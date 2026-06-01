@@ -28,3 +28,6 @@ PRINCIPLES.md
 
 # Docs corpus (authored prose, including the migrated design corpus — not prettier-managed)
 docs/
+
+# GitHub config (issue/PR templates, labels — GitHub's domain, kept as authored)
+.github/
