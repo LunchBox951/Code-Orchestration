@@ -18,7 +18,7 @@ jobs:
       # Deriving it from packageManager keeps a single source of truth and
       # installs exactly 10.33.0, matching the committed pnpm-lock.yaml.
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
