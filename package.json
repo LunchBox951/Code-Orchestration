@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
+    "pretest": "pnpm build",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
