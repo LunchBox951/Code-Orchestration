@@ -34,7 +34,7 @@ by topic — preserve them regardless of implementation choices.
 | 13 | `provider-neutral` | Claude and Codex are interchangeable behind one routing/gating/mail abstraction. Pinned roles + a rate-limit-aware balancer spread load; when tapped, **pace — don't sacrifice**. | [PROVIDERS](architecture/providers.md) · [DISPATCH](architecture/dispatch.md) · [COST-and-USAGE](architecture/cost-and-usage.md) |
 | 14 | `recoverable` | Everything is an **event** — durable, inspectable, replayable; the system can always be reconstructed and recovered from its own record. | [STATE-and-RECOVERY](architecture/state-and-recovery.md) · [CORE-CONCEPTS](concepts.md) · [HEALTH-and-DIAGNOSTICS](architecture/health-and-diagnostics.md) |
 | 15 | `one-stop-shop` | The desktop app absorbs the alt-tab: **observe and steer agents first**, light manual coding second. Deliberately *not* a new IDE — just enough to never leave the flow. | [TUI](architecture/tui.md) · [MAIL-BUS](architecture/mail-bus.md) · [REVIEW-GATES](architecture/review-gates.md) |
-| 16 | `decisions-deferred` | The runtime substrate is **parked for research, not guessed** — anchored on the authentic-terminal directive, validated at spec-execution time. Measure before committing. | [Authoritative prose](#authoritative-prose) · [EVENT-ROUTER](architecture/event-router.md) · [runtime-substrate](research/runtime-substrate.md) *(pending)* |
+| 16 | `decisions-deferred` | The runtime substrate is **parked for research, not guessed** — anchored on the authentic-terminal directive, validated at spec-execution time. Measure before committing. | [Authoritative prose](#authoritative-prose) · [EVENT-ROUTER](architecture/event-router.md) · [runtime-substrate](research/runtime-substrate.md) *(research open)* |
 
 ---
 
