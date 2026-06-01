@@ -1,3 +1,6 @@
+> NOTE: The canonical design corpus now lives in docs/ (start at docs/README.md). This original is
+> frozen and is removed at the prototype-footprint migration — see docs/migration.md.
+
 # Claude Orchestrator vs Code Orchestration
 Consider Claude Orchestrator a prototype of Code Orchestration. This project involves rewriting the application from the ground up with a dual focus:
 
