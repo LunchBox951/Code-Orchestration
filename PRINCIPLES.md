@@ -1,3 +1,7 @@
+> NOTE: The canonical design corpus now lives in docs/ (this file is migrated to docs/principles.md;
+> start at docs/README.md). This original is frozen and is removed at the prototype-footprint
+> migration — see docs/migration.md.
+
 # Code Orchestration — Design Principles (index & tracker)
 
 The canonical, at-a-glance index of the **16 design principles** that govern Code
