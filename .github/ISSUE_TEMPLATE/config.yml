@@ -1,10 +1,8 @@
-# PLACEHOLDER: `OWNER/REPO` below is resolved to the real GitHub slug in Phase 6
-# (operator/remote bootstrap) once the repository exists. Do not invent a slug here.
 blank_issues_enabled: false
 contact_links:
   - name: Questions & ideas
-    url: https://github.com/OWNER/REPO/discussions
+    url: https://github.com/LunchBox951/Code-Orchestration/discussions
     about: Use Discussions for questions, ideas, and RFCs.
   - name: Report a security vulnerability
-    url: https://github.com/OWNER/REPO/security/advisories/new
+    url: https://github.com/LunchBox951/Code-Orchestration/security/advisories/new
     about: Please report vulnerabilities privately, not as issues.

@@ -1,12 +1,9 @@
 # Ownership maps to roles; the operator owns everything until areas are delegated.
-#
-# PLACEHOLDER: `@OWNER` is resolved to the real GitHub handle in Phase 6
-# (operator/remote bootstrap) once the repository exists. Do not invent a handle here.
-*                       @OWNER
+*                       @LunchBox951
 
-/packages/core/         @OWNER
-/packages/cli/          @OWNER
-/packages/mcp/          @OWNER
-/apps/desktop/          @OWNER
-/docs/                  @OWNER
-/.github/               @OWNER
+/packages/core/         @LunchBox951
+/packages/cli/          @LunchBox951
+/packages/mcp/          @LunchBox951
+/apps/desktop/          @LunchBox951
+/docs/                  @LunchBox951
+/.github/               @LunchBox951
