@@ -48,11 +48,3 @@ Open decisions & research (`.research/`) — everything *substrate-dependent* is
    substrate doc's open question #7; the Electron-vs-Tauri shell choice stays parked there.
 
 Original codebase: `/home/Projects/Claude-Orchestrator`
-
-Project Scaffolding Spec and Plan:
-1. [`docs/superpowers/specs/2026-06-01-project-scaffolding-design.md`]  — **first spec** the
-    first iteration of the spec of implementation. A living document for a fresh coordinator.
-    This file is not considered the final spec of approach, but touches on some clear goals.
-2. [`docs/superpowers/plans/2026-06-01-project-scaffolding.md`]  — **first plan** the
-    first iteration of the plan of implementation. A living document for a fresh coordinator.
-    This file is not considered the final plan of approach, but touches on some clear goals.
