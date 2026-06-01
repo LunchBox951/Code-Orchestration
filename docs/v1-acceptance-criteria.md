@@ -78,7 +78,7 @@ These are the top-level conditions that, all met, *are* v1.
 
 - `RG-1` ☐ Nothing reaches `master`/remote/PR without a **PASS** (agent or human); two verdicts only
   (PASS / ISSUES) (Principle 7).
-- `RG-2` ☐ The blocker bar **tightens toward production** — nits ride as suggestions into `nightly`,
+- `RG-2` ☐ The blocker bar **tightens toward production** — nits ride as suggestions into `dev`,
   become blockers at the `main`/PR gate (Principle 7).
 - `RG-3` ☐ Operator override exists, is **audited, and records its reason** (Principle 7).
 - `RG-4` ☐ Acceptance criteria are the **cohesion contract**: the spec produces them, the plan

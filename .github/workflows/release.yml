@@ -1,5 +1,5 @@
 # PLACEHOLDER — wired once docs/governance/release-policy.md is resolved.
-# Two-track intent: push to main -> stable release; push to nightly -> prerelease.
+# Two-track intent: promote dev -> main for a stable release; nightly prereleases are cut from dev.
 # No publish step yet (packages are private). Runs only on manual dispatch.
 name: Release (placeholder)
 
