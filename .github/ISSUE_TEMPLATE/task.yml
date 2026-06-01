@@ -1,0 +1,25 @@
+name: Task
+description: An implementer-sized unit of work inside a phase.
+title: "[task] "
+labels: ["type:task", "role:implementer"]
+body:
+  - type: input
+    id: phase
+    attributes:
+      label: Parent phase
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: The change
+      description: Files/behavior to add or modify.
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: How to verify
+      description: Test/command proving it works.
+    validations:
+      required: true

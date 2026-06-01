@@ -1,0 +1,23 @@
+name: Research / open decision
+description: An evidence-pending decision (Principle 16 — decisions-deferred).
+title: "[research] "
+labels: ["type:research", "role:researcher"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: The question
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Options under consideration
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: What evidence would decide it
+    validations:
+      required: true
