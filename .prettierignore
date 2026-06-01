@@ -1,0 +1,30 @@
+# Prettier scope: workspace source (packages/*/src) + root config files.
+# Everything below is intentionally out of prettier's reach so that
+# `pnpm format:check` is green and `pnpm format` never rewrites generated
+# output, the prototype footprint, the docs corpus, or the lockfile.
+
+# Dependencies & build output (generated)
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# Package manager (pnpm owns the lockfile's format)
+pnpm-lock.yaml
+
+# Hand-authored manifests kept in their compact, tool-native shape
+package.json
+**/package.json
+pnpm-workspace.yaml
+
+# Prototype footprint (temporary tenant — removed at migration; see docs/migration.md)
+.co/
+.claude/
+.codex/
+.goals/
+.research/
+PORTING-CO.md
+PRINCIPLES.md
+
+# Docs corpus (authored prose, including the migrated design corpus — not prettier-managed)
+docs/
