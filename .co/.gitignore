@@ -1,0 +1,9 @@
+# co orchestrator — personal tooling state.
+# Project work is shared via specs/, plans/, issues/. Everything
+# else (config.yaml, state.db, worktrees/, logs/, ...) is per-
+# developer; collaborators run `co init` to set up their own.
+/*
+!/.gitignore
+!/specs/
+!/plans/
+!/issues/
