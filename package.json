@@ -6,7 +6,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b --noEmit",
+    "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
