@@ -1,0 +1,25 @@
+name: Spec
+description: Top-level intent to be shaped into a locked spec.
+title: "[spec] "
+labels: ["type:spec", "status:spec-locked", "role:coordinator"]
+body:
+  - type: textarea
+    id: intent
+    attributes:
+      label: Intent
+      description: What outcome is wanted, and why. Not how.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: The concrete, checkable standard for "done" (Principle 10).
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints / non-goals
+    validations:
+      required: false

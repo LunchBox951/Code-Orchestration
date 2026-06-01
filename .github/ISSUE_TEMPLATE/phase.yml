@@ -1,0 +1,25 @@
+name: Phase
+description: An independently-mergeable slice of a spec, owned by one Lead.
+title: "[phase] "
+labels: ["type:phase", "role:lead"]
+body:
+  - type: input
+    id: spec
+    attributes:
+      label: Parent spec
+      description: Link the spec issue this phase belongs to.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What this phase delivers; where it merges.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
