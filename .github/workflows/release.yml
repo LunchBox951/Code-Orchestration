@@ -1,0 +1,13 @@
+# PLACEHOLDER — wired once docs/governance/release-policy.md is resolved.
+# Two-track intent: push to main -> stable release; push to nightly -> prerelease.
+# No publish step yet (packages are private). Runs only on manual dispatch.
+name: Release (placeholder)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Release automation is parked. See docs/governance/release-policy.md."
