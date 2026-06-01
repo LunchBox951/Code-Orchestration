@@ -1,0 +1,5 @@
+# Build and dependency artifacts
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
