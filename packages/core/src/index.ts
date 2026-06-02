@@ -33,8 +33,9 @@ export { assertRepoPristine } from './config/pristine.js';
 // classification, log-derived sticky resolution, an event-sourced read-receipt, the
 // completion-predicate registry, and the outstanding-action projection. W4 adds the
 // first-class `approval` type + `approval_response` decision and the log-derived
-// outward-action gate (operator-terminal for outward actions). Seed types: chat,
-// operator_message, clarify_request, clarify_response, approval, approval_response.
+// outward-action gate (operator-terminal for outward actions). W5 adds the first-class
+// `escalation` type + the resolve-or-forward never-drop protocol. Seed types: chat,
+// operator_message, clarify_request, clarify_response, approval, approval_response, escalation.
 export type {
   MailEnvelope,
   DeliveredMail,
@@ -56,6 +57,7 @@ export {
   MAIL_CLARIFY_RESPONSE,
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_ESCALATION,
   MAIL_TYPES,
   EVENT_MAIL_READ,
   MAIL_EVENT_V,
@@ -78,6 +80,7 @@ export {
   ensureInboxTable,
   outstandingForRecipient,
   countOutstanding,
+  sentByForSender,
 } from './mail/mail-projector.js';
 export type { Delivery } from './mail/delivery.js';
 export { InProcessDelivery, LiveDeliveryStub } from './mail/delivery.js';
@@ -86,6 +89,29 @@ export { openMailStore } from './mail/mail-store.js';
 // L1 W4 outward-action approval gate + operator-terminal addressing (AC-L1-5).
 export type { ApprovalOutcome, OutwardApprovalRequest } from './mail/approval.js';
 export { approvalOutcome, gateOutwardAction, outwardApprovalEnvelope } from './mail/approval.js';
+// L1 W5 escalation protocol: resolve-or-forward / never-drop / never-guess / threaded brainstorm
+// up the spawn chain (AC-L1-6), the L6 parent-resolver seam + a structural coordinator→@operator
+// prototype double, the forward-up clarify-timeout policy (firing deferred to L7), and the
+// log-derived asker-WAITING query.
+export type {
+  ParentResolver,
+  PrototypeChain,
+  EscalationRequest,
+  EscalationResolution,
+  ClarifyTimeoutPolicy,
+} from './mail/escalation.js';
+export {
+  prototypeParentResolver,
+  escalate,
+  forwardEscalation,
+  resolveEscalation,
+  forwardOnTimeout,
+  waitingItems,
+  isAwaitingReply,
+  CLARIFY_TIMEOUT_SECONDS_KEY,
+  CLARIFY_TIMEOUT_SECONDS_DEFAULT,
+  CLARIFY_TIMEOUT_POLICY,
+} from './mail/escalation.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
