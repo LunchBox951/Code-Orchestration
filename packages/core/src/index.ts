@@ -28,5 +28,101 @@ export type { JsonValue } from './config/events.js';
 // tree or `.git` (freeze #7), by asserting byte-identity around a wrapped op.
 export { assertRepoPristine } from './config/pristine.js';
 
+// L1 mail bus: a typed, schema-validated, idempotent envelope over the L0 log that
+// activates the four reserved fields, plus send/inbox and the in-process Delivery
+// seam (the L7 plug-point is a typed stub). W3 adds actionable/informational
+// classification, log-derived sticky resolution, an event-sourced read-receipt, the
+// completion-predicate registry, and the outstanding-action projection. W4 adds the
+// first-class `approval` type + `approval_response` decision and the log-derived
+// outward-action gate (operator-terminal for outward actions). W5 adds the first-class
+// `escalation` type + the resolve-or-forward never-drop protocol. Seed types: chat,
+// operator_message, clarify_request, clarify_response, approval, approval_response, escalation.
+export type {
+  MailEnvelope,
+  DeliveredMail,
+  MailType,
+  MailMessage,
+  MailRead,
+  MailKind,
+  CompletionPredicate,
+  ApprovalDecision,
+  ApprovalResponse,
+  MailPayload,
+} from './mail/events.js';
+export {
+  OPERATOR,
+  MAIL_SCOPE_PREFIX,
+  MAIL_CHAT,
+  MAIL_OPERATOR_MESSAGE,
+  MAIL_CLARIFY_REQUEST,
+  MAIL_CLARIFY_RESPONSE,
+  MAIL_APPROVAL,
+  MAIL_APPROVAL_RESPONSE,
+  MAIL_ESCALATION,
+  MAIL_TYPES,
+  EVENT_MAIL_READ,
+  MAIL_EVENT_V,
+  mailMessageSchema,
+  approvalResponseSchema,
+  mailReadSchema,
+  mailSchemas,
+  mailUpcasters,
+  mailScope,
+  mailRecipientForScope,
+  makeMailEvent,
+  makeMailReadEvent,
+  mailKinds,
+  mailKind,
+  completionPredicates,
+  completionPredicate,
+} from './mail/events.js';
+export {
+  MailProjector,
+  ensureInboxTable,
+  outstandingForRecipient,
+  countOutstanding,
+  sentByForSender,
+} from './mail/mail-projector.js';
+export type { Delivery } from './mail/delivery.js';
+export { InProcessDelivery, LiveDeliveryStub } from './mail/delivery.js';
+export type { MailStore, MailStoreOptions, ReplyDraft } from './mail/mail-store.js';
+export { openMailStore } from './mail/mail-store.js';
+// L1 W4 outward-action approval gate + operator-terminal addressing (AC-L1-5).
+export type { ApprovalOutcome, OutwardApprovalRequest } from './mail/approval.js';
+export { approvalOutcome, gateOutwardAction, outwardApprovalEnvelope } from './mail/approval.js';
+// L1 W5 escalation protocol: resolve-or-forward / never-drop / never-guess / threaded brainstorm
+// up the spawn chain (AC-L1-6), the L6 parent-resolver seam + a structural coordinator→@operator
+// prototype double, the forward-up clarify-timeout policy (firing deferred to L7), and the
+// log-derived asker-WAITING query.
+export type {
+  ParentResolver,
+  PrototypeChain,
+  EscalationRequest,
+  EscalationResolution,
+  ClarifyTimeoutPolicy,
+} from './mail/escalation.js';
+export {
+  prototypeParentResolver,
+  escalate,
+  forwardEscalation,
+  resolveEscalation,
+  forwardOnTimeout,
+  waitingItems,
+  isAwaitingReply,
+  CLARIFY_TIMEOUT_SECONDS_KEY,
+  CLARIFY_TIMEOUT_SECONDS_DEFAULT,
+  CLARIFY_TIMEOUT_POLICY,
+} from './mail/escalation.js';
+// L1 W6 renderer-registry seam + a trivial generic default renderer (AC-L1-8). The bus stays
+// typed/structured for agents; making a DeliveredMail human-legible is the app's job. L1 ships
+// the seam + the default only — per-type human cards are the L9 plug-point (register).
+export type { MailRenderer, RendererRegistry } from './mail/renderer.js';
+export { createRendererRegistry, defaultMailRenderer } from './mail/renderer.js';
+// L1 W6 mail-type no-stub assertion (AC-L1-7): a reusable completeness check proving every
+// declared type has schema + flow (+ a predicate iff actionable). L1 owns this local assertion;
+// the full build-time gate is L2.
+export type { MailTypeViolation } from './mail/completeness.js';
+export { checkMailTypeCompleteness } from './mail/completeness.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
