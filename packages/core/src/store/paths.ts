@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 /**
  * Program-data root. Precedence (freeze #3, LOCKED order):
@@ -41,7 +41,17 @@ export function dataRoot(): string {
   }
 }
 
-/** `${dataRoot()}/projects/${projectId}` */
+/**
+ * `${dataRoot()}/projects/${projectId}` — bounded to one segment under the projects
+ * root (Principle 12 — pristine-repo). Throws loudly on path-traversal ids.
+ */
 export function projectDataDir(projectId: string): string {
-  return join(dataRoot(), 'projects', projectId);
+  const projectsRoot = resolve(join(dataRoot(), 'projects'));
+  const resolved = resolve(join(projectsRoot, projectId));
+  if (dirname(resolved) !== projectsRoot) {
+    throw new Error(
+      `projectDataDir: projectId '${projectId}' escapes program-data root (Principle 12)`,
+    );
+  }
+  return resolved;
 }

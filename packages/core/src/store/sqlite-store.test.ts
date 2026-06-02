@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
+import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { openGlobalStore, openProjectStore } from './sqlite-store.js';
 import type { NewEvent } from './types.js';
 
@@ -174,6 +174,30 @@ describe('reserved L1 envelope columns', () => {
         correlation_id: null,
         idempotency_key: null,
       });
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('migrate — future schema version', () => {
+  it('throws when opening a db with user_version > SCHEMA_VERSION', () => {
+    const dbPath = join(dataDir, 'projects', 'p-future', 'store.db');
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA user_version = 9999');
+    db.close();
+
+    expect(() => openProjectStore('p-future')).toThrow(
+      /database is from a newer co.*refusing to open/i,
+    );
+  });
+
+  it('opens normally when user_version === SCHEMA_VERSION (already migrated)', () => {
+    const store = openProjectStore('p-current');
+    try {
+      store.append([event()]);
+      expect(store.head()).toBe(1);
     } finally {
       store.close();
     }

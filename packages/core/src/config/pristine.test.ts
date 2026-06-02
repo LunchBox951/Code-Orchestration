@@ -29,9 +29,9 @@ afterEach(() => {
 describe('assertRepoPristine', () => {
   it('throws when fn writes a NEW file into the working tree (positive control)', () => {
     const repo = makeRepo();
-    expect(() =>
-      assertRepoPristine(repo, () => writeFileSync(join(repo, 'scratch'), '1')),
-    ).toThrow(/modified|added/i);
+    expect(() => assertRepoPristine(repo, () => writeFileSync(join(repo, 'scratch'), '1'))).toThrow(
+      /modified|added/i,
+    );
   });
 
   it('throws when fn modifies an existing tracked file', () => {
@@ -74,7 +74,9 @@ describe('assertRepoPristine', () => {
   it('detects a change inside a NESTED directory', () => {
     const repo = makeRepo();
     expect(() =>
-      assertRepoPristine(repo, () => writeFileSync(join(repo, '.git', 'refs', 'heads', 'main'), 'sha')),
+      assertRepoPristine(repo, () =>
+        writeFileSync(join(repo, '.git', 'refs', 'heads', 'main'), 'sha'),
+      ),
     ).toThrow(/modified|added/i);
   });
 

@@ -47,4 +47,41 @@ describe('upcast', () => {
     const payload = { value: 5, label: 'n' };
     expect(upcast('counter', 2, payload, reg)).toBe(payload);
   });
+
+  it('throws on a future event version greater than the current version', () => {
+    const v1ToV2: Upcaster = (p) => p;
+    const reg: UpcasterRegistry = new Map([['counter', [v1ToV2]]]);
+    // chain.length=1 → currentVersion=2; fromV=3 is future
+    expect(() => upcast('counter', 3, {}, reg)).toThrow(
+      /unsupported future event version.*counter.*v3.*v2/i,
+    );
+  });
+
+  it('throws on a future version for a type with no registered chain', () => {
+    const reg: UpcasterRegistry = new Map();
+    // no chain → currentVersion=1; fromV=2 is future
+    expect(() => upcast('some-type', 2, {}, reg)).toThrow(
+      /unsupported future event version.*some-type.*v2.*v1/i,
+    );
+  });
+
+  it('current-version events still pass (no throw, identity returned)', () => {
+    const v1ToV2: Upcaster = () => ({ changed: true });
+    const reg: UpcasterRegistry = new Map([['counter', [v1ToV2]]]);
+    const payload = { value: 5 };
+    expect(() => upcast('counter', 2, payload, reg)).not.toThrow();
+    expect(upcast('counter', 2, payload, reg)).toBe(payload);
+  });
+
+  it('normal older-to-current upcast chain still works after adding the future-version guard', () => {
+    const v1ToV2: Upcaster = (p) => ({ ...(p as object), label: 'added' });
+    const v2ToV3: Upcaster = (p) => ({ ...(p as object), extra: true });
+    const reg: UpcasterRegistry = new Map([['evt', [v1ToV2, v2ToV3]]]);
+    expect(upcast('evt', 1, { count: 1 }, reg)).toEqual({ count: 1, label: 'added', extra: true });
+    expect(upcast('evt', 2, { count: 1, label: 'added' }, reg)).toEqual({
+      count: 1,
+      label: 'added',
+      extra: true,
+    });
+  });
 });

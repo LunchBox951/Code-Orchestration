@@ -86,3 +86,19 @@ describe('projectDataDir', () => {
     expect(projectDataDir('proj-1')).toBe(join('/tmp/co-data', 'projects', 'proj-1'));
   });
 });
+
+describe('projectDataDir — path boundary (Principle 12)', () => {
+  it.each(['../escape', '../../etc', '/etc/passwd', 'a/b', '..', ''])(
+    "throws on hostile projectId '%s'",
+    (badId) => {
+      process.env.CO_DATA_DIR = '/tmp/co-data';
+      expect(() => projectDataDir(badId)).toThrow(/escapes program-data root/);
+    },
+  );
+
+  it('accepts a normal UUID and returns the expected path', () => {
+    process.env.CO_DATA_DIR = '/tmp/co-data';
+    const id = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    expect(projectDataDir(id)).toBe(join('/tmp/co-data', 'projects', id));
+  });
+});
