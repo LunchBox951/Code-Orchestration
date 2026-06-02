@@ -18,5 +18,14 @@ export { decode } from './replay/decode.js';
 export type { ProjectRegistry, ProjectId } from './registry/registry.js';
 export { openRegistry } from './registry/registry.js';
 
+// Part D config cascade: effective = global ⊕ project-overrides (project wins),
+// stored entirely in the GLOBAL program-data store (never in any repo).
+export type { ConfigStore, EffectiveConfig } from './config/config-store.js';
+export { openConfigStore } from './config/config-store.js';
+
+// Part D pristine-repo guard: proves no L0 op writes into a target repo's working
+// tree or `.git` (freeze #7), by asserting byte-identity around a wrapped op.
+export { assertRepoPristine } from './config/pristine.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
