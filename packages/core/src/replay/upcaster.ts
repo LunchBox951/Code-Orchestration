@@ -24,8 +24,9 @@ export type UpcasterRegistry = Map<string /* type */, readonly Upcaster[]>;
 /**
  * Walk the registered chain for `type`, lifting `payload` from `fromV` to the
  * current version. Pure: never writes back to the log (events are immutable).
- * An absent or empty chain — or a `fromV` already at/after the chain end — is
- * the identity.
+ * An absent or empty chain means the current version is 1; `fromV === current`
+ * is identity. Throws loudly when `fromV > current` (Principle 9 — a future
+ * event written by a newer `co` must not be silently accepted).
  */
 export function upcast(
   type: string,
@@ -34,6 +35,12 @@ export function upcast(
   reg: UpcasterRegistry,
 ): unknown {
   const chain = reg.get(type) ?? [];
+  const currentVersion = chain.length + 1;
+  if (fromV > currentVersion) {
+    throw new Error(
+      `upcast: unsupported future event version for type '${type}': v${fromV} > current v${currentVersion}`,
+    );
+  }
   let p = payload;
   for (let v = fromV; v - 1 < chain.length; v++) {
     p = chain[v - 1]!(p);

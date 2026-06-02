@@ -374,8 +374,7 @@ export const completionPredicates: ReadonlyMap<MailType, CompletionPredicate> = 
     // dedicated response type. Registered ONLY for `escalation`, so it can never affect a
     // `clarify_request`/`approval` item (each consults its own predicate in the loop).
     MAIL_ESCALATION,
-    (item, closer) =>
-      closer.sender === item.recipient && closer.causationId === String(item.seq),
+    (item, closer) => closer.sender === item.recipient && closer.causationId === String(item.seq),
   ],
 ]);
 

@@ -215,9 +215,7 @@ export function forwardOnTimeout(
  * flipping the asker to WAITING and waking it on an answer — is L6/L7, NOT modeled here.
  */
 export function waitingItems(mail: MailStore, agent: string): readonly DeliveredMail[] {
-  return mail
-    .sentBy(agent)
-    .filter((m) => m.type === MAIL_CLARIFY_REQUEST && !m.resolved);
+  return mail.sentBy(agent).filter((m) => m.type === MAIL_CLARIFY_REQUEST && !m.resolved);
 }
 
 /** Whether `agent` is WAITING — it has at least one unresolved `clarify_request` it raised. */

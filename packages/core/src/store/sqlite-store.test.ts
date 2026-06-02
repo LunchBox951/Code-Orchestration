@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
+import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { openGlobalStore, openProjectStore } from './sqlite-store.js';
 import type { NewEvent, StoredEvent, StoreTx } from './types.js';
 import { applyEvent, rebuildAll, type Projector } from '../replay/projector.js';
@@ -183,6 +183,30 @@ describe('reserved L1 envelope columns', () => {
   });
 });
 
+describe('migrate — future schema version', () => {
+  it('throws when opening a db with user_version > SCHEMA_VERSION', () => {
+    const dbPath = join(dataDir, 'projects', 'p-future', 'store.db');
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA user_version = 9999');
+    db.close();
+
+    expect(() => openProjectStore('p-future')).toThrow(
+      /database is from a newer co.*refusing to open/i,
+    );
+  });
+
+  it('opens normally when user_version === SCHEMA_VERSION (already migrated)', () => {
+    const store = openProjectStore('p-current');
+    try {
+      store.append([event()]);
+      expect(store.head()).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 describe('determinism', () => {
   it('persists ts at append time and does not re-derive it on read', () => {
     const store = openProjectStore('p1');
@@ -339,11 +363,10 @@ describe('store widening — AC-L0-5 pristine', () => {
         stdio: 'ignore',
       });
       writeFileSync(join(dir, 'file.txt'), 'fixture\n');
-      execFileSync(
-        'git',
-        ['-c', 'user.email=t@example.com', '-c', 'user.name=T', 'add', '.'],
-        { cwd: dir, stdio: 'ignore' },
-      );
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=T', 'add', '.'], {
+        cwd: dir,
+        stdio: 'ignore',
+      });
       execFileSync(
         'git',
         ['-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-q', '-m', 'init'],

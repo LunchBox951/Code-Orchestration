@@ -54,7 +54,10 @@ export function checkMailTypeCompleteness(args: {
     // actually lands in the read-model).
     const kind = kinds.get(type);
     if (kind == null) {
-      violations.push({ type, reason: 'missing classification (mailKinds — actionable|informational)' });
+      violations.push({
+        type,
+        reason: 'missing classification (mailKinds — actionable|informational)',
+      });
     }
     if (!handles(type)) {
       violations.push({ type, reason: 'not folded by the projector (handles returned false)' });
@@ -64,7 +67,10 @@ export function checkMailTypeCompleteness(args: {
     // unclassified type is already flagged in (b), so we don't double-report it here.
     const hasPredicate = predicates.has(type);
     if (kind === 'actionable' && !hasPredicate) {
-      violations.push({ type, reason: 'actionable but missing completion predicate (completionPredicates)' });
+      violations.push({
+        type,
+        reason: 'actionable but missing completion predicate (completionPredicates)',
+      });
     }
     if (kind === 'informational' && hasPredicate) {
       violations.push({

@@ -613,18 +613,40 @@ describe('AC-L1-3 — outstanding-action count is a projection (drops on resolve
   it('counts unresolved actionable items, drops as they resolve, and rebuilds to the same count', () => {
     const mail = openMailStore('p-count');
     try {
-      const r1 = mail.send({ type: MAIL_CLARIFY_REQUEST, to: 'lead', from: 'w1', subject: 'q1', body: '?' });
-      const r2 = mail.send({ type: MAIL_CLARIFY_REQUEST, to: 'lead', from: 'w2', subject: 'q2', body: '?' });
+      const r1 = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'lead',
+        from: 'w1',
+        subject: 'q1',
+        body: '?',
+      });
+      const r2 = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'lead',
+        from: 'w2',
+        subject: 'q2',
+        body: '?',
+      });
       mail.send({ type: MAIL_CLARIFY_REQUEST, to: 'lead', from: 'w3', subject: 'q3', body: '?' });
       // Informational mail to the SAME recipient does NOT add to the outstanding count.
       mail.send({ type: MAIL_CHAT, to: 'lead', from: 'w4', subject: 'fyi', body: 'hi' });
       expect(mail.outstandingCount('lead')).toBe(3);
       expect(mail.outstanding('lead')).toHaveLength(3);
-      expect(mail.outstanding('lead').every((x) => x.kind === 'actionable' && !x.resolved)).toBe(true);
+      expect(mail.outstanding('lead').every((x) => x.kind === 'actionable' && !x.resolved)).toBe(
+        true,
+      );
 
       const inbox = mail.inbox('lead');
-      mail.reply(inbox.find((x) => x.seq === r1.seq)!, { type: MAIL_CLARIFY_RESPONSE, subject: 'a1', body: 'x' });
-      mail.reply(inbox.find((x) => x.seq === r2.seq)!, { type: MAIL_CLARIFY_RESPONSE, subject: 'a2', body: 'y' });
+      mail.reply(inbox.find((x) => x.seq === r1.seq)!, {
+        type: MAIL_CLARIFY_RESPONSE,
+        subject: 'a1',
+        body: 'x',
+      });
+      mail.reply(inbox.find((x) => x.seq === r2.seq)!, {
+        type: MAIL_CLARIFY_RESPONSE,
+        subject: 'a2',
+        body: 'y',
+      });
       expect(mail.outstandingCount('lead')).toBe(1);
     } finally {
       mail.close();
@@ -644,7 +666,13 @@ describe('AC-L1-4 — completion-predicate registry (generic Map; clarify pairin
   it('a clarify_request is closed only by an in-thread clarify_response (correlationId + causationId)', () => {
     const mail = openMailStore('p-pred');
     try {
-      const req = mail.send({ type: MAIL_CLARIFY_REQUEST, to: 'lead', from: 'worker', subject: 'q', body: '?' });
+      const req = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'lead',
+        from: 'worker',
+        subject: 'q',
+        body: '?',
+      });
 
       // Same thread, WRONG causationId → predicate says "not mine" → request stays open.
       mail.send({

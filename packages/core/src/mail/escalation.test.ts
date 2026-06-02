@@ -116,7 +116,11 @@ describe('AC-L1-6 — the parent-resolver seam + structural coordinator→@opera
   it('a coordinator ALWAYS resolves to @operator (cannot be misconfigured to a peer)', () => {
     // Even if a caller tries to also name the coordinator as some other agent's parent, the
     // coordinator id itself is forced to @operator structurally.
-    const r = prototypeParentResolver({ implementer: 'i', lead: 'coord-1', coordinator: 'coord-1' });
+    const r = prototypeParentResolver({
+      implementer: 'i',
+      lead: 'coord-1',
+      coordinator: 'coord-1',
+    });
     expect(r.parentOf('coord-1')).toBe(OPERATOR);
   });
 
@@ -186,8 +190,16 @@ describe('AC-L1-6 — the resolve-or-forward chain (every forward advances + sha
     const seed = openMailStore('p-esc-chain-replay');
     try {
       const e1 = escalate(seed, resolver, { from: CHAIN.implementer, subject: 's', body: 'b' });
-      const e2 = forwardEscalation(seed, resolver, seed.inbox(CHAIN.lead).find((m) => m.seq === e1.seq)!);
-      forwardEscalation(seed, resolver, seed.inbox(CHAIN.coordinator).find((m) => m.seq === e2.seq)!);
+      const e2 = forwardEscalation(
+        seed,
+        resolver,
+        seed.inbox(CHAIN.lead).find((m) => m.seq === e1.seq)!,
+      );
+      forwardEscalation(
+        seed,
+        resolver,
+        seed.inbox(CHAIN.coordinator).find((m) => m.seq === e2.seq)!,
+      );
     } finally {
       seed.close();
     }
@@ -224,7 +236,10 @@ describe('AC-L1-6 — resolve-or-forward holds / sticky (never dropped)', () => 
 
       // The lead RESOLVES it down to the asker (in-thread). It discharges + flows back down.
       const held = mail.inbox(CHAIN.lead).find((m) => m.seq === e1.seq)!;
-      const answer = resolveEscalation(mail, held, { subject: 're: which approach?', body: 'use A' });
+      const answer = resolveEscalation(mail, held, {
+        subject: 're: which approach?',
+        body: 'use A',
+      });
       expect(answer.recipient).toBe(CHAIN.implementer); // the resolution reaches the asker
       expect(answer.type).toBe(MAIL_CHAT); // default carrier is informational
       expect(answer.correlationId).toBe(String(e1.seq)); // same thread
@@ -474,7 +489,11 @@ describe('AC-L1-9 — L0 preserved + pristine (escalation/forward events)', () =
     const mail = openMailStore('p-esc-pristine');
     try {
       const e1 = assertRepoPristine(repo, () => {
-        const raised = escalate(mail, resolver, { from: CHAIN.implementer, subject: 's', body: 'b' });
+        const raised = escalate(mail, resolver, {
+          from: CHAIN.implementer,
+          subject: 's',
+          body: 'b',
+        });
         const held = mail.inbox(CHAIN.lead).find((m) => m.seq === raised.seq)!;
         forwardEscalation(mail, resolver, held); // a forward writes nothing into the repo either
         return raised;

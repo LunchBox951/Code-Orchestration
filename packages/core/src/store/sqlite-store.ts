@@ -73,6 +73,11 @@ class SqliteStore implements Store {
   private migrate(): void {
     const row = this.db.prepare('PRAGMA user_version').get();
     const current = Number(row?.user_version ?? 0);
+    if (current > SCHEMA_VERSION) {
+      throw new Error(
+        `database is from a newer co (user_version=${current} > supported=${SCHEMA_VERSION}); refusing to open`,
+      );
+    }
     if (current < SCHEMA_VERSION) {
       // actor / causation_id / correlation_id / idempotency_key are reserved
       // event-envelope fields (Part B §3 D2): declared here; surfaced through the

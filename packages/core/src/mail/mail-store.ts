@@ -110,7 +110,9 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
 
     markRead(recipient: string, seq: number): DeliveredMail {
       if (!delivery.markRead) {
-        throw new Error('mail: the configured Delivery does not support markRead (read-state seam)');
+        throw new Error(
+          'mail: the configured Delivery does not support markRead (read-state seam)',
+        );
       }
       return delivery.markRead(recipient, seq);
     },

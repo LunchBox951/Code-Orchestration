@@ -38,7 +38,9 @@ class KvProjector implements Projector {
     ).run(key, value, value);
   }
 }
-const kvSchemas: SchemaMap = new Map([['kv.set', z.object({ key: z.string(), value: z.string() })]]);
+const kvSchemas: SchemaMap = new Map([
+  ['kv.set', z.object({ key: z.string(), value: z.string() })],
+]);
 const kvUpcasters: UpcasterRegistry = new Map();
 
 function ev(projectId: string, scope: string, type: string, payload: unknown): NewEvent {

@@ -77,7 +77,13 @@ function realArgs() {
  * flow, not just a registry entry.
  */
 function exerciseEveryType(mail: MailStore): Record<MailType, DeliveredMail> {
-  const chat = mail.send({ type: MAIL_CHAT, to: 'bob', from: 'alice', subject: 'hi', body: 'hello' });
+  const chat = mail.send({
+    type: MAIL_CHAT,
+    to: 'bob',
+    from: 'alice',
+    subject: 'hi',
+    body: 'hello',
+  });
   const operatorMessage = mail.send({
     type: MAIL_OPERATOR_MESSAGE,
     to: OPERATOR,
@@ -103,10 +109,12 @@ function exerciseEveryType(mail: MailStore): Record<MailType, DeliveredMail> {
     subject: 'ship v1?',
     body: 'requesting a bless on the outward push',
   });
-  const approvalResponse = mail.reply(
-    mail.inbox(OPERATOR).find((m) => m.seq === approval.seq)!,
-    { type: MAIL_APPROVAL_RESPONSE, subject: 're: ship v1?', body: 'approved', decision: 'approve' },
-  );
+  const approvalResponse = mail.reply(mail.inbox(OPERATOR).find((m) => m.seq === approval.seq)!, {
+    type: MAIL_APPROVAL_RESPONSE,
+    subject: 're: ship v1?',
+    body: 'approved',
+    decision: 'approve',
+  });
   const escalation = mail.send({
     type: MAIL_ESCALATION,
     to: 'lead',
@@ -184,7 +192,10 @@ describe('AC-L1-7 — no-stub completeness: RED for a declared-but-unflowed type
   });
 
   it('(b) a declared type that is unclassified OR unfolded is flagged for the flow', () => {
-    const schemas: SchemaMap = new Map([...mailSchemas, [BOGUS, z.object({ subject: z.string(), body: z.string() })]]);
+    const schemas: SchemaMap = new Map([
+      ...mailSchemas,
+      [BOGUS, z.object({ subject: z.string(), body: z.string() })],
+    ]);
 
     // Unclassified (no kind) — note: predicate check is skipped while the kind is unknown.
     const unclassified = checkMailTypeCompleteness({
@@ -212,7 +223,10 @@ describe('AC-L1-7 — no-stub completeness: RED for a declared-but-unflowed type
   });
 
   it('(c) an actionable type missing its predicate is flagged; an informational type with one is too', () => {
-    const schemas: SchemaMap = new Map([...mailSchemas, [BOGUS, z.object({ subject: z.string(), body: z.string() })]]);
+    const schemas: SchemaMap = new Map([
+      ...mailSchemas,
+      [BOGUS, z.object({ subject: z.string(), body: z.string() })],
+    ]);
     const folds = (t: string): boolean => realHandles(t) || t === BOGUS;
 
     // Actionable but NO predicate → flagged.
@@ -231,7 +245,10 @@ describe('AC-L1-7 — no-stub completeness: RED for a declared-but-unflowed type
       types: [BOGUS],
       schemas,
       kinds: new Map<string, MailKind>([...mailKinds, [BOGUS, 'informational']]),
-      predicates: new Map<string, CompletionPredicate>([...completionPredicates, [BOGUS, dummyPredicate]]),
+      predicates: new Map<string, CompletionPredicate>([
+        ...completionPredicates,
+        [BOGUS, dummyPredicate],
+      ]),
       handles: folds,
     });
     expect(informationalWithPredicate).toHaveLength(1);

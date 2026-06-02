@@ -85,7 +85,9 @@ export class InProcessDelivery implements Delivery {
 
       const existing = selectMailBySeq(db, seq);
       if (!existing || existing.recipient !== recipient) {
-        throw new Error(`InProcessDelivery.markRead: no mail seq=${seq} for recipient '${recipient}'`);
+        throw new Error(
+          `InProcessDelivery.markRead: no mail seq=${seq} for recipient '${recipient}'`,
+        );
       }
 
       const [stored] = tx.append([makeMailReadEvent(this.projectId, recipient, seq)]);
@@ -93,7 +95,9 @@ export class InProcessDelivery implements Delivery {
 
       const updated = selectMailBySeq(db, seq);
       if (!updated) {
-        throw new Error(`InProcessDelivery.markRead: inbox row missing after projection (seq=${seq})`);
+        throw new Error(
+          `InProcessDelivery.markRead: inbox row missing after projection (seq=${seq})`,
+        );
       }
       return updated;
     });
