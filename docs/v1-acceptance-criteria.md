@@ -55,22 +55,22 @@ These are the top-level conditions that, all met, *are* v1.
   research — on the v1 critical path.*
 - `SF-2` ☐ The operator can **steer any agent mid-turn** from its terminal pane (answer, redirect,
   interrupt) without tearing it down (Principle 1).
-- `SF-3` ☐ Agents coordinate **only** via the typed, persisted **mail bus**; the operator is a
-  first-class participant and escalations/approvals **filter up** to their inbox (Principles 1, 8).
-- `SF-4` ☐ Actionable mail is **un-loseable** (sticky until acted on); informational mail is not
-  (Principle 8, `MAIL-BUS`).
+- `SF-3` ◐ Agents coordinate **only** via the typed, persisted **mail bus**; the operator is a
+  first-class participant and escalations/approvals **filter up** to their inbox (Principles 1, 8). L1 delivers the typed, schema-validated, persisted mail bus over the L0 event log, with `@operator` first-class. Remaining: 'ONLY via mail' (no other channel) is enforced once the MCP surface (L2) + Conductor (L7) wire it.
+- `SF-4` ◐ Actionable mail is **un-loseable** (sticky until acted on); informational mail is not
+  (Principle 8, `MAIL-BUS`). L1 delivers actionable-vs-informational with sticky-until-resolved as a tested REPLAY invariant + an outstanding-action-count projection. Remaining: the operator-facing inbox UX is the app (L9).
 - `SF-5` ⏸ A **desktop app** is the operator's one-stop surface — observe and steer all agents in
   one place (Principle 15). *Couples to the parked shell decision (Electron vs Tauri).*
-- `SF-6` ☐ Artifacts (mail, commit messages) are **rendered per audience** — structured under the
-  hood, clean human view on top; provider voice stays out of artifacts (Principle 3).
+- `SF-6` ◐ Artifacts (mail, commit messages) are **rendered per audience** — structured under the
+  hood, clean human view on top; provider voice stays out of artifacts (Principle 3). L1 ships the renderer-registry seam + a generic default renderer. Remaining: per-type human renderers are the app (L9).
 
 ## C. Roles, dispatch & escalation (P8, P11, P13)
 
 - `RL-1` ☐ The five base roles work — **Coordinator, Lead, Implementer, Reviewer, Researcher** —
   each with a distinct mandate + permission profile (Principle 11, `AGENT-ROLES`).
 - `RL-2` ☐ Sub-roles specialize approach and may only **narrow** permissions (Principle 11).
-- `RL-3` ☐ Escalation works: repeated failure / stuck worker / intent ambiguity climbs the spawn
-  chain (parent → Coordinator → operator), resolved at the lowest competent level (Principle 8).
+- `RL-3` ◐ Escalation works: repeated failure / stuck worker / intent ambiguity climbs the spawn
+  chain (parent → Coordinator → operator), resolved at the lowest competent level (Principle 8). L1 delivers the escalation protocol — resolve-or-forward (never-drop; send throws on failed persist), ask-on-intent-ambiguity, parent<->child threaded brainstorm, the upward chain, and clarify-timeout=forward-up policy. Remaining: the 3-strike trigger (L5) + roster/authority (L6).
 - `RL-4` ☐ A **rate-limit-aware balancer** spreads load across subscriptions; when tapped, it
   **paces** rather than degrading quality (Principle 13, `DISPATCH`, `COST-and-USAGE`).
 
@@ -93,15 +93,15 @@ These are the top-level conditions that, all met, *are* v1.
   are explicit and locked (Principle 6, `WORKTREES`).
 - `WT-2` ☐ Gitignored essentials are copied/pointer-linked into worktrees so non-trivial repos and
   environments don't break (Principle 6).
-- `WT-3` ☐ **Nothing orchestration-related touches the target repo** except `CLAUDE.md`/`AGENTS.md`;
-  all state/specs/plans/config live in program-data, keyed per project (Principle 12).
+- `WT-3` ◐ **Nothing orchestration-related touches the target repo** except `CLAUDE.md`/`AGENTS.md`;
+  all state/specs/plans/config live in program-data, keyed per project (Principle 12). L0 landed the per-project program-data store + the pristine-repo guard (`assertRepoPristine`, run on every L0 op); L1 mail is program-data-keyed with no repo writes. Remaining: full no-`.co/`-dependency self-host = SH-2/SH-3.
 - `WT-4` ☐ Repository-relationship modes work — **Owner / Contributor / Offline** — auto-detected
   with override; the review gate applies in all three (`WORKTREES`).
 
 ## F. State, recovery & observability (P9, P14)
 
-- `ST-1` ☐ **Everything is an event** — agents, turns, mail, reviews, phases — durable, inspectable,
-  replayable (Principle 14).
+- `ST-1` ◐ **Everything is an event** — agents, turns, mail, reviews, phases — durable, inspectable,
+  replayable (Principle 14). L0 landed the append-only event log + projections/replay (config & registry are events; replay byte-equality tested); L1 is fully event-sourced over the L0 log (mail send/read + actionable state are events). Remaining: agents/turns/reviews/phases as events in later layers. Evidence: L0 on `main` (PR #11); L1 on `dev`.
 - `ST-2` ☐ The system can be **reconstructed and recovered** from its record after a crash/restart;
   stuck/zombie agents are reconciled back to WAITING (Principle 14, `STATE-and-RECOVERY`).
 - `ST-3` ☐ **No silent failures** — pre-flight (the doctor), in-flight (live stream monitoring),
@@ -109,8 +109,8 @@ These are the top-level conditions that, all met, *are* v1.
 
 ## G. The agent surface — MCP & self-describing (P4, P5)
 
-- `MC-1` ☐ Agents act through the **MCP server alone, no fallback**; a stubbed tool fails loudly
-  (completeness gate) (Principle 4).
+- `MC-1` ◐ Agents act through the **MCP server alone, no fallback**; a stubbed tool fails loudly
+  (completeness gate) (Principle 4). L1 ships an L1-local no-stub assertion (every declared mail type has schema + live flow + completion predicate; tested green-on-real-enum / red-on-stub). Remaining: the full build-time MCP completeness gate is L2.
 - `MC-2` ☐ **One core, thin adapters** — the CLI, MCP server, and app import the same core; logic
   cannot drift (Principle 4, `MCP-TOOLS`).
 - `MC-3` ☐ The protocol is **self-describing**: `orient` teaches workflow, schemas teach syntax,

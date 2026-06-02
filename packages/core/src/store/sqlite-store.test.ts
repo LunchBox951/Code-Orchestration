@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { openGlobalStore, openProjectStore } from './sqlite-store.js';
-import type { NewEvent } from './types.js';
+import type { NewEvent, StoredEvent, StoreTx } from './types.js';
+import { applyEvent, rebuildAll, type Projector } from '../replay/projector.js';
+import { assertRepoPristine } from '../config/pristine.js';
 
 const ORIGINAL_ENV = process.env;
 let dataDir: string;
@@ -159,8 +162,7 @@ describe('reserved L1 envelope columns', () => {
     const store = openProjectStore('p1');
     try {
       const [appended] = store.append([event()]);
-      // These columns are reserved (Part B §3 D2) and intentionally absent from
-      // the Part C.1 read API, so inspect the raw row via the tx handle.
+      // These columns are reserved for L1+ mail metadata. L0 events leave them NULL.
       const row = store.transaction((tx) =>
         (tx.raw as DatabaseSync)
           .prepare(
@@ -214,6 +216,190 @@ describe('determinism', () => {
       expect(readBack!.seq).toBe(appended!.seq);
     } finally {
       store.close();
+    }
+  });
+});
+
+describe('store widening — reserved field round-trips', () => {
+  it('round-trips all four reserved fields through append and readAll/readStream', () => {
+    const store = openProjectStore('p1');
+    try {
+      const [appended] = store.append([
+        event({
+          actor: 'agent-abc',
+          causationId: 'evt-001',
+          correlationId: 'thread-xyz',
+          idempotencyKey: 'idem-123',
+        }),
+      ]);
+      expect(appended).toMatchObject({
+        actor: 'agent-abc',
+        causationId: 'evt-001',
+        correlationId: 'thread-xyz',
+        idempotencyKey: 'idem-123',
+      });
+
+      const [viaReadAll] = store.readAll();
+      expect(viaReadAll).toMatchObject({
+        actor: 'agent-abc',
+        causationId: 'evt-001',
+        correlationId: 'thread-xyz',
+        idempotencyKey: 'idem-123',
+      });
+      // append return is byte-identical to a later read
+      expect(appended).toEqual(viaReadAll);
+
+      const [viaReadStream] = store.readStream(event().scope);
+      expect(viaReadStream).toEqual(viaReadAll);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('omits all four keys when none of the reserved fields are supplied', () => {
+    const store = openProjectStore('p1');
+    try {
+      const [appended] = store.append([event()]);
+      expect(appended).not.toHaveProperty('actor');
+      expect(appended).not.toHaveProperty('causationId');
+      expect(appended).not.toHaveProperty('correlationId');
+      expect(appended).not.toHaveProperty('idempotencyKey');
+
+      const [readBack] = store.readAll();
+      expect(readBack).not.toHaveProperty('actor');
+      expect(readBack).not.toHaveProperty('causationId');
+      expect(readBack).not.toHaveProperty('correlationId');
+      expect(readBack).not.toHaveProperty('idempotencyKey');
+      expect(appended).toEqual(readBack);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('surfaces only the supplied field when only idempotencyKey is set (partial)', () => {
+    const store = openProjectStore('p1');
+    try {
+      const [appended] = store.append([event({ idempotencyKey: 'idem-only' })]);
+      expect(appended).not.toHaveProperty('actor');
+      expect(appended).not.toHaveProperty('causationId');
+      expect(appended).not.toHaveProperty('correlationId');
+      expect(appended).toMatchObject({ idempotencyKey: 'idem-only' });
+
+      const [readBack] = store.readAll();
+      expect(readBack).not.toHaveProperty('actor');
+      expect(readBack).not.toHaveProperty('causationId');
+      expect(readBack).not.toHaveProperty('correlationId');
+      expect(readBack).toMatchObject({ idempotencyKey: 'idem-only' });
+      expect(appended).toEqual(readBack);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('store widening — AC-L0-2 replay preserved', () => {
+  /** Minimal projector that records (seq, actor) for every folded event. */
+  class ActorLogProjector implements Projector {
+    readonly name = 'actor_log';
+    handles(): boolean {
+      return true;
+    }
+    private ensure(db: DatabaseSync): void {
+      db.exec('CREATE TABLE IF NOT EXISTS actor_log (seq INTEGER PRIMARY KEY, actor TEXT)');
+    }
+    reset(tx: StoreTx): void {
+      const db = tx.raw as DatabaseSync;
+      this.ensure(db);
+      db.exec('DELETE FROM actor_log');
+    }
+    apply(tx: StoreTx, ev: StoredEvent): void {
+      const db = tx.raw as DatabaseSync;
+      this.ensure(db);
+      db.prepare('INSERT INTO actor_log (seq, actor) VALUES (?, ?)').run(ev.seq, ev.actor ?? null);
+    }
+    snapshot(db: DatabaseSync): string {
+      this.ensure(db);
+      return JSON.stringify(db.prepare('SELECT seq, actor FROM actor_log ORDER BY seq').all());
+    }
+  }
+
+  it('live → snapshot → rebuildAll → snapshot is byte-identical with reserved fields in the log', () => {
+    const store = openProjectStore('p1');
+    const proj = new ActorLogProjector();
+    try {
+      for (const e of [
+        event({ actor: 'agent-1', correlationId: 'thread-1' }),
+        event(),
+        event({ actor: 'agent-2', idempotencyKey: 'k-2' }),
+      ]) {
+        store.transaction((tx) => {
+          const [s] = tx.append([e]);
+          applyEvent(tx, s!, [proj]);
+        });
+      }
+      const live = store.transaction((tx) => proj.snapshot(tx.raw as DatabaseSync));
+
+      rebuildAll(store, [proj]);
+
+      const replayed = store.transaction((tx) => proj.snapshot(tx.raw as DatabaseSync));
+      expect(replayed).toBe(live);
+      // guard against a vacuous pass
+      expect(live).toContain('"actor":"agent-1"');
+      expect(live).toContain('"actor":null');
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('store widening — AC-L0-5 pristine', () => {
+  /** Minimal fixture repo (hand-built .git tree; no git binary required). */
+  function makeFixtureRepo(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'co-fixture-'));
+    try {
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=T', 'init', '-q'], {
+        cwd: dir,
+        stdio: 'ignore',
+      });
+      writeFileSync(join(dir, 'file.txt'), 'fixture\n');
+      execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=T', 'add', '.'], {
+        cwd: dir,
+        stdio: 'ignore',
+      });
+      execFileSync(
+        'git',
+        ['-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-q', '-m', 'init'],
+        { cwd: dir, stdio: 'ignore' },
+      );
+    } catch {
+      mkdirSync(join(dir, '.git', 'refs', 'heads'), { recursive: true });
+      writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+      writeFileSync(join(dir, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n');
+      writeFileSync(join(dir, 'file.txt'), 'fixture\n');
+    }
+    return dir;
+  }
+
+  it('widened append with all four reserved fields does not write into the repo tree', () => {
+    const repoDir = makeFixtureRepo();
+    try {
+      assertRepoPristine(repoDir, () => {
+        const store = openProjectStore('pristine-p');
+        try {
+          store.append([
+            event({
+              actor: 'a',
+              causationId: 'c',
+              correlationId: 'r',
+              idempotencyKey: 'k',
+            }),
+          ]);
+        } finally {
+          store.close();
+        }
+      });
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
     }
   });
 });
