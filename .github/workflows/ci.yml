@@ -10,17 +10,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # pnpm's version is read from package.json "packageManager" (pnpm@10.33.0).
-      # No `version:` input on purpose: pnpm/action-setup@v4 throws
+      # No `version:` input on purpose: pnpm/action-setup@v6 throws
       # "Multiple versions of pnpm specified" when a `version` input disagrees
       # with the packageManager pin (e.g. `version: 10` != `pnpm@10.33.0`).
       # Deriving it from packageManager keeps a single source of truth and
       # installs exactly 10.33.0, matching the committed pnpm-lock.yaml.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
