@@ -241,6 +241,43 @@ describe('AC-L1-1 — idempotent send (dedupe on idempotencyKey)', () => {
     }
   });
 
+  it('scopes an idempotencyKey to the sender/recipient/type operation boundary', () => {
+    const mail = openMailStore('p-idem-scope');
+    try {
+      const toBob = mail.send({
+        type: MAIL_CHAT,
+        to: 'bob',
+        from: 'alice',
+        subject: 's',
+        body: 'for bob',
+        idempotencyKey: 'shared-key',
+      });
+      const toCarol = mail.send({
+        type: MAIL_CHAT,
+        to: 'carol',
+        from: 'alice',
+        subject: 's',
+        body: 'for carol',
+        idempotencyKey: 'shared-key',
+      });
+      const fromDana = mail.send({
+        type: MAIL_CHAT,
+        to: 'bob',
+        from: 'dana',
+        subject: 's',
+        body: 'from dana',
+        idempotencyKey: 'shared-key',
+      });
+
+      expect(toCarol.seq).not.toBe(toBob.seq);
+      expect(fromDana.seq).not.toBe(toBob.seq);
+      expect(mail.inbox('bob').map((m) => m.body)).toEqual(['for bob', 'from dana']);
+      expect(mail.inbox('carol').map((m) => m.body)).toEqual(['for carol']);
+    } finally {
+      mail.close();
+    }
+  });
+
   it('treats sends WITHOUT an idempotencyKey as distinct', () => {
     const mail = openMailStore('p-distinct');
     try {
@@ -355,6 +392,40 @@ describe('AC-L1-2 — send routes through the Delivery seam (regression 5)', () 
     } finally {
       mail.close();
       store.close();
+    }
+  });
+});
+
+describe('AC-L1-2 — reply derives threading from the persisted row', () => {
+  it('ignores forged DeliveredMail fields and replies to the stored sender from the stored recipient', () => {
+    const mail = openMailStore('p-reply-forged');
+    try {
+      const actual = mail.send({
+        type: MAIL_CHAT,
+        to: 'lead',
+        from: 'worker',
+        subject: 'q',
+        body: '?',
+      });
+      const forged = {
+        ...actual,
+        recipient: OPERATOR,
+        sender: 'worker',
+        correlationId: 'forged-thread',
+      };
+
+      const reply = mail.reply(forged, {
+        type: MAIL_CHAT,
+        subject: 're',
+        body: 'answer',
+      });
+
+      expect(reply.sender).toBe('lead');
+      expect(reply.recipient).toBe('worker');
+      expect(reply.correlationId).toBe(String(actual.seq));
+      expect(reply.causationId).toBe(String(actual.seq));
+    } finally {
+      mail.close();
     }
   });
 });
@@ -687,6 +758,50 @@ describe('AC-L1-4 — completion-predicate registry (generic Map; clarify pairin
       expect(mail.outstandingCount('lead')).toBe(1);
 
       // The correct in-thread reply (causationId = the request seq) resolves it.
+      mail.reply(mail.inbox('lead').find((x) => x.seq === req.seq)!, {
+        type: MAIL_CLARIFY_RESPONSE,
+        subject: 'a',
+        body: 'answer',
+      });
+      expect(mail.outstandingCount('lead')).toBe(0);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('a clarify_request is not closed by a spoofed response from the wrong actor or to the wrong recipient', () => {
+    const mail = openMailStore('p-pred-spoof');
+    try {
+      const req = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'lead',
+        from: 'worker',
+        subject: 'q',
+        body: '?',
+      });
+
+      mail.send({
+        type: MAIL_CLARIFY_RESPONSE,
+        to: 'worker',
+        from: 'intruder',
+        subject: 'spoof',
+        body: 'not the holder',
+        correlationId: String(req.seq),
+        causationId: String(req.seq),
+      });
+      expect(mail.outstandingCount('lead')).toBe(1);
+
+      mail.send({
+        type: MAIL_CLARIFY_RESPONSE,
+        to: 'auditor',
+        from: 'lead',
+        subject: 'misrouted',
+        body: 'not back to the asker',
+        correlationId: String(req.seq),
+        causationId: String(req.seq),
+      });
+      expect(mail.outstandingCount('lead')).toBe(1);
+
       mail.reply(mail.inbox('lead').find((x) => x.seq === req.seq)!, {
         type: MAIL_CLARIFY_RESPONSE,
         subject: 'a',

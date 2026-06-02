@@ -2,8 +2,11 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Projector } from '../replay/projector.js';
 import type { StoredEvent, StoreTx } from '../store/types.js';
 import {
+  EVENT_MAIL_FORWARD,
   EVENT_MAIL_READ,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_CLARIFY_REQUEST,
+  MAIL_ESCALATION,
   MAIL_TYPES,
   completionPredicate,
   mailKind,
@@ -11,6 +14,7 @@ import {
   type ApprovalDecision,
   type ApprovalResponse,
   type DeliveredMail,
+  type MailForward,
   type MailMessage,
   type MailRead,
   type MailType,
@@ -28,17 +32,19 @@ import {
  *   - `read`      — set by a {@link EVENT_MAIL_READ} read-receipt; "informational
  *                   clears on view" without any mutable-only state.
  *   - `resolved`  — set when a closing event in the same thread satisfies this
- *                   actionable item's completion predicate (freeze #4 — un-loseable:
- *                   viewing does NOT resolve; only a real closing event does).
+ *                   actionable item's completion predicate, or when a replay-verified
+ *                   {@link EVENT_MAIL_FORWARD} receipt proves the item was forwarded up
+ *                   (freeze #4 — un-loseable: viewing does NOT resolve; only a real
+ *                   closing event or validated forward does).
  *   - `thread_id` — the root message's seq as a string (`correlation_id ?? seq`),
  *                   so resolution matches request↔response within a thread (freeze #7).
  *   - `decision`  — nullable; the approve/decline an `approval_response` carries (W4).
  *                   Log-derived from the payload, so the outward-action gate reads it
  *                   replay-safely; NULL for every other type.
  *
- * Indexes: `recipient` for `inbox(recipient)`, `idempotency_key` for the dedupe
- * lookup, `thread_id` for in-thread resolution, and `(recipient, kind, resolved)`
- * for the outstanding-action projection (SF-4).
+ * Indexes: `recipient` for `inbox(recipient)`, idempotency scope for the dedupe lookup,
+ * `thread_id` for in-thread resolution, and `(recipient, kind, resolved)` for the
+ * outstanding-action projection (SF-4).
  */
 const CREATE_INBOX_TABLE = `
   CREATE TABLE IF NOT EXISTS inbox (
@@ -59,10 +65,19 @@ const CREATE_INBOX_TABLE = `
     decision        TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_inbox_recipient_seq ON inbox (recipient, seq);
-  CREATE INDEX IF NOT EXISTS idx_inbox_idempotency_key ON inbox (idempotency_key);
+  CREATE INDEX IF NOT EXISTS idx_inbox_idempotency_scope
+    ON inbox (idempotency_key, recipient, sender, type);
   CREATE INDEX IF NOT EXISTS idx_inbox_thread ON inbox (thread_id);
   CREATE INDEX IF NOT EXISTS idx_inbox_outstanding ON inbox (recipient, kind, resolved);
   CREATE INDEX IF NOT EXISTS idx_inbox_sender ON inbox (sender);
+
+  CREATE TABLE IF NOT EXISTS inbox_forward_links (
+    forwarded_seq INTEGER PRIMARY KEY,
+    held_seq      INTEGER NOT NULL,
+    holder        TEXT NOT NULL,
+    forwarded_to  TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_inbox_forward_links_held ON inbox_forward_links (held_seq);
 `;
 
 /**
@@ -114,15 +129,27 @@ export function selectMailBySeq(db: DatabaseSync, seq: number): DeliveredMail | 
   return row ? rowToDeliveredMail(row as Record<string, unknown>) : undefined;
 }
 
-/** The earliest mail with `idempotencyKey`, or undefined — the dedupe lookup (freeze #6). */
+/** The operation boundary for idempotent send dedupe (freeze #6). */
+export interface IdempotencyScope {
+  readonly recipient: string;
+  readonly sender: string;
+  readonly type: MailType;
+}
+
+/** The earliest mail with `idempotencyKey` in `scope`, or undefined — the dedupe lookup. */
 export function selectMailByIdempotencyKey(
   db: DatabaseSync,
   idempotencyKey: string,
+  scope: IdempotencyScope,
 ): DeliveredMail | undefined {
   ensureInboxTable(db);
   const row = db
-    .prepare(`SELECT ${INBOX_COLUMNS} FROM inbox WHERE idempotency_key = ? ORDER BY seq LIMIT 1`)
-    .get(idempotencyKey);
+    .prepare(
+      `SELECT ${INBOX_COLUMNS} FROM inbox
+       WHERE idempotency_key = ? AND recipient = ? AND sender = ? AND type = ?
+       ORDER BY seq LIMIT 1`,
+    )
+    .get(idempotencyKey, scope.recipient, scope.sender, scope.type);
   return row ? rowToDeliveredMail(row as Record<string, unknown>) : undefined;
 }
 
@@ -146,9 +173,7 @@ export function outstandingForRecipient(db: DatabaseSync, recipient: string): De
 /**
  * All mail a given agent SENT (matched on `sender` = the event `actor`), chronological.
  * Unlike {@link inboxForRecipient} (keyed by RECIPIENT), this is keyed by SENDER, so an
- * agent can find the actionable items IT RAISED — e.g. the W5 'awaiting reply' query
- * (an asker is WAITING while a `clarify_request` it raised is still unresolved). The
- * `resolved` flag is carried log-derived, so the derived 'waiting' state is replay-safe.
+ * agent can find the actionable items IT RAISED — e.g. the W5 'awaiting reply' query.
  */
 export function sentByForSender(db: DatabaseSync, sender: string): DeliveredMail[] {
   ensureInboxTable(db);
@@ -156,6 +181,18 @@ export function sentByForSender(db: DatabaseSync, sender: string): DeliveredMail
     .prepare(`SELECT ${INBOX_COLUMNS} FROM inbox WHERE sender = ? ORDER BY seq`)
     .all(sender);
   return rows.map(rowToDeliveredMail);
+}
+
+/** The held item that produced forwarded escalation `forwardedSeq`, if it came through the forward seam. */
+export function forwardSourceForSeq(
+  db: DatabaseSync,
+  forwardedSeq: number,
+): DeliveredMail | undefined {
+  ensureInboxTable(db);
+  const link = db
+    .prepare('SELECT held_seq FROM inbox_forward_links WHERE forwarded_seq = ?')
+    .get(forwardedSeq) as { held_seq: number } | undefined;
+  return link ? selectMailBySeq(db, Number(link.held_seq)) : undefined;
 }
 
 /** Count of a recipient's outstanding actions — the {@link outstandingForRecipient} cardinality. */
@@ -197,7 +234,8 @@ function threadIdOf(event: StoredEvent): string {
  * field (freeze #6 — it persists the event ts).
  *
  * `handles()` covers every {@link MAIL_TYPES} member (so later workers light up by
- * registering their type, not by editing this projector) plus {@link EVENT_MAIL_READ}.
+ * registering their type, not by editing this projector) plus infrastructure receipts
+ * {@link EVENT_MAIL_READ} and {@link EVENT_MAIL_FORWARD}.
  *
  * Resolution is generic (freeze #6): after inserting a mail row, it consults the
  * completion-predicate registry for any OPEN actionable item in the same thread and
@@ -208,13 +246,18 @@ export class MailProjector implements Projector {
   readonly name = 'inbox';
 
   handles(type: string): boolean {
-    return type === EVENT_MAIL_READ || (MAIL_TYPES as readonly string[]).includes(type);
+    return (
+      type === EVENT_MAIL_READ ||
+      type === EVENT_MAIL_FORWARD ||
+      (MAIL_TYPES as readonly string[]).includes(type)
+    );
   }
 
   reset(tx: StoreTx): void {
     const db = tx.raw as DatabaseSync;
     ensureInboxTable(db);
     db.exec('DELETE FROM inbox');
+    db.exec('DELETE FROM inbox_forward_links');
   }
 
   apply(tx: StoreTx, event: StoredEvent): void {
@@ -222,6 +265,10 @@ export class MailProjector implements Projector {
     ensureInboxTable(db);
     if (event.type === EVENT_MAIL_READ) {
       this.applyReadReceipt(db, event);
+      return;
+    }
+    if (event.type === EVENT_MAIL_FORWARD) {
+      this.applyForwardReceipt(db, event);
       return;
     }
     this.applyMail(db, event);
@@ -284,5 +331,66 @@ export class MailProjector implements Projector {
     const recipient = mailRecipientForScope(event.scope);
     const { seq } = event.payload as MailRead;
     db.prepare('UPDATE inbox SET read = 1 WHERE seq = ? AND recipient = ?').run(seq, recipient);
+  }
+
+  /**
+   * Fold a forward-receipt: first prove the holder really sent an escalation caused by the held
+   * item to the recorded parent, then discharge the old holder's actionable item.
+   */
+  private applyForwardReceipt(db: DatabaseSync, event: StoredEvent): void {
+    const holder = mailRecipientForScope(event.scope);
+    if (event.actor !== holder) {
+      throw new Error(
+        `mail projector: forward receipt seq=${event.seq} actor '${event.actor ?? '<none>'}' ` +
+          `does not match holder '${holder}'`,
+      );
+    }
+
+    const { seq, forwardedTo } = event.payload as MailForward;
+    const item = selectMailBySeq(db, seq);
+    if (!item || item.recipient !== holder || item.kind !== 'actionable') {
+      throw new Error(
+        `mail projector: forward receipt seq=${event.seq} names non-actionable or missing ` +
+          `item ${seq} for holder '${holder}'`,
+      );
+    }
+    if (item.type !== MAIL_ESCALATION && item.type !== MAIL_CLARIFY_REQUEST) {
+      throw new Error(
+        `mail projector: forward receipt seq=${event.seq} cannot forward '${item.type}' items`,
+      );
+    }
+
+    const forwarded = db
+      .prepare(
+        `SELECT seq FROM inbox
+         WHERE sender = ? AND recipient = ? AND type = ? AND causation_id = ? AND correlation_id = ?
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(holder, forwardedTo, MAIL_ESCALATION, String(seq), item.correlationId ?? String(seq)) as
+      | { seq: number }
+      | undefined;
+    if (!forwarded) {
+      throw new Error(
+        `mail projector: forward receipt seq=${event.seq} has no matching escalation ` +
+          `from '${holder}' to '${forwardedTo}' caused by ${seq}`,
+      );
+    }
+
+    const duplicate = db
+      .prepare('SELECT forwarded_seq FROM inbox_forward_links WHERE held_seq = ?')
+      .get(seq);
+    if (duplicate) {
+      throw new Error(`mail projector: item ${seq} already has a forward receipt`);
+    }
+
+    db.prepare(
+      `UPDATE inbox
+       SET resolved = 1
+       WHERE seq = ? AND recipient = ? AND kind = 'actionable'`,
+    ).run(seq, holder);
+    db.prepare(
+      `INSERT INTO inbox_forward_links (forwarded_seq, held_seq, holder, forwarded_to)
+       VALUES (?, ?, ?, ?)`,
+    ).run(Number(forwarded.seq), seq, holder, forwardedTo);
   }
 }

@@ -30,9 +30,21 @@ export type ApprovalOutcome = 'pending' | 'approved' | 'declined';
  * inbox projection, so the outcome survives a projection rebuild (AC-L1-5 replay-safe).
  */
 export function approvalOutcome(mail: MailStore, approval: DeliveredMail): ApprovalOutcome {
+  const storedApproval = mail.inbox(approval.recipient).find((m) => m.seq === approval.seq);
+  if (!storedApproval || storedApproval.type !== MAIL_APPROVAL) {
+    throw new Error('approvalOutcome: expected a persisted approval mail item');
+  }
+  const threadId = storedApproval.correlationId ?? String(storedApproval.seq);
   const response = mail
-    .inbox(approval.sender)
-    .find((m) => m.type === MAIL_APPROVAL_RESPONSE && m.causationId === String(approval.seq));
+    .inbox(storedApproval.sender)
+    .find(
+      (m) =>
+        m.type === MAIL_APPROVAL_RESPONSE &&
+        m.sender === storedApproval.recipient &&
+        m.recipient === storedApproval.sender &&
+        m.correlationId === threadId &&
+        m.causationId === String(storedApproval.seq),
+    );
   const decision: ApprovalDecision | undefined = response?.decision;
   switch (decision) {
     case undefined:

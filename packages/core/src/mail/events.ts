@@ -52,9 +52,9 @@ export const MAIL_APPROVAL_RESPONSE = 'approval_response' as const;
  * protocol. It carries the shared `{subject, body}` prose (a readable problem summary +
  * context) and is **discharged only when its holder acts** in-thread: forwarding it UP
  * (a new `escalation` to the holder's parent) OR resolving it DOWN (any in-thread reply
- * back to the asker). It has NO dedicated response type — both discharge modes reuse the
- * holder's in-thread follow-up — so its completion predicate keys on the CLOSER's
- * `sender`/`causationId`, not on a fixed closing type (see {@link completionPredicates}).
+ * back to the asker). It has NO dedicated response type. Down-resolve reuses the holder's
+ * in-thread follow-up; forward-up is discharged by the internal {@link EVENT_MAIL_FORWARD}
+ * receipt emitted by the validated forward seam.
  */
 export const MAIL_ESCALATION = 'escalation' as const;
 
@@ -80,6 +80,14 @@ export type MailType = (typeof MAIL_TYPES)[number];
  * keeping "informational clears on view" a pure function of the log (rebuild-safe).
  */
 export const EVENT_MAIL_READ = 'mail.read' as const;
+
+/**
+ * The internal forward-receipt event. This is infrastructure, not a sendable mail type:
+ * `forwardEscalation` writes it after the upward escalation mail is persisted, and the
+ * projector folds it to discharge the old holder's action. Keeping forwarding as a replayed
+ * receipt prevents an arbitrary caused `escalation` mail from masquerading as a valid forward.
+ */
+export const EVENT_MAIL_FORWARD = 'mail.forwarded' as const;
 
 /** Current payload schema version — v1; no upcasters yet (see {@link mailUpcasters}). */
 export const MAIL_EVENT_V = 1;
@@ -128,12 +136,23 @@ export const mailReadSchema = z.object({
 export type MailRead = z.infer<typeof mailReadSchema>;
 
 /**
+ * The forward-receipt payload: the held actionable `seq` plus the parent recipient the holder
+ * forwarded to. The holder is carried by the event scope/actor (`mail:<holder>`).
+ */
+export const mailForwardSchema = z.object({
+  seq: z.number().int().nonnegative(),
+  forwardedTo: z.string().min(1),
+});
+export type MailForward = z.infer<typeof mailForwardSchema>;
+
+/**
  * Current-version schema per mail event type — validated on append AND on read
  * (decode). Most {@link MAIL_TYPES} members share the {@link mailMessageSchema}
  * `{subject, body}` payload (a question / an answer / prose); `approval_response`
  * carries the richer {@link approvalResponseSchema} (W4's structured `decision`).
  * {@link EVENT_MAIL_READ} gets its own schema HERE but is NOT in `MAIL_TYPES` — it is
- * folded by the projector yet can never be `send`-ed (freeze #4).
+ * folded by the projector yet can never be `send`-ed (freeze #4). Same for
+ * {@link EVENT_MAIL_FORWARD}, which is the replay-safe receipt for a validated forward path.
  */
 export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [MAIL_CHAT, mailMessageSchema],
@@ -144,6 +163,7 @@ export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [MAIL_APPROVAL_RESPONSE, approvalResponseSchema],
   [MAIL_ESCALATION, mailMessageSchema], // {subject, body}: a readable problem summary + context
   [EVENT_MAIL_READ, mailReadSchema],
+  [EVENT_MAIL_FORWARD, mailForwardSchema],
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -241,6 +261,9 @@ export function validateEnvelope(envelope: MailEnvelope): MailPayload {
   assertMailType(envelope.type);
   assertAddress('to', envelope.to);
   assertAddress('from', envelope.from);
+  if (envelope.type === MAIL_APPROVAL && envelope.to !== OPERATOR) {
+    throw new Error(`mail: approval must be addressed to ${OPERATOR}`);
+  }
   const schema = mailSchemas.get(envelope.type);
   if (schema == null) {
     // A registered MAIL_TYPES member with no schema is a programming error (Principle 9).
@@ -295,6 +318,30 @@ export function makeMailReadEvent(projectId: string, recipient: string, seq: num
   };
 }
 
+/**
+ * Build + validate a forward-receipt {@link EVENT_MAIL_FORWARD} event: `holder` forwarded the
+ * actionable mail at `seq` to `forwardedTo`. The projector verifies that the matching upward
+ * escalation mail exists in the same replayed log before it marks the held item resolved.
+ */
+export function makeMailForwardEvent(
+  projectId: string,
+  holder: string,
+  seq: number,
+  forwardedTo: string,
+): NewEvent {
+  assertAddress('to', holder);
+  assertAddress('to', forwardedTo);
+  return {
+    projectId,
+    scope: mailScope(holder),
+    type: EVENT_MAIL_FORWARD,
+    v: MAIL_EVENT_V,
+    payload: mailForwardSchema.parse({ seq, forwardedTo }),
+    actor: holder,
+    causationId: String(seq),
+  };
+}
+
 // ── Actionability classification (freeze #2) — a generic registry, not a switch ──
 
 /** Whether a mail type demands a response (`actionable`) or is purely informational. */
@@ -338,12 +385,29 @@ export function mailKind(type: MailType): MailKind {
  */
 export type CompletionPredicate = (item: DeliveredMail, closer: DeliveredMail) => boolean;
 
+function causedBy(item: DeliveredMail, closer: DeliveredMail): boolean {
+  return closer.causationId === String(item.seq);
+}
+
+function sentByHolder(item: DeliveredMail, closer: DeliveredMail): boolean {
+  return closer.sender === item.recipient;
+}
+
+function sentBackToRequester(item: DeliveredMail, closer: DeliveredMail): boolean {
+  return closer.recipient === item.sender;
+}
+
+function inSameThread(item: DeliveredMail, closer: DeliveredMail): boolean {
+  return closer.correlationId === (item.correlationId ?? String(item.seq));
+}
+
 /**
  * The completion-predicate registry: every ACTIONABLE type registers a predicate;
  * informational types register NONE. Later workers light up by adding an entry — the
  * projector consults this generically, so it never needs a per-type switch. Seeded
- * with `clarify_request`'s predicate: a `clarify_response` whose `causationId` points
- * at the request's `seq` resolves it.
+ * with `clarify_request`'s predicate: the holder answers the requester with a
+ * `clarify_response`. Forwarding is folded by the internal {@link EVENT_MAIL_FORWARD}
+ * receipt, so a raw caused `escalation` cannot clear an item by itself.
  */
 export const completionPredicates: ReadonlyMap<MailType, CompletionPredicate> = new Map<
   MailType,
@@ -352,29 +416,39 @@ export const completionPredicates: ReadonlyMap<MailType, CompletionPredicate> = 
   [
     MAIL_CLARIFY_REQUEST,
     (item, closer) =>
-      closer.type === MAIL_CLARIFY_RESPONSE && closer.causationId === String(item.seq),
+      sentByHolder(item, closer) &&
+      causedBy(item, closer) &&
+      inSameThread(item, closer) &&
+      closer.type === MAIL_CLARIFY_RESPONSE &&
+      sentBackToRequester(item, closer),
   ],
   [
     // An `approval` is resolved by an in-thread `approval_response` answering it (freeze
     // #6) — EITHER decision resolves the actionable (the decision has been made); the
-    // gate reads {@link DeliveredMail.decision} to allow/refuse. Same shape as clarify.
+    // gate reads {@link DeliveredMail.decision} to allow/refuse. Only the approval holder
+    // can answer, and the answer must route back to the requester.
     MAIL_APPROVAL,
     (item, closer) =>
-      closer.type === MAIL_APPROVAL_RESPONSE && closer.causationId === String(item.seq),
+      closer.type === MAIL_APPROVAL_RESPONSE &&
+      sentByHolder(item, closer) &&
+      sentBackToRequester(item, closer) &&
+      inSameThread(item, closer) &&
+      causedBy(item, closer),
   ],
   [
     // The UNIFIED resolve-or-forward model (AC-L1-6). An escalation `E` held by `R`
     // (`E.recipient === R`) is discharged precisely when ITS HOLDER produces an in-thread
-    // follow-up CAUSED by it — which is EITHER a forward UP (`R` sends a fresh `escalation`
-    // to its own parent) OR a resolution DOWN (`R` replies in-thread to the asker). Both
-    // share one shape: the closer's `sender` is the holder and its `causationId` is `E`'s
-    // seq. So a single predicate captures both, and doing NEITHER leaves `E` outstanding
-    // forever — the never-drop guarantee (the only way to clear it is for the holder to
-    // act). Keyed on `sender`/`causationId` (NOT a closing type), because escalation has no
-    // dedicated response type. Registered ONLY for `escalation`, so it can never affect a
-    // `clarify_request`/`approval` item (each consults its own predicate in the loop).
+    // follow-up CAUSED by it. Resolution DOWN is a holder reply to the asker. Forward UP is
+    // not accepted as a raw `escalation` closer; the validated forward path emits
+    // `mail.forwarded`, which the projector folds after verifying the forwarded escalation
+    // exists in the log. Caused mail from the holder to anyone else must stay sticky.
     MAIL_ESCALATION,
-    (item, closer) => closer.sender === item.recipient && closer.causationId === String(item.seq),
+    (item, closer) =>
+      sentByHolder(item, closer) &&
+      causedBy(item, closer) &&
+      inSameThread(item, closer) &&
+      closer.type !== MAIL_ESCALATION &&
+      sentBackToRequester(item, closer),
   ],
 ]);
 
