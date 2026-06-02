@@ -159,6 +159,37 @@ describe('ConfigStore — program-data only', () => {
   });
 });
 
+describe('ConfigStore — undefined rejection (Principle 9)', () => {
+  it('setGlobal throws on undefined value', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.setGlobal('k', undefined)).toThrow();
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('setProjectOverride throws on undefined value', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.setProjectOverride('p-alpha', 'k', undefined)).toThrow();
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('normal values still round-trip after an undefined rejection', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.setGlobal('bad', undefined)).toThrow();
+      cfg.setGlobal('good', 'ok');
+      expect(cfg.resolveEffective('any').good).toBe('ok');
+    } finally {
+      cfg.close();
+    }
+  });
+});
+
 describe('ConfigStore — projection determinism', () => {
   it('AC-L0-2: rebuildAll reproduces the config read-model byte-for-byte', () => {
     const cfg = openConfigStore();

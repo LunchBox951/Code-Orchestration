@@ -12,7 +12,7 @@ import type { UpcasterRegistry } from './upcaster.js';
 
 // ── Decode config shared by the live path AND replay (the live==replay identity) ──
 const upcasters: UpcasterRegistry = new Map();
-const schemas: SchemaMap = new Map([
+const schemas: SchemaMap = new Map<string, z.ZodType>([
   ['counter.inc', z.object({ by: z.number() })],
   ['kv.set', z.object({ key: z.string(), value: z.string() })],
 ]);
