@@ -26,17 +26,37 @@ export const OPERATOR = '@operator';
 export const MAIL_SCOPE_PREFIX = 'mail:';
 
 /**
- * Seed mail types this worker (W2) declares AND flows. Both are informational
- * prose. The full 7-type enum is owned across W2–W5: declaring a type without a
- * live flow here would be exactly the banned stub (W6 asserts this), so we declare
- * ONLY what we flow. Later workers extend the enum through the open registry.
+ * Seed mail types declared AND flowed across W2–W3. Each is declared only where it
+ * is also flowed: declaring a type without a live flow would be exactly the banned
+ * stub (W6 asserts this). W2 seeded the two informational prose types; W3 adds the
+ * first actionable/informational threaded pair (`clarify_request` is answered by a
+ * `clarify_response`). Later workers extend the enum through the open registries
+ * below (a `Map` entry per type), never by editing a central switch.
  */
 export const MAIL_CHAT = 'chat' as const;
 export const MAIL_OPERATOR_MESSAGE = 'operator_message' as const;
+export const MAIL_CLARIFY_REQUEST = 'clarify_request' as const;
+export const MAIL_CLARIFY_RESPONSE = 'clarify_response' as const;
 
 /** Registered seed-type enum — `send` rejects any type not in here (freeze #2, #5). */
-export const MAIL_TYPES = [MAIL_CHAT, MAIL_OPERATOR_MESSAGE] as const;
+export const MAIL_TYPES = [
+  MAIL_CHAT,
+  MAIL_OPERATOR_MESSAGE,
+  MAIL_CLARIFY_REQUEST,
+  MAIL_CLARIFY_RESPONSE,
+] as const;
 export type MailType = (typeof MAIL_TYPES)[number];
+
+/**
+ * The internal read-receipt event (freeze #4 — event-sourced read-state). Dotted
+ * like L0's `config.set` to mark it INFRASTRUCTURE, NOT a sendable message: it is
+ * deliberately NOT a member of {@link MAIL_TYPES} (so `send` keeps rejecting it and
+ * W6's no-stub assertion — which iterates `MAIL_TYPES` — never sees it), yet it gets
+ * a schema in {@link mailSchemas} so `decode` validates it on read/replay. A
+ * `markRead`/`view` appends one; the projector folds it to set a row's `read` flag,
+ * keeping "informational clears on view" a pure function of the log (rebuild-safe).
+ */
+export const EVENT_MAIL_READ = 'mail.read' as const;
 
 /** Current payload schema version — v1; no upcasters yet (see {@link mailUpcasters}). */
 export const MAIL_EVENT_V = 1;
@@ -52,10 +72,29 @@ export const mailMessageSchema = z.object({
 });
 export type MailMessage = z.infer<typeof mailMessageSchema>;
 
-/** Current-version schema per mail event type — validated on append AND on read (decode). */
+/**
+ * The read-receipt payload: the `seq` of the viewed mail. A non-negative integer
+ * because it names a store seq (the inbox PK). It is the only field — the recipient
+ * is carried by the event SCOPE (`mail:<recipient>`), like every other mail event.
+ */
+export const mailReadSchema = z.object({
+  seq: z.number().int().nonnegative(),
+});
+export type MailRead = z.infer<typeof mailReadSchema>;
+
+/**
+ * Current-version schema per mail event type — validated on append AND on read
+ * (decode). Every {@link MAIL_TYPES} member shares the {@link mailMessageSchema}
+ * `{subject, body}` payload (a question / an answer / prose). {@link EVENT_MAIL_READ}
+ * gets its own schema HERE but is NOT in `MAIL_TYPES` — it is folded by the projector
+ * yet can never be `send`-ed (freeze #4).
+ */
 export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [MAIL_CHAT, mailMessageSchema],
   [MAIL_OPERATOR_MESSAGE, mailMessageSchema],
+  [MAIL_CLARIFY_REQUEST, mailMessageSchema],
+  [MAIL_CLARIFY_RESPONSE, mailMessageSchema],
+  [EVENT_MAIL_READ, mailReadSchema],
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -95,6 +134,10 @@ export interface DeliveredMail {
   readonly causationId?: string;
   readonly idempotencyKey?: string;
   readonly ts: number; // the persisted event ts (freeze #6 — never wall-clock on read)
+  // ── W3 read-model state (all log-derived; additive so W2's inbox shape holds) ──
+  readonly kind?: MailKind; // actionable | informational (from the kind registry)
+  readonly read?: boolean; // an informational item "clears on view" via a read-receipt
+  readonly resolved?: boolean; // an actionable item is resolved by an in-thread closing event
 }
 
 /** A recipient's stream scope: `mail:<recipient>`. */
@@ -163,4 +206,85 @@ export function makeMailEvent(projectId: string, envelope: MailEnvelope): NewEve
     ...(envelope.causationId != null ? { causationId: envelope.causationId } : {}),
     ...(envelope.idempotencyKey != null ? { idempotencyKey: envelope.idempotencyKey } : {}),
   };
+}
+
+/**
+ * Build + validate a read-receipt {@link EVENT_MAIL_READ} event: `recipient` viewed
+ * the mail at `seq`. The recipient is the stream scope (so the receipt lives in the
+ * same stream as the mail) and the `actor` (the viewer). The payload carries only the
+ * viewed `seq`; the projector folds it to set that row's `read` flag.
+ */
+export function makeMailReadEvent(projectId: string, recipient: string, seq: number): NewEvent {
+  assertAddress('to', recipient);
+  return {
+    projectId,
+    scope: mailScope(recipient),
+    type: EVENT_MAIL_READ,
+    v: MAIL_EVENT_V,
+    payload: mailReadSchema.parse({ seq }),
+    actor: recipient,
+  };
+}
+
+// ── Actionability classification (freeze #2) — a generic registry, not a switch ──
+
+/** Whether a mail type demands a response (`actionable`) or is purely informational. */
+export type MailKind = 'actionable' | 'informational';
+
+/**
+ * The kind registry: later workers EXTEND it by adding their type's entry (no central
+ * switch to edit). Seeded for W2/W3's four types — `clarify_request` is the only
+ * actionable one (it must be answered); the rest are informational.
+ */
+export const mailKinds: ReadonlyMap<MailType, MailKind> = new Map<MailType, MailKind>([
+  [MAIL_CLARIFY_REQUEST, 'actionable'],
+  [MAIL_CLARIFY_RESPONSE, 'informational'],
+  [MAIL_CHAT, 'informational'],
+  [MAIL_OPERATOR_MESSAGE, 'informational'],
+]);
+
+/**
+ * Classify a mail type. A type missing from {@link mailKinds} is a programming error
+ * (a type was added to `MAIL_TYPES` without classifying it), so fail loud rather than
+ * silently default (Principle 9 — no-silent-failures).
+ */
+export function mailKind(type: MailType): MailKind {
+  const kind = mailKinds.get(type);
+  if (kind == null) {
+    throw new Error(`mail: no kind registered for type '${type}' (extend mailKinds)`);
+  }
+  return kind;
+}
+
+// ── Completion-predicate registry (freeze #6) — generic Map<MailType, predicate> ──
+
+/**
+ * Decides whether `closer` (a later mail in the SAME thread) resolves the actionable
+ * `item`. Pinned signature — W4/W5 reuse it verbatim. Threading is by the root
+ * message's `seq` (freeze #7): a reply sets `correlationId` = the thread id and
+ * `causationId` = the `seq` of the message it answers.
+ */
+export type CompletionPredicate = (item: DeliveredMail, closer: DeliveredMail) => boolean;
+
+/**
+ * The completion-predicate registry: every ACTIONABLE type registers a predicate;
+ * informational types register NONE. Later workers light up by adding an entry — the
+ * projector consults this generically, so it never needs a per-type switch. Seeded
+ * with `clarify_request`'s predicate: a `clarify_response` whose `causationId` points
+ * at the request's `seq` resolves it.
+ */
+export const completionPredicates: ReadonlyMap<MailType, CompletionPredicate> = new Map<
+  MailType,
+  CompletionPredicate
+>([
+  [
+    MAIL_CLARIFY_REQUEST,
+    (item, closer) =>
+      closer.type === MAIL_CLARIFY_RESPONSE && closer.causationId === String(item.seq),
+  ],
+]);
+
+/** The completion predicate for `type`, or `undefined` for an informational type. */
+export function completionPredicate(type: MailType): CompletionPredicate | undefined {
+  return completionPredicates.get(type);
 }

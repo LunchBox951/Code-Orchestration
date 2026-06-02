@@ -4,6 +4,7 @@ import { applyEvent, type Projector } from '../replay/projector.js';
 import type { Store } from '../store/types.js';
 import {
   makeMailEvent,
+  makeMailReadEvent,
   mailSchemas,
   mailUpcasters,
   type DeliveredMail,
@@ -12,14 +13,21 @@ import {
 import { ensureInboxTable, selectMailByIdempotencyKey, selectMailBySeq } from './mail-projector.js';
 
 /**
- * The delivery seam (freeze #3, regression 5). `send()` NEVER writes the store
+ * The delivery seam (freeze #3, regression 5). The bus NEVER writes the store
  * directly — it hands a validated envelope to a `Delivery`, so L7 can place the
- * real writer Conductor-side without reworking the bus. `deliver` persists the
- * mail and makes it visible to `inbox(recipient)`; it is idempotent on
- * `idempotencyKey`.
+ * real writer Conductor-side (never inside a worker sandbox) without reworking the
+ * bus. `deliver` persists the mail and makes it visible to `inbox(recipient)`; it is
+ * idempotent on `idempotencyKey`.
+ *
+ * `markRead` is the read-state half of the SAME seam: appending a read-receipt is a
+ * store write too, so it must route here for the same reason (freeze #4 — read-state
+ * is event-sourced). It is optional only so a minimal `Delivery` test double need not
+ * implement it; the facade fails loud if a configured seam omits it.
  */
 export interface Delivery {
   deliver(envelope: MailEnvelope): DeliveredMail;
+  /** Append a read-receipt for `recipient`'s mail at `seq`; returns the updated row. */
+  markRead?(recipient: string, seq: number): DeliveredMail;
 }
 
 /**
@@ -63,6 +71,33 @@ export class InProcessDelivery implements Delivery {
       return delivered;
     });
   }
+
+  /**
+   * Append a read-receipt and fold it in the SAME tx (mirrors {@link deliver}). The
+   * target mail must already exist for `recipient` — marking a mail that isn't in the
+   * recipient's inbox is a programming error, so fail loud (Principle 9) rather than
+   * write a dangling receipt. Returns the mail in its updated (`read`) shape.
+   */
+  markRead(recipient: string, seq: number): DeliveredMail {
+    return this.store.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      ensureInboxTable(db);
+
+      const existing = selectMailBySeq(db, seq);
+      if (!existing || existing.recipient !== recipient) {
+        throw new Error(`InProcessDelivery.markRead: no mail seq=${seq} for recipient '${recipient}'`);
+      }
+
+      const [stored] = tx.append([makeMailReadEvent(this.projectId, recipient, seq)]);
+      applyEvent(tx, decode(stored!, mailUpcasters, mailSchemas), this.projectors);
+
+      const updated = selectMailBySeq(db, seq);
+      if (!updated) {
+        throw new Error(`InProcessDelivery.markRead: inbox row missing after projection (seq=${seq})`);
+      }
+      return updated;
+    });
+  }
 }
 
 /**
@@ -82,6 +117,14 @@ export class LiveDeliveryStub implements Delivery {
         'This is the L7 plug-point: persist the mail Conductor-side (never from a worker sandbox), ' +
         'wake the WAITING recipient, and inject unread actionable mail into its live pty session. ' +
         'Use InProcessDelivery for headless flows.',
+    );
+  }
+
+  markRead(): DeliveredMail {
+    throw new Error(
+      'LiveDeliveryStub.markRead: live (Conductor-side) read-receipts are not implemented at L1. ' +
+        'This is the L7 plug-point: append the read-receipt Conductor-side (never from a worker ' +
+        'sandbox). Use InProcessDelivery for headless flows.',
     );
   }
 }

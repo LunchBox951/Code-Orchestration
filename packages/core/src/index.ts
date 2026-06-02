@@ -29,26 +29,51 @@ export { assertRepoPristine } from './config/pristine.js';
 
 // L1 mail bus: a typed, schema-validated, idempotent envelope over the L0 log that
 // activates the four reserved fields, plus send/inbox and the in-process Delivery
-// seam (the L7 plug-point is a typed stub). Seed types: chat + operator_message.
-export type { MailEnvelope, DeliveredMail, MailType, MailMessage } from './mail/events.js';
+// seam (the L7 plug-point is a typed stub). W3 adds actionable/informational
+// classification, log-derived sticky resolution, an event-sourced read-receipt, the
+// completion-predicate registry, and the outstanding-action projection. Seed types:
+// chat, operator_message, clarify_request, clarify_response.
+export type {
+  MailEnvelope,
+  DeliveredMail,
+  MailType,
+  MailMessage,
+  MailRead,
+  MailKind,
+  CompletionPredicate,
+} from './mail/events.js';
 export {
   OPERATOR,
   MAIL_SCOPE_PREFIX,
   MAIL_CHAT,
   MAIL_OPERATOR_MESSAGE,
+  MAIL_CLARIFY_REQUEST,
+  MAIL_CLARIFY_RESPONSE,
   MAIL_TYPES,
+  EVENT_MAIL_READ,
   MAIL_EVENT_V,
   mailMessageSchema,
+  mailReadSchema,
   mailSchemas,
   mailUpcasters,
   mailScope,
   mailRecipientForScope,
   makeMailEvent,
+  makeMailReadEvent,
+  mailKinds,
+  mailKind,
+  completionPredicates,
+  completionPredicate,
 } from './mail/events.js';
-export { MailProjector, ensureInboxTable } from './mail/mail-projector.js';
+export {
+  MailProjector,
+  ensureInboxTable,
+  outstandingForRecipient,
+  countOutstanding,
+} from './mail/mail-projector.js';
 export type { Delivery } from './mail/delivery.js';
 export { InProcessDelivery, LiveDeliveryStub } from './mail/delivery.js';
-export type { MailStore, MailStoreOptions } from './mail/mail-store.js';
+export type { MailStore, MailStoreOptions, ReplyDraft } from './mail/mail-store.js';
 export { openMailStore } from './mail/mail-store.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
