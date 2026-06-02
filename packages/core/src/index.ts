@@ -31,8 +31,10 @@ export { assertRepoPristine } from './config/pristine.js';
 // activates the four reserved fields, plus send/inbox and the in-process Delivery
 // seam (the L7 plug-point is a typed stub). W3 adds actionable/informational
 // classification, log-derived sticky resolution, an event-sourced read-receipt, the
-// completion-predicate registry, and the outstanding-action projection. Seed types:
-// chat, operator_message, clarify_request, clarify_response.
+// completion-predicate registry, and the outstanding-action projection. W4 adds the
+// first-class `approval` type + `approval_response` decision and the log-derived
+// outward-action gate (operator-terminal for outward actions). Seed types: chat,
+// operator_message, clarify_request, clarify_response, approval, approval_response.
 export type {
   MailEnvelope,
   DeliveredMail,
@@ -41,6 +43,9 @@ export type {
   MailRead,
   MailKind,
   CompletionPredicate,
+  ApprovalDecision,
+  ApprovalResponse,
+  MailPayload,
 } from './mail/events.js';
 export {
   OPERATOR,
@@ -49,10 +54,13 @@ export {
   MAIL_OPERATOR_MESSAGE,
   MAIL_CLARIFY_REQUEST,
   MAIL_CLARIFY_RESPONSE,
+  MAIL_APPROVAL,
+  MAIL_APPROVAL_RESPONSE,
   MAIL_TYPES,
   EVENT_MAIL_READ,
   MAIL_EVENT_V,
   mailMessageSchema,
+  approvalResponseSchema,
   mailReadSchema,
   mailSchemas,
   mailUpcasters,
@@ -75,6 +83,9 @@ export type { Delivery } from './mail/delivery.js';
 export { InProcessDelivery, LiveDeliveryStub } from './mail/delivery.js';
 export type { MailStore, MailStoreOptions, ReplyDraft } from './mail/mail-store.js';
 export { openMailStore } from './mail/mail-store.js';
+// L1 W4 outward-action approval gate + operator-terminal addressing (AC-L1-5).
+export type { ApprovalOutcome, OutwardApprovalRequest } from './mail/approval.js';
+export { approvalOutcome, gateOutwardAction, outwardApprovalEnvelope } from './mail/approval.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

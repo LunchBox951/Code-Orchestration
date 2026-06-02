@@ -1,7 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { openProjectStore } from '../store/sqlite-store.js';
 import type { Projector } from '../replay/projector.js';
-import { validateEnvelope, type DeliveredMail, type MailEnvelope, type MailType } from './events.js';
+import {
+  validateEnvelope,
+  type ApprovalDecision,
+  type DeliveredMail,
+  type MailEnvelope,
+  type MailType,
+} from './events.js';
 import { InProcessDelivery, type Delivery } from './delivery.js';
 import {
   MailProjector,
@@ -22,6 +28,7 @@ export interface ReplyDraft {
   readonly body: string;
   readonly from?: string;
   readonly idempotencyKey?: string;
+  readonly decision?: ApprovalDecision; // ONLY an `approval_response` reply carries it (W4)
 }
 
 /**
@@ -93,6 +100,7 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
         correlationId: toMail.correlationId ?? String(toMail.seq),
         causationId: String(toMail.seq),
         ...(draft.idempotencyKey != null ? { idempotencyKey: draft.idempotencyKey } : {}),
+        ...(draft.decision != null ? { decision: draft.decision } : {}),
       };
       return doSend(envelope);
     },
