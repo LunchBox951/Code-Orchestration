@@ -31,7 +31,14 @@ describe('decode', () => {
     const schemas: SchemaMap = new Map([['counter.inc', z.object({ by: z.number() })]]);
     const event = stored({ seq: 7, ts: 4242, projectId: 'proj', scope: 'c:1', v: 1 });
     const out = decode(event, NO_UPCASTERS, schemas);
-    expect(out).toMatchObject({ seq: 7, ts: 4242, projectId: 'proj', scope: 'c:1', type: 'counter.inc', v: 1 });
+    expect(out).toMatchObject({
+      seq: 7,
+      ts: 4242,
+      projectId: 'proj',
+      scope: 'c:1',
+      type: 'counter.inc',
+      v: 1,
+    });
   });
 
   it('upcasts a stored v1 payload to the current v2 shape, then validates it', () => {

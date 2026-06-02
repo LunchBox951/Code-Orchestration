@@ -22,6 +22,7 @@ export { openRegistry } from './registry/registry.js';
 // stored entirely in the GLOBAL program-data store (never in any repo).
 export type { ConfigStore, EffectiveConfig } from './config/config-store.js';
 export { openConfigStore } from './config/config-store.js';
+export type { JsonValue } from './config/events.js';
 
 // Part D pristine-repo guard: proves no L0 op writes into a target repo's working
 // tree or `.git` (freeze #7), by asserting byte-identity around a wrapped op.

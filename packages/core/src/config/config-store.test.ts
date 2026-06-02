@@ -190,6 +190,73 @@ describe('ConfigStore — undefined rejection (Principle 9)', () => {
   });
 });
 
+describe('ConfigStore — fully JSON-safe values (Principle 9)', () => {
+  it('rejects nested {a: undefined}', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.setGlobal('k', { a: undefined })).toThrow();
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('rejects NaN', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.setGlobal('k', NaN)).toThrow();
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('rejects Infinity', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.setGlobal('k', Infinity)).toThrow();
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('rejects a function value', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.setGlobal('k', () => 'x')).toThrow();
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('rejects an array containing undefined', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.setGlobal('k', [1, undefined, 3])).toThrow();
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('rejects a nested object containing a function', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.setGlobal('k', { a: { b: () => 'x' } })).toThrow();
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('accepts a deeply nested valid value and it round-trips through set→resolve', () => {
+    const cfg = openConfigStore();
+    try {
+      const val = { a: { b: [1, 'two', false, null] } };
+      cfg.setGlobal('nested', val);
+      expect(cfg.resolveEffective('p').nested).toEqual(val);
+    } finally {
+      cfg.close();
+    }
+  });
+});
+
 describe('ConfigStore — projection determinism', () => {
   it('AC-L0-2: rebuildAll reproduces the config read-model byte-for-byte', () => {
     const cfg = openConfigStore();

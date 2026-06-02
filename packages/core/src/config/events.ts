@@ -4,6 +4,30 @@ import type { SchemaMap } from '../replay/decode.js';
 import type { UpcasterRegistry } from '../replay/upcaster.js';
 import type { ProjectId } from '../registry/registry.js';
 
+/** JSON-round-trippable value — rejects undefined, NaN, Infinity, functions, symbols. */
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+// Recursive zod schema enforcing full JSON safety at every nesting level.
+// z.number() in Zod v4 already rejects NaN/Infinity; .finite() documents intent.
+// The cast is needed because TypeScript cannot prove the lazy union's inferred
+// output type is exactly assignable to JsonValue without the recursive annotation.
+const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number().finite(),
+    z.boolean(),
+    z.null(),
+    z.array(jsonValue),
+    z.record(z.string(), jsonValue),
+  ]),
+) as unknown as z.ZodType<JsonValue>;
+
 /**
  * Config events live in the GLOBAL store (freeze #4 — program-data only), so the
  * owning envelope projectId is the sentinel `@global` (the store owner), exactly
@@ -33,12 +57,10 @@ export const CONFIG_EVENT_V = 1;
  * object, array). We deliberately do NOT enforce a fixed config schema here —
  * later layers grow their fields THROUGH ConfigStore, not by editing this type.
  */
-// undefined cannot round-trip JSON (JSON.stringify(undefined) === undefined) — Principle 9.
+// jsonValue enforces full JSON safety recursively — Principle 9.
 export const configSetSchema = z.object({
   key: z.string(),
-  value: z.unknown().refine((v) => v !== undefined, {
-    message: 'config value must not be undefined (undefined cannot round-trip JSON)',
-  }),
+  value: jsonValue,
 });
 export type ConfigSet = z.infer<typeof configSetSchema>;
 
