@@ -12,8 +12,10 @@ import { InProcessDelivery, type Delivery } from './delivery.js';
 import {
   MailProjector,
   countOutstanding,
+  forwardSourceForSeq,
   inboxForRecipient,
   outstandingForRecipient,
+  selectMailBySeq,
   sentByForSender,
 } from './mail-projector.js';
 
@@ -44,12 +46,22 @@ export interface MailStore {
   send(envelope: MailEnvelope): DeliveredMail;
   /** Reply to `toMail`, filling `to`/`correlationId`/`causationId` so it threads (freeze #7). */
   reply(toMail: DeliveredMail, draft: ReplyDraft): DeliveredMail;
+  /** Forward a held actionable item upward, emitting the mail plus a replayed forward receipt. */
+  forward(held: DeliveredMail, envelope: MailEnvelope): DeliveredMail;
+  /** Resolve a held escalation down, optionally relaying a final answer, as one durable operation. */
+  resolve(
+    held: DeliveredMail,
+    envelope: MailEnvelope,
+    relays?: readonly MailEnvelope[],
+  ): DeliveredMail;
   /** Mark `recipient`'s mail at `seq` read (event-sourced); informational mail "clears on view". */
   markRead(recipient: string, seq: number): DeliveredMail;
   /** Headless chronological read of a recipient's inbox. */
   inbox(recipient: string): readonly DeliveredMail[];
   /** Chronological read of every mail an agent SENT (by sender), for by-sender derivations (W5 'waiting'). */
   sentBy(sender: string): readonly DeliveredMail[];
+  /** Internal replay-derived link: the held item that produced a forwarded escalation, if any. */
+  forwardSource(forwardedSeq: number): DeliveredMail | undefined;
   /** A recipient's unresolved actionable items (SF-4). */
   outstanding(recipient: string): readonly DeliveredMail[];
   /** Count of a recipient's unresolved actionable items (SF-4). */
@@ -90,22 +102,47 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
     send: doSend,
 
     reply(toMail: DeliveredMail, draft: ReplyDraft): DeliveredMail {
+      const current = store.transaction((tx) => selectMailBySeq(tx.raw as DatabaseSync, toMail.seq));
+      if (!current) {
+        throw new Error(`mail reply: no persisted mail seq=${toMail.seq}`);
+      }
       // Thread id = the root message's seq (freeze #7): inherit the answered mail's
       // thread if it has one, else the answered mail IS the root. `causationId`
       // always points at the message being answered, so a response matches its
       // request and is never orphaned.
       const envelope: MailEnvelope = {
         type: draft.type,
-        to: toMail.sender,
-        from: draft.from ?? toMail.recipient,
+        to: current.sender,
+        from: draft.from ?? current.recipient,
         subject: draft.subject,
         body: draft.body,
-        correlationId: toMail.correlationId ?? String(toMail.seq),
-        causationId: String(toMail.seq),
+        correlationId: current.correlationId ?? String(current.seq),
+        causationId: String(current.seq),
         ...(draft.idempotencyKey != null ? { idempotencyKey: draft.idempotencyKey } : {}),
         ...(draft.decision != null ? { decision: draft.decision } : {}),
       };
       return doSend(envelope);
+    },
+
+    forward(held: DeliveredMail, envelope: MailEnvelope): DeliveredMail {
+      validateEnvelope(envelope);
+      if (!delivery.forward) {
+        throw new Error('mail: the configured Delivery does not support forward receipts');
+      }
+      return delivery.forward(held, envelope);
+    },
+
+    resolve(
+      held: DeliveredMail,
+      envelope: MailEnvelope,
+      relays?: readonly MailEnvelope[],
+    ): DeliveredMail {
+      validateEnvelope(envelope);
+      for (const relay of relays ?? []) validateEnvelope(relay);
+      if (!delivery.resolve) {
+        throw new Error('mail: the configured Delivery does not support atomic resolution');
+      }
+      return delivery.resolve(held, envelope, relays);
     },
 
     markRead(recipient: string, seq: number): DeliveredMail {
@@ -123,6 +160,10 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
 
     sentBy(sender: string): readonly DeliveredMail[] {
       return store.transaction((tx) => sentByForSender(tx.raw as DatabaseSync, sender));
+    },
+
+    forwardSource(forwardedSeq: number): DeliveredMail | undefined {
+      return store.transaction((tx) => forwardSourceForSeq(tx.raw as DatabaseSync, forwardedSeq));
     },
 
     outstanding(recipient: string): readonly DeliveredMail[] {

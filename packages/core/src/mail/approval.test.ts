@@ -13,6 +13,7 @@ import {
   MAIL_CHAT,
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_ESCALATION,
   mailKind,
   completionPredicate,
   makeMailEvent,
@@ -150,6 +151,33 @@ describe('AC-L1-5 — the live outward-action gate (block / proceed / refuse)', 
       mail.close();
     }
   });
+
+  it('approvalOutcome rejects non-approval mail even when an approval_response references it', () => {
+    const mail = openMailStore('p-gate-nonapproval');
+    try {
+      const chat = mail.send({
+        type: MAIL_CHAT,
+        to: OPERATOR,
+        from: 'worker',
+        subject: 'not an approval',
+        body: 'just chat',
+      });
+      mail.send({
+        type: MAIL_APPROVAL_RESPONSE,
+        to: 'worker',
+        from: OPERATOR,
+        subject: 'spoof',
+        body: 'go ahead',
+        decision: 'approve',
+        correlationId: String(chat.seq),
+        causationId: String(chat.seq),
+      });
+
+      expect(() => approvalOutcome(mail, chat)).toThrow(/persisted approval/i);
+    } finally {
+      mail.close();
+    }
+  });
 });
 
 describe('AC-L1-5 — approval resolution + outstanding (either decision resolves it)', () => {
@@ -174,6 +202,68 @@ describe('AC-L1-5 — approval resolution + outstanding (either decision resolve
 
       expect(mail.outstandingCount(OPERATOR)).toBe(0);
       expect(mail.inbox(OPERATOR).find((m) => m.seq === approval.seq)!.resolved).toBe(true);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('ignores approval_response mail not sent by the approval holder back to the requester', () => {
+    const mail = openMailStore('p-appr-spoof');
+    try {
+      const approval = mail.send(
+        outwardApprovalEnvelope({ from: 'worker', subject: 'file issue?', body: 'public action' }),
+      );
+      expect(mail.outstandingCount(OPERATOR)).toBe(1);
+
+      mail.send({
+        type: MAIL_APPROVAL_RESPONSE,
+        to: 'worker',
+        from: 'intruder',
+        subject: 'spoof',
+        body: 'go ahead',
+        decision: 'approve',
+        correlationId: String(approval.seq),
+        causationId: String(approval.seq),
+      });
+      expect(approvalOutcome(mail, approval)).toBe('pending');
+      expect(mail.outstandingCount(OPERATOR)).toBe(1);
+      expect(mail.inbox(OPERATOR).find((m) => m.seq === approval.seq)!.resolved).toBe(false);
+
+      mail.send({
+        type: MAIL_APPROVAL_RESPONSE,
+        to: 'worker',
+        from: OPERATOR,
+        subject: 'off-thread',
+        body: 'not in the approval thread',
+        decision: 'approve',
+        correlationId: 'wrong-thread',
+        causationId: String(approval.seq),
+      });
+      expect(approvalOutcome(mail, approval)).toBe('pending');
+      expect(mail.outstandingCount(OPERATOR)).toBe(1);
+
+      mail.send({
+        type: MAIL_APPROVAL_RESPONSE,
+        to: 'auditor',
+        from: OPERATOR,
+        subject: 'misrouted',
+        body: 'not back to requester',
+        decision: 'approve',
+        correlationId: String(approval.seq),
+        causationId: String(approval.seq),
+      });
+      expect(approvalOutcome(mail, approval)).toBe('pending');
+      expect(mail.outstandingCount(OPERATOR)).toBe(1);
+
+      const row = mail.inbox(OPERATOR).find((m) => m.seq === approval.seq)!;
+      mail.reply(row, {
+        type: MAIL_APPROVAL_RESPONSE,
+        subject: 're',
+        body: 'ok',
+        decision: 'approve',
+      });
+      expect(approvalOutcome(mail, approval)).toBe('approved');
+      expect(mail.outstandingCount(OPERATOR)).toBe(0);
     } finally {
       mail.close();
     }
@@ -284,6 +374,73 @@ describe('AC-L1-5 — operator-terminal addressing (operator Q3)', () => {
       const a = mail.send(env);
       expect(a.recipient).toBe(OPERATOR);
       expect(mail.inbox(OPERATOR).find((m) => m.seq === a.seq)!.recipient).toBe(OPERATOR);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('rejects a raw approval addressed to a peer instead of @operator', () => {
+    const mail = openMailStore('p-peer-approval');
+    try {
+      expect(() =>
+        mail.send({
+          type: MAIL_APPROVAL,
+          to: 'lead',
+          from: 'worker',
+          subject: 'approve peer action?',
+          body: 'outward approvals must filter to the operator',
+        }),
+      ).toThrow(/approval.*@operator/i);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('does not allow an approval to be discharged through the forward seam', () => {
+    const mail = openMailStore('p-approval-forward');
+    try {
+      const approval = mail.send(
+        outwardApprovalEnvelope({ from: 'worker', subject: 'file issue?', body: 'public action' }),
+      );
+      const held = mail.inbox(OPERATOR).find((m) => m.seq === approval.seq)!;
+      expect(() =>
+        mail.forward(held, {
+          type: MAIL_ESCALATION,
+          to: 'coordinator',
+          from: OPERATOR,
+          subject: held.subject,
+          body: held.body,
+          correlationId: String(held.seq),
+          causationId: String(held.seq),
+        }),
+      ).toThrow(/cannot forward.*approval/i);
+      expect(mail.outstandingCount(OPERATOR)).toBe(1);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('does not trust a forged DeliveredMail object to forward an approval seq', () => {
+    const mail = openMailStore('p-approval-forged-forward');
+    try {
+      const approval = mail.send(
+        outwardApprovalEnvelope({ from: 'worker', subject: 'file issue?', body: 'public action' }),
+      );
+      const held = mail.inbox(OPERATOR).find((m) => m.seq === approval.seq)!;
+      const forged = { ...held, type: MAIL_ESCALATION } as typeof held;
+
+      expect(() =>
+        mail.forward(forged, {
+          type: MAIL_ESCALATION,
+          to: 'coordinator',
+          from: OPERATOR,
+          subject: held.subject,
+          body: held.body,
+          correlationId: String(held.seq),
+          causationId: String(held.seq),
+        }),
+      ).toThrow(/cannot forward.*approval/i);
+      expect(mail.outstandingCount(OPERATOR)).toBe(1);
     } finally {
       mail.close();
     }

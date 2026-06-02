@@ -18,6 +18,7 @@ import {
   MAIL_ESCALATION,
   MAIL_TYPES,
   EVENT_MAIL_READ,
+  EVENT_MAIL_FORWARD,
   mailSchemas,
   mailUpcasters,
   mailKinds,
@@ -307,6 +308,24 @@ describe('AC-L1-7 — the bus boundary rejects non-enum types (regressions 1, 7)
       expect(() =>
         mail.send({
           type: EVENT_MAIL_READ as unknown as MailType,
+          to: 'bob',
+          from: 'alice',
+          subject: 's',
+          body: 'b',
+        }),
+      ).toThrow(/unknown type/i);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('mail.forwarded is NOT a participant type and send rejects it (the no-stub check ignores it)', () => {
+    expect((MAIL_TYPES as readonly string[]).includes(EVENT_MAIL_FORWARD)).toBe(false);
+    const mail = openMailStore('p-reject-forwarded');
+    try {
+      expect(() =>
+        mail.send({
+          type: EVENT_MAIL_FORWARD as unknown as MailType,
           to: 'bob',
           from: 'alice',
           subject: 's',

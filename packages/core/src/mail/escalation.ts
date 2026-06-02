@@ -1,6 +1,7 @@
 import {
   MAIL_CHAT,
   MAIL_CLARIFY_REQUEST,
+  MAIL_CLARIFY_RESPONSE,
   MAIL_ESCALATION,
   OPERATOR,
   type DeliveredMail,
@@ -117,10 +118,11 @@ export function escalate(
 /**
  * FORWARD a held escalation UP: the holder (`held.recipient`) re-raises it to ITS parent
  * (`resolver.parentOf(holder)`), reusing the thread (`correlationId`) and setting
- * `causationId = held.seq`. Because the new escalation's `sender` is the holder and its
- * `causationId` is `held.seq`, folding it DISCHARGES `held` (the holder acted — resolve-or-forward)
- * AND leaves the parent holding a fresh outstanding escalation, so the chain advances by one step.
- * Routes through `send`/the Delivery seam → throws on a failed persist (never-drop, freeze #5).
+ * `causationId = held.seq`. The `MailStore.forward` seam persists the new escalation and a
+ * replayed forward receipt in one durable operation; the receipt discharges `held` only after the
+ * projector verifies the forwarded escalation exists. That leaves the parent holding a fresh
+ * outstanding escalation, so the chain advances by one step. Throws on a failed persist
+ * (never-drop, freeze #5).
  */
 export function forwardEscalation(
   mail: MailStore,
@@ -128,7 +130,7 @@ export function forwardEscalation(
   held: DeliveredMail,
 ): DeliveredMail {
   const holder = held.recipient;
-  return mail.send({
+  return mail.forward(held, {
     type: MAIL_ESCALATION,
     to: resolver.parentOf(holder),
     from: holder,
@@ -149,24 +151,86 @@ export interface EscalationResolution {
   readonly idempotencyKey?: string;
 }
 
+function forwardedSources(mail: MailStore, held: DeliveredMail): DeliveredMail[] {
+  let cursor: DeliveredMail = held;
+  const sources: DeliveredMail[] = [];
+  const seen = new Set<number>();
+
+  while (cursor.type === MAIL_ESCALATION) {
+    if (seen.has(cursor.seq)) {
+      throw new Error(`resolveEscalation: causation cycle while tracing seq=${held.seq}`);
+    }
+    seen.add(cursor.seq);
+
+    const parent = mail.forwardSource(cursor.seq);
+    if (!parent) {
+      return sources;
+    }
+    sources.push(parent);
+    cursor = parent;
+  }
+
+  return sources;
+}
+
 /**
  * RESOLVE a held escalation DOWN: the holder (`held.recipient`) replies in-thread to the asker
- * (`held.sender`) via {@link MailStore.reply}, which sets `causationId = held.seq` and threads the
- * answer back to the asker. The reply's `sender` is the holder and its `causationId` is `held.seq`,
- * so folding it DISCHARGES `held` (resolve-or-forward). The carrier defaults to an informational
- * `chat` (the resolution itself demands no further action). Throws on a failed persist (never-drop).
+ * (`held.sender`) via the atomic {@link MailStore.resolve} seam. If this escalation came from a
+ * forwarded clarify chain, the same durable operation also relays a final `clarify_response` back
+ * to the original asker. The carrier defaults to an informational `chat` (the resolution itself
+ * demands no further action). Throws on a failed persist (never-drop).
  */
 export function resolveEscalation(
   mail: MailStore,
   held: DeliveredMail,
   resolution: EscalationResolution,
 ): DeliveredMail {
-  return mail.reply(held, {
+  const currentHeld = mail.inbox(held.recipient).find((m) => m.seq === held.seq);
+  if (
+    !currentHeld ||
+    currentHeld.type !== MAIL_ESCALATION ||
+    currentHeld.kind !== 'actionable' ||
+    currentHeld.resolved
+  ) {
+    throw new Error('resolveEscalation: expected an unresolved persisted escalation');
+  }
+  if (resolution.type === MAIL_ESCALATION) {
+    throw new Error('resolveEscalation: use forwardEscalation to forward upward');
+  }
+  const response = {
     type: resolution.type ?? MAIL_CHAT,
+    to: currentHeld.sender,
+    from: currentHeld.recipient,
     subject: resolution.subject,
     body: resolution.body,
+    correlationId: currentHeld.correlationId ?? String(currentHeld.seq),
+    causationId: String(currentHeld.seq),
     ...(resolution.idempotencyKey != null ? { idempotencyKey: resolution.idempotencyKey } : {}),
-  });
+  };
+
+  const relays = forwardedSources(mail, currentHeld).map((source) =>
+    source.type === MAIL_CLARIFY_REQUEST
+      ? {
+          type: MAIL_CLARIFY_RESPONSE,
+          to: source.sender,
+          from: source.recipient,
+          subject: resolution.subject,
+          body: resolution.body,
+          correlationId: source.correlationId ?? String(source.seq),
+          causationId: String(source.seq),
+        }
+      : {
+          type: resolution.type ?? MAIL_CHAT,
+          to: source.sender,
+          from: source.recipient,
+          subject: resolution.subject,
+          body: resolution.body,
+          correlationId: source.correlationId ?? String(source.seq),
+          causationId: String(source.seq),
+        },
+  );
+
+  return mail.resolve(currentHeld, response, relays);
 }
 
 // ── Clarify-timeout policy (Q4) — POLICY/DATA ONLY; the FIRING is L7 (no wall-clock here) ──
@@ -174,7 +238,7 @@ export function resolveEscalation(
 /** The config key for the clarify-timeout (seconds an asker waits before the policy applies). */
 export const CLARIFY_TIMEOUT_SECONDS_KEY = 'clarify_timeout_seconds' as const;
 
-/** Default clarify-timeout: 30 minutes. The asker blocks at most this long before forward-up. */
+/** Default clarify-timeout: 30 minutes before the holder forwards the question upward. */
 export const CLARIFY_TIMEOUT_SECONDS_DEFAULT = 1800;
 
 /** The clarify-timeout policy. `forward-up` is the only v1 policy (Q4): escalate it up the chain. */
@@ -207,18 +271,31 @@ export function forwardOnTimeout(
 // ── Asker-blocked / WAITING (own the bus-side DATA; the lifecycle/suspend is L6/L7) ──
 
 /**
- * The unresolved `clarify_request`s an agent RAISED — the items it is WAITING on (never-guess: it
- * blocks rather than proceeding on a guess). Derived purely from the inbox read-model by `sender`
- * + unresolved, so it is a function of the log and survives a `rebuildAll` (replay-safe).
+ * The unanswered `clarify_request`s an agent RAISED — the items it is WAITING on (never-guess: it
+ * blocks rather than proceeding on a guess). This is intentionally distinct from the recipient-side
+ * `resolved` flag: a holder can discharge its action by forwarding the question up, but the original
+ * asker is still waiting until a real `clarify_response` flows back down.
  *
  * This owns only the bus-side DATA the WAITING lifecycle reads. The actual turn suspend/resume —
  * flipping the asker to WAITING and waking it on an answer — is L6/L7, NOT modeled here.
  */
 export function waitingItems(mail: MailStore, agent: string): readonly DeliveredMail[] {
-  return mail.sentBy(agent).filter((m) => m.type === MAIL_CLARIFY_REQUEST && !m.resolved);
+  const repliesToAgent = mail.inbox(agent);
+  return mail.sentBy(agent).filter(
+    (m) =>
+      m.type === MAIL_CLARIFY_REQUEST &&
+      !repliesToAgent.some(
+        (reply) =>
+          reply.type === MAIL_CLARIFY_RESPONSE &&
+          reply.sender === m.recipient &&
+          reply.recipient === m.sender &&
+          reply.correlationId === (m.correlationId ?? String(m.seq)) &&
+          reply.causationId === String(m.seq),
+      ),
+  );
 }
 
-/** Whether `agent` is WAITING — it has at least one unresolved `clarify_request` it raised. */
+/** Whether `agent` is WAITING — it has at least one unanswered `clarify_request` it raised. */
 export function isAwaitingReply(mail: MailStore, agent: string): boolean {
   return waitingItems(mail, agent).length > 0;
 }

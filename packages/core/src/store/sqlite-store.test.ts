@@ -162,8 +162,7 @@ describe('reserved L1 envelope columns', () => {
     const store = openProjectStore('p1');
     try {
       const [appended] = store.append([event()]);
-      // These columns are reserved (Part B §3 D2) and intentionally absent from
-      // the Part C.1 read API, so inspect the raw row via the tx handle.
+      // These columns are reserved for L1+ mail metadata. L0 events leave them NULL.
       const row = store.transaction((tx) =>
         (tx.raw as DatabaseSync)
           .prepare(
