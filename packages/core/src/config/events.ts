@@ -14,7 +14,9 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 
 // Recursive zod schema enforcing full JSON safety at every nesting level.
-// z.number() in Zod v4 already rejects NaN/Infinity; .finite() documents intent.
+// .finite() is load-bearing: it rejects BOTH NaN and Infinity. Do NOT drop it —
+// Infinity is not JSON-safe (JSON.stringify(Infinity) === 'null'), which would silently
+// corrupt config values.
 // The cast is needed because TypeScript cannot prove the lazy union's inferred
 // output type is exactly assignable to JsonValue without the recursive annotation.
 const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
