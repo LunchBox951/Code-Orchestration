@@ -14,6 +14,7 @@ import {
   countOutstanding,
   inboxForRecipient,
   outstandingForRecipient,
+  sentByForSender,
 } from './mail-projector.js';
 
 /**
@@ -47,6 +48,8 @@ export interface MailStore {
   markRead(recipient: string, seq: number): DeliveredMail;
   /** Headless chronological read of a recipient's inbox. */
   inbox(recipient: string): readonly DeliveredMail[];
+  /** Chronological read of every mail an agent SENT (by sender), for by-sender derivations (W5 'waiting'). */
+  sentBy(sender: string): readonly DeliveredMail[];
   /** A recipient's unresolved actionable items (SF-4). */
   outstanding(recipient: string): readonly DeliveredMail[];
   /** Count of a recipient's unresolved actionable items (SF-4). */
@@ -114,6 +117,10 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
 
     inbox(recipient: string): readonly DeliveredMail[] {
       return store.transaction((tx) => inboxForRecipient(tx.raw as DatabaseSync, recipient));
+    },
+
+    sentBy(sender: string): readonly DeliveredMail[] {
+      return store.transaction((tx) => sentByForSender(tx.raw as DatabaseSync, sender));
     },
 
     outstanding(recipient: string): readonly DeliveredMail[] {

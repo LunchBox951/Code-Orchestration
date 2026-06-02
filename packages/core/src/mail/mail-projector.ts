@@ -62,6 +62,7 @@ const CREATE_INBOX_TABLE = `
   CREATE INDEX IF NOT EXISTS idx_inbox_idempotency_key ON inbox (idempotency_key);
   CREATE INDEX IF NOT EXISTS idx_inbox_thread ON inbox (thread_id);
   CREATE INDEX IF NOT EXISTS idx_inbox_outstanding ON inbox (recipient, kind, resolved);
+  CREATE INDEX IF NOT EXISTS idx_inbox_sender ON inbox (sender);
 `;
 
 /**
@@ -139,6 +140,21 @@ export function outstandingForRecipient(db: DatabaseSync, recipient: string): De
        ORDER BY seq`,
     )
     .all(recipient);
+  return rows.map(rowToDeliveredMail);
+}
+
+/**
+ * All mail a given agent SENT (matched on `sender` = the event `actor`), chronological.
+ * Unlike {@link inboxForRecipient} (keyed by RECIPIENT), this is keyed by SENDER, so an
+ * agent can find the actionable items IT RAISED — e.g. the W5 'awaiting reply' query
+ * (an asker is WAITING while a `clarify_request` it raised is still unresolved). The
+ * `resolved` flag is carried log-derived, so the derived 'waiting' state is replay-safe.
+ */
+export function sentByForSender(db: DatabaseSync, sender: string): DeliveredMail[] {
+  ensureInboxTable(db);
+  const rows = db
+    .prepare(`SELECT ${INBOX_COLUMNS} FROM inbox WHERE sender = ? ORDER BY seq`)
+    .all(sender);
   return rows.map(rowToDeliveredMail);
 }
 

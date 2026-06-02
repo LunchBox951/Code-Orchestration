@@ -47,6 +47,16 @@ export const MAIL_CLARIFY_RESPONSE = 'clarify_response' as const;
  */
 export const MAIL_APPROVAL = 'approval' as const;
 export const MAIL_APPROVAL_RESPONSE = 'approval_response' as const;
+/**
+ * W5 adds the first-class `escalation` actionable (AC-L1-6) — the never-drop upward
+ * protocol. It carries the shared `{subject, body}` prose (a readable problem summary +
+ * context) and is **discharged only when its holder acts** in-thread: forwarding it UP
+ * (a new `escalation` to the holder's parent) OR resolving it DOWN (any in-thread reply
+ * back to the asker). It has NO dedicated response type — both discharge modes reuse the
+ * holder's in-thread follow-up — so its completion predicate keys on the CLOSER's
+ * `sender`/`causationId`, not on a fixed closing type (see {@link completionPredicates}).
+ */
+export const MAIL_ESCALATION = 'escalation' as const;
 
 /** Registered seed-type enum — `send` rejects any type not in here (freeze #2, #5). */
 export const MAIL_TYPES = [
@@ -56,6 +66,7 @@ export const MAIL_TYPES = [
   MAIL_CLARIFY_RESPONSE,
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_ESCALATION,
 ] as const;
 export type MailType = (typeof MAIL_TYPES)[number];
 
@@ -131,6 +142,7 @@ export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [MAIL_CLARIFY_RESPONSE, mailMessageSchema],
   [MAIL_APPROVAL, mailMessageSchema],
   [MAIL_APPROVAL_RESPONSE, approvalResponseSchema],
+  [MAIL_ESCALATION, mailMessageSchema], // {subject, body}: a readable problem summary + context
   [EVENT_MAIL_READ, mailReadSchema],
 ]);
 
@@ -300,6 +312,7 @@ export const mailKinds: ReadonlyMap<MailType, MailKind> = new Map<MailType, Mail
   [MAIL_OPERATOR_MESSAGE, 'informational'],
   [MAIL_APPROVAL, 'actionable'], // asks the recipient to bless an outward action
   [MAIL_APPROVAL_RESPONSE, 'informational'], // the recorded decision; closes the approval
+  [MAIL_ESCALATION, 'actionable'], // the holder must resolve-or-forward it (never drop)
 ]);
 
 /**
@@ -348,6 +361,21 @@ export const completionPredicates: ReadonlyMap<MailType, CompletionPredicate> = 
     MAIL_APPROVAL,
     (item, closer) =>
       closer.type === MAIL_APPROVAL_RESPONSE && closer.causationId === String(item.seq),
+  ],
+  [
+    // The UNIFIED resolve-or-forward model (AC-L1-6). An escalation `E` held by `R`
+    // (`E.recipient === R`) is discharged precisely when ITS HOLDER produces an in-thread
+    // follow-up CAUSED by it — which is EITHER a forward UP (`R` sends a fresh `escalation`
+    // to its own parent) OR a resolution DOWN (`R` replies in-thread to the asker). Both
+    // share one shape: the closer's `sender` is the holder and its `causationId` is `E`'s
+    // seq. So a single predicate captures both, and doing NEITHER leaves `E` outstanding
+    // forever — the never-drop guarantee (the only way to clear it is for the holder to
+    // act). Keyed on `sender`/`causationId` (NOT a closing type), because escalation has no
+    // dedicated response type. Registered ONLY for `escalation`, so it can never affect a
+    // `clarify_request`/`approval` item (each consults its own predicate in the loop).
+    MAIL_ESCALATION,
+    (item, closer) =>
+      closer.sender === item.recipient && closer.causationId === String(item.seq),
   ],
 ]);
 
