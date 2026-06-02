@@ -13,5 +13,10 @@ export { upcast } from './replay/upcaster.js';
 export type { SchemaMap } from './replay/decode.js';
 export { decode } from './replay/decode.js';
 
+// Part C registry: absolute path → stable opaque project id → data dir, with
+// headless relink (lives in the GLOBAL store; built on the parts above).
+export type { ProjectRegistry, ProjectId } from './registry/registry.js';
+export { openRegistry } from './registry/registry.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
