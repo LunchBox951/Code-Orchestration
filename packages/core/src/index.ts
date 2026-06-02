@@ -27,5 +27,29 @@ export { openConfigStore } from './config/config-store.js';
 // tree or `.git` (freeze #7), by asserting byte-identity around a wrapped op.
 export { assertRepoPristine } from './config/pristine.js';
 
+// L1 mail bus: a typed, schema-validated, idempotent envelope over the L0 log that
+// activates the four reserved fields, plus send/inbox and the in-process Delivery
+// seam (the L7 plug-point is a typed stub). Seed types: chat + operator_message.
+export type { MailEnvelope, DeliveredMail, MailType, MailMessage } from './mail/events.js';
+export {
+  OPERATOR,
+  MAIL_SCOPE_PREFIX,
+  MAIL_CHAT,
+  MAIL_OPERATOR_MESSAGE,
+  MAIL_TYPES,
+  MAIL_EVENT_V,
+  mailMessageSchema,
+  mailSchemas,
+  mailUpcasters,
+  mailScope,
+  mailRecipientForScope,
+  makeMailEvent,
+} from './mail/events.js';
+export { MailProjector, ensureInboxTable } from './mail/mail-projector.js';
+export type { Delivery } from './mail/delivery.js';
+export { InProcessDelivery, LiveDeliveryStub } from './mail/delivery.js';
+export type { MailStore, MailStoreOptions } from './mail/mail-store.js';
+export { openMailStore } from './mail/mail-store.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
