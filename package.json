@@ -6,7 +6,8 @@
   "engines": { "node": ">=24" },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b",
+    "typecheck": "tsc -b && pnpm typecheck:test",
+    "typecheck:test": "tsc -p packages/core/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json && tsc -p packages/mcp/tsconfig.test.json",
     "pretest": "pnpm build",
     "test": "vitest run",
     "test:watch": "vitest",

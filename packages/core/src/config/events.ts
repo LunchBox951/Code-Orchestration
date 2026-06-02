@@ -33,7 +33,13 @@ export const CONFIG_EVENT_V = 1;
  * object, array). We deliberately do NOT enforce a fixed config schema here —
  * later layers grow their fields THROUGH ConfigStore, not by editing this type.
  */
-export const configSetSchema = z.object({ key: z.string(), value: z.unknown() });
+// undefined cannot round-trip JSON (JSON.stringify(undefined) === undefined) — Principle 9.
+export const configSetSchema = z.object({
+  key: z.string(),
+  value: z.unknown().refine((v) => v !== undefined, {
+    message: 'config value must not be undefined (undefined cannot round-trip JSON)',
+  }),
+});
 export type ConfigSet = z.infer<typeof configSetSchema>;
 
 /** Current-version schema per event type — validated on append AND on read (decode). */
