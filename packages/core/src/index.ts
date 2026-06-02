@@ -112,6 +112,16 @@ export {
   CLARIFY_TIMEOUT_SECONDS_DEFAULT,
   CLARIFY_TIMEOUT_POLICY,
 } from './mail/escalation.js';
+// L1 W6 renderer-registry seam + a trivial generic default renderer (AC-L1-8). The bus stays
+// typed/structured for agents; making a DeliveredMail human-legible is the app's job. L1 ships
+// the seam + the default only — per-type human cards are the L9 plug-point (register).
+export type { MailRenderer, RendererRegistry } from './mail/renderer.js';
+export { createRendererRegistry, defaultMailRenderer } from './mail/renderer.js';
+// L1 W6 mail-type no-stub assertion (AC-L1-7): a reusable completeness check proving every
+// declared type has schema + flow (+ a predicate iff actionable). L1 owns this local assertion;
+// the full build-time gate is L2.
+export type { MailTypeViolation } from './mail/completeness.js';
+export { checkMailTypeCompleteness } from './mail/completeness.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
