@@ -19,6 +19,10 @@ function toStoredEvent(row: Record<string, unknown>): StoredEvent {
     type: String(row.type),
     v: Number(row.v),
     payload: JSON.parse(String(row.payload)),
+    ...(row.actor != null ? { actor: String(row.actor) } : {}),
+    ...(row.causation_id != null ? { causationId: String(row.causation_id) } : {}),
+    ...(row.correlation_id != null ? { correlationId: String(row.correlation_id) } : {}),
+    ...(row.idempotency_key != null ? { idempotencyKey: String(row.idempotency_key) } : {}),
   };
 }
 
@@ -45,19 +49,19 @@ class SqliteStore implements Store {
     this.migrate();
 
     this.insertStmt = this.db.prepare(
-      `INSERT INTO events (ts, project_id, scope, type, v, payload)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO events (ts, project_id, scope, type, v, payload, actor, causation_id, correlation_id, idempotency_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING seq, ts`,
     );
     this.readStreamStmt = this.db.prepare(
-      `SELECT seq, ts, project_id, scope, type, v, payload
+      `SELECT seq, ts, project_id, scope, type, v, payload, actor, causation_id, correlation_id, idempotency_key
        FROM events
        WHERE scope = ? AND seq > ?
        ORDER BY seq ASC
        LIMIT ?`,
     );
     this.readAllStmt = this.db.prepare(
-      `SELECT seq, ts, project_id, scope, type, v, payload
+      `SELECT seq, ts, project_id, scope, type, v, payload, actor, causation_id, correlation_id, idempotency_key
        FROM events
        WHERE seq > ?
        ORDER BY seq ASC
@@ -71,10 +75,9 @@ class SqliteStore implements Store {
     const current = Number(row?.user_version ?? 0);
     if (current < SCHEMA_VERSION) {
       // actor / causation_id / correlation_id / idempotency_key are reserved
-      // event-envelope fields (Part B §3 D2): declared now but populated only
-      // from L1+. Nullable with no default, and omitted by the L0 INSERT, so
-      // they persist as NULL. They are deliberately NOT surfaced through the
-      // Part C.1 read API (StoredEvent) yet.
+      // event-envelope fields (Part B §3 D2): declared here; surfaced through the
+      // StoredEvent/NewEvent API from L1 (Stage 2). Nullable with no default;
+      // NULL persists as an omitted key in the TypeScript read shape.
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS events (
           seq             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +139,10 @@ class SqliteStore implements Store {
         event.type,
         event.v,
         JSON.stringify(event.payload),
+        event.actor ?? null,
+        event.causationId ?? null,
+        event.correlationId ?? null,
+        event.idempotencyKey ?? null,
       );
       if (!row) {
         throw new Error('Store.append: INSERT ... RETURNING produced no row');
@@ -149,6 +156,10 @@ class SqliteStore implements Store {
         v: event.v,
         // Round-trip so the returned shape equals what a later read yields.
         payload: JSON.parse(JSON.stringify(event.payload)),
+        ...(event.actor != null ? { actor: event.actor } : {}),
+        ...(event.causationId != null ? { causationId: event.causationId } : {}),
+        ...(event.correlationId != null ? { correlationId: event.correlationId } : {}),
+        ...(event.idempotencyKey != null ? { idempotencyKey: event.idempotencyKey } : {}),
       });
     }
     return stored;

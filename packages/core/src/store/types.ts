@@ -7,6 +7,10 @@ export interface StoredEvent {
   readonly type: string; // event-type discriminant
   readonly v: number; // payload schema version as STORED (pre-upcast)
   readonly payload: unknown; // raw JSON value; caller upcasts + validates
+  readonly actor?: string; // sender / acting agent id (L1 mail activates this)
+  readonly causationId?: string; // id of the triggering event
+  readonly correlationId?: string; // thread / conversation id
+  readonly idempotencyKey?: string; // dedupe key
 }
 
 /** What a caller supplies to append; the Store assigns seq and ts. */
@@ -16,6 +20,10 @@ export interface NewEvent {
   readonly type: string;
   readonly v: number;
   readonly payload: unknown; // already validated for (type, v) by the caller (later parts)
+  readonly actor?: string; // sender / acting agent id (L1 mail activates this)
+  readonly causationId?: string; // id of the triggering event
+  readonly correlationId?: string; // thread / conversation id
+  readonly idempotencyKey?: string; // dedupe key
 }
 
 /** Write handle valid only inside a transaction; append + projection writes in ONE atomic unit. */
