@@ -203,9 +203,7 @@ describe('ConfigStore — projection determinism', () => {
     const store = openGlobalStore();
     try {
       const live = snapshotConfig(store);
-      rebuildAll(store, [new ConfigProjector()], (e) =>
-        decode(e, configUpcasters, configSchemas),
-      );
+      rebuildAll(store, [new ConfigProjector()], (e) => decode(e, configUpcasters, configSchemas));
       const replayed = snapshotConfig(store);
 
       expect(replayed).toBe(live);
@@ -224,9 +222,7 @@ describe('ConfigStore — projection determinism', () => {
     const store = openGlobalStore();
     try {
       const before = snapshotConfig(store);
-      rebuildAll(store, [new ConfigProjector()], (e) =>
-        decode(e, configUpcasters, configSchemas),
-      );
+      rebuildAll(store, [new ConfigProjector()], (e) => decode(e, configUpcasters, configSchemas));
       const after = snapshotConfig(store);
       expect(after).toBe(before);
 
