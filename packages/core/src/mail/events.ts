@@ -37,6 +37,16 @@ export const MAIL_CHAT = 'chat' as const;
 export const MAIL_OPERATOR_MESSAGE = 'operator_message' as const;
 export const MAIL_CLARIFY_REQUEST = 'clarify_request' as const;
 export const MAIL_CLARIFY_RESPONSE = 'clarify_response' as const;
+/**
+ * W4 adds the first-class `approval` actionable + its `approval_response` closer
+ * (freeze #8). `approval` asks the recipient to bless an outward action; the response
+ * carries a structured `decision` (approve|decline) — the first NON-`{subject, body}`
+ * payload, which is why {@link validateEnvelope} now parses against each type's own
+ * schema. The gate ({@link DeliveredMail.decision} → `approvalOutcome`) reads the
+ * recorded decision to allow/refuse the action (AC-L1-5).
+ */
+export const MAIL_APPROVAL = 'approval' as const;
+export const MAIL_APPROVAL_RESPONSE = 'approval_response' as const;
 
 /** Registered seed-type enum — `send` rejects any type not in here (freeze #2, #5). */
 export const MAIL_TYPES = [
@@ -44,6 +54,8 @@ export const MAIL_TYPES = [
   MAIL_OPERATOR_MESSAGE,
   MAIL_CLARIFY_REQUEST,
   MAIL_CLARIFY_RESPONSE,
+  MAIL_APPROVAL,
+  MAIL_APPROVAL_RESPONSE,
 ] as const;
 export type MailType = (typeof MAIL_TYPES)[number];
 
@@ -73,6 +85,28 @@ export const mailMessageSchema = z.object({
 export type MailMessage = z.infer<typeof mailMessageSchema>;
 
 /**
+ * The `approval_response` payload: the shared prose plus a structured `decision`
+ * (freeze #8). This is the first mail payload that is NOT just `{subject, body}`, so
+ * {@link validateEnvelope} validates each envelope against ITS OWN schema (from
+ * {@link mailSchemas}) rather than always {@link mailMessageSchema}. The decision is
+ * carried on the wire by {@link MailEnvelope.decision} and persisted log-derived onto
+ * {@link DeliveredMail.decision} so the outward-action gate can read it (AC-L1-5).
+ */
+export const approvalResponseSchema = mailMessageSchema.extend({
+  decision: z.enum(['approve', 'decline']),
+});
+export type ApprovalResponse = z.infer<typeof approvalResponseSchema>;
+/** The decision an `approval_response` carries: bless the action or refuse it. */
+export type ApprovalDecision = ApprovalResponse['decision'];
+
+/**
+ * Every mail payload extends `{subject, body}`; `approval_response` additionally
+ * carries a `decision`. {@link validateEnvelope} returns this union (the parsed,
+ * schema-valid payload for the envelope's type).
+ */
+export type MailPayload = MailMessage | ApprovalResponse;
+
+/**
  * The read-receipt payload: the `seq` of the viewed mail. A non-negative integer
  * because it names a store seq (the inbox PK). It is the only field — the recipient
  * is carried by the event SCOPE (`mail:<recipient>`), like every other mail event.
@@ -84,16 +118,19 @@ export type MailRead = z.infer<typeof mailReadSchema>;
 
 /**
  * Current-version schema per mail event type — validated on append AND on read
- * (decode). Every {@link MAIL_TYPES} member shares the {@link mailMessageSchema}
- * `{subject, body}` payload (a question / an answer / prose). {@link EVENT_MAIL_READ}
- * gets its own schema HERE but is NOT in `MAIL_TYPES` — it is folded by the projector
- * yet can never be `send`-ed (freeze #4).
+ * (decode). Most {@link MAIL_TYPES} members share the {@link mailMessageSchema}
+ * `{subject, body}` payload (a question / an answer / prose); `approval_response`
+ * carries the richer {@link approvalResponseSchema} (W4's structured `decision`).
+ * {@link EVENT_MAIL_READ} gets its own schema HERE but is NOT in `MAIL_TYPES` — it is
+ * folded by the projector yet can never be `send`-ed (freeze #4).
  */
 export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [MAIL_CHAT, mailMessageSchema],
   [MAIL_OPERATOR_MESSAGE, mailMessageSchema],
   [MAIL_CLARIFY_REQUEST, mailMessageSchema],
   [MAIL_CLARIFY_RESPONSE, mailMessageSchema],
+  [MAIL_APPROVAL, mailMessageSchema],
+  [MAIL_APPROVAL_RESPONSE, approvalResponseSchema],
   [EVENT_MAIL_READ, mailReadSchema],
 ]);
 
@@ -115,6 +152,7 @@ export interface MailEnvelope {
   readonly correlationId?: string; // thread id
   readonly causationId?: string; // triggering event
   readonly idempotencyKey?: string; // dedupe key
+  readonly decision?: ApprovalDecision; // structured payload field — ONLY `approval_response` uses it
 }
 
 /**
@@ -138,6 +176,8 @@ export interface DeliveredMail {
   readonly kind?: MailKind; // actionable | informational (from the kind registry)
   readonly read?: boolean; // an informational item "clears on view" via a read-receipt
   readonly resolved?: boolean; // an actionable item is resolved by an in-thread closing event
+  // ── W4 read-model state (log-derived) ──
+  readonly decision?: ApprovalDecision; // set for `approval_response` rows; the gate reads it
 }
 
 /** A recipient's stream scope: `mail:<recipient>`. */
@@ -180,12 +220,29 @@ export function assertAddress(field: 'to' | 'from', value: string): void {
  * and return the parsed payload. Shared by `send` (freeze #8 — validate before the
  * seam) and {@link makeMailEvent} (so the builder is self-validating, like L0's
  * `make*Event`). Idempotent, so calling it on both paths is safe.
+ *
+ * It parses against the type's OWN schema ({@link mailSchemas}) — built additively in
+ * W4 so a structured type (`approval_response`) can carry more than `{subject, body}`
+ * while every existing type keeps its `{subject, body}` contract (and tests) unchanged.
  */
-export function validateEnvelope(envelope: MailEnvelope): MailMessage {
+export function validateEnvelope(envelope: MailEnvelope): MailPayload {
   assertMailType(envelope.type);
   assertAddress('to', envelope.to);
   assertAddress('from', envelope.from);
-  return mailMessageSchema.parse({ subject: envelope.subject, body: envelope.body });
+  const schema = mailSchemas.get(envelope.type);
+  if (schema == null) {
+    // A registered MAIL_TYPES member with no schema is a programming error (Principle 9).
+    throw new Error(`mail: no schema registered for type '${envelope.type}'`);
+  }
+  // The candidate payload = the shared prose fields plus any type-specific wire field.
+  // Only `approval_response` reads `decision`; the (non-strict) `{subject, body}`
+  // schemas strip it, so an existing type is unaffected by a stray decision.
+  const candidate: Record<string, unknown> = {
+    subject: envelope.subject,
+    body: envelope.body,
+    ...(envelope.decision != null ? { decision: envelope.decision } : {}),
+  };
+  return schema.parse(candidate) as MailPayload;
 }
 
 /**
@@ -241,6 +298,8 @@ export const mailKinds: ReadonlyMap<MailType, MailKind> = new Map<MailType, Mail
   [MAIL_CLARIFY_RESPONSE, 'informational'],
   [MAIL_CHAT, 'informational'],
   [MAIL_OPERATOR_MESSAGE, 'informational'],
+  [MAIL_APPROVAL, 'actionable'], // asks the recipient to bless an outward action
+  [MAIL_APPROVAL_RESPONSE, 'informational'], // the recorded decision; closes the approval
 ]);
 
 /**
@@ -281,6 +340,14 @@ export const completionPredicates: ReadonlyMap<MailType, CompletionPredicate> = 
     MAIL_CLARIFY_REQUEST,
     (item, closer) =>
       closer.type === MAIL_CLARIFY_RESPONSE && closer.causationId === String(item.seq),
+  ],
+  [
+    // An `approval` is resolved by an in-thread `approval_response` answering it (freeze
+    // #6) — EITHER decision resolves the actionable (the decision has been made); the
+    // gate reads {@link DeliveredMail.decision} to allow/refuse. Same shape as clarify.
+    MAIL_APPROVAL,
+    (item, closer) =>
+      closer.type === MAIL_APPROVAL_RESPONSE && closer.causationId === String(item.seq),
   ],
 ]);
 

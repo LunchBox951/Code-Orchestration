@@ -3,10 +3,13 @@ import type { Projector } from '../replay/projector.js';
 import type { StoredEvent, StoreTx } from '../store/types.js';
 import {
   EVENT_MAIL_READ,
+  MAIL_APPROVAL_RESPONSE,
   MAIL_TYPES,
   completionPredicate,
   mailKind,
   mailRecipientForScope,
+  type ApprovalDecision,
+  type ApprovalResponse,
   type DeliveredMail,
   type MailMessage,
   type MailRead,
@@ -29,6 +32,9 @@ import {
  *                   viewing does NOT resolve; only a real closing event does).
  *   - `thread_id` — the root message's seq as a string (`correlation_id ?? seq`),
  *                   so resolution matches request↔response within a thread (freeze #7).
+ *   - `decision`  — nullable; the approve/decline an `approval_response` carries (W4).
+ *                   Log-derived from the payload, so the outward-action gate reads it
+ *                   replay-safely; NULL for every other type.
  *
  * Indexes: `recipient` for `inbox(recipient)`, `idempotency_key` for the dedupe
  * lookup, `thread_id` for in-thread resolution, and `(recipient, kind, resolved)`
@@ -49,7 +55,8 @@ const CREATE_INBOX_TABLE = `
     kind            TEXT NOT NULL,
     read            INTEGER NOT NULL DEFAULT 0,
     resolved        INTEGER NOT NULL DEFAULT 0,
-    thread_id       TEXT NOT NULL
+    thread_id       TEXT NOT NULL,
+    decision        TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_inbox_recipient_seq ON inbox (recipient, seq);
   CREATE INDEX IF NOT EXISTS idx_inbox_idempotency_key ON inbox (idempotency_key);
@@ -68,7 +75,7 @@ export function ensureInboxTable(db: DatabaseSync): void {
 
 /** Columns selected for every read, in `inbox` order — mapped by name in {@link rowToDeliveredMail}. */
 const INBOX_COLUMNS =
-  'seq, recipient, sender, type, subject, body, correlation_id, causation_id, idempotency_key, ts, kind, read, resolved';
+  'seq, recipient, sender, type, subject, body, correlation_id, causation_id, idempotency_key, ts, kind, read, resolved, decision';
 
 /** Map a raw `inbox` row (loosely typed at the SQLite boundary) to a {@link DeliveredMail}. */
 export function rowToDeliveredMail(row: Record<string, unknown>): DeliveredMail {
@@ -86,6 +93,7 @@ export function rowToDeliveredMail(row: Record<string, unknown>): DeliveredMail 
     kind: String(row.kind) as DeliveredMail['kind'],
     read: Number(row.read) === 1,
     resolved: Number(row.resolved) === 1,
+    ...(row.decision != null ? { decision: String(row.decision) as ApprovalDecision } : {}),
   };
 }
 
@@ -214,11 +222,15 @@ export class MailProjector implements Projector {
     const { subject, body } = event.payload as MailMessage;
     const type = event.type as MailType; // guaranteed ∈ MAIL_TYPES by handles()
     const threadId = threadIdOf(event);
+    // Only `approval_response` carries a structured decision; persist it log-derived so
+    // the outward-action gate reads it replay-safely. NULL for every other type.
+    const decision: ApprovalDecision | null =
+      type === MAIL_APPROVAL_RESPONSE ? (event.payload as ApprovalResponse).decision : null;
     db.prepare(
       `INSERT INTO inbox
          (seq, recipient, sender, type, subject, body, correlation_id, causation_id,
-          idempotency_key, ts, kind, read, resolved, thread_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+          idempotency_key, ts, kind, read, resolved, thread_id, decision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
     ).run(
       event.seq,
       recipient,
@@ -232,6 +244,7 @@ export class MailProjector implements Projector {
       event.ts,
       mailKind(type),
       threadId,
+      decision,
     );
 
     // Generic resolution: this freshly-folded mail is a potential closer. For each
