@@ -9,12 +9,13 @@ import type { UpcasterRegistry } from '../replay/upcaster.js';
  * pure ORCHESTRATION state: a worktree record and the test baseline captured at branch-off. None of
  * it ever touches the target repo (Principle 12 — pristine-repo); it lives only in program-data.
  *
- * Two streams, each keyed by branch via the L0 `${entity}:${id}` scope pattern:
+ * Three streams, each keyed by branch via the L0 `${entity}:${id}` scope pattern:
  *   - `worktree:<branch>`  — the created sandbox record (one per slung branch).
  *   - `baseline:<branch>`  — the test baseline captured when the branch was cut from its base.
+ *   - `finish:<branch>`    — the finish recorded by `co_finish` (commit sha + the finish test run).
  *
- * The event types are DOTTED (`worktree.created`, `baseline.captured`) to mark them as L0-style
- * infrastructure events, mirroring `config.set` / `mail.read`.
+ * The event types are DOTTED (`worktree.created`, `baseline.captured`, `finish.recorded`) to mark
+ * them as L0-style infrastructure events, mirroring `config.set` / `mail.read`.
  */
 
 /** Current payload schema version — v1; no upcasters yet (an empty chain is the identity upcast). */
@@ -24,11 +25,15 @@ export const WORKTREE_EVENT_V = 1;
 export const EVENT_WORKTREE_CREATED = 'worktree.created' as const;
 /** The test baseline captured at branch-off (the honest-verification baseline — review-gates.md). */
 export const EVENT_BASELINE_CAPTURED = 'baseline.captured' as const;
+/** A finish recorded by `co_finish` (L3-C): the house-style commit + the finish's test run (L5 input). */
+export const EVENT_FINISH_RECORDED = 'finish.recorded' as const;
 
 /** Scope prefix for the per-branch worktree-record stream; the suffix is the branch. */
 export const WORKTREE_SCOPE_PREFIX = 'worktree:';
 /** Scope prefix for the per-branch baseline stream; the suffix is the branch. */
 export const BASELINE_SCOPE_PREFIX = 'baseline:';
+/** Scope prefix for the per-branch finish stream; the suffix is the branch. */
+export const FINISH_SCOPE_PREFIX = 'finish:';
 
 /** A branch's worktree-record stream scope: `worktree:<branch>`. */
 export function worktreeScope(branch: string): string {
@@ -38,6 +43,11 @@ export function worktreeScope(branch: string): string {
 /** A branch's baseline stream scope: `baseline:<branch>`. */
 export function baselineScope(branch: string): string {
   return BASELINE_SCOPE_PREFIX + branch;
+}
+
+/** A branch's finish stream scope: `finish:<branch>`. */
+export function finishScope(branch: string): string {
+  return FINISH_SCOPE_PREFIX + branch;
 }
 
 /**
@@ -74,10 +84,27 @@ export const baselineCapturedSchema = z.object({
 });
 export type BaselineCaptured = z.infer<typeof baselineCapturedSchema>;
 
+/**
+ * The `finish.recorded` payload: what `co_finish` durably records when a worker finishes — the
+ * branch, the `baseSha` it was cut from (so L5 can locate the baseline to diff against), the
+ * `commitSha` of the rendered house-style commit, and the finish's structured test run. This is the
+ * INPUT L5 compares against {@link Baseline}; this layer only RECORDS it (it does NOT compute the
+ * regression diff — that is L5). The `tests` shape is aligned with {@link TestOutcome} so the
+ * comparison is apples-to-apples.
+ */
+export const finishRecordedSchema = z.object({
+  branch: z.string().min(1),
+  baseSha: z.string().min(1),
+  commitSha: z.string().min(1),
+  tests: z.array(testOutcomeSchema),
+});
+export type FinishRecorded = z.infer<typeof finishRecordedSchema>;
+
 /** Current-version schema per L3 worktree event type — validated on append AND on read (decode). */
 export const worktreeSchemas: SchemaMap = new Map<string, z.ZodType>([
   [EVENT_WORKTREE_CREATED, worktreeCreatedSchema],
   [EVENT_BASELINE_CAPTURED, baselineCapturedSchema],
+  [EVENT_FINISH_RECORDED, finishRecordedSchema],
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -112,6 +139,18 @@ export function makeBaselineCapturedEvent(projectId: string, b: BaselineCaptured
   };
 }
 
+/** Build + validate a `finish.recorded` `NewEvent`, keyed on the branch's finish stream scope. */
+export function makeFinishRecordedEvent(projectId: string, f: FinishRecorded): NewEvent {
+  const payload = finishRecordedSchema.parse(f);
+  return {
+    projectId,
+    scope: finishScope(payload.branch),
+    type: EVENT_FINISH_RECORDED,
+    v: WORKTREE_EVENT_V,
+    payload,
+  };
+}
+
 /**
  * A persisted, read-back worktree record — the read-model shape the store facade returns.
  * `createdTs` is the PERSISTED event ts (freeze #6 — never wall-clock on read). `removed` is the
@@ -134,4 +173,17 @@ export interface Baseline {
   readonly baseSha: string;
   readonly tests: readonly TestOutcome[];
   readonly capturedTs: number;
+}
+
+/**
+ * A persisted, read-back finish record — the read-model shape `getFinish` returns. `recordedTs` is
+ * the PERSISTED event ts (freeze #6 — never wall-clock on read). This is what L5 reads (with the
+ * matching {@link Baseline}) to tell a regression from a pre-existing failure.
+ */
+export interface FinishRecord {
+  readonly branch: string;
+  readonly baseSha: string;
+  readonly commitSha: string;
+  readonly tests: readonly TestOutcome[];
+  readonly recordedTs: number;
 }

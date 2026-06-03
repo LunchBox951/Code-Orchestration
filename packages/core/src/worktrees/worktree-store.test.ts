@@ -9,10 +9,12 @@ import { decode } from '../replay/decode.js';
 import { assertRepoPristine } from '../config/pristine.js';
 import {
   makeBaselineCapturedEvent,
+  makeFinishRecordedEvent,
   makeWorktreeCreatedEvent,
   worktreeSchemas,
   worktreeUpcasters,
   type BaselineCaptured,
+  type FinishRecorded,
   type WorktreeCreated,
 } from './events.js';
 import { WorktreeProjector } from './worktree-projector.js';
@@ -65,6 +67,17 @@ const base = (over: Partial<BaselineCaptured> = {}): BaselineCaptured => ({
   tests: [
     { name: 'suite/a', passed: true },
     { name: 'suite/b', passed: false },
+  ],
+  ...over,
+});
+
+const finish = (over: Partial<FinishRecorded> = {}): FinishRecorded => ({
+  branch: 'co/feature',
+  baseSha: 'a'.repeat(40),
+  commitSha: 'f'.repeat(40),
+  tests: [
+    { name: 'suite/a', passed: true },
+    { name: 'suite/b', passed: true },
   ],
   ...over,
 });
@@ -140,6 +153,39 @@ describe('WorktreeStore — record + read worktrees and baselines', () => {
       b.close();
     }
   });
+
+  it('records a finish and reads it back, structured (per project + branch)', () => {
+    const store = openWorktreeStore('p-finish');
+    try {
+      const saved = store.recordFinish(finish());
+      expect(saved.branch).toBe('co/feature');
+      expect(saved.baseSha).toBe('a'.repeat(40));
+      expect(saved.commitSha).toBe('f'.repeat(40));
+      expect(saved.tests).toEqual([
+        { name: 'suite/a', passed: true },
+        { name: 'suite/b', passed: true },
+      ]);
+      expect(saved.recordedTs).toBeGreaterThan(0);
+      expect(store.getFinish('co/feature')).toEqual(saved);
+      expect(store.getFinish('co/absent')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a re-finish UPSERTs — the read-model holds the LATEST finish for the branch', () => {
+    const store = openWorktreeStore('p-refinish');
+    try {
+      store.recordFinish(finish({ commitSha: '1'.repeat(40) }));
+      const second = store.recordFinish(
+        finish({ commitSha: '2'.repeat(40), tests: [{ name: 'suite/a', passed: false }] }),
+      );
+      expect(store.getFinish('co/feature')).toEqual(second);
+      expect(store.getFinish('co/feature')?.commitSha).toBe('2'.repeat(40));
+    } finally {
+      store.close();
+    }
+  });
 });
 
 // ── AC-L0-2 preserved: the L3 read-model replays byte-equal (the brief's invariant #3) ──────────
@@ -156,6 +202,11 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
           'SELECT branch, base_ref, base_sha, tests, captured_ts FROM baselines ORDER BY branch',
         )
         .all(),
+      finishes: db
+        .prepare(
+          'SELECT branch, base_sha, commit_sha, tests, recorded_ts FROM finishes ORDER BY branch',
+        )
+        .all(),
     });
   }
 
@@ -170,6 +221,10 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
         rec({ branch: 'co/b', path: '/d/b', parent: 'coord-1' }),
       ),
       makeBaselineCapturedEvent('p-replay', base({ branch: 'co/b', tests: [] })),
+      makeFinishRecordedEvent('p-replay', finish({ branch: 'co/a', commitSha: 'a'.repeat(40) })),
+      // A re-finish of co/a (UPSERT — last wins): the rebuild must reach the same final row.
+      makeFinishRecordedEvent('p-replay', finish({ branch: 'co/a', commitSha: 'd'.repeat(40) })),
+      makeFinishRecordedEvent('p-replay', finish({ branch: 'co/b', commitSha: 'e'.repeat(40) })),
     ];
     try {
       for (const e of sequence) {
@@ -188,6 +243,10 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
       expect(live).toContain('"branch":"co/a"');
       expect(live).toContain('"parent":"coord-1"');
       expect(live).toContain('suite/a');
+      // The finishes read-model is in the snapshot and reflects the LATEST finish per branch.
+      expect(live).toContain('"commit_sha":"' + 'd'.repeat(40) + '"'); // co/a's re-finish won
+      expect(live).not.toContain('"commit_sha":"' + 'a'.repeat(40) + '"'); // the superseded finish
+      expect(live).toContain('"commit_sha":"' + 'e'.repeat(40) + '"'); // co/b's finish
     } finally {
       store.close();
     }
@@ -196,17 +255,19 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
 
 // ── Principle 12: the state-recording cores write only program-data, never the repo ─────────────
 describe('AC-L3-1 — assertRepoPristine holds around the state-recording cores', () => {
-  it('recordWorktree + recordBaseline write nothing into the target repo', () => {
+  it('recordWorktree + recordBaseline + recordFinish write nothing into the target repo', () => {
     const repo = makeRepo();
     const store = openWorktreeStore('p-pristine');
     try {
       assertRepoPristine(repo, () => {
         store.recordWorktree(rec());
         store.recordBaseline(base());
+        store.recordFinish(finish());
       });
       // The writes really happened — pristine did not block them, it proved no repo write.
       expect(store.getWorktree('co/feature')).toBeDefined();
       expect(store.getBaseline('co/feature')).toBeDefined();
+      expect(store.getFinish('co/feature')).toBeDefined();
       expect(existsSync(join(repo, '.co'))).toBe(false);
     } finally {
       store.close();

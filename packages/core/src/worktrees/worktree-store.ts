@@ -4,11 +4,14 @@ import { applyEvent, type Projector } from '../replay/projector.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import {
   makeBaselineCapturedEvent,
+  makeFinishRecordedEvent,
   makeWorktreeCreatedEvent,
   worktreeSchemas,
   worktreeUpcasters,
   type Baseline,
   type BaselineCaptured,
+  type FinishRecord,
+  type FinishRecorded,
   type WorktreeCreated,
   type WorktreeRecord,
 } from './events.js';
@@ -17,6 +20,7 @@ import {
   ensureWorktreeTables,
   selectAllWorktrees,
   selectBaseline,
+  selectFinish,
   selectWorktree,
 } from './worktree-projector.js';
 
@@ -35,6 +39,7 @@ import {
  *
  * The facade is intentionally shaped so phase E slots in additively: `removeWorktree` /
  * `detectOrphans` become new methods folding a `worktree.removed` event, with no change here.
+ * L3-C added `recordFinish` / `getFinish` the same additive way (a new `finish.recorded` event).
  */
 export interface WorktreeStore {
   /** Record a created sandbox (append `worktree.created` + fold); returns the read-back record. */
@@ -47,6 +52,13 @@ export interface WorktreeStore {
   recordBaseline(b: BaselineCaptured): Baseline;
   /** The baseline for `branch`, or undefined. */
   getBaseline(branch: string): Baseline | undefined;
+  /**
+   * Record a finish (append `finish.recorded` + fold); returns the read-back record. The commit sha
+   * + the finish's test run that L5 compares against the baseline. A re-finish UPSERTs (last wins).
+   */
+  recordFinish(f: FinishRecorded): FinishRecord;
+  /** The recorded finish for `branch`, or undefined (no finish yet). */
+  getFinish(branch: string): FinishRecord | undefined;
   /** Close the underlying project store. */
   close(): void;
 }
@@ -103,6 +115,26 @@ export function openWorktreeStore(projectId: string): WorktreeStore {
 
     getBaseline(branch: string): Baseline | undefined {
       return store.transaction((tx) => selectBaseline(tx.raw as DatabaseSync, branch));
+    },
+
+    recordFinish(f: FinishRecorded): FinishRecord {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureWorktreeTables(db);
+        const [stored] = tx.append([makeFinishRecordedEvent(projectId, f)]);
+        applyEvent(tx, decode(stored!, worktreeUpcasters, worktreeSchemas), projectors);
+        const row = selectFinish(db, f.branch);
+        if (!row) {
+          throw new Error(
+            `openWorktreeStore.recordFinish: row missing after projection (branch='${f.branch}')`,
+          );
+        }
+        return row;
+      });
+    },
+
+    getFinish(branch: string): FinishRecord | undefined {
+      return store.transaction((tx) => selectFinish(tx.raw as DatabaseSync, branch));
     },
 
     close(): void {
