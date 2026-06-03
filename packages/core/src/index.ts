@@ -128,5 +128,15 @@ export { createRendererRegistry, defaultMailRenderer } from './mail/renderer.js'
 export type { MailTypeViolation } from './mail/completeness.js';
 export { checkMailTypeCompleteness } from './mail/completeness.js';
 
+// L2-A tool-registry foundation: the FROZEN cross-phase contracts the single MCP agent surface
+// is built from (Principle 4 — one-agent-surface). `ToolContext` is the headless invocation seam;
+// `ToolSpec`/`ToolHandler` are the typed tool declaration (schemas = the single syntax source,
+// Principle 5); `ToolRegistry` + `createToolRegistry` are the append-only single source of truth
+// the adapter mounts / the gate checks / the role-scoper filters; `notImplemented` is the stub
+// sentinel the L2 completeness gate detects. Phase A is types + mechanism + sentinel only — the
+// real tools and the canonical registry instance land in phase B.
+export type { ToolContext, ToolHandler, ToolSpec, ToolRegistry } from './tools/index.js';
+export { createToolRegistry, notImplemented } from './tools/index.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
