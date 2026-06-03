@@ -56,6 +56,8 @@ export interface MailStore {
   ): DeliveredMail;
   /** Mark `recipient`'s mail at `seq` read (event-sourced); informational mail "clears on view". */
   markRead(recipient: string, seq: number): DeliveredMail;
+  /** Retract `sender`'s mail at `seq` (event-sourced tombstone); only the original sender may. */
+  retract(sender: string, seq: number): DeliveredMail;
   /** Headless chronological read of a recipient's inbox. */
   inbox(recipient: string): readonly DeliveredMail[];
   /** Chronological read of every mail an agent SENT (by sender), for by-sender derivations (W5 'waiting'). */
@@ -102,9 +104,14 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
     send: doSend,
 
     reply(toMail: DeliveredMail, draft: ReplyDraft): DeliveredMail {
-      const current = store.transaction((tx) => selectMailBySeq(tx.raw as DatabaseSync, toMail.seq));
+      const current = store.transaction((tx) =>
+        selectMailBySeq(tx.raw as DatabaseSync, toMail.seq),
+      );
       if (!current) {
         throw new Error(`mail reply: no persisted mail seq=${toMail.seq}`);
+      }
+      if (current.retracted) {
+        throw new Error(`mail reply: mail seq=${toMail.seq} was retracted`);
       }
       // Thread id = the root message's seq (freeze #7): inherit the answered mail's
       // thread if it has one, else the answered mail IS the root. `causationId`
@@ -152,6 +159,13 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
         );
       }
       return delivery.markRead(recipient, seq);
+    },
+
+    retract(sender: string, seq: number): DeliveredMail {
+      if (!delivery.retract) {
+        throw new Error('mail: the configured Delivery does not support retract (tombstone seam)');
+      }
+      return delivery.retract(sender, seq);
     },
 
     inbox(recipient: string): readonly DeliveredMail[] {

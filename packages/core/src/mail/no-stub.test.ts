@@ -16,6 +16,7 @@ import {
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
   MAIL_ESCALATION,
+  MAIL_WORKER_DONE,
   MAIL_TYPES,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
@@ -123,6 +124,13 @@ function exerciseEveryType(mail: MailStore): Record<MailType, DeliveredMail> {
     subject: 'blocked',
     body: 'cannot proceed without a decision',
   });
+  const workerDone = mail.send({
+    type: MAIL_WORKER_DONE,
+    to: 'lead',
+    from: 'worker',
+    subject: 'worker_done: co/feature',
+    body: 'finished co/feature; tests 3/3 passed',
+  });
   return {
     [MAIL_CHAT]: chat,
     [MAIL_OPERATOR_MESSAGE]: operatorMessage,
@@ -131,6 +139,7 @@ function exerciseEveryType(mail: MailStore): Record<MailType, DeliveredMail> {
     [MAIL_APPROVAL]: approval,
     [MAIL_APPROVAL_RESPONSE]: approvalResponse,
     [MAIL_ESCALATION]: escalation,
+    [MAIL_WORKER_DONE]: workerDone,
   };
 }
 
@@ -140,7 +149,7 @@ describe('AC-L1-7 — no-stub completeness: GREEN over the real seed enum', () =
   });
 
   it('proves it is not vacuous — the enum has every seed type and is non-empty', () => {
-    expect(MAIL_TYPES.length).toBe(7);
+    expect(MAIL_TYPES.length).toBe(8);
     expect([...MAIL_TYPES].sort()).toEqual(
       [
         MAIL_APPROVAL,
@@ -150,6 +159,7 @@ describe('AC-L1-7 — no-stub completeness: GREEN over the real seed enum', () =
         MAIL_CLARIFY_RESPONSE,
         MAIL_ESCALATION,
         MAIL_OPERATOR_MESSAGE,
+        MAIL_WORKER_DONE,
       ].sort(),
     );
   });

@@ -235,7 +235,11 @@ describe('AC-L1-6 — the resolve-or-forward chain (every forward advances + sha
     const resolver = prototypeParentResolver(CHAIN);
     const mail = openMailStore('p-esc-chain-answer');
     try {
-      const e1 = escalate(mail, resolver, { from: CHAIN.implementer, subject: 'blocked', body: 'b' });
+      const e1 = escalate(mail, resolver, {
+        from: CHAIN.implementer,
+        subject: 'blocked',
+        body: 'b',
+      });
       const e2 = forwardEscalation(
         mail,
         resolver,
@@ -843,6 +847,43 @@ describe('AC-L1-6 — threaded brainstorm + never-guess + asker-blocked (WAITING
       expect(isAwaitingReply(mail, CHAIN.implementer)).toBe(true);
     } finally {
       mail.close();
+    }
+  });
+
+  it('a clarify_request the asker retracted no longer counts as waiting (review #81)', () => {
+    const mail = openMailStore('p-esc-waiting-retract');
+    let reqSeq = -1;
+    try {
+      const req = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: CHAIN.lead,
+        from: CHAIN.implementer,
+        subject: 'q',
+        body: '?',
+      });
+      reqSeq = req.seq;
+
+      // Raised but unanswered → the asker is WAITING on it.
+      expect(isAwaitingReply(mail, CHAIN.implementer)).toBe(true);
+      expect(waitingItems(mail, CHAIN.implementer).map((m) => m.seq)).toEqual([req.seq]);
+
+      // The asker WITHDRAWS its own question → it is no longer a thing it waits on, even though the
+      // retracted row stays visible to the sender via sentBy (the tombstone is never deleted).
+      mail.retract(CHAIN.implementer, req.seq);
+      expect(isAwaitingReply(mail, CHAIN.implementer)).toBe(false);
+      expect(waitingItems(mail, CHAIN.implementer)).toEqual([]);
+    } finally {
+      mail.close();
+    }
+
+    // Log-derived: the retracted clarify stays out of the WAITING set across a rebuild.
+    rebuildOf('p-esc-waiting-retract');
+    const m = openMailStore('p-esc-waiting-retract');
+    try {
+      expect(isAwaitingReply(m, CHAIN.implementer)).toBe(false);
+      expect(m.sentBy(CHAIN.implementer).find((x) => x.seq === reqSeq)!.retracted).toBe(true);
+    } finally {
+      m.close();
     }
   });
 });

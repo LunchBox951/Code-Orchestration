@@ -284,6 +284,9 @@ export function waitingItems(mail: MailStore, agent: string): readonly Delivered
   return mail.sentBy(agent).filter(
     (m) =>
       m.type === MAIL_CLARIFY_REQUEST &&
+      // A clarify the asker itself RETRACTED is no longer a question it waits on — the tombstone
+      // withdraws it (`sentBy` keeps retracted rows visible to the sender, so filter here).
+      !m.retracted &&
       !repliesToAgent.some(
         (reply) =>
           reply.type === MAIL_CLARIFY_RESPONSE &&

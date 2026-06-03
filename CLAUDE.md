@@ -17,9 +17,10 @@ pnpm test
 pnpm lint
 pnpm typecheck
 pnpm build
+pnpm format:check
 ```
 
-Run all four (`test` included) before considering a diff done.
+Run all five (`test` included) before considering a diff done.
 
 ## Conventions & architecture
 
