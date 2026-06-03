@@ -8,3 +8,12 @@
 export type { ToolContext } from './context.js';
 export type { ToolHandler, ToolSpec, ToolRegistry } from './registry.js';
 export { createToolRegistry, notImplemented } from './registry.js';
+
+// L2-B1: the first REAL tools. `buildCoreRegistry` is the canonical single source of truth
+// (the nine `co_*` tools as self-describing ToolSpecs); `invokeTool` is the transport-agnostic
+// headless harness that validates I/O and dispatches to a handler (the seam the MCP adapter
+// reuses); `readWorktreeInfo` is the read-only git helper behind `co_worktree_info`.
+export { buildCoreRegistry } from './core-registry.js';
+export { invokeTool } from './invoke.js';
+export type { WorktreeInfo } from './worktree.js';
+export { readWorktreeInfo } from './worktree.js';

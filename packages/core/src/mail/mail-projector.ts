@@ -4,6 +4,7 @@ import type { StoredEvent, StoreTx } from '../store/types.js';
 import {
   EVENT_MAIL_FORWARD,
   EVENT_MAIL_READ,
+  EVENT_MAIL_RETRACTED,
   MAIL_APPROVAL_RESPONSE,
   MAIL_CLARIFY_REQUEST,
   MAIL_ESCALATION,
@@ -17,6 +18,7 @@ import {
   type MailForward,
   type MailMessage,
   type MailRead,
+  type MailRetract,
   type MailType,
 } from './events.js';
 
@@ -41,6 +43,10 @@ import {
  *   - `decision`  — nullable; the approve/decline an `approval_response` carries (W4).
  *                   Log-derived from the payload, so the outward-action gate reads it
  *                   replay-safely; NULL for every other type.
+ *   - `retracted` — set by a {@link EVENT_MAIL_RETRACTED} tombstone (only the original
+ *                   sender can append one). A retracted mail drops out of `inbox()` and the
+ *                   outstanding-action projection, but its row + log event persist
+ *                   (Principle 14 — recoverable, replay-safe).
  *
  * Indexes: `recipient` for `inbox(recipient)`, idempotency scope for the dedupe lookup,
  * `thread_id` for in-thread resolution, and `(recipient, kind, resolved)` for the
@@ -62,7 +68,8 @@ const CREATE_INBOX_TABLE = `
     read            INTEGER NOT NULL DEFAULT 0,
     resolved        INTEGER NOT NULL DEFAULT 0,
     thread_id       TEXT NOT NULL,
-    decision        TEXT
+    decision        TEXT,
+    retracted       INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS idx_inbox_recipient_seq ON inbox (recipient, seq);
   CREATE INDEX IF NOT EXISTS idx_inbox_idempotency_scope
@@ -91,7 +98,7 @@ export function ensureInboxTable(db: DatabaseSync): void {
 
 /** Columns selected for every read, in `inbox` order — mapped by name in {@link rowToDeliveredMail}. */
 const INBOX_COLUMNS =
-  'seq, recipient, sender, type, subject, body, correlation_id, causation_id, idempotency_key, ts, kind, read, resolved, decision';
+  'seq, recipient, sender, type, subject, body, correlation_id, causation_id, idempotency_key, ts, kind, read, resolved, decision, retracted';
 
 /** Map a raw `inbox` row (loosely typed at the SQLite boundary) to a {@link DeliveredMail}. */
 export function rowToDeliveredMail(row: Record<string, unknown>): DeliveredMail {
@@ -109,15 +116,22 @@ export function rowToDeliveredMail(row: Record<string, unknown>): DeliveredMail 
     kind: String(row.kind) as DeliveredMail['kind'],
     read: Number(row.read) === 1,
     resolved: Number(row.resolved) === 1,
+    retracted: Number(row.retracted) === 1,
     ...(row.decision != null ? { decision: String(row.decision) as ApprovalDecision } : {}),
   };
 }
 
-/** A recipient's chronological inbox: `WHERE recipient = ? ORDER BY seq`. */
+/**
+ * A recipient's chronological inbox: `WHERE recipient = ? ORDER BY seq`. Retracted mail is
+ * excluded — a withdrawn message is no longer in the inbox (its tombstone row still persists
+ * for recovery/replay; see {@link EVENT_MAIL_RETRACTED}).
+ */
 export function inboxForRecipient(db: DatabaseSync, recipient: string): DeliveredMail[] {
   ensureInboxTable(db);
   const rows = db
-    .prepare(`SELECT ${INBOX_COLUMNS} FROM inbox WHERE recipient = ? ORDER BY seq`)
+    .prepare(
+      `SELECT ${INBOX_COLUMNS} FROM inbox WHERE recipient = ? AND retracted = 0 ORDER BY seq`,
+    )
     .all(recipient);
   return rows.map(rowToDeliveredMail);
 }
@@ -163,7 +177,7 @@ export function outstandingForRecipient(db: DatabaseSync, recipient: string): De
   const rows = db
     .prepare(
       `SELECT ${INBOX_COLUMNS} FROM inbox
-       WHERE recipient = ? AND kind = 'actionable' AND resolved = 0
+       WHERE recipient = ? AND kind = 'actionable' AND resolved = 0 AND retracted = 0
        ORDER BY seq`,
     )
     .all(recipient);
@@ -201,7 +215,7 @@ export function countOutstanding(db: DatabaseSync, recipient: string): number {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM inbox
-       WHERE recipient = ? AND kind = 'actionable' AND resolved = 0`,
+       WHERE recipient = ? AND kind = 'actionable' AND resolved = 0 AND retracted = 0`,
     )
     .get(recipient) as { n: number };
   return Number(row.n);
@@ -249,6 +263,7 @@ export class MailProjector implements Projector {
     return (
       type === EVENT_MAIL_READ ||
       type === EVENT_MAIL_FORWARD ||
+      type === EVENT_MAIL_RETRACTED ||
       (MAIL_TYPES as readonly string[]).includes(type)
     );
   }
@@ -269,6 +284,10 @@ export class MailProjector implements Projector {
     }
     if (event.type === EVENT_MAIL_FORWARD) {
       this.applyForwardReceipt(db, event);
+      return;
+    }
+    if (event.type === EVENT_MAIL_RETRACTED) {
+      this.applyRetractReceipt(db, event);
       return;
     }
     this.applyMail(db, event);
@@ -331,6 +350,18 @@ export class MailProjector implements Projector {
     const recipient = mailRecipientForScope(event.scope);
     const { seq } = event.payload as MailRead;
     db.prepare('UPDATE inbox SET read = 1 WHERE seq = ? AND recipient = ?').run(seq, recipient);
+  }
+
+  /**
+   * Fold a retract-receipt: set the target row's `retracted` flag (idempotent; rebuild-safe).
+   * The receipt's scope/actor IS the original sender, so we match on `sender` (mirrors how the
+   * read-receipt matches on `recipient`) — a tombstone can only mark a mail the actor sent.
+   * The row is NOT deleted (Principle 14); `inbox()`/`outstanding()` exclude it by `retracted`.
+   */
+  private applyRetractReceipt(db: DatabaseSync, event: StoredEvent): void {
+    const sender = mailRecipientForScope(event.scope);
+    const { seq } = event.payload as MailRetract;
+    db.prepare('UPDATE inbox SET retracted = 1 WHERE seq = ? AND sender = ?').run(seq, sender);
   }
 
   /**

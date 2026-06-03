@@ -72,6 +72,10 @@ export function createToolRegistry(): ToolRegistry {
  * the L2 completeness gate (phase C) recognizes this exact reference and FAILS the build.
  * It throws loudly (Principle 9) if ever actually invoked. Use it nowhere in shipped tools —
  * it exists so the gate has a precise, testable definition of "stubbed".
+ *
+ * Its zero-parameter arrow is intentionally assignable to {@link ToolHandler} (TS allows a
+ * function to ignore trailing parameters), so the sentinel needs no unused `ctx`/`input`
+ * bindings — it always throws regardless of arguments (review #67).
  */
 export const notImplemented: ToolHandler = () => {
   throw new Error(
