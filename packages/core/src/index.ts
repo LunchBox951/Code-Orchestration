@@ -44,6 +44,7 @@ export type {
   MailMessage,
   MailRead,
   MailForward,
+  MailRetract,
   MailKind,
   CompletionPredicate,
   ApprovalDecision,
@@ -63,11 +64,13 @@ export {
   MAIL_TYPES,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
+  EVENT_MAIL_RETRACTED,
   MAIL_EVENT_V,
   mailMessageSchema,
   approvalResponseSchema,
   mailReadSchema,
   mailForwardSchema,
+  mailRetractSchema,
   mailSchemas,
   mailUpcasters,
   mailScope,
@@ -75,6 +78,7 @@ export {
   makeMailEvent,
   makeMailReadEvent,
   makeMailForwardEvent,
+  makeMailRetractEvent,
   mailKinds,
   mailKind,
   completionPredicates,
@@ -137,6 +141,13 @@ export { checkMailTypeCompleteness } from './mail/completeness.js';
 // real tools and the canonical registry instance land in phase B.
 export type { ToolContext, ToolHandler, ToolSpec, ToolRegistry } from './tools/index.js';
 export { createToolRegistry, notImplemented } from './tools/index.js';
+
+// L2-B1 first real tools: the canonical registry of the nine `co_*` tools (`buildCoreRegistry`),
+// the transport-agnostic headless invocation harness (`invokeTool`) the MCP adapter (B2) mounts,
+// and the read-only git worktree helper behind `co_worktree_info` (`readWorktreeInfo`). All logic
+// is in core; B2 is a thin transport over this.
+export type { WorktreeInfo } from './tools/index.js';
+export { buildCoreRegistry, invokeTool, readWorktreeInfo } from './tools/index.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

@@ -89,6 +89,19 @@ export const EVENT_MAIL_READ = 'mail.read' as const;
  */
 export const EVENT_MAIL_FORWARD = 'mail.forwarded' as const;
 
+/**
+ * The internal retract-receipt event (a tombstone — Principle 14). Dotted like
+ * {@link EVENT_MAIL_READ} to mark it INFRASTRUCTURE, NOT a sendable message: it is
+ * deliberately NOT a member of {@link MAIL_TYPES} (so `send` keeps rejecting it and the
+ * no-stub assertion — which iterates `MAIL_TYPES` — never sees it), yet it gets a schema in
+ * {@link mailSchemas} so `decode` validates it on read/replay. Only the original SENDER may
+ * append one (the {@link import('./delivery.js').Delivery} seam enforces ownership); the
+ * projector folds it to set the target row's `retracted` flag, which drops the mail from the
+ * recipient's `inbox()` and from the outstanding-action projection — but the row + log event
+ * persist (never deleted), so the withdrawal is recoverable and replay-safe.
+ */
+export const EVENT_MAIL_RETRACTED = 'mail.retracted' as const;
+
 /** Current payload schema version — v1; no upcasters yet (see {@link mailUpcasters}). */
 export const MAIL_EVENT_V = 1;
 
@@ -146,6 +159,16 @@ export const mailForwardSchema = z.object({
 export type MailForward = z.infer<typeof mailForwardSchema>;
 
 /**
+ * The retract-receipt payload: the `seq` of the withdrawn mail (a non-negative integer
+ * naming the inbox PK). It is the only field — the retracting sender is carried by the
+ * event SCOPE/actor (`mail:<sender>`), mirroring {@link mailReadSchema}.
+ */
+export const mailRetractSchema = z.object({
+  seq: z.number().int().nonnegative(),
+});
+export type MailRetract = z.infer<typeof mailRetractSchema>;
+
+/**
  * Current-version schema per mail event type — validated on append AND on read
  * (decode). Most {@link MAIL_TYPES} members share the {@link mailMessageSchema}
  * `{subject, body}` payload (a question / an answer / prose); `approval_response`
@@ -164,6 +187,7 @@ export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [MAIL_ESCALATION, mailMessageSchema], // {subject, body}: a readable problem summary + context
   [EVENT_MAIL_READ, mailReadSchema],
   [EVENT_MAIL_FORWARD, mailForwardSchema],
+  [EVENT_MAIL_RETRACTED, mailRetractSchema], // infrastructure tombstone; never a MAIL_TYPES member
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -208,6 +232,7 @@ export interface DeliveredMail {
   readonly kind?: MailKind; // actionable | informational (from the kind registry)
   readonly read?: boolean; // an informational item "clears on view" via a read-receipt
   readonly resolved?: boolean; // an actionable item is resolved by an in-thread closing event
+  readonly retracted?: boolean; // the sender withdrew it (tombstone); dropped from inbox/outstanding
   // ── W4 read-model state (log-derived) ──
   readonly decision?: ApprovalDecision; // set for `approval_response` rows; the gate reads it
 }
@@ -315,6 +340,27 @@ export function makeMailReadEvent(projectId: string, recipient: string, seq: num
     v: MAIL_EVENT_V,
     payload: mailReadSchema.parse({ seq }),
     actor: recipient,
+  };
+}
+
+/**
+ * Build + validate a retract-receipt {@link EVENT_MAIL_RETRACTED} event: `sender` withdrew
+ * the mail at `seq`. The sender is the stream scope (so the tombstone lives in the same
+ * stream form as a read-receipt) and the `actor`. The payload carries only the withdrawn
+ * `seq`; the projector folds it to set that row's `retracted` flag. Ownership (only the
+ * original sender may retract) is enforced at the {@link import('./delivery.js').Delivery}
+ * seam before this is appended (mirrors `markRead` going through the seam).
+ */
+export function makeMailRetractEvent(projectId: string, sender: string, seq: number): NewEvent {
+  assertAddress('from', sender);
+  return {
+    projectId,
+    scope: mailScope(sender),
+    type: EVENT_MAIL_RETRACTED,
+    v: MAIL_EVENT_V,
+    payload: mailRetractSchema.parse({ seq }),
+    actor: sender,
+    causationId: String(seq),
   };
 }
 
