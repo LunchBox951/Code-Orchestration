@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { finishWorktree } from '../../worktrees/finish.js';
 import { defaultGitReader } from '../../worktrees/detect-base.js';
+import { resolveProvisioningManifest } from '../../worktrees/provision.js';
 import type { ToolSpec } from '../registry.js';
 import { readWorktreeInfo } from '../worktree.js';
 
@@ -117,7 +118,11 @@ export const finishTool: ToolSpec<FinishInput, FinishOutput> = {
         tests: input.tests,
         ...(input.notes != null ? { notes: input.notes } : {}),
       },
-      { readInfo: readWorktreeInfo, gitReader: defaultGitReader },
+      {
+        readInfo: readWorktreeInfo,
+        gitReader: defaultGitReader,
+        provisioningManifest: () => resolveProvisioningManifest(ctx.projectId),
+      },
     );
     return {
       commit_sha: result.commitSha,

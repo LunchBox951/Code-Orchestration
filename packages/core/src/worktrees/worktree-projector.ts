@@ -7,6 +7,7 @@ import {
   EVENT_FINISH_RECORDED,
   EVENT_WORKTREE_CREATED,
   EVENT_WORKTREE_REMOVED,
+  worktreeProvisionedEntrySchema,
   type Baseline,
   type BaselineCaptured,
   type FinishRecord,
@@ -41,7 +42,8 @@ const CREATE_WORKTREE_TABLES = `
     path       TEXT NOT NULL,
     parent     TEXT NOT NULL,
     created_ts INTEGER NOT NULL,
-    removed    INTEGER NOT NULL DEFAULT 0
+    removed    INTEGER NOT NULL DEFAULT 0,
+    provisioned TEXT
   );
   CREATE TABLE IF NOT EXISTS baselines (
     branch      TEXT PRIMARY KEY,
@@ -65,6 +67,10 @@ const CREATE_WORKTREE_TABLES = `
  */
 export function ensureWorktreeTables(db: DatabaseSync): void {
   db.exec(CREATE_WORKTREE_TABLES);
+  const columns = db.prepare('PRAGMA table_info(worktrees)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'provisioned')) {
+    db.exec('ALTER TABLE worktrees ADD COLUMN provisioned TEXT');
+  }
 }
 
 // `handles()` guarantees only these two types reach `apply()`; modelling them as a StoredEvent
@@ -94,6 +100,10 @@ type WorktreeEvent =
 
 /** Map a raw `worktrees` row (loosely typed at the SQLite boundary) to a {@link WorktreeRecord}. */
 export function rowToWorktreeRecord(row: Record<string, unknown>): WorktreeRecord {
+  const provisioned =
+    row.provisioned != null
+      ? worktreeProvisionedEntrySchema.array().parse(JSON.parse(String(row.provisioned)))
+      : undefined;
   return {
     branch: String(row.branch),
     baseRef: String(row.base_ref),
@@ -102,6 +112,7 @@ export function rowToWorktreeRecord(row: Record<string, unknown>): WorktreeRecor
     parent: String(row.parent),
     createdTs: Number(row.created_ts),
     removed: Number(row.removed) === 1,
+    ...(provisioned !== undefined ? { provisioned } : {}),
   };
 }
 
@@ -127,7 +138,8 @@ export function rowToFinishRecord(row: Record<string, unknown>): FinishRecord {
   };
 }
 
-const WORKTREE_COLUMNS = 'branch, base_ref, base_sha, path, parent, created_ts, removed';
+const WORKTREE_COLUMNS =
+  'branch, base_ref, base_sha, path, parent, created_ts, removed, provisioned';
 const BASELINE_COLUMNS = 'branch, base_ref, base_sha, tests, captured_ts';
 const FINISH_COLUMNS = 'branch, base_sha, commit_sha, tests, recorded_ts';
 
@@ -193,11 +205,20 @@ export class WorktreeProjector implements Projector {
     const worktreeEvent = event as WorktreeEvent;
     switch (worktreeEvent.type) {
       case EVENT_WORKTREE_CREATED: {
-        const { branch, baseRef, baseSha, path, parent } = worktreeEvent.payload;
+        const { branch, baseRef, baseSha, path, parent, provisioned } = worktreeEvent.payload;
         db.prepare(
-          `INSERT INTO worktrees (branch, base_ref, base_sha, path, parent, created_ts, removed)
-           VALUES (?, ?, ?, ?, ?, ?, 0)`,
-        ).run(branch, baseRef, baseSha, path, parent, event.ts);
+          `INSERT INTO worktrees
+             (branch, base_ref, base_sha, path, parent, created_ts, removed, provisioned)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
+        ).run(
+          branch,
+          baseRef,
+          baseSha,
+          path,
+          parent,
+          event.ts,
+          provisioned != null ? JSON.stringify(provisioned) : null,
+        );
         return;
       }
       case EVENT_BASELINE_CAPTURED: {

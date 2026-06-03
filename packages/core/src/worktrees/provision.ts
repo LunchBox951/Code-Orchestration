@@ -238,7 +238,7 @@ export interface ProvisionContext {
  * no-op/recording one (or pass a manifest directly to {@link provisionWorktree}) so they need not
  * touch config or place real files.
  */
-export type Provisioner = (ctx: ProvisionContext) => void;
+export type Provisioner = (ctx: ProvisionContext) => ProvisionResult | void;
 
 /**
  * The production {@link Provisioner}: resolve the project's effective manifest (defaults ⊕ config
@@ -246,5 +246,5 @@ export type Provisioner = (ctx: ProvisionContext) => void;
  */
 export const defaultProvisioner: Provisioner = ({ repoCwd, worktreePath, projectId }) => {
   const manifest = resolveProvisioningManifest(projectId);
-  provisionWorktree({ repoCwd, worktreePath, manifest });
+  return provisionWorktree({ repoCwd, worktreePath, manifest });
 };

@@ -55,14 +55,22 @@ export function finishScope(branch: string): string {
 /**
  * The `worktree.created` payload (camelCase, like `DeliveredMail`): the created sandbox's facts.
  * `baseRef` is the resolved base (auto-detected or overridden), `baseSha` its commit at branch-off,
- * `path` the program-data sandbox dir (NEVER in the repo), `parent` the spawner the sandbox is for.
+ * `path` the program-data sandbox dir (NEVER in the repo), `parent` the spawner the sandbox is for,
+ * and `provisioned` is the gitignored working-essential set actually placed into this sandbox.
  */
+export const worktreeProvisionedEntrySchema = z.object({
+  path: z.string().min(1),
+  mechanism: z.enum(['symlink', 'copy', 'isolated-copy']),
+});
+export type WorktreeProvisionedEntry = z.infer<typeof worktreeProvisionedEntrySchema>;
+
 export const worktreeCreatedSchema = z.object({
   branch: z.string().min(1),
   baseRef: z.string().min(1),
   baseSha: z.string().min(1),
   path: z.string().min(1),
   parent: z.string().min(1),
+  provisioned: z.array(worktreeProvisionedEntrySchema).optional(),
 });
 export type WorktreeCreated = z.infer<typeof worktreeCreatedSchema>;
 
@@ -195,6 +203,8 @@ export interface WorktreeRecord {
   readonly parent: string;
   readonly createdTs: number;
   readonly removed: boolean;
+  /** The working essentials actually placed at sling time; absent for older records. */
+  readonly provisioned?: readonly WorktreeProvisionedEntry[];
 }
 
 /** A persisted, read-back baseline — the read-model shape `getBaseline` returns. */

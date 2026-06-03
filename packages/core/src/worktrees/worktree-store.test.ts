@@ -8,16 +8,16 @@ import { applyEvent, rebuildAll } from '../replay/projector.js';
 import { decode } from '../replay/decode.js';
 import { assertRepoPristine } from '../config/pristine.js';
 import {
+  makeWorktreeCreatedEvent,
   makeBaselineCapturedEvent,
   makeFinishRecordedEvent,
-  makeWorktreeCreatedEvent,
   worktreeSchemas,
   worktreeUpcasters,
   type BaselineCaptured,
   type FinishRecorded,
   type WorktreeCreated,
 } from './events.js';
-import { WorktreeProjector } from './worktree-projector.js';
+import { rowToWorktreeRecord, WorktreeProjector } from './worktree-projector.js';
 import { openWorktreeStore } from './worktree-store.js';
 
 // ── Program-data dir per test (mirrors mail.test.ts / config-store.test.ts) ──────────────────────
@@ -96,6 +96,24 @@ describe('WorktreeStore — record + read worktrees and baselines', () => {
       expect(store.getWorktree('co/absent')).toBeUndefined();
     } finally {
       store.close();
+    }
+  });
+
+  it('records provisioned paths and reads them back after reopening the store', () => {
+    const provisioned = [{ path: '.npmrc', mechanism: 'copy' as const }];
+    const first = openWorktreeStore('p-provisioned');
+    try {
+      const saved = first.recordWorktree(rec({ provisioned }));
+      expect(saved.provisioned).toEqual(provisioned);
+    } finally {
+      first.close();
+    }
+
+    const second = openWorktreeStore('p-provisioned');
+    try {
+      expect(second.getWorktree('co/feature')?.provisioned).toEqual(provisioned);
+    } finally {
+      second.close();
     }
   });
 
@@ -194,7 +212,7 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
     return JSON.stringify({
       worktrees: db
         .prepare(
-          'SELECT branch, base_ref, base_sha, path, parent, created_ts, removed FROM worktrees ORDER BY branch',
+          'SELECT branch, base_ref, base_sha, path, parent, created_ts, removed, provisioned FROM worktrees ORDER BY branch',
         )
         .all(),
       baselines: db
@@ -218,7 +236,12 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
       makeBaselineCapturedEvent('p-replay', base({ branch: 'co/a' })),
       makeWorktreeCreatedEvent(
         'p-replay',
-        rec({ branch: 'co/b', path: '/d/b', parent: 'coord-1' }),
+        rec({
+          branch: 'co/b',
+          path: '/d/b',
+          parent: 'coord-1',
+          provisioned: [{ path: '.npmrc', mechanism: 'copy' }],
+        }),
       ),
       makeBaselineCapturedEvent('p-replay', base({ branch: 'co/b', tests: [] })),
       makeFinishRecordedEvent('p-replay', finish({ branch: 'co/a', commitSha: 'a'.repeat(40) })),
@@ -242,6 +265,7 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
       // Guard against a vacuous pass (two empty snapshots are also "equal").
       expect(live).toContain('"branch":"co/a"');
       expect(live).toContain('"parent":"coord-1"');
+      expect(live).toContain('.npmrc');
       expect(live).toContain('suite/a');
       // The finishes read-model is in the snapshot and reflects the LATEST finish per branch.
       expect(live).toContain('"commit_sha":"' + 'd'.repeat(40) + '"'); // co/a's re-finish won
@@ -250,6 +274,32 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe('Worktree read-model validation — provisioned paths', () => {
+  it('rejects malformed provisioned entries at event and read-model boundaries', () => {
+    expect(() =>
+      makeWorktreeCreatedEvent(
+        'p-invalid-provisioned',
+        rec({
+          provisioned: [{ path: '.npmrc', mechanism: 'teleport' }] as never,
+        }),
+      ),
+    ).toThrow(/invalid/i);
+
+    expect(() =>
+      rowToWorktreeRecord({
+        branch: 'co/feature',
+        base_ref: 'main',
+        base_sha: 'a'.repeat(40),
+        path: '/data/worktrees/co/feature',
+        parent: 'lead-7',
+        created_ts: 1,
+        removed: 0,
+        provisioned: JSON.stringify([{ path: '.npmrc', mechanism: 'teleport' }]),
+      }),
+    ).toThrow(/invalid/i);
   });
 });
 

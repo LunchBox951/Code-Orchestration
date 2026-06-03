@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, rmSync, type Dirent } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, type Dirent } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { decode } from '../replay/decode.js';
 import { applyEvent, type Projector } from '../replay/projector.js';
@@ -93,14 +93,88 @@ export function defaultWorktreeRealityProbe(projectId: string): WorktreeRealityP
  */
 export interface SandboxFs {
   exists(path: string): boolean;
+  isSymlink(path: string): boolean;
+  realpath(path: string): string;
   removeDir(path: string): void;
 }
 
 /** The production {@link SandboxFs}: real `node:fs`; `removeDir` is recursive + force (idempotent). */
 export const defaultSandboxFs: SandboxFs = {
   exists: (path) => existsSync(path),
+  isSymlink: (path) => {
+    try {
+      return lstatSync(path).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  },
+  realpath: (path) => realpathSync(path),
   removeDir: (path) => rmSync(path, { recursive: true, force: true }),
 };
+
+/** Prove a recorded sandbox path is bounded under this project's program-data worktrees root. */
+function strictlyWithin(root: string, path: string): boolean {
+  return path !== root && path.startsWith(root + '/');
+}
+
+function assertNoSymlinkedBoundary(
+  root: string,
+  sandbox: string,
+  branch: string,
+  fs: SandboxFs,
+): void {
+  if (fs.isSymlink(root)) {
+    throw new Error(
+      `openWorktreeStore.removeWorktree: worktrees root '${root}' for branch '${branch}' is a ` +
+        'symlink. Refusing teardown.',
+    );
+  }
+
+  let cursor = root;
+  for (const segment of relative(root, sandbox).split('/')) {
+    if (segment.length === 0) continue;
+    cursor = join(cursor, segment);
+    if (fs.isSymlink(cursor)) {
+      throw new Error(
+        `openWorktreeStore.removeWorktree: recorded path boundary '${cursor}' for branch ` +
+          `'${branch}' is a symlink. Refusing teardown.`,
+      );
+    }
+  }
+}
+
+function assertRecordedSandboxPathBounded(
+  projectId: string,
+  path: string,
+  branch: string,
+  fs: SandboxFs,
+): string {
+  const root = resolve(join(projectDataDir(projectId), 'worktrees'));
+  const sandbox = resolve(path);
+  if (path !== sandbox) {
+    throw new Error(
+      `openWorktreeStore.removeWorktree: recorded path '${path}' for branch '${branch}' is not ` +
+        `the normalized absolute sandbox path '${sandbox}'. Refusing teardown.`,
+    );
+  }
+  if (!strictlyWithin(root, sandbox)) {
+    throw new Error(
+      `openWorktreeStore.removeWorktree: recorded path '${path}' for branch '${branch}' is ` +
+        `outside this project's worktrees root '${root}'. Refusing teardown.`,
+    );
+  }
+  assertNoSymlinkedBoundary(root, sandbox, branch, fs);
+  if (!fs.exists(sandbox)) return sandbox;
+  const realRoot = fs.realpath(root);
+  const realSandbox = fs.realpath(sandbox);
+  if (!strictlyWithin(realRoot, realSandbox)) {
+    throw new Error(
+      `openWorktreeStore.removeWorktree: recorded path '${path}' for branch '${branch}' resolves ` +
+        `outside this project's worktrees root '${realRoot}'. Refusing teardown.`,
+    );
+  }
+  return sandbox;
+}
 
 /** Injectable seams for {@link WorktreeStore.removeWorktree}; the git/fs sides default to production. */
 export interface RemoveWorktreeDeps {
@@ -327,17 +401,18 @@ export function openWorktreeStore(projectId: string): WorktreeStore {
           `openWorktreeStore.removeWorktree: no worktree recorded for branch '${branch}'.`,
         );
       }
+      const sandboxPath = assertRecordedSandboxPathBounded(projectId, record.path, branch, fs);
 
       // 2) Tear down the git worktree + sandbox dir. Tolerate an already-absent dir idempotently
       //    (cleanup, not an error); fail loud on a genuine git failure. git's `.git/worktrees/…`
       //    admin write + the dir deletion are teardown's job — NOT an orchestration write, so they
       //    are deliberately NOT wrapped over the repo (Principle 12 holds via the record path below).
-      if (fs.exists(record.path)) {
-        gitExec(deps.repoCwd, ['worktree', 'remove', record.path]);
+      if (fs.exists(sandboxPath)) {
+        gitExec(deps.repoCwd, ['worktree', 'remove', sandboxPath]);
       } else {
         gitExec(deps.repoCwd, ['worktree', 'prune']);
       }
-      fs.removeDir(record.path); // ensure the program-data sandbox dir is gone (no-op if already absent).
+      fs.removeDir(sandboxPath); // ensure the program-data sandbox dir is gone (no-op if absent).
 
       // 3) Record the teardown: append `worktree.removed` + fold (marks the record `removed`). This
       //    is the only orchestration write, and it lands ONLY in program-data (Principle 12).

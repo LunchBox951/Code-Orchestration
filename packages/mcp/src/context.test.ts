@@ -190,7 +190,12 @@ describe('defaultContextFactory — production context resolution', () => {
     worktrees.removeWorktree('co/mcp-removed', {
       repoCwd: repo,
       gitExec: () => {},
-      fs: { exists: () => true, removeDir: () => {} },
+      fs: {
+        exists: () => true,
+        isSymlink: () => false,
+        realpath: (path) => path,
+        removeDir: () => {},
+      },
     });
     worktrees.close();
 
