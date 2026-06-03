@@ -182,6 +182,7 @@ export type {
   WorktreeCreated,
   BaselineCaptured,
   FinishRecorded,
+  WorktreeRemoved,
   TestOutcome,
   WorktreeRecord,
   Baseline,
@@ -192,6 +193,7 @@ export {
   EVENT_WORKTREE_CREATED,
   EVENT_BASELINE_CAPTURED,
   EVENT_FINISH_RECORDED,
+  EVENT_WORKTREE_REMOVED,
   worktreeScope,
   baselineScope,
   finishScope,
@@ -200,10 +202,28 @@ export {
   makeWorktreeCreatedEvent,
   makeBaselineCapturedEvent,
   makeFinishRecordedEvent,
+  makeWorktreeRemovedEvent,
 } from './worktrees/events.js';
 export { WorktreeProjector } from './worktrees/worktree-projector.js';
-export type { WorktreeStore } from './worktrees/worktree-store.js';
-export { openWorktreeStore } from './worktrees/worktree-store.js';
+// L3-E worktree teardown + orphan-detection PRIMITIVES (AC-L3-5): `removeWorktree` tears a sandbox
+// down (git worktree remove + dir deletion, then a `worktree.removed` record in program-data) and
+// `detectOrphans` SURFACES recorded-vs-reality mismatches against an injectable reality probe. Both
+// are reusable primitives — the operator cleanup VERBS (cleanup/unstick/nuke + "prove merged before
+// removing") are L8 (a typed `CleanupGateStub`), and the merge-time teardown trigger is L5.
+export type {
+  WorktreeStore,
+  Orphan,
+  WorktreeRealityProbe,
+  SandboxFs,
+  RemoveWorktreeDeps,
+} from './worktrees/worktree-store.js';
+export {
+  openWorktreeStore,
+  defaultWorktreeRealityProbe,
+  defaultSandboxFs,
+} from './worktrees/worktree-store.js';
+export type { CleanupGate } from './worktrees/cleanup-gate.js';
+export { CleanupGateStub } from './worktrees/cleanup-gate.js';
 // L3-C message contract (AC-L3-3): pure, provider-deterministic renderers — commit / merge / PR text
 // from a structured intent in a fixed house style, with NO provider/voice parameter (Principle 3).
 // Only the commit renderer has a consumer in L3 (`co_finish`); the merge/PR renderers ship as core
