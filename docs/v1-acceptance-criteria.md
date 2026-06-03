@@ -62,7 +62,10 @@ These are the top-level conditions that, all met, *are* v1.
 - `SF-5` ⏸ A **desktop app** is the operator's one-stop surface — observe and steer all agents in
   one place (Principle 15). *Couples to the parked shell decision (Electron vs Tauri).*
 - `SF-6` ◐ Artifacts (mail, commit messages) are **rendered per audience** — structured under the
-  hood, clean human view on top; provider voice stays out of artifacts (Principle 3). L1 ships the renderer-registry seam + a generic default renderer. Remaining: per-type human renderers are the app (L9).
+  hood, clean human view on top; provider voice stays out of artifacts (Principle 3). L1 ships the
+  renderer-registry seam + a generic default renderer; L3 ships provider-deterministic commit /
+  merge / PR message renderers and `co_finish` consumes the commit renderer. Remaining: per-type
+  human mail renderers are the app (L9), and merge/PR renderers get their gated consumers in L5.
 
 ## C. Roles, dispatch & escalation (P8, P11, P13)
 
@@ -89,14 +92,20 @@ These are the top-level conditions that, all met, *are* v1.
 
 ## E. Worktrees & pristine repo (P6, P12)
 
-- `WT-1` ☐ Every worker gets an **isolated worktree/branch**; parallel work never collides; merges
-  are explicit and locked (Principle 6, `WORKTREES`).
-- `WT-2` ☐ Gitignored essentials are copied/pointer-linked into worktrees so non-trivial repos and
-  environments don't break (Principle 6).
+- `WT-1` ◐ Every worker gets an **isolated worktree/branch**; parallel work never collides; merges
+  are explicit and locked (Principle 6, `WORKTREES`). L3 ships `co_sling`: branch/base capture,
+  injective program-data sandbox paths, and recorded worktree+baseline facts. Remaining: worker
+  spawn into those sandboxes (L7) and locked/gated integration (L5).
+- `WT-2` ◐ Gitignored essentials are copied/pointer-linked into worktrees so non-trivial repos and
+  environments don't break (Principle 6). L3 ships the provisioning manifest with symlink / copy /
+  isolated-copy mechanisms, config overrides, and runnable fixture coverage. Remaining: richer
+  project-specific install/offline workflows where a workspace needs more than the manifest.
 - `WT-3` ◐ **Nothing orchestration-related touches the target repo** except `CLAUDE.md`/`AGENTS.md`;
   all state/specs/plans/config live in program-data, keyed per project (Principle 12). L0 landed the per-project program-data store + the pristine-repo guard (`assertRepoPristine`, run on every L0 op); L1 mail is program-data-keyed with no repo writes. Remaining: full no-`.co/`-dependency self-host = SH-2/SH-3.
-- `WT-4` ☐ Repository-relationship modes work — **Owner / Contributor / Offline** — auto-detected
-  with override; the review gate applies in all three (`WORKTREES`).
+- `WT-4` ◐ Repository-relationship modes work — **Owner / Contributor / Offline** — auto-detected
+  with override; the review gate applies in all three (`WORKTREES`). L3 ships read-only
+  auto-detection, `repo.mode` override, Offline push/PR-disabled capabilities, and minimal host
+  convention probes. Remaining: the L5 gated publish verbs applying the gate in all three modes.
 
 ## F. State, recovery & observability (P9, P14)
 
@@ -110,12 +119,19 @@ These are the top-level conditions that, all met, *are* v1.
 ## G. The agent surface — MCP & self-describing (P4, P5)
 
 - `MC-1` ◐ Agents act through the **MCP server alone, no fallback**; a stubbed tool fails loudly
-  (completeness gate) (Principle 4). L1 ships an L1-local no-stub assertion (every declared mail type has schema + live flow + completion predicate; tested green-on-real-enum / red-on-stub). Remaining: the full build-time MCP completeness gate is L2.
-- `MC-2` ☐ **One core, thin adapters** — the CLI, MCP server, and app import the same core; logic
-  cannot drift (Principle 4, `MCP-TOOLS`).
-- `MC-3` ☐ The protocol is **self-describing**: `orient` teaches workflow, schemas teach syntax,
-  native project memory teaches the repo, the locator maps unfamiliar code (Principle 5). The proof
-  is `SH-4` (works on a stranger repo).
+  (completeness gate) (Principle 4). L1 ships an L1-local no-stub assertion; L2 ships the canonical
+  core tool registry, MCP mount, and full tool completeness gate over the real registry (green on
+  real tools, red on synthetic stubs). Remaining: L7 session hosting must wire live agents to this
+  MCP surface with no alternate command path.
+- `MC-2` ◐ **One core, thin adapters** — the CLI, MCP server, and app import the same core; logic
+  cannot drift (Principle 4, `MCP-TOOLS`). L2 ships the public core tool surface plus a mechanical
+  lint guard that prevents `cli`/`mcp` from deep-importing core internals or opening stores directly.
+  Remaining: carry the same rule through the app once it leaves its parked stub.
+- `MC-3` ◐ The protocol is **self-describing**: `orient` teaches workflow, schemas teach syntax,
+  native project memory teaches the repo, the locator maps unfamiliar code (Principle 5). L2 ships
+  workflow-only, role-scoped `co_orient` and schema-publication through MCP, with drift tests
+  proving orient does not restate tool field lists. Remaining: locator behavior and the `SH-4`
+  stranger-repo proof.
 
 ## H. Providers (P13)
 

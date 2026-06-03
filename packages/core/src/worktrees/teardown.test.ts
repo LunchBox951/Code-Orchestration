@@ -175,6 +175,23 @@ describe('removeWorktree — teardown removes the git worktree + sandbox dir', (
     expect(store.getWorktree('co/twice')?.removed).toBe(true);
   });
 
+  it('prunes stale git worktree metadata when the sandbox dir was manually deleted', () => {
+    const repo = makeMainRepo();
+    const store = openStore('p-prune-stale');
+    const slung = slingWorktree(
+      store,
+      { parent: 'lead-7', branch: 'co/stale', repoCwd: repo, projectId: 'p-prune-stale' },
+      { probe: knownProbe },
+    );
+    rmSync(slung.worktreePath, { recursive: true, force: true });
+
+    store.removeWorktree('co/stale', { repoCwd: repo });
+
+    expect(store.getWorktree('co/stale')?.removed).toBe(true);
+    const listed = execFileSync('git', ['worktree', 'list'], { cwd: repo, encoding: 'utf8' });
+    expect(listed).not.toContain(slung.worktreePath);
+  });
+
   it('fails loud when tearing down an unrecorded branch (Principle 9)', () => {
     const store = openStore('p-unrecorded');
     expect(() => store.removeWorktree('co/never', { repoCwd: '/irrelevant' })).toThrow(
@@ -182,16 +199,20 @@ describe('removeWorktree — teardown removes the git worktree + sandbox dir', (
     );
   });
 
-  it('skips git when the dir is already absent, but still records the teardown (headless)', () => {
+  it('prunes git when the dir is already absent, then records the teardown (headless)', () => {
     const store = openStore('p-headless');
     store.recordWorktree(rec({ branch: 'co/h', path: '/data/worktrees/co/h' }));
-    const fs = recordingFs(false); // dir reported absent → git must NOT be called
-    let gitCalls = 0;
-    const deps: RemoveWorktreeDeps = { repoCwd: '/irrelevant', gitExec: () => void gitCalls++, fs };
+    const fs = recordingFs(false); // dir reported absent → prune stale git worktree metadata
+    const calls: Array<{ cwd: string; args: readonly string[] }> = [];
+    const deps: RemoveWorktreeDeps = {
+      repoCwd: '/main/repo',
+      gitExec: (cwd, args) => calls.push({ cwd, args }),
+      fs,
+    };
 
     const updated = store.removeWorktree('co/h', deps);
 
-    expect(gitCalls).toBe(0); // absent dir ⇒ no `git worktree remove`
+    expect(calls).toEqual([{ cwd: '/main/repo', args: ['worktree', 'prune'] }]);
     expect(fs.removed).toEqual(['/data/worktrees/co/h']); // dir-removal still attempted (idempotent)
     expect(updated.removed).toBe(true);
   });

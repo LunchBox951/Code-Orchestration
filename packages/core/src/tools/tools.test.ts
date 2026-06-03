@@ -222,6 +222,35 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
     }
   });
 
+  it('unread_only keeps acknowledged unresolved actionable mail visible', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const req = (await invokeTool(reg, ctx('alice'), 'co_mail_send', {
+        to: 'bob',
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'answer needed',
+        body: '?',
+      })) as WireMail;
+      await invokeTool(reg, ctx('bob'), 'co_mail_ack', { ids: [req.seq] });
+
+      const needsAttention = (await invokeTool(reg, ctx('bob'), 'co_mail_inbox', {
+        unread_only: true,
+      })) as ListOut;
+      expect(needsAttention.mail.map((m) => m.seq)).toEqual([req.seq]);
+      expect(needsAttention.mail[0]?.read).toBe(true);
+      expect(needsAttention.mail[0]?.resolved).toBe(false);
+    } finally {
+      close();
+    }
+  });
+
+  it('co_mail_send schema rejects unknown mail types before the bus layer', () => {
+    const send = buildCoreRegistry().get('co_mail_send');
+    expect(() =>
+      send?.inputSchema.parse({ to: 'bob', type: 'wizard_mail', subject: 's', body: 'b' }),
+    ).toThrow();
+  });
+
   it('a reply to a mail NOT in the caller inbox fails loud', async () => {
     const { reg, ctx, close } = setup();
     try {

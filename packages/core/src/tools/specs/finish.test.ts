@@ -177,4 +177,50 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
       }),
     ).rejects.toThrow(/input failed schema validation/i);
   });
+
+  it('rejects commit-intent header injection (single-line conventional fields only)', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContext('impl-1', repo, repo);
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_finish', {
+        intent: { type: 'feat\nfix', summary: 'x' },
+        tests: [],
+      }),
+    ).rejects.toThrow(/input failed schema validation/i);
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_finish', {
+        intent: { type: 'feat', scope: 'core)', summary: 'x' },
+        tests: [],
+      }),
+    ).rejects.toThrow(/input failed schema validation/i);
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_finish', {
+        intent: { type: 'feat', summary: 'fix(core): smuggle a prebuilt header' },
+        tests: [],
+      }),
+    ).rejects.toThrow(/input failed schema validation/i);
+  });
+
+  it('refuses to finish when a provisioned default path is visible to git', async () => {
+    const repo = makeMainRepo();
+    writeFileSync(join(repo, '.env'), 'SECRET=1\n'); // present but NOT ignored
+    const reg = buildCoreRegistry();
+
+    const slingCtx = makeContext('lead-7', repo, repo);
+    const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/leaky-env',
+    })) as { worktree_path: string };
+
+    const finishCtx = makeContext('impl-1', repo, sling.worktree_path);
+    await expect(
+      invokeTool(reg, finishCtx, 'co_finish', {
+        intent: { type: 'feat', scope: 'core', summary: 'finish safely' },
+        tests: [],
+      }),
+    ).rejects.toThrow(/provisioned|visible to git|\\.env/i);
+  });
 });

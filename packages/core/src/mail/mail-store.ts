@@ -110,6 +110,9 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
       if (!current) {
         throw new Error(`mail reply: no persisted mail seq=${toMail.seq}`);
       }
+      if (current.retracted) {
+        throw new Error(`mail reply: mail seq=${toMail.seq} was retracted`);
+      }
       // Thread id = the root message's seq (freeze #7): inherit the answered mail's
       // thread if it has one, else the answered mail IS the root. `causationId`
       // always points at the message being answered, so a response matches its

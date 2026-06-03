@@ -159,12 +159,15 @@ export function slingWorktree(
   //     repo, writes only the sandbox, so it is runnable before the baseline is captured.
   provisioner({ repoCwd, worktreePath, projectId });
 
-  // 3) Record the sandbox.
-  store.recordWorktree({ branch, baseRef, baseSha, path: worktreePath, parent });
-
-  // 4) Capture + record the branch-off baseline (L5 compares; we only capture + store).
+  // 3) Capture the branch-off baseline (L5 compares; we only capture + store).
   const tests = probe({ repoCwd, worktreePath, branch, baseRef, baseSha });
-  store.recordBaseline({ branch, baseRef, baseSha, tests: [...tests] });
+
+  // 4) Record the sandbox + baseline atomically so replay never preserves a live worktree
+  //    without its required branch-off baseline.
+  store.recordWorktreeAndBaseline(
+    { branch, baseRef, baseSha, path: worktreePath, parent },
+    { branch, baseRef, baseSha, tests: [...tests] },
+  );
 
   return { branch, baseRef, baseSha, worktreePath, baselineCaptured: true };
 }

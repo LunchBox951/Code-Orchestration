@@ -2,6 +2,8 @@ import type { MailStore } from '../mail/mail-store.js';
 import { MAIL_WORKER_DONE } from '../mail/events.js';
 import type { TestOutcome } from './events.js';
 import { renderCommitMessage, type CommitIntent } from './messages.js';
+import type { GitReader } from './detect-base.js';
+import { DEFAULT_PROVISION_MANIFEST } from './provision.js';
 import { defaultGitExec, type GitExec } from './sling.js';
 import type { WorktreeStore } from './worktree-store.js';
 
@@ -51,6 +53,11 @@ export interface FinishDeps {
   readonly readInfo: (cwd: string) => WorktreeGitFacts;
   /** Mutating git seam (stage + commit). Defaults to {@link defaultGitExec}. */
   readonly gitExec?: GitExec;
+  /**
+   * Read-only git seam used by the production tool to prove default-provisioned paths are ignored
+   * before `git add -A`. Omitted in headless core tests whose cwd is not a real repo.
+   */
+  readonly gitReader?: GitReader;
 }
 
 /** The structured facts {@link finishWorktree} returns (what `co_finish` reports back). */
@@ -71,6 +78,31 @@ function summarizeTests(tests: readonly TestOutcome[]): string {
   return `${passed}/${total} passed${suffix}`;
 }
 
+/** Refuse to stage default-provisioned essentials if the repo would track them. */
+function assertProvisionedDefaultsHidden(repoCwd: string, gitReader: GitReader | undefined): void {
+  if (gitReader == null) return;
+  for (const { path } of DEFAULT_PROVISION_MANIFEST) {
+    const status = gitReader(repoCwd, [
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '--',
+      path,
+    ]);
+    if (status == null) {
+      throw new Error(
+        `co_finish: could not verify whether provisioned path '${path}' is ignored before staging.`,
+      );
+    }
+    if (status.trim().length > 0) {
+      throw new Error(
+        `co_finish: provisioned path '${path}' is visible to git; add it to .gitignore or remove ` +
+          'it before finishing so gitignored essentials are not committed.',
+      );
+    }
+  }
+}
+
 /**
  * Run the finish. Steps:
  *   1. Resolve the worktree's current branch; load its sling record (loud-fail if absent — finishing
@@ -84,12 +116,12 @@ function summarizeTests(tests: readonly TestOutcome[]): string {
  */
 export function finishWorktree(
   store: WorktreeStore,
-  mail: MailStore,
+  _mail: MailStore,
   params: FinishParams,
   deps: FinishDeps,
 ): FinishResult {
   const gitExec = deps.gitExec ?? defaultGitExec;
-  const { readInfo } = deps;
+  const { readInfo, gitReader } = deps;
   const { agent, repoCwd, intent, tests, notes } = params;
 
   // 1) Resolve the branch + load the sling record (the recorded parent + baseSha).
@@ -101,6 +133,12 @@ export function finishWorktree(
         '(sling records the sandbox; co_finish reads the parent it recorded). Sling first.',
     );
   }
+  if (record.removed) {
+    throw new Error(
+      `co_finish: worktree record for branch '${branch}' has been removed — cannot finish a ` +
+        'torn-down sandbox.',
+    );
+  }
 
   // 2) Render the house-style commit message (provider-deterministic — no voice parameter).
   const commitMessage = renderCommitMessage(intent);
@@ -108,13 +146,12 @@ export function finishWorktree(
   // 3) Stage + commit the worktree's own content with the rendered message + DCO sign-off, then read
   //    back the commit sha. Committing the worktree's content is the worker's sandbox, not an
   //    orchestration write (Principle 12) — the finish RECORD + worker_done go to program-data / the bus.
+  assertProvisionedDefaultsHidden(repoCwd, gitReader);
   gitExec(repoCwd, ['add', '-A']);
   gitExec(repoCwd, ['commit', '-s', '-m', commitMessage]);
   const { headSha: commitSha } = readInfo(repoCwd);
 
   // 4) Record the finish (commit + tests) — the durable L5 input. Do NOT compute the regression diff.
-  store.recordFinish({ branch, baseSha: record.baseSha, commitSha, tests: [...tests] });
-
   // 5) Emit worker_done (informational) to the recorded parent — bus-visible, non-sticky.
   const subject = `worker_done: ${branch}`;
   const body =
@@ -122,13 +159,16 @@ export function finishWorktree(
     `Commit: ${commitMessage.split('\n', 1)[0]}\n` +
     `Tests: ${summarizeTests(tests)}.` +
     (notes != null && notes.trim().length > 0 ? `\n\nNotes: ${notes.trim()}` : '');
-  const delivered = mail.send({
-    type: MAIL_WORKER_DONE,
-    to: record.parent,
-    from: agent,
-    subject,
-    body,
-  });
+  const delivered = store.recordFinishAndWorkerDone(
+    { branch, baseSha: record.baseSha, commitSha, tests: [...tests] },
+    {
+      type: MAIL_WORKER_DONE,
+      to: record.parent,
+      from: agent,
+      subject,
+      body,
+    },
+  ).workerDone;
 
   return {
     branch,

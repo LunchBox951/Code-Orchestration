@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { DeliveredMail, MailType } from '../../mail/events.js';
+import { MAIL_TYPES, type DeliveredMail } from '../../mail/events.js';
 import type { ToolSpec } from '../registry.js';
 import { deliveredMailSchema, toWireMail, type WireMail } from './wire.js';
 
@@ -17,7 +17,7 @@ const mailSendInput = z.object({
         '(the recipient is derived from the answered mail).',
     ),
   type: z
-    .string()
+    .enum(MAIL_TYPES)
     .describe('The mail type (a registered MailType, e.g. clarify_request, escalation, chat).'),
   subject: z.string().describe('Short subject line for the message.'),
   body: z.string().describe('The message body (free-form prose).'),
@@ -60,7 +60,7 @@ export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
         );
       }
       delivered = ctx.mail.reply(answered, {
-        type: input.type as MailType,
+        type: input.type,
         subject: input.subject,
         body: input.body,
         from: ctx.agent,
@@ -76,7 +76,7 @@ export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
       // L1 validateEnvelope enforces type∈enum, non-empty addressing, and approval→@operator;
       // its throw surfaces as the tool error.
       delivered = ctx.mail.send({
-        type: input.type as MailType,
+        type: input.type,
         to: input.to,
         from: ctx.agent,
         subject: input.subject,
@@ -94,7 +94,9 @@ const mailInboxInput = z.object({
   unread_only: z
     .boolean()
     .optional()
-    .describe('When true, return only mail still needing attention (unread and unresolved).'),
+    .describe(
+      'When true, return only mail still needing attention: unresolved actionables or unread informational mail.',
+    ),
 });
 type MailInboxInput = z.infer<typeof mailInboxInput>;
 
@@ -114,7 +116,7 @@ export const mailInboxTool: ToolSpec<MailInboxInput, MailListOutput> = {
   handler: (ctx, input): MailListOutput => {
     let mail = ctx.mail.inbox(ctx.agent);
     if (input.unread_only) {
-      mail = mail.filter((m) => !m.read && !m.resolved);
+      mail = mail.filter((m) => (m.kind === 'actionable' ? !m.resolved : !m.read));
     }
     return { mail: mail.map(toWireMail) };
   },

@@ -146,10 +146,12 @@ export class InProcessDelivery implements Delivery {
         !currentHeld ||
         currentHeld.recipient !== held.recipient ||
         currentHeld.kind !== 'actionable' ||
-        currentHeld.resolved
+        currentHeld.resolved ||
+        currentHeld.retracted
       ) {
         throw new Error(
           `InProcessDelivery.forward: no unresolved actionable mail seq=${held.seq} ` +
+            `(or it was retracted) ` +
             `for holder '${held.recipient}'`,
         );
       }
@@ -192,10 +194,12 @@ export class InProcessDelivery implements Delivery {
         currentHeld.recipient !== held.recipient ||
         currentHeld.type !== MAIL_ESCALATION ||
         currentHeld.kind !== 'actionable' ||
-        currentHeld.resolved
+        currentHeld.resolved ||
+        currentHeld.retracted
       ) {
         throw new Error(
           `InProcessDelivery.resolve: no unresolved escalation seq=${held.seq} ` +
+            `(or it was retracted) ` +
             `for holder '${held.recipient}'`,
         );
       }

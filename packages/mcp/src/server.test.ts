@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   buildCoreRegistry,
+  MAIL_TYPES,
   openMailStore,
   openRegistry,
   toolsForRole,
@@ -114,6 +115,19 @@ describe('createCoMcpServer — tool-list parity', () => {
       ?.properties;
     expect(props).toBeDefined();
     expect(props).toHaveProperty('subject');
+  });
+
+  it('publishes co_mail_send.type as the exact MAIL_TYPES enum over MCP', async () => {
+    const ctx = makeTestContext('impl-mail-enum');
+    const client = await connect({ contextFactory: () => ctx });
+
+    const { tools } = await client.listTools();
+    const send = tools.find((t) => t.name === 'co_mail_send');
+    const props = (send?.inputSchema as { properties?: Record<string, unknown> } | undefined)
+      ?.properties;
+    const typeSchema = props?.type as { enum?: unknown[] } | undefined;
+
+    expect(typeSchema?.enum).toEqual([...MAIL_TYPES]);
   });
 });
 
