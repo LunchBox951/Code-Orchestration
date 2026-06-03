@@ -184,6 +184,7 @@ export type {
   FinishRecorded,
   WorktreeRemoved,
   TestOutcome,
+  WorktreeProvisionedEntry,
   WorktreeRecord,
   Baseline,
   FinishRecord,

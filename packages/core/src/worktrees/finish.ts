@@ -1,10 +1,12 @@
 import type { MailStore } from '../mail/mail-store.js';
 import { MAIL_WORKER_DONE } from '../mail/events.js';
+import { resolve } from 'node:path';
 import type { TestOutcome } from './events.js';
 import { renderCommitMessage, type CommitIntent } from './messages.js';
 import type { GitReader } from './detect-base.js';
-import { DEFAULT_PROVISION_MANIFEST } from './provision.js';
+import { DEFAULT_PROVISION_MANIFEST, type ProvisioningManifest } from './provision.js';
 import { defaultGitExec, type GitExec } from './sling.js';
+import type { WorktreeRecord } from './events.js';
 import type { WorktreeStore } from './worktree-store.js';
 
 /**
@@ -28,6 +30,8 @@ export interface WorktreeGitFacts {
   /** The full HEAD commit sha (`rev-parse HEAD`) — read back AFTER the commit. */
   readonly headSha: string;
 }
+
+type ProvisioningManifestSource = ProvisioningManifest | (() => ProvisioningManifest);
 
 /** Inputs to {@link finishWorktree}. */
 export interface FinishParams {
@@ -54,10 +58,16 @@ export interface FinishDeps {
   /** Mutating git seam (stage + commit). Defaults to {@link defaultGitExec}. */
   readonly gitExec?: GitExec;
   /**
-   * Read-only git seam used by the production tool to prove default-provisioned paths are ignored
-   * before `git add -A`. Omitted in headless core tests whose cwd is not a real repo.
+   * Read-only git seam used by the production tool to prove provisioned paths are ignored before
+   * `git add -A`. Omitted in headless core tests whose cwd is not a real repo.
    */
   readonly gitReader?: GitReader;
+  /**
+   * The effective provisioning manifest used for old worktree records that predate recording the
+   * placed paths. The production tool passes a lazy config reader so new records can use their
+   * sling-time `provisioned` facts without being affected by later config drift.
+   */
+  readonly provisioningManifest?: ProvisioningManifestSource;
 }
 
 /** The structured facts {@link finishWorktree} returns (what `co_finish` reports back). */
@@ -78,10 +88,14 @@ function summarizeTests(tests: readonly TestOutcome[]): string {
   return `${passed}/${total} passed${suffix}`;
 }
 
-/** Refuse to stage default-provisioned essentials if the repo would track them. */
-function assertProvisionedDefaultsHidden(repoCwd: string, gitReader: GitReader | undefined): void {
+/** Refuse to stage provisioned essentials if the repo would track them. */
+function assertProvisionedPathsHidden(
+  repoCwd: string,
+  gitReader: GitReader | undefined,
+  manifest: ProvisioningManifest,
+): void {
   if (gitReader == null) return;
-  for (const { path } of DEFAULT_PROVISION_MANIFEST) {
+  for (const { path } of manifest) {
     const status = gitReader(repoCwd, [
       'status',
       '--porcelain',
@@ -100,6 +114,24 @@ function assertProvisionedDefaultsHidden(repoCwd: string, gitReader: GitReader |
           'it before finishing so gitignored essentials are not committed.',
       );
     }
+  }
+}
+
+function resolveProvisioningManifestSource(
+  source: ProvisioningManifestSource,
+): ProvisioningManifest {
+  return typeof source === 'function' ? source() : source;
+}
+
+/** Prove the cwd being finished is exactly the recorded slung sandbox for this branch. */
+function assertCwdMatchesRecordedSandbox(repoCwd: string, record: WorktreeRecord): void {
+  const cwd = resolve(repoCwd);
+  const recorded = resolve(record.path);
+  if (cwd !== recorded) {
+    throw new Error(
+      `co_finish: cwd '${repoCwd}' does not match the recorded sandbox path '${record.path}' ` +
+        `for branch '${record.branch}'. Refusing to stage or commit the wrong checkout.`,
+    );
   }
 }
 
@@ -139,6 +171,7 @@ export function finishWorktree(
         'torn-down sandbox.',
     );
   }
+  assertCwdMatchesRecordedSandbox(repoCwd, record);
 
   // 2) Render the house-style commit message (provider-deterministic — no voice parameter).
   const commitMessage = renderCommitMessage(intent);
@@ -146,7 +179,12 @@ export function finishWorktree(
   // 3) Stage + commit the worktree's own content with the rendered message + DCO sign-off, then read
   //    back the commit sha. Committing the worktree's content is the worker's sandbox, not an
   //    orchestration write (Principle 12) — the finish RECORD + worker_done go to program-data / the bus.
-  assertProvisionedDefaultsHidden(repoCwd, gitReader);
+  assertProvisionedPathsHidden(
+    repoCwd,
+    gitReader,
+    record.provisioned ??
+      resolveProvisioningManifestSource(deps.provisioningManifest ?? DEFAULT_PROVISION_MANIFEST),
+  );
   gitExec(repoCwd, ['add', '-A']);
   gitExec(repoCwd, ['commit', '-s', '-m', commitMessage]);
   const { headSha: commitSha } = readInfo(repoCwd);

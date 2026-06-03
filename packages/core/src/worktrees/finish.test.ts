@@ -8,6 +8,7 @@ import { openWorktreeStore, type WorktreeStore } from './worktree-store.js';
 import { finishWorktree, type WorktreeGitFacts } from './finish.js';
 import { renderCommitMessage, type CommitIntent } from './messages.js';
 import { FinishReviewGateStub } from './review-trigger.js';
+import { worktreePathFor } from './sling.js';
 
 // AC-L3-6 — the co_finish CORE, headless (no real git): finishWorktree commits via the injectable
 // GitExec seam, records the finish (commit + tests — the L5 input), and emits worker_done
@@ -65,11 +66,12 @@ const intent: CommitIntent = {
 describe('finishWorktree — commit + record finish + emit worker_done', () => {
   it('commits (signed) with the rendered message, records the finish, and pings the parent', () => {
     const { store, mail } = openStores('p-finish-ok');
+    const repoCwd = '/wt/co/feature';
     store.recordWorktree({
       branch: 'co/feature',
       baseRef: 'main',
       baseSha: 'b'.repeat(40),
-      path: '/data/worktrees/co/feature',
+      path: repoCwd,
       parent: 'lead-7',
     });
     const git = recordingGitExec();
@@ -83,7 +85,7 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
       mail,
       {
         agent: 'impl-1',
-        repoCwd: '/wt/co/feature',
+        repoCwd,
         intent,
         tests: [
           { name: 'suite/a', passed: true },
@@ -130,17 +132,18 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
 
   it('worker_done is informational (non-sticky) — it raises no outstanding action on the parent', () => {
     const { store, mail } = openStores('p-finish-informational');
+    const repoCwd = '/wt';
     store.recordWorktree({
       branch: 'co/x',
       baseRef: 'main',
       baseSha: 'b'.repeat(40),
-      path: '/d/x',
+      path: repoCwd,
       parent: 'lead-7',
     });
     finishWorktree(
       store,
       mail,
-      { agent: 'impl-1', repoCwd: '/wt', intent, tests: [{ name: 't', passed: true }] },
+      { agent: 'impl-1', repoCwd, intent, tests: [{ name: 't', passed: true }] },
       { readInfo: () => ({ branch: 'co/x', headSha: 'a'.repeat(40) }), gitExec: () => {} },
     );
     // Informational, so it does NOT count as an outstanding action (freeze #3).
@@ -180,13 +183,18 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
       branch: 'co/removed',
       baseRef: 'main',
       baseSha: 'b'.repeat(40),
-      path: '/data/worktrees/co/removed',
+      path: worktreePathFor('p-finish-removed', 'co/removed'),
       parent: 'lead-7',
     });
     store.removeWorktree('co/removed', {
       repoCwd: '/main/repo',
       gitExec: () => {},
-      fs: { exists: () => false, removeDir: () => {} },
+      fs: {
+        exists: () => false,
+        isSymlink: () => false,
+        realpath: (path) => path,
+        removeDir: () => {},
+      },
     });
     const git = recordingGitExec();
 
@@ -202,13 +210,13 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
     expect(store.getFinish('co/removed')).toBeUndefined();
   });
 
-  it('does not leave a finish record if worker_done cannot be persisted', () => {
-    const { store, mail } = openStores('p-finish-atomic');
+  it('does NOT commit when cwd does not match the recorded sandbox path for the branch', () => {
+    const { store, mail } = openStores('p-finish-wrong-cwd');
     store.recordWorktree({
-      branch: 'co/atomic',
+      branch: 'co/feature',
       baseRef: 'main',
       baseSha: 'b'.repeat(40),
-      path: '/data/worktrees/co/atomic',
+      path: '/recorded/sandbox',
       parent: 'lead-7',
     });
     const git = recordingGitExec();
@@ -217,7 +225,33 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
       finishWorktree(
         store,
         mail,
-        { agent: '', repoCwd: '/wt', intent, tests: [] },
+        { agent: 'impl-1', repoCwd: '/other/sandbox', intent, tests: [] },
+        { readInfo: () => ({ branch: 'co/feature', headSha: 'a'.repeat(40) }), gitExec: git.exec },
+      ),
+    ).toThrow(/does not match the recorded sandbox path/i);
+
+    expect(git.calls).toHaveLength(0);
+    expect(store.getFinish('co/feature')).toBeUndefined();
+    expect(mail.inbox('lead-7')).toEqual([]);
+  });
+
+  it('does not leave a finish record if worker_done cannot be persisted', () => {
+    const { store, mail } = openStores('p-finish-atomic');
+    const repoCwd = '/wt';
+    store.recordWorktree({
+      branch: 'co/atomic',
+      baseRef: 'main',
+      baseSha: 'b'.repeat(40),
+      path: repoCwd,
+      parent: 'lead-7',
+    });
+    const git = recordingGitExec();
+
+    expect(() =>
+      finishWorktree(
+        store,
+        mail,
+        { agent: '', repoCwd, intent, tests: [] },
         { readInfo: () => ({ branch: 'co/atomic', headSha: 'a'.repeat(40) }), gitExec: git.exec },
       ),
     ).toThrow(/from|sender|actor/i);

@@ -1,12 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { openMailStore, type MailStore } from '../../mail/mail-store.js';
 import { MAIL_WORKER_DONE } from '../../mail/events.js';
+import { openConfigStore, type ConfigStore } from '../../config/config-store.js';
 import { openRegistry, type ProjectRegistry } from '../../registry/registry.js';
 import { openWorktreeStore, type WorktreeStore } from '../../worktrees/worktree-store.js';
+import { WORKTREE_PROVISION_CONFIG_KEY } from '../../worktrees/provision.js';
+import { worktreePathFor } from '../../worktrees/sling.js';
 import { buildCoreRegistry } from '../core-registry.js';
 import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
@@ -20,6 +23,7 @@ let tmpDirs: string[] = [];
 let mails: MailStore[] = [];
 let worktreeStores: WorktreeStore[] = [];
 let regs: ProjectRegistry[] = [];
+let configs: ConfigStore[] = [];
 
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
@@ -27,6 +31,7 @@ beforeEach(() => {
   mails = [];
   worktreeStores = [];
   regs = [];
+  configs = [];
   const data = mkdtempSync(join(tmpdir(), 'co-finish-tool-data-'));
   tmpDirs.push(data);
   process.env.CO_DATA_DIR = data;
@@ -36,12 +41,14 @@ afterEach(() => {
   for (const m of mails) m.close();
   for (const w of worktreeStores) w.close();
   for (const r of regs) r.close();
+  for (const c of configs) c.close();
   process.env = ORIGINAL_ENV;
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
   tmpDirs = [];
   mails = [];
   worktreeStores = [];
   regs = [];
+  configs = [];
 });
 
 function git(cwd: string, ...args: string[]): string {
@@ -80,6 +87,12 @@ function makeContext(
   const worktrees = openWorktreeStore(projectId);
   worktreeStores.push(worktrees);
   return { agent, projectId, cwd, mail, registry, worktrees };
+}
+
+function openConfig(): ConfigStore {
+  const cfg = openConfigStore();
+  configs.push(cfg);
+  return cfg;
 }
 
 type FinishOut = {
@@ -222,5 +235,119 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
         tests: [],
       }),
     ).rejects.toThrow(/provisioned|visible to git|\\.env/i);
+  });
+
+  it('refuses to finish when an override-added provisioned path is visible to git', async () => {
+    const repo = makeMainRepo();
+    writeFileSync(join(repo, '.npmrc'), '//registry.example/:_authToken=secret\n');
+    const reg = buildCoreRegistry();
+
+    const slingCtx = makeContext('lead-7', repo, repo);
+    openConfig().setProjectOverride(slingCtx.projectId, WORKTREE_PROVISION_CONFIG_KEY, {
+      '.npmrc': 'copy',
+    });
+    const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/leaky-override',
+    })) as { worktree_path: string };
+
+    const finishCtx = makeContext('impl-1', repo, sling.worktree_path);
+    await expect(
+      invokeTool(reg, finishCtx, 'co_finish', {
+        intent: { type: 'feat', scope: 'core', summary: 'finish safely' },
+        tests: [],
+      }),
+    ).rejects.toThrow(/provisioned|visible to git|\\.npmrc/i);
+  });
+
+  it('uses the sling-recorded provisioned paths even if worktree.provision changes before finish', async () => {
+    const repo = makeMainRepo();
+    writeFileSync(join(repo, '.npmrc'), '//registry.example/:_authToken=secret\n');
+    const reg = buildCoreRegistry();
+
+    const slingCtx = makeContext('lead-7', repo, repo);
+    const cfg = openConfig();
+    cfg.setProjectOverride(slingCtx.projectId, WORKTREE_PROVISION_CONFIG_KEY, {
+      '.npmrc': 'copy',
+    });
+    const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/leaky-override-drift',
+    })) as { worktree_path: string };
+    expect(slingCtx.worktrees?.getWorktree('co/leaky-override-drift')?.provisioned).toEqual([
+      { path: '.npmrc', mechanism: 'copy' },
+    ]);
+
+    cfg.setProjectOverride(slingCtx.projectId, WORKTREE_PROVISION_CONFIG_KEY, {
+      '.npmrc': 'none',
+    });
+
+    const finishCtx = makeContext('impl-1', repo, sling.worktree_path);
+    await expect(
+      invokeTool(reg, finishCtx, 'co_finish', {
+        intent: { type: 'feat', scope: 'core', summary: 'finish safely' },
+        tests: [],
+      }),
+    ).rejects.toThrow(/provisioned|visible to git|\\.npmrc/i);
+  });
+
+  it('does not read malformed current worktree.provision when the sling record has provisioned paths', async () => {
+    const repo = makeMainRepo();
+    writeFileSync(join(repo, '.npmrc'), '//registry.example/:_authToken=secret\n');
+    const reg = buildCoreRegistry();
+
+    const slingCtx = makeContext('lead-7', repo, repo);
+    const cfg = openConfig();
+    cfg.setProjectOverride(slingCtx.projectId, WORKTREE_PROVISION_CONFIG_KEY, {
+      '.npmrc': 'copy',
+    });
+    const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/leaky-override-malformed-drift',
+    })) as { worktree_path: string };
+
+    cfg.setProjectOverride(slingCtx.projectId, WORKTREE_PROVISION_CONFIG_KEY, {
+      '.npmrc': 'teleport',
+    });
+
+    const finishCtx = makeContext('impl-1', repo, sling.worktree_path);
+    await expect(
+      invokeTool(reg, finishCtx, 'co_finish', {
+        intent: { type: 'feat', scope: 'core', summary: 'finish safely' },
+        tests: [],
+      }),
+    ).rejects.toThrow(/provisioned|visible to git|\\.npmrc/i);
+  });
+
+  it('lazily uses the current provision manifest for old records without sling-recorded paths', async () => {
+    const repo = makeMainRepo();
+    const reg = buildCoreRegistry();
+    const setupCtx = makeContext('lead-7', repo, repo);
+    const branch = 'co/old-record-override';
+    const sandbox = worktreePathFor(setupCtx.projectId, branch);
+    mkdirSync(dirname(sandbox), { recursive: true });
+    execFileSync('git', ['worktree', 'add', '-b', branch, sandbox, 'main'], {
+      cwd: repo,
+      stdio: 'ignore',
+    });
+    setupCtx.worktrees?.recordWorktree({
+      branch,
+      baseRef: 'main',
+      baseSha: git(repo, 'rev-parse', 'main'),
+      path: sandbox,
+      parent: 'lead-7',
+    });
+    openConfig().setProjectOverride(setupCtx.projectId, WORKTREE_PROVISION_CONFIG_KEY, {
+      '.npmrc': 'copy',
+    });
+    writeFileSync(join(sandbox, '.npmrc'), '//registry.example/:_authToken=secret\n');
+
+    const finishCtx = makeContext('impl-1', repo, sandbox);
+    await expect(
+      invokeTool(reg, finishCtx, 'co_finish', {
+        intent: { type: 'feat', scope: 'core', summary: 'finish safely' },
+        tests: [],
+      }),
+    ).rejects.toThrow(/provisioned|visible to git|\\.npmrc/i);
   });
 });

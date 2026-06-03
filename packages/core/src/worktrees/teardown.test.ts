@@ -1,13 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { openProjectStore } from '../store/sqlite-store.js';
 import { applyEvent, rebuildAll } from '../replay/projector.js';
 import { decode } from '../replay/decode.js';
 import { assertRepoPristine } from '../config/pristine.js';
+import { projectDataDir } from '../store/paths.js';
 import {
   makeBaselineCapturedEvent,
   makeWorktreeCreatedEvent,
@@ -116,6 +117,8 @@ function recordingFs(
   return {
     removed,
     exists: () => initialExists,
+    isSymlink: () => false,
+    realpath: (path) => path,
     removeDir: (path: string) => {
       removed.push(path);
     },
@@ -201,7 +204,8 @@ describe('removeWorktree — teardown removes the git worktree + sandbox dir', (
 
   it('prunes git when the dir is already absent, then records the teardown (headless)', () => {
     const store = openStore('p-headless');
-    store.recordWorktree(rec({ branch: 'co/h', path: '/data/worktrees/co/h' }));
+    const path = worktreePathFor('p-headless', 'co/h');
+    store.recordWorktree(rec({ branch: 'co/h', path }));
     const fs = recordingFs(false); // dir reported absent → prune stale git worktree metadata
     const calls: Array<{ cwd: string; args: readonly string[] }> = [];
     const deps: RemoveWorktreeDeps = {
@@ -213,13 +217,14 @@ describe('removeWorktree — teardown removes the git worktree + sandbox dir', (
     const updated = store.removeWorktree('co/h', deps);
 
     expect(calls).toEqual([{ cwd: '/main/repo', args: ['worktree', 'prune'] }]);
-    expect(fs.removed).toEqual(['/data/worktrees/co/h']); // dir-removal still attempted (idempotent)
+    expect(fs.removed).toEqual([path]); // dir-removal still attempted (idempotent)
     expect(updated.removed).toBe(true);
   });
 
   it('invokes `git worktree remove` with the sandbox path when the dir exists (headless)', () => {
     const store = openStore('p-headless-exists');
-    store.recordWorktree(rec({ branch: 'co/e', path: '/data/worktrees/co/e' }));
+    const path = worktreePathFor('p-headless-exists', 'co/e');
+    store.recordWorktree(rec({ branch: 'co/e', path }));
     const fs = recordingFs(true);
     const calls: Array<{ cwd: string; args: readonly string[] }> = [];
     store.removeWorktree('co/e', {
@@ -227,10 +232,182 @@ describe('removeWorktree — teardown removes the git worktree + sandbox dir', (
       gitExec: (cwd, args) => calls.push({ cwd, args }),
       fs,
     });
-    expect(calls).toEqual([
-      { cwd: '/main/repo', args: ['worktree', 'remove', '/data/worktrees/co/e'] },
-    ]);
+    expect(calls).toEqual([{ cwd: '/main/repo', args: ['worktree', 'remove', path] }]);
     expect(store.getWorktree('co/e')?.removed).toBe(true);
+  });
+
+  it('refuses to remove a recorded path outside this project’s program-data worktrees root', () => {
+    const store = openStore('p-bounded-remove');
+    store.recordWorktree(rec({ branch: 'co/unsafe', path: '/tmp/not-co-owned' }));
+    const fs = recordingFs(true);
+    const calls: Array<{ cwd: string; args: readonly string[] }> = [];
+
+    expect(() =>
+      store.removeWorktree('co/unsafe', {
+        repoCwd: '/main/repo',
+        gitExec: (cwd, args) => calls.push({ cwd, args }),
+        fs,
+      }),
+    ).toThrow(/outside this project's worktrees root/i);
+
+    expect(calls).toEqual([]);
+    expect(fs.removed).toEqual([]);
+    expect(store.getWorktree('co/unsafe')?.removed).toBe(false);
+  });
+
+  it('refuses a symlinked recorded path under the root that targets an outside worktree', () => {
+    const repo = makeMainRepo();
+    const projectId = 'p-symlink-remove';
+    const store = openStore(projectId);
+    const outsideParent = mkdtempSync(join(tmpdir(), 'co-teardown-outside-'));
+    tmpDirs.push(outsideParent);
+    const outsideWorktree = join(outsideParent, 'outside-worktree');
+    execFileSync('git', ['worktree', 'add', '-b', 'co/outside', outsideWorktree, 'main'], {
+      cwd: repo,
+      stdio: 'ignore',
+    });
+    const symlinkPath = worktreePathFor(projectId, 'co/symlink');
+    mkdirSync(dirname(symlinkPath), { recursive: true });
+    symlinkSync(outsideWorktree, symlinkPath, 'dir');
+    store.recordWorktree(rec({ branch: 'co/symlink', path: symlinkPath }));
+
+    expect(() => store.removeWorktree('co/symlink', { repoCwd: repo })).toThrow(
+      /symlink|outside this project's worktrees root/i,
+    );
+
+    expect(existsSync(outsideWorktree)).toBe(true);
+    const listed = execFileSync('git', ['worktree', 'list'], { cwd: repo, encoding: 'utf8' });
+    expect(listed).toContain(outsideWorktree);
+    expect(store.getWorktree('co/symlink')?.removed).toBe(false);
+
+    execFileSync('git', ['worktree', 'remove', outsideWorktree], { cwd: repo, stdio: 'ignore' });
+  });
+
+  it('refuses when the project worktrees root itself is a symlink to outside program-data', () => {
+    const repo = makeMainRepo();
+    const projectId = 'p-root-symlink-remove';
+    const store = openStore(projectId);
+    const outsideRoot = mkdtempSync(join(tmpdir(), 'co-teardown-root-outside-'));
+    tmpDirs.push(outsideRoot);
+    const root = join(projectDataDir(projectId), 'worktrees');
+    symlinkSync(outsideRoot, root, 'dir');
+    const outsideWorktree = join(outsideRoot, 'co', 'root-symlink');
+    mkdirSync(dirname(outsideWorktree), { recursive: true });
+    execFileSync('git', ['worktree', 'add', '-b', 'co/root-outside', outsideWorktree, 'main'], {
+      cwd: repo,
+      stdio: 'ignore',
+    });
+    const recordedPath = worktreePathFor(projectId, 'co/root-symlink');
+    store.recordWorktree(rec({ branch: 'co/root-symlink', path: recordedPath }));
+
+    expect(() => store.removeWorktree('co/root-symlink', { repoCwd: repo })).toThrow(
+      /worktrees root|symlink|outside this project's worktrees root/i,
+    );
+
+    expect(existsSync(outsideWorktree)).toBe(true);
+    const listed = execFileSync('git', ['worktree', 'list'], { cwd: repo, encoding: 'utf8' });
+    expect(listed).toContain(outsideWorktree);
+    expect(store.getWorktree('co/root-symlink')?.removed).toBe(false);
+
+    execFileSync('git', ['worktree', 'remove', outsideWorktree], { cwd: repo, stdio: 'ignore' });
+  });
+
+  it('refuses a non-normalized raw path before filesystem teardown can follow a skipped symlink', () => {
+    const repo = makeMainRepo();
+    const projectId = 'p-raw-path-remove';
+    const store = openStore(projectId);
+    const outsideParent = mkdtempSync(join(tmpdir(), 'co-teardown-raw-outside-'));
+    tmpDirs.push(outsideParent);
+    const linkTarget = join(outsideParent, 'link-target');
+    mkdirSync(linkTarget, { recursive: true });
+    const outsideWorktree = join(outsideParent, 'victim');
+    execFileSync('git', ['worktree', 'add', '-b', 'co/raw-outside', outsideWorktree, 'main'], {
+      cwd: repo,
+      stdio: 'ignore',
+    });
+    const linkPath = join(projectDataDir(projectId), 'worktrees', 'co', 'link');
+    mkdirSync(dirname(linkPath), { recursive: true });
+    symlinkSync(linkTarget, linkPath, 'dir');
+    const rawPath = `${linkPath}/../victim`;
+    store.recordWorktree(rec({ branch: 'co/raw-path', path: rawPath }));
+    const calls: Array<{ cwd: string; args: readonly string[] }> = [];
+
+    expect(() =>
+      store.removeWorktree('co/raw-path', {
+        repoCwd: repo,
+        gitExec: (cwd, args) => calls.push({ cwd, args }),
+      }),
+    ).toThrow(/normalized|outside this project's worktrees root|symlink/i);
+
+    expect(calls).toEqual([]);
+    expect(existsSync(outsideWorktree)).toBe(true);
+    const listed = execFileSync('git', ['worktree', 'list'], { cwd: repo, encoding: 'utf8' });
+    expect(listed).toContain(outsideWorktree);
+    expect(store.getWorktree('co/raw-path')?.removed).toBe(false);
+
+    execFileSync('git', ['worktree', 'remove', outsideWorktree], { cwd: repo, stdio: 'ignore' });
+  });
+
+  it('refuses a broken symlinked worktrees root before pruning or recording teardown', () => {
+    const projectId = 'p-broken-root-remove';
+    const store = openStore(projectId);
+    const root = join(projectDataDir(projectId), 'worktrees');
+    symlinkSync(join(tmpdir(), 'co-missing-worktrees-root'), root, 'dir');
+    const path = worktreePathFor(projectId, 'co/broken-root');
+    store.recordWorktree(rec({ branch: 'co/broken-root', path }));
+    const calls: Array<{ cwd: string; args: readonly string[] }> = [];
+
+    expect(() =>
+      store.removeWorktree('co/broken-root', {
+        repoCwd: '/main/repo',
+        gitExec: (cwd, args) => calls.push({ cwd, args }),
+      }),
+    ).toThrow(/worktrees root|symlink/i);
+
+    expect(calls).toEqual([]);
+    expect(store.getWorktree('co/broken-root')?.removed).toBe(false);
+  });
+
+  it('refuses a broken symlinked path boundary before pruning or recording teardown', () => {
+    const projectId = 'p-broken-boundary-remove';
+    const store = openStore(projectId);
+    const root = join(projectDataDir(projectId), 'worktrees');
+    const linkPath = join(root, 'co', 'broken-link');
+    mkdirSync(dirname(linkPath), { recursive: true });
+    symlinkSync(join(tmpdir(), 'co-missing-worktree-boundary'), linkPath, 'dir');
+    const path = join(linkPath, 'sandbox');
+    store.recordWorktree(rec({ branch: 'co/broken-boundary', path }));
+    const calls: Array<{ cwd: string; args: readonly string[] }> = [];
+
+    expect(() =>
+      store.removeWorktree('co/broken-boundary', {
+        repoCwd: '/main/repo',
+        gitExec: (cwd, args) => calls.push({ cwd, args }),
+      }),
+    ).toThrow(/boundary|symlink/i);
+
+    expect(calls).toEqual([]);
+    expect(store.getWorktree('co/broken-boundary')?.removed).toBe(false);
+  });
+
+  it('refuses a broken symlinked recorded leaf before pruning or recording teardown', () => {
+    const projectId = 'p-broken-leaf-remove';
+    const store = openStore(projectId);
+    const path = worktreePathFor(projectId, 'co/broken-leaf');
+    mkdirSync(dirname(path), { recursive: true });
+    symlinkSync(join(tmpdir(), 'co-missing-worktree-leaf'), path, 'dir');
+    store.recordWorktree(rec({ branch: 'co/broken-leaf', path }));
+    const calls: Array<{ cwd: string; args: readonly string[] }> = [];
+
+    expect(() =>
+      store.removeWorktree('co/broken-leaf', {
+        repoCwd: '/main/repo',
+        gitExec: (cwd, args) => calls.push({ cwd, args }),
+      }),
+    ).toThrow(/boundary|symlink/i);
+
+    expect(calls).toEqual([]);
+    expect(store.getWorktree('co/broken-leaf')?.removed).toBe(false);
   });
 });
 
@@ -251,16 +428,23 @@ describe('detectOrphans — surface recorded-vs-reality mismatches (surface only
 
   it('a torn-down (removed) record is intentionally gone — never surfaced as a dangling-record', () => {
     const store = openStore('p-orphan-removed');
-    store.recordWorktree(rec({ branch: 'co/a', path: '/sandboxes/a' }));
-    store.recordWorktree(rec({ branch: 'co/b', path: '/sandboxes/b' }));
+    const aPath = worktreePathFor('p-orphan-removed', 'co/a');
+    const bPath = worktreePathFor('p-orphan-removed', 'co/b');
+    store.recordWorktree(rec({ branch: 'co/a', path: aPath }));
+    store.recordWorktree(rec({ branch: 'co/b', path: bPath }));
     // Tear down b headlessly (dir already absent → idempotent).
     store.removeWorktree('co/b', {
       repoCwd: '/irrelevant',
       gitExec: () => {},
-      fs: { exists: () => false, removeDir: () => {} },
+      fs: {
+        exists: () => false,
+        isSymlink: () => false,
+        realpath: (path) => path,
+        removeDir: () => {},
+      },
     });
     // Reality has only a; b is removed (not dangling), so there are NO orphans.
-    expect(store.detectOrphans(() => ['/sandboxes/a'])).toEqual([]);
+    expect(store.detectOrphans(() => [aPath])).toEqual([]);
   });
 
   it('no mismatch ⇒ no orphans (records and reality agree)', () => {
@@ -302,7 +486,7 @@ describe('AC-L0-2 (L3-E) — the post-removal worktree read-model rebuilds byte-
     return JSON.stringify({
       worktrees: db
         .prepare(
-          'SELECT branch, base_ref, base_sha, path, parent, created_ts, removed FROM worktrees ORDER BY branch',
+          'SELECT branch, base_ref, base_sha, path, parent, created_ts, removed, provisioned FROM worktrees ORDER BY branch',
         )
         .all(),
       baselines: db
@@ -363,7 +547,7 @@ describe('AC-L3-5 — assertRepoPristine holds around the teardown record path +
   it('removeWorktree writes nothing into the target repo (the git/fs sides faked, record path real)', () => {
     const repo = makeFakeRepo();
     const store = openStore('p-pristine');
-    store.recordWorktree(rec({ branch: 'co/p', path: '/data/worktrees/co/p' }));
+    store.recordWorktree(rec({ branch: 'co/p', path: worktreePathFor('p-pristine', 'co/p') }));
     // Fake the git + fs sides so the ONLY real write is the `worktree.removed` append — which must
     // land in program-data, leaving the repo byte-identical (the git worktree-remove that would
     // legitimately touch `.git/worktrees/…` is faked away here so the record path is isolated).
@@ -371,7 +555,12 @@ describe('AC-L3-5 — assertRepoPristine holds around the teardown record path +
       store.removeWorktree('co/p', {
         repoCwd: repo,
         gitExec: () => {},
-        fs: { exists: () => true, removeDir: () => {} },
+        fs: {
+          exists: () => true,
+          isSymlink: () => false,
+          realpath: (path) => path,
+          removeDir: () => {},
+        },
       }),
     );
     expect(result.removed).toBe(true); // the write really happened; pristine proved it skipped the repo

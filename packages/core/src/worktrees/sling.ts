@@ -157,7 +157,7 @@ export function slingWorktree(
 
   // 2b) Provision the gitignored working essentials into the sandbox (phase B): reads from the main
   //     repo, writes only the sandbox, so it is runnable before the baseline is captured.
-  provisioner({ repoCwd, worktreePath, projectId });
+  const provisionResult = provisioner({ repoCwd, worktreePath, projectId });
 
   // 3) Capture the branch-off baseline (L5 compares; we only capture + store).
   const tests = probe({ repoCwd, worktreePath, branch, baseRef, baseSha });
@@ -165,7 +165,14 @@ export function slingWorktree(
   // 4) Record the sandbox + baseline atomically so replay never preserves a live worktree
   //    without its required branch-off baseline.
   store.recordWorktreeAndBaseline(
-    { branch, baseRef, baseSha, path: worktreePath, parent },
+    {
+      branch,
+      baseRef,
+      baseSha,
+      path: worktreePath,
+      parent,
+      provisioned: [...(provisionResult?.provisioned ?? [])],
+    },
     { branch, baseRef, baseSha, tests: [...tests] },
   );
 
