@@ -37,6 +37,7 @@ export { assertRepoPristine } from './config/pristine.js';
 // outward-action gate (operator-terminal for outward actions). W5 adds the first-class
 // `escalation` type + the resolve-or-forward never-drop protocol. Seed types: chat,
 // operator_message, clarify_request, clarify_response, approval, approval_response, escalation.
+// L3-C activates the deferred informational `worker_done` (a worker's finish ping; see worktrees/finish.ts).
 export type {
   MailEnvelope,
   DeliveredMail,
@@ -61,6 +62,7 @@ export {
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
   MAIL_ESCALATION,
+  MAIL_WORKER_DONE,
   MAIL_TYPES,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
@@ -179,24 +181,48 @@ export { BASE_ROLES, roleToolsets, toolsForRole } from './tools/index.js';
 export type {
   WorktreeCreated,
   BaselineCaptured,
+  FinishRecorded,
   TestOutcome,
   WorktreeRecord,
   Baseline,
+  FinishRecord,
 } from './worktrees/events.js';
 export {
   WORKTREE_EVENT_V,
   EVENT_WORKTREE_CREATED,
   EVENT_BASELINE_CAPTURED,
+  EVENT_FINISH_RECORDED,
   worktreeScope,
   baselineScope,
+  finishScope,
   worktreeSchemas,
   worktreeUpcasters,
   makeWorktreeCreatedEvent,
   makeBaselineCapturedEvent,
+  makeFinishRecordedEvent,
 } from './worktrees/events.js';
 export { WorktreeProjector } from './worktrees/worktree-projector.js';
 export type { WorktreeStore } from './worktrees/worktree-store.js';
 export { openWorktreeStore } from './worktrees/worktree-store.js';
+// L3-C message contract (AC-L3-3): pure, provider-deterministic renderers — commit / merge / PR text
+// from a structured intent in a fixed house style, with NO provider/voice parameter (Principle 3).
+// Only the commit renderer has a consumer in L3 (`co_finish`); the merge/PR renderers ship as core
+// functions with no MCP verb wired to them (the gated `co_merge`/`co_push`/`co_pr_merge` are L5).
+export type { CommitIntent, MergeIntent, PrIntent } from './worktrees/messages.js';
+export { renderCommitMessage, renderMergeMessage, renderPrMessage } from './worktrees/messages.js';
+// L3-C `co_finish` core (AC-L3-6): commit (house-style, DCO-signed) + record the finish (the L5
+// comparison input) + emit `worker_done` (informational). It does NOT review or merge (L5).
+export type {
+  WorktreeGitFacts,
+  FinishParams,
+  FinishDeps,
+  FinishResult,
+} from './worktrees/finish.js';
+export { finishWorktree } from './worktrees/finish.js';
+// L3-C L5 plug-point: the typed review-trigger + merge gate `co_finish` stops short of. A loud-failing
+// stub (never a silent no-op) marking the seam — the gated verbs are simply NOT BUILT in L3 (P7).
+export type { FinishReviewGate } from './worktrees/review-trigger.js';
+export { FinishReviewGateStub } from './worktrees/review-trigger.js';
 export type { GitReader } from './worktrees/detect-base.js';
 export { detectBaseRef, defaultGitReader, resolveRefSha } from './worktrees/detect-base.js';
 export type {
