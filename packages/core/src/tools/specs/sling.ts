@@ -49,8 +49,8 @@ type SlingOutput = z.infer<typeof slingOutput>;
  * → master → local HEAD) unless overridden — NEVER a hard-coded `master`. The sandbox lives under
  * program-data, never in the repo (Principle 12).
  *
- * In Stage 3 this ONLY creates + records the sandbox: it does NOT spawn an agent into it (L7) and
- * does NOT provision deps/env (phase B) — the slung worktree may be bare.
+ * In Stage 3 this creates + records the sandbox and provisions it (phase B — `defaultProvisioner`
+ * runs right after `git worktree add`): it does NOT spawn an agent into it (L7).
  *
  * The handler loud-fails if the mount did not inject a worktree store (Principle 9 — a tool never
  * opens its own store; the mount resolves and injects it), mirroring the L1 optional-seam pattern.
