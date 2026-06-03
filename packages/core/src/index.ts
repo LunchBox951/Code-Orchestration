@@ -37,6 +37,7 @@ export { assertRepoPristine } from './config/pristine.js';
 // outward-action gate (operator-terminal for outward actions). W5 adds the first-class
 // `escalation` type + the resolve-or-forward never-drop protocol. Seed types: chat,
 // operator_message, clarify_request, clarify_response, approval, approval_response, escalation.
+// L3-C activates the deferred informational `worker_done` (a worker's finish ping; see worktrees/finish.ts).
 export type {
   MailEnvelope,
   DeliveredMail,
@@ -61,6 +62,7 @@ export {
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
   MAIL_ESCALATION,
+  MAIL_WORKER_DONE,
   MAIL_TYPES,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
@@ -142,7 +144,7 @@ export { checkMailTypeCompleteness } from './mail/completeness.js';
 export type { ToolContext, ToolHandler, ToolSpec, ToolRegistry } from './tools/index.js';
 export { createToolRegistry, notImplemented } from './tools/index.js';
 
-// L2-B1 first real tools: the canonical registry of the nine `co_*` tools (`buildCoreRegistry`),
+// L2-B1 first real tools: the canonical registry of the `co_*` tools (`buildCoreRegistry`),
 // the transport-agnostic headless invocation harness (`invokeTool`) the MCP adapter (B2) mounts,
 // and the read-only git worktree helper behind `co_worktree_info` (`readWorktreeInfo`). All logic
 // is in core; B2 is a thin transport over this.
@@ -163,12 +165,150 @@ export { checkToolCompleteness } from './tools/index.js';
 // role-scoped body behind `co_orient` (AC-L2-4): a pure function of (role, topic) that never
 // restates a tool's field list (schemas are the syntax source, Principle 5) and never bakes a
 // target repo's project memory (the prompting split, Principle 11). `Role`/`BASE_ROLES`/
-// `roleToolsets`/`toolsForRole` are the per-role tool-scoping mechanism + seed over the current nine
+// `roleToolsets`/`toolsForRole` are the per-role tool-scoping mechanism + seed over the current
 // tools (AC-L2-5): the relevance-scoping hook the MCP mount feeds into `createCoMcpServer({ tools })`,
 // fail-loud on a phantom tool. Authoritative rosters and sub-roles are an L6 concern.
 export { orientContent } from './tools/index.js';
 export type { Role } from './tools/index.js';
 export { BASE_ROLES, roleToolsets, toolsForRole } from './tools/index.js';
+
+// L3-A worktrees & git: `co_sling`'s core — base auto-detect (origin/HEAD → main → master → local
+// HEAD, NEVER a hard-coded master), the program-data worktree store (worktree records + branch-off
+// baselines, never in the repo — Principle 12), and the create+record+capture orchestration
+// `co_sling` dispatches to. The mount opens `openWorktreeStore(projectId)` and injects it onto the
+// (optional, additive) `ToolContext.worktrees`; L5 consumes the captured baseline, L7 spawns into
+// the sandbox, phase B provisions it — none of which this layer builds.
+export type {
+  WorktreeCreated,
+  BaselineCaptured,
+  FinishRecorded,
+  WorktreeRemoved,
+  TestOutcome,
+  WorktreeRecord,
+  Baseline,
+  FinishRecord,
+} from './worktrees/events.js';
+export {
+  WORKTREE_EVENT_V,
+  EVENT_WORKTREE_CREATED,
+  EVENT_BASELINE_CAPTURED,
+  EVENT_FINISH_RECORDED,
+  EVENT_WORKTREE_REMOVED,
+  worktreeScope,
+  baselineScope,
+  finishScope,
+  worktreeSchemas,
+  worktreeUpcasters,
+  makeWorktreeCreatedEvent,
+  makeBaselineCapturedEvent,
+  makeFinishRecordedEvent,
+  makeWorktreeRemovedEvent,
+} from './worktrees/events.js';
+export { WorktreeProjector } from './worktrees/worktree-projector.js';
+// L3-E worktree teardown + orphan-detection PRIMITIVES (AC-L3-5): `removeWorktree` tears a sandbox
+// down (git worktree remove + dir deletion, then a `worktree.removed` record in program-data) and
+// `detectOrphans` SURFACES recorded-vs-reality mismatches against an injectable reality probe. Both
+// are reusable primitives — the operator cleanup VERBS (cleanup/unstick/nuke + "prove merged before
+// removing") are L8 (a typed `CleanupGateStub`), and the merge-time teardown trigger is L5.
+export type {
+  WorktreeStore,
+  Orphan,
+  WorktreeRealityProbe,
+  SandboxFs,
+  RemoveWorktreeDeps,
+} from './worktrees/worktree-store.js';
+export {
+  openWorktreeStore,
+  defaultWorktreeRealityProbe,
+  defaultSandboxFs,
+} from './worktrees/worktree-store.js';
+export type { CleanupGate } from './worktrees/cleanup-gate.js';
+export { CleanupGateStub } from './worktrees/cleanup-gate.js';
+// L3-C message contract (AC-L3-3): pure, provider-deterministic renderers — commit / merge / PR text
+// from a structured intent in a fixed house style, with NO provider/voice parameter (Principle 3).
+// Only the commit renderer has a consumer in L3 (`co_finish`); the merge/PR renderers ship as core
+// functions with no MCP verb wired to them (the gated `co_merge`/`co_push`/`co_pr_merge` are L5).
+export type { CommitIntent, MergeIntent, PrIntent } from './worktrees/messages.js';
+export { renderCommitMessage, renderMergeMessage, renderPrMessage } from './worktrees/messages.js';
+// L3-C `co_finish` core (AC-L3-6): commit (house-style, DCO-signed) + record the finish (the L5
+// comparison input) + emit `worker_done` (informational). It does NOT review or merge (L5).
+export type {
+  WorktreeGitFacts,
+  FinishParams,
+  FinishDeps,
+  FinishResult,
+} from './worktrees/finish.js';
+export { finishWorktree } from './worktrees/finish.js';
+// L3-C L5 plug-point: the typed review-trigger + merge gate `co_finish` stops short of. A loud-failing
+// stub (never a silent no-op) marking the seam — the gated verbs are simply NOT BUILT in L3 (P7).
+export type { FinishReviewGate } from './worktrees/review-trigger.js';
+export { FinishReviewGateStub } from './worktrees/review-trigger.js';
+// L3-D repository-relationship modes (AC-L3-4): per-project Owner / Contributor / Offline that reshape
+// the publishing surface. The L3-ownable half — the read-only injectable remote-capability prober, the
+// pure D2 detection order, override-beats-detection resolution (persisted in the config cascade, never
+// the repo), the Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe
+// (PR-template presence + a sign-off signal). The gated verbs that ACT on a mode (co_merge/co_push/
+// co_pr_merge, the fork→PR enactment, "gate in all three") + the rich CONTRIBUTING/PR-template parse are
+// L5/L9 — a loud-failing typed stub (RepoModeGateStub), never built, no MCP tool declared (P4, P7).
+export type {
+  RepoMode,
+  RemoteSignals,
+  RemoteProbe,
+  ResolveRepoModeDeps,
+  RepoModeCapabilities,
+  HostConventions,
+  RepoModeGate,
+} from './worktrees/repo-mode.js';
+export {
+  REPO_MODE_CONFIG_KEY,
+  defaultRemoteProbe,
+  detectRepoMode,
+  resolveRepoMode,
+  repoModeCapabilities,
+  detectHostConventions,
+  RepoModeGateStub,
+} from './worktrees/repo-mode.js';
+export type { GitReader } from './worktrees/detect-base.js';
+export { detectBaseRef, defaultGitReader, resolveRefSha } from './worktrees/detect-base.js';
+export type {
+  GitExec,
+  BaselineProbe,
+  BaselineProbeContext,
+  SlingParams,
+  SlingDeps,
+  SlingResult,
+} from './worktrees/sling.js';
+export {
+  slingWorktree,
+  defaultGitExec,
+  emptyBaselineProbe,
+  worktreePathFor,
+  CO_BRANCH_PREFIX,
+} from './worktrees/sling.js';
+// L3-B worktree environment provisioning: place the gitignored working essentials into a slung
+// sandbox by the right mechanism per item (symlink large/stable deps · copy small/mutable env ·
+// isolated-copy a dep dir an agent will mutate), from a configurable manifest (smart defaults ⊕
+// per-project `worktree.provision` overrides via the config cascade). Reads the source repo, writes
+// only the sandbox (Principle 12 — pristine SOURCE). `co_sling` runs the `defaultProvisioner` after
+// `git worktree add`; the seam is additive (no new tool, no registry change).
+export type {
+  ProvisionMechanism,
+  ProvisionEntry,
+  ProvisioningManifest,
+  ProvisionOverride,
+  ProvisionParams,
+  ProvisionResult,
+  ProvisionContext,
+  Provisioner,
+} from './worktrees/provision.js';
+export {
+  DEFAULT_PROVISION_MANIFEST,
+  WORKTREE_PROVISION_CONFIG_KEY,
+  mergeProvisioningManifest,
+  resolveProvisioningManifest,
+  provisionWorktree,
+  defaultProvisioner,
+} from './worktrees/provision.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

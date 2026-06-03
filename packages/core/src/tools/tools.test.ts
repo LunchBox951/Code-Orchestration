@@ -87,7 +87,7 @@ type StatusOut = {
 };
 type OrientOut = { guidance: string };
 
-const NINE_TOOLS = [
+const ALL_TOOLS = [
   'co_mail_send',
   'co_mail_inbox',
   'co_mail_get',
@@ -97,12 +97,14 @@ const NINE_TOOLS = [
   'co_status',
   'co_worktree_info',
   'co_orient',
+  'co_sling',
+  'co_finish',
 ];
 
 describe('buildCoreRegistry — the canonical single source of truth', () => {
-  it('registers exactly the nine real tools, in order, with non-stub handlers', () => {
+  it('registers exactly the real tools, in order, with non-stub handlers', () => {
     const reg = buildCoreRegistry();
-    expect(reg.list().map((t) => t.name)).toEqual(NINE_TOOLS);
+    expect(reg.list().map((t) => t.name)).toEqual(ALL_TOOLS);
     for (const spec of reg.list()) {
       expect(spec.handler).not.toBe(notImplemented); // no stubs reach the canonical registry
       expect(spec.description.length).toBeGreaterThan(0); // every tool self-describes

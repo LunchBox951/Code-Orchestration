@@ -35,25 +35,31 @@ const UNIVERSAL_TOOLSET: readonly string[] = [
 ];
 
 /**
- * SEED per-role toolsets over the CURRENT nine `co_*` tools — the mechanism plus a defensible
+ * SEED per-role toolsets over the CURRENT eleven `co_*` tools — the mechanism plus a defensible
  * starting membership, NOT the authoritative rosters. The concrete, authoritative per-role rosters
- * (and the L6 tools they will gain — `co_sling`, `co_finish`, `co_merge`, …) are an L6 concern;
- * this seed exists to prove the per-role scoping hook works today (AC-L2-5). Memberships are kept
- * defensible against each role's mandate in agent-roles.md:
+ * (and the later gated tools they will gain — `co_merge`, … — which are L5/L6) are not locked here;
+ * this seed exists to prove the per-role scoping hook works today (AC-L2-5).
+ * Memberships are kept defensible against each role's mandate in agent-roles.md:
  *
  *   - everyone gets {@link UNIVERSAL_TOOLSET};
  *   - `co_mail_retract` (withdraw a message you sent) goes to the roles that actively dispatch /
  *     coordinate — coordinator, lead, implementer — not to the leaf-ish reviewer / researcher;
  *   - `co_worktree_info` (read-only worktree facts) goes to the roles that work over a code
  *     worktree — lead (integrates reviewed branches), implementer (works in one), reviewer
- *     (inspects the target) — not to the coordinator (delegates) or the read-only researcher.
+ *     (inspects the target) — not to the coordinator (delegates) or the read-only researcher;
+ *   - `co_sling` (create + record an isolated worktree sandbox) goes to the roles that DISPATCH
+ *     work into fresh sandboxes — coordinator and lead — not to a leaf implementer / reviewer /
+ *     researcher, which work inside a sandbox they were given;
+ *   - `co_finish` (commit + record a finish + emit `worker_done`) goes to the IMPLEMENTER — the
+ *     role that finishes through the gate — not to a lead (which integrates reviewed branches, it
+ *     does not finish through the gate), nor to the leaf reviewer / researcher.
  *
  * Scoping is RELEVANCE, not a wall (permissions.md): an irrelevant tool simply isn't offered.
  */
 export const roleToolsets: ReadonlyMap<Role, readonly string[]> = new Map<Role, readonly string[]>([
-  ['coordinator', [...UNIVERSAL_TOOLSET, 'co_mail_retract']],
-  ['lead', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_worktree_info']],
-  ['implementer', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_worktree_info']],
+  ['coordinator', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_sling']],
+  ['lead', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_worktree_info', 'co_sling']],
+  ['implementer', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_worktree_info', 'co_finish']],
   ['reviewer', [...UNIVERSAL_TOOLSET, 'co_worktree_info']],
   ['researcher', [...UNIVERSAL_TOOLSET]],
 ]);
