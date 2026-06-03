@@ -6,6 +6,7 @@ import {
   EVENT_BASELINE_CAPTURED,
   EVENT_FINISH_RECORDED,
   EVENT_WORKTREE_CREATED,
+  EVENT_WORKTREE_REMOVED,
   type Baseline,
   type BaselineCaptured,
   type FinishRecord,
@@ -13,6 +14,7 @@ import {
   type TestOutcome,
   type WorktreeCreated,
   type WorktreeRecord,
+  type WorktreeRemoved,
 } from './events.js';
 
 /**
@@ -80,7 +82,15 @@ interface FinishRecordedEvent extends StoredEvent {
   readonly type: typeof EVENT_FINISH_RECORDED;
   readonly payload: FinishRecorded;
 }
-type WorktreeEvent = WorktreeCreatedEvent | BaselineCapturedEvent | FinishRecordedEvent;
+interface WorktreeRemovedEvent extends StoredEvent {
+  readonly type: typeof EVENT_WORKTREE_REMOVED;
+  readonly payload: WorktreeRemoved;
+}
+type WorktreeEvent =
+  | WorktreeCreatedEvent
+  | BaselineCapturedEvent
+  | FinishRecordedEvent
+  | WorktreeRemovedEvent;
 
 /** Map a raw `worktrees` row (loosely typed at the SQLite boundary) to a {@link WorktreeRecord}. */
 export function rowToWorktreeRecord(row: Record<string, unknown>): WorktreeRecord {
@@ -164,7 +174,8 @@ export class WorktreeProjector implements Projector {
     return (
       type === EVENT_WORKTREE_CREATED ||
       type === EVENT_BASELINE_CAPTURED ||
-      type === EVENT_FINISH_RECORDED
+      type === EVENT_FINISH_RECORDED ||
+      type === EVENT_WORKTREE_REMOVED
     );
   }
 
@@ -214,6 +225,14 @@ export class WorktreeProjector implements Projector {
              tests = excluded.tests,
              recorded_ts = excluded.recorded_ts`,
         ).run(branch, baseSha, commitSha, JSON.stringify(tests), event.ts);
+        return;
+      }
+      case EVENT_WORKTREE_REMOVED: {
+        const { branch } = worktreeEvent.payload;
+        // Teardown (L3-E): mark the sandbox record removed. Idempotent + replay-safe — a re-removal
+        // (or a branch with no row) re-asserts the same flag with no side effect, so the rebuild
+        // reaches a byte-identical row. Carries NO wall-clock field (freeze #6).
+        db.prepare('UPDATE worktrees SET removed = 1 WHERE branch = ?').run(branch);
         return;
       }
       default:
