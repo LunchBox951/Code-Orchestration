@@ -46,11 +46,12 @@ export interface BaselineProbeContext {
 export type BaselineProbe = (ctx: BaselineProbeContext) => readonly TestOutcome[];
 
 /**
- * The DEFAULT probe: capture an EMPTY baseline. At branch-off the worktree is bare — deps/env are
- * not yet provisioned (that is phase B), so there is nothing runnable to probe yet. An empty
- * baseline is the honest "no pre-existing failures recorded" starting point; a runnable probe is
- * injected by provisioning / L5 once the suite can actually run in the sandbox. (The baseline is
- * still RECORDED + readable per project+branch, which is this layer's job — L5 does the comparing.)
+ * The DEFAULT probe: capture an EMPTY baseline. By the time the baseline is captured the sandbox has
+ * already been provisioned (phase B runs first), so it IS runnable — but actually RUNNING the suite to
+ * record pre-existing failures is the honest-verification step L5 owns. So the default stays empty (the
+ * honest "no pre-existing failures recorded" starting point) and L5 injects a runnable probe once it
+ * wires the comparison. This layer's job is only to RECORD a baseline (per project+branch) that is
+ * readable; L5 does the comparing.
  */
 export const emptyBaselineProbe: BaselineProbe = () => [];
 
