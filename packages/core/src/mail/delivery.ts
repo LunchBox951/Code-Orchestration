@@ -73,7 +73,11 @@ export interface Delivery {
   /** Deliver a validated upward escalation and atomically mark `held` forwarded. */
   forward?(held: DeliveredMail, envelope: MailEnvelope): DeliveredMail;
   /** Deliver a down-resolution and optional relay in one durable operation. */
-  resolve?(held: DeliveredMail, envelope: MailEnvelope, relays?: readonly MailEnvelope[]): DeliveredMail;
+  resolve?(
+    held: DeliveredMail,
+    envelope: MailEnvelope,
+    relays?: readonly MailEnvelope[],
+  ): DeliveredMail;
   /** Append a read-receipt for `recipient`'s mail at `seq`; returns the updated row. */
   markRead?(recipient: string, seq: number): DeliveredMail;
 }
@@ -143,7 +147,7 @@ export class InProcessDelivery implements Delivery {
       ) {
         throw new Error(
           `InProcessDelivery.forward: no unresolved actionable mail seq=${held.seq} ` +
-          `for holder '${held.recipient}'`,
+            `for holder '${held.recipient}'`,
         );
       }
       assertForwardEnvelope(currentHeld, envelope);
