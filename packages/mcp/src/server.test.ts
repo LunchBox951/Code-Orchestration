@@ -8,6 +8,7 @@ import {
   buildCoreRegistry,
   openMailStore,
   openRegistry,
+  toolsForRole,
   type MailStore,
   type ProjectRegistry,
   type ToolContext,
@@ -163,6 +164,39 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
       arguments: { type: 'chat', subject: 's', body: 'b' },
     });
     expect(res.isError).toBe(true);
+  });
+});
+
+describe('createCoMcpServer — per-role tool-scoping (AC-L2-5: the server scopes the offered toolset per role)', () => {
+  it('exposes EXACTLY the reviewer’s scoped tools, 1:1 — a strict subset of the nine', async () => {
+    const ctx = makeTestContext('rev-scope');
+    const reviewerTools = toolsForRole('reviewer');
+    const client = await connect({ tools: reviewerTools, contextFactory: () => ctx });
+
+    const { tools } = await client.listTools();
+    const exposed = tools.map((t) => t.name).sort();
+    // 1:1 with exactly the reviewer's scoped tools — nothing added, nothing dropped.
+    expect(exposed).toEqual(reviewerTools.map((t) => t.name).sort());
+    // Scoped, not the whole registry: strictly fewer than nine, and missing the tool the seed omits.
+    expect(exposed.length).toBeLessThan(9);
+    expect(exposed).not.toContain('co_mail_retract');
+  });
+
+  it('two roles expose DIFFERENT scoped surfaces through the same builder', async () => {
+    const revClient = await connect({
+      tools: toolsForRole('reviewer'),
+      contextFactory: () => makeTestContext('rev'),
+    });
+    const implClient = await connect({
+      tools: toolsForRole('implementer'),
+      contextFactory: () => makeTestContext('impl'),
+    });
+
+    const rev = (await revClient.listTools()).tools.map((t) => t.name).sort();
+    const impl = (await implClient.listTools()).tools.map((t) => t.name).sort();
+    expect(rev).not.toEqual(impl);
+    expect(impl).toContain('co_mail_retract'); // implementer carries retract…
+    expect(rev).not.toContain('co_mail_retract'); // …the leaf reviewer does not.
   });
 });
 
