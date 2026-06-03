@@ -102,7 +102,9 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
     send: doSend,
 
     reply(toMail: DeliveredMail, draft: ReplyDraft): DeliveredMail {
-      const current = store.transaction((tx) => selectMailBySeq(tx.raw as DatabaseSync, toMail.seq));
+      const current = store.transaction((tx) =>
+        selectMailBySeq(tx.raw as DatabaseSync, toMail.seq),
+      );
       if (!current) {
         throw new Error(`mail reply: no persisted mail seq=${toMail.seq}`);
       }
