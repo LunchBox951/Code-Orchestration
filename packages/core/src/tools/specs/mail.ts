@@ -202,6 +202,10 @@ export const mailAckTool: ToolSpec<MailAckInput, MailAckOutput> = {
   inputSchema: mailAckInput,
   outputSchema: mailAckOutput,
   handler: (ctx, input): MailAckOutput => {
+    // markRead only requires that the mail belongs to the caller (by recipient); acking a
+    // RETRACTED tombstone therefore succeeds and just sets `read` on a row already hidden from
+    // inbox()/unread counts — a benign no-op on visibility at L2 (review #68). The live L7
+    // delivery seam may want to reject acking a withdrawn mail; left as an L7 consideration.
     const acked = input.ids.map((id) => ctx.mail.markRead(ctx.agent, id));
     return { acked: acked.map(toWireMail) };
   },
