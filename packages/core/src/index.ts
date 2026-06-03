@@ -223,6 +223,31 @@ export { finishWorktree } from './worktrees/finish.js';
 // stub (never a silent no-op) marking the seam — the gated verbs are simply NOT BUILT in L3 (P7).
 export type { FinishReviewGate } from './worktrees/review-trigger.js';
 export { FinishReviewGateStub } from './worktrees/review-trigger.js';
+// L3-D repository-relationship modes (AC-L3-4): per-project Owner / Contributor / Offline that reshape
+// the publishing surface. The L3-ownable half — the read-only injectable remote-capability prober, the
+// pure D2 detection order, override-beats-detection resolution (persisted in the config cascade, never
+// the repo), the Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe
+// (PR-template presence + a sign-off signal). The gated verbs that ACT on a mode (co_merge/co_push/
+// co_pr_merge, the fork→PR enactment, "gate in all three") + the rich CONTRIBUTING/PR-template parse are
+// L5/L9 — a loud-failing typed stub (RepoModeGateStub), never built, no MCP tool declared (P4, P7).
+export type {
+  RepoMode,
+  RemoteSignals,
+  RemoteProbe,
+  ResolveRepoModeDeps,
+  RepoModeCapabilities,
+  HostConventions,
+  RepoModeGate,
+} from './worktrees/repo-mode.js';
+export {
+  REPO_MODE_CONFIG_KEY,
+  defaultRemoteProbe,
+  detectRepoMode,
+  resolveRepoMode,
+  repoModeCapabilities,
+  detectHostConventions,
+  RepoModeGateStub,
+} from './worktrees/repo-mode.js';
 export type { GitReader } from './worktrees/detect-base.js';
 export { detectBaseRef, defaultGitReader, resolveRefSha } from './worktrees/detect-base.js';
 export type {
