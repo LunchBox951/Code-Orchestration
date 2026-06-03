@@ -16,8 +16,8 @@ import {
 import { createCoMcpServer, type CoMcpServerOptions } from './server.js';
 import { LiveSessionHostStub } from './live-session-host.js';
 
-// The canonical nine `co_*` tools the mount must expose 1:1 (registration order from
-// buildCoreRegistry). Pinned here so the parity test catches a tool added OR dropped.
+// The canonical `co_*` tools the mount must expose 1:1 (registration order from buildCoreRegistry).
+// Pinned here so the parity test catches a tool added OR dropped.
 const EXPECTED_TOOLS = [
   'co_mail_send',
   'co_mail_inbox',
@@ -28,6 +28,7 @@ const EXPECTED_TOOLS = [
   'co_status',
   'co_worktree_info',
   'co_orient',
+  'co_sling',
 ];
 
 // ── Per-test program-data dir + live stores (mirrors the CO_DATA_DIR idiom in mail.test.ts) ──
@@ -82,7 +83,7 @@ async function connect(opts: CoMcpServerOptions): Promise<Client> {
 }
 
 describe('createCoMcpServer — tool-list parity', () => {
-  it('exposes exactly the nine canonical tools, 1:1 with the core registry', async () => {
+  it('exposes exactly the canonical tools, 1:1 with the core registry', async () => {
     const ctx = makeTestContext('impl-parity');
     const client = await connect({ contextFactory: () => ctx });
 
@@ -96,7 +97,7 @@ describe('createCoMcpServer — tool-list parity', () => {
     // Nothing added, nothing dropped: the exposed surface IS the registry.
     expect(exposed).toEqual(fromRegistry);
     expect(exposed).toEqual([...EXPECTED_TOOLS].sort());
-    expect(exposed).toHaveLength(9);
+    expect(exposed).toHaveLength(EXPECTED_TOOLS.length);
   });
 
   it('publishes each tool with its title, description, and an input JSON schema', async () => {
@@ -168,7 +169,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
 });
 
 describe('createCoMcpServer — per-role tool-scoping (AC-L2-5: the server scopes the offered toolset per role)', () => {
-  it('exposes EXACTLY the reviewer’s scoped tools, 1:1 — a strict subset of the nine', async () => {
+  it('exposes EXACTLY the reviewer’s scoped tools, 1:1 — a strict subset of the registry', async () => {
     const ctx = makeTestContext('rev-scope');
     const reviewerTools = toolsForRole('reviewer');
     const client = await connect({ tools: reviewerTools, contextFactory: () => ctx });
@@ -177,9 +178,11 @@ describe('createCoMcpServer — per-role tool-scoping (AC-L2-5: the server scope
     const exposed = tools.map((t) => t.name).sort();
     // 1:1 with exactly the reviewer's scoped tools — nothing added, nothing dropped.
     expect(exposed).toEqual(reviewerTools.map((t) => t.name).sort());
-    // Scoped, not the whole registry: strictly fewer than nine, and missing the tool the seed omits.
-    expect(exposed.length).toBeLessThan(9);
+    // Scoped, not the whole registry: strictly fewer than the full set, and missing the tools the
+    // seed omits (the dispatch-only verbs).
+    expect(exposed.length).toBeLessThan(buildCoreRegistry().list().length);
     expect(exposed).not.toContain('co_mail_retract');
+    expect(exposed).not.toContain('co_sling');
   });
 
   it('two roles expose DIFFERENT scoped surfaces through the same builder', async () => {

@@ -10,7 +10,7 @@ export type { ToolHandler, ToolSpec, ToolRegistry } from './registry.js';
 export { createToolRegistry, notImplemented } from './registry.js';
 
 // L2-B1: the first REAL tools. `buildCoreRegistry` is the canonical single source of truth
-// (the nine `co_*` tools as self-describing ToolSpecs); `invokeTool` is the transport-agnostic
+// (the `co_*` tools as self-describing ToolSpecs); `invokeTool` is the transport-agnostic
 // headless harness that validates I/O and dispatches to a handler (the seam the MCP adapter
 // reuses); `readWorktreeInfo` is the read-only git helper behind `co_worktree_info`.
 export { buildCoreRegistry } from './core-registry.js';
@@ -34,7 +34,7 @@ export { checkToolCompleteness } from './completeness.js';
 export { orientContent } from './orient-content.js';
 
 // L2-D per-role tool-scoping (AC-L2-5): the base-role vocabulary + the SEED per-role toolsets over
-// the current nine tools, and `toolsForRole` — the relevance-scoping hook the MCP mount passes into
+// the current tools, and `toolsForRole` — the relevance-scoping hook the MCP mount passes into
 // `createCoMcpServer({ tools })`. Fails loud on a phantom tool (the scoping analogue of the C gate);
 // authoritative rosters are an L6 concern.
 export type { Role } from './scoping.js';

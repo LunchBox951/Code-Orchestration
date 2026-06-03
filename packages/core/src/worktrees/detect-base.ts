@@ -1,0 +1,88 @@
+import { execFileSync } from 'node:child_process';
+
+/**
+ * Read-only git seam used by base auto-detect: run `git <args>` in `cwd` and return trimmed stdout,
+ * or `null` when git exits non-zero (the ref/branch does not exist). Returning `null` rather than
+ * throwing is deliberate — it lets the detection chain FALL THROUGH a missing rung to the next one;
+ * a genuinely broken git (or non-repo) still surfaces loudly at {@link resolveRefSha}, which is the
+ * fail-loud read every successful detection ends in.
+ *
+ * It passes `--no-optional-locks` so even a status-touching command never writes `.git` (Principle
+ * 12 — pristine-repo; same discipline as `tools/worktree.ts`). Injectable so the chain is tested
+ * headless against recorded fixtures with no real git.
+ */
+export type GitReader = (cwd: string, args: readonly string[]) => string | null;
+
+/** The production {@link GitReader}: read-only git, `null` on a non-zero exit. */
+export const defaultGitReader: GitReader = (cwd, args) => {
+  try {
+    return execFileSync('git', ['--no-optional-locks', ...args], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  } catch {
+    // Non-zero exit ⇒ the ref/branch is absent; the chain falls through to the next rung.
+    return null;
+  }
+};
+
+const REMOTE_REF_PREFIX = 'refs/remotes/';
+
+/**
+ * Auto-detect the base ref a new sandbox should branch from — THE #1 frozen invariant (AC-L3-1).
+ * The prototype's single most-repeated failure was defaulting the base to `master`; this is the
+ * cure: a read-only, injectable detector with an explicit, named chain and NO hard-coded `master`
+ * default anywhere.
+ *
+ *   1. `origin/HEAD` — the remote's default branch. If `refs/remotes/origin/HEAD` is a symbolic ref
+ *      (e.g. → `refs/remotes/origin/main`), USE it (returns e.g. `origin/main`). This is why an
+ *      `origin/HEAD → main` repo resolves `main`, never `master`, even if a local `master` exists.
+ *   2. else local `main` exists → `main`.
+ *   3. else local `master` exists → `master` (only reached when there is no remote default AND no
+ *      `main` — never a blanket default).
+ *   4. else (remote-less / fresh repo) → local `HEAD`.
+ *
+ * `gitReader` is injectable (default {@link defaultGitReader}) so the chain is tested headless.
+ */
+export function detectBaseRef(cwd: string, gitReader: GitReader = defaultGitReader): string {
+  // 1) origin/HEAD — the remote's default branch (authoritative when a remote exists).
+  const originHead = gitReader(cwd, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+  if (originHead != null && originHead.startsWith(REMOTE_REF_PREFIX)) {
+    return originHead.slice(REMOTE_REF_PREFIX.length); // 'refs/remotes/origin/main' → 'origin/main'
+  }
+
+  // 2) local main.
+  if (gitReader(cwd, ['rev-parse', '--verify', '--quiet', 'refs/heads/main']) != null) {
+    return 'main';
+  }
+
+  // 3) local master — reached ONLY when there is no remote default and no local main.
+  if (gitReader(cwd, ['rev-parse', '--verify', '--quiet', 'refs/heads/master']) != null) {
+    return 'master';
+  }
+
+  // 4) remote-less / fresh repo — branch from local HEAD.
+  return 'HEAD';
+}
+
+/**
+ * Resolve `ref` to a full commit sha via read-only git. Fail loud (Principle 9) if it cannot be
+ * resolved — a base ref that names no commit is a programming/environment error, not something to
+ * paper over with a fabricated sha. This is the call that surfaces a genuinely broken git / non-repo
+ * that {@link detectBaseRef} would otherwise have silently fallen through to `HEAD`.
+ */
+export function resolveRefSha(
+  cwd: string,
+  ref: string,
+  gitReader: GitReader = defaultGitReader,
+): string {
+  const sha = gitReader(cwd, ['rev-parse', '--verify', `${ref}^{commit}`]);
+  if (sha == null || sha.length === 0) {
+    throw new Error(
+      `co worktrees: cannot resolve base ref '${ref}' to a commit in '${cwd}' ` +
+        '(no such ref, or git is unavailable / not a repository).',
+    );
+  }
+  return sha;
+}

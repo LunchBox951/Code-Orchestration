@@ -1,5 +1,6 @@
 import type { MailStore } from '../mail/mail-store.js';
 import type { ProjectRegistry, ProjectId } from '../registry/registry.js';
+import type { WorktreeStore } from '../worktrees/worktree-store.js';
 
 /**
  * What every tool handler receives. Assembled by whoever MOUNTS the surface — the
@@ -18,4 +19,11 @@ export interface ToolContext {
   readonly mail: MailStore;
   /** The project registry (path <-> id). */
   readonly registry: ProjectRegistry;
+  /**
+   * OPTIONAL L3 program-data handle: the worktree store (worktree records + branch-off baselines),
+   * opened + injected by the mount alongside {@link mail}. Optional + additive so every existing
+   * ToolContext construction site and L1/L2 handler stays untouched and keeps compiling; an L3 tool
+   * that needs it loud-fails when it is absent (Principle 9), mirroring L1's optional-method seams.
+   */
+  readonly worktrees?: WorktreeStore;
 }
