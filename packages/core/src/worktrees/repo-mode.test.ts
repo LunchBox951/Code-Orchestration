@@ -215,7 +215,7 @@ describe('repoModeCapabilities — Offline disables push/PR (AC-L3-4)', () => {
     expect(repoModeCapabilities('offline')).toEqual({ push: false, pr: false });
   });
 
-  it('owner → push allowed (to master), pr allowed (optional)', () => {
+  it('owner → push allowed (to default branch), pr allowed (optional)', () => {
     expect(repoModeCapabilities('owner')).toEqual({ push: true, pr: true });
   });
 

@@ -173,6 +173,58 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
     ).toThrow();
     expect(git.calls).toHaveLength(0); // never touched git
   });
+
+  it('does NOT commit when the worktree record was removed', () => {
+    const { store, mail } = openStores('p-finish-removed');
+    store.recordWorktree({
+      branch: 'co/removed',
+      baseRef: 'main',
+      baseSha: 'b'.repeat(40),
+      path: '/data/worktrees/co/removed',
+      parent: 'lead-7',
+    });
+    store.removeWorktree('co/removed', {
+      repoCwd: '/main/repo',
+      gitExec: () => {},
+      fs: { exists: () => false, removeDir: () => {} },
+    });
+    const git = recordingGitExec();
+
+    expect(() =>
+      finishWorktree(
+        store,
+        mail,
+        { agent: 'impl-1', repoCwd: '/wt', intent, tests: [] },
+        { readInfo: () => ({ branch: 'co/removed', headSha: 'a'.repeat(40) }), gitExec: git.exec },
+      ),
+    ).toThrow(/removed/i);
+    expect(git.calls).toHaveLength(0);
+    expect(store.getFinish('co/removed')).toBeUndefined();
+  });
+
+  it('does not leave a finish record if worker_done cannot be persisted', () => {
+    const { store, mail } = openStores('p-finish-atomic');
+    store.recordWorktree({
+      branch: 'co/atomic',
+      baseRef: 'main',
+      baseSha: 'b'.repeat(40),
+      path: '/data/worktrees/co/atomic',
+      parent: 'lead-7',
+    });
+    const git = recordingGitExec();
+
+    expect(() =>
+      finishWorktree(
+        store,
+        mail,
+        { agent: '', repoCwd: '/wt', intent, tests: [] },
+        { readInfo: () => ({ branch: 'co/atomic', headSha: 'a'.repeat(40) }), gitExec: git.exec },
+      ),
+    ).toThrow(/from|sender|actor/i);
+
+    expect(store.getFinish('co/atomic')).toBeUndefined();
+    expect(mail.inbox('lead-7')).toEqual([]);
+  });
 });
 
 describe('FinishReviewGateStub — the L5 review-trigger + merge plug-point (never a silent no-op)', () => {

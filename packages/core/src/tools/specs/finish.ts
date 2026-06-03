@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { finishWorktree } from '../../worktrees/finish.js';
+import { defaultGitReader } from '../../worktrees/detect-base.js';
 import type { ToolSpec } from '../registry.js';
 import { readWorktreeInfo } from '../worktree.js';
 
@@ -8,27 +9,42 @@ import { readWorktreeInfo } from '../worktree.js';
 // house-style commit message from it (AC-L3-3); the test run is structured + aligned with the
 // baseline so L5 can compare it (AC-L3-6). The caller never supplies its own identity, branch, or
 // parent — those come from the mount-assembled ToolContext + the sling record.
+const conventionalType = z
+  .string()
+  .min(1)
+  .regex(/^[a-z][a-z0-9-]*$/u, 'type must be a single lowercase Conventional-Commit token')
+  .describe('Conventional-Commit type — e.g. feat, fix, chore, docs, refactor, test.');
+
+const conventionalScope = z
+  .string()
+  .regex(/^[A-Za-z0-9._/-]+$/u, 'scope must be a single token without spaces, parens, or newlines')
+  .optional()
+  .describe('Optional Conventional-Commit scope, rendered as type(scope): when present.');
+
+const conventionalSummary = z
+  .string()
+  .min(1)
+  .refine((s) => !/[\r\n]/u.test(s), 'summary must be a single line')
+  .refine(
+    (s) => !/^[a-z][a-z0-9-]*(?:\([^)]+\))?:\s/u.test(s.trim()),
+    'summary must not include a pre-rendered Conventional-Commit header',
+  )
+  .describe('Imperative one-line summary (no type/scope prefix — co adds it).');
+
+const commitBody = z
+  .string()
+  .optional()
+  .describe(
+    'Optional commit body explaining what changed and why, to help a reader follow the diff. ' +
+      'Omit for a trivial change (summary only).',
+  );
+
 const commitIntentInput = z
   .object({
-    type: z
-      .string()
-      .min(1)
-      .describe('Conventional-Commit type — e.g. feat, fix, chore, docs, refactor, test.'),
-    scope: z
-      .string()
-      .optional()
-      .describe('Optional Conventional-Commit scope, rendered as type(scope): when present.'),
-    summary: z
-      .string()
-      .min(1)
-      .describe('Imperative one-line summary (no type/scope prefix — co adds it).'),
-    body: z
-      .string()
-      .optional()
-      .describe(
-        'Optional commit body explaining what changed and why, to help a reader follow the diff. ' +
-          'Omit for a trivial change (summary only).',
-      ),
+    type: conventionalType,
+    scope: conventionalScope,
+    summary: conventionalSummary,
+    body: commitBody,
   })
   .describe('The structured commit intent co renders into the house-style commit message.');
 
@@ -101,7 +117,7 @@ export const finishTool: ToolSpec<FinishInput, FinishOutput> = {
         tests: input.tests,
         ...(input.notes != null ? { notes: input.notes } : {}),
       },
-      { readInfo: readWorktreeInfo },
+      { readInfo: readWorktreeInfo, gitReader: defaultGitReader },
     );
     return {
       commit_sha: result.commitSha,

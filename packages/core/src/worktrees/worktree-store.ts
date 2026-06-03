@@ -3,6 +3,14 @@ import { join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { decode } from '../replay/decode.js';
 import { applyEvent, type Projector } from '../replay/projector.js';
+import {
+  makeMailEvent,
+  mailSchemas,
+  mailUpcasters,
+  type DeliveredMail,
+  type MailEnvelope,
+} from '../mail/events.js';
+import { MailProjector, selectMailBySeq } from '../mail/mail-projector.js';
 import { projectDataDir } from '../store/paths.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import {
@@ -134,6 +142,14 @@ export interface WorktreeStore {
   listWorktrees(): readonly WorktreeRecord[];
   /** Record a branch-off baseline (append `baseline.captured` + fold); returns the read-back baseline. */
   recordBaseline(b: BaselineCaptured): Baseline;
+  /**
+   * Record a created sandbox and its branch-off baseline in one durable transaction. This prevents
+   * replay from preserving a live worktree record whose required baseline never landed.
+   */
+  recordWorktreeAndBaseline(
+    rec: WorktreeCreated,
+    b: BaselineCaptured,
+  ): { readonly worktree: WorktreeRecord; readonly baseline: Baseline };
   /** The baseline for `branch`, or undefined. */
   getBaseline(branch: string): Baseline | undefined;
   /**
@@ -141,6 +157,14 @@ export interface WorktreeStore {
    * + the finish's test run that L5 compares against the baseline. A re-finish UPSERTs (last wins).
    */
   recordFinish(f: FinishRecorded): FinishRecord;
+  /**
+   * Record a finish and its paired worker_done mail in one durable transaction. This preserves the
+   * event-log story: either the finish and parent notification both exist, or neither does.
+   */
+  recordFinishAndWorkerDone(
+    f: FinishRecorded,
+    workerDone: MailEnvelope,
+  ): { readonly finish: FinishRecord; readonly workerDone: DeliveredMail };
   /** The recorded finish for `branch`, or undefined (no finish yet). */
   getFinish(branch: string): FinishRecord | undefined;
   /**
@@ -211,6 +235,32 @@ export function openWorktreeStore(projectId: string): WorktreeStore {
       });
     },
 
+    recordWorktreeAndBaseline(
+      rec: WorktreeCreated,
+      b: BaselineCaptured,
+    ): { readonly worktree: WorktreeRecord; readonly baseline: Baseline } {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureWorktreeTables(db);
+        const stored = tx.append([
+          makeWorktreeCreatedEvent(projectId, rec),
+          makeBaselineCapturedEvent(projectId, b),
+        ]);
+        for (const event of stored) {
+          applyEvent(tx, decode(event, worktreeUpcasters, worktreeSchemas), projectors);
+        }
+        const worktree = selectWorktree(db, rec.branch);
+        const baseline = selectBaseline(db, b.branch);
+        if (!worktree || !baseline) {
+          throw new Error(
+            `openWorktreeStore.recordWorktreeAndBaseline: row missing after projection ` +
+              `(branch='${rec.branch}')`,
+          );
+        }
+        return { worktree, baseline };
+      });
+    },
+
     getBaseline(branch: string): Baseline | undefined {
       return store.transaction((tx) => selectBaseline(tx.raw as DatabaseSync, branch));
     },
@@ -228,6 +278,36 @@ export function openWorktreeStore(projectId: string): WorktreeStore {
           );
         }
         return row;
+      });
+    },
+
+    recordFinishAndWorkerDone(
+      f: FinishRecorded,
+      workerDone: MailEnvelope,
+    ): { readonly finish: FinishRecord; readonly workerDone: DeliveredMail } {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureWorktreeTables(db);
+        const allProjectors: readonly Projector[] = [new WorktreeProjector(), new MailProjector()];
+        const stored = tx.append([
+          makeFinishRecordedEvent(projectId, f),
+          makeMailEvent(projectId, workerDone),
+        ]);
+        for (const event of stored) {
+          const decoded = worktreeSchemas.has(event.type)
+            ? decode(event, worktreeUpcasters, worktreeSchemas)
+            : decode(event, mailUpcasters, mailSchemas);
+          applyEvent(tx, decoded, allProjectors);
+        }
+        const finish = selectFinish(db, f.branch);
+        const workerDoneRow = selectMailBySeq(db, stored[1]!.seq);
+        if (!finish || !workerDoneRow) {
+          throw new Error(
+            `openWorktreeStore.recordFinishAndWorkerDone: row missing after projection ` +
+              `(branch='${f.branch}')`,
+          );
+        }
+        return { finish, workerDone: workerDoneRow };
       });
     },
 
@@ -254,6 +334,8 @@ export function openWorktreeStore(projectId: string): WorktreeStore {
       //    are deliberately NOT wrapped over the repo (Principle 12 holds via the record path below).
       if (fs.exists(record.path)) {
         gitExec(deps.repoCwd, ['worktree', 'remove', record.path]);
+      } else {
+        gitExec(deps.repoCwd, ['worktree', 'prune']);
       }
       fs.removeDir(record.path); // ensure the program-data sandbox dir is gone (no-op if already absent).
 

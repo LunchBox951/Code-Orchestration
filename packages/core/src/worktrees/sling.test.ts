@@ -198,6 +198,27 @@ describe('slingWorktree — create + record from the auto-detected base', () => 
     expect(store.getBaseline('co/empty')?.tests).toEqual([]);
   });
 
+  it('does not record a live worktree without its baseline when the baseline probe fails', () => {
+    const repo = makeMainRepo();
+    const store = openStore('p-probe-fail');
+
+    expect(() =>
+      slingWorktree(
+        store,
+        { parent: 'lead-7', branch: 'co/probe-fail', repoCwd: repo, projectId: 'p-probe-fail' },
+        {
+          provisioner: () => {},
+          probe: () => {
+            throw new Error('probe exploded');
+          },
+        },
+      ),
+    ).toThrow(/probe exploded/);
+
+    expect(store.getWorktree('co/probe-fail')).toBeUndefined();
+    expect(store.getBaseline('co/probe-fail')).toBeUndefined();
+  });
+
   it('rejects a non-co/ branch and an empty parent fail-loud (Principle 9)', () => {
     const repo = makeMainRepo();
     const store = openStore('p-reject');

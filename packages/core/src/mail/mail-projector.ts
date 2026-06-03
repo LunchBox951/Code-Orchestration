@@ -231,6 +231,7 @@ function openActionableInThread(
     .prepare(
       `SELECT ${INBOX_COLUMNS} FROM inbox
        WHERE thread_id = ? AND kind = 'actionable' AND resolved = 0 AND seq != ?
+         AND retracted = 0
        ORDER BY seq`,
     )
     .all(threadId, excludeSeq);
@@ -379,9 +380,9 @@ export class MailProjector implements Projector {
 
     const { seq, forwardedTo } = event.payload as MailForward;
     const item = selectMailBySeq(db, seq);
-    if (!item || item.recipient !== holder || item.kind !== 'actionable') {
+    if (!item || item.recipient !== holder || item.kind !== 'actionable' || item.retracted) {
       throw new Error(
-        `mail projector: forward receipt seq=${event.seq} names non-actionable or missing ` +
+        `mail projector: forward receipt seq=${event.seq} names non-actionable, retracted, or missing ` +
           `item ${seq} for holder '${holder}'`,
       );
     }

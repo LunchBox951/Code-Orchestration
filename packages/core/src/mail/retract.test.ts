@@ -4,14 +4,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { openProjectStore } from '../store/sqlite-store.js';
-import { rebuildAll } from '../replay/projector.js';
+import { applyEvent, rebuildAll, type Projector } from '../replay/projector.js';
 import { decode } from '../replay/decode.js';
+import type { StoredEvent } from '../store/types.js';
 import { assertRepoPristine } from '../config/pristine.js';
 import {
   EVENT_MAIL_RETRACTED,
   MAIL_CHAT,
   MAIL_CLARIFY_REQUEST,
+  MAIL_CLARIFY_RESPONSE,
+  MAIL_ESCALATION,
   MAIL_TYPES,
+  makeMailEvent,
+  makeMailForwardEvent,
   mailSchemas,
   mailUpcasters,
 } from './events.js';
@@ -108,6 +113,126 @@ describe('mail.retracted — the sender withdraws a message (tombstone)', () => 
       expect(mail.outstanding('lead')).toEqual([]);
     } finally {
       mail.close();
+    }
+  });
+
+  it('a retracted actionable item cannot be forwarded later through a stale handle', () => {
+    const mail = openMailStore('p-retract-stale-forward');
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'worker',
+        subject: 'blocked',
+        body: 'need authority',
+      });
+
+      mail.retract('worker', held.seq);
+
+      expect(() =>
+        mail.forward(held, {
+          type: MAIL_ESCALATION,
+          to: 'coordinator',
+          from: 'lead',
+          subject: held.subject,
+          body: held.body,
+          correlationId: String(held.seq),
+          causationId: String(held.seq),
+        }),
+      ).toThrow(/retracted|unresolved actionable/i);
+      expect(mail.outstandingCount('coordinator')).toBe(0);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('a retracted actionable item cannot be replied to later through a stale handle', () => {
+    const mail = openMailStore('p-retract-stale-reply');
+    try {
+      const held = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'lead',
+        from: 'worker',
+        subject: 'question',
+        body: 'need input',
+      });
+
+      mail.retract('worker', held.seq);
+
+      expect(() =>
+        mail.reply(held, {
+          type: MAIL_CLARIFY_RESPONSE,
+          subject: 'answer',
+          body: 'too late',
+          from: 'lead',
+        }),
+      ).toThrow(/retracted/i);
+      expect(mail.inbox('worker')).toEqual([]);
+      expect(mail.sentBy('lead')).toEqual([]);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('a forged late forward receipt cannot resolve a retracted held item during projection', () => {
+    const projectId = 'p-retract-forward-receipt';
+    const store = openProjectStore(projectId);
+    const projectors: Projector[] = [new MailProjector()];
+    const decodeFn = (e: StoredEvent): StoredEvent => decode(e, mailUpcasters, mailSchemas);
+
+    try {
+      const held = store.transaction((tx) => {
+        const [stored] = tx.append([
+          makeMailEvent(projectId, {
+            type: MAIL_ESCALATION,
+            to: 'lead',
+            from: 'worker',
+            subject: 'blocked',
+            body: 'need authority',
+          }),
+        ]);
+        applyEvent(tx, decodeFn(stored!), projectors);
+        return stored!;
+      });
+      store.transaction((tx) => {
+        const [stored] = tx.append([
+          makeMailEvent(projectId, {
+            type: MAIL_ESCALATION,
+            to: 'coordinator',
+            from: 'lead',
+            subject: 'blocked',
+            body: 'need authority',
+            correlationId: String(held.seq),
+            causationId: String(held.seq),
+          }),
+        ]);
+        applyEvent(tx, decodeFn(stored!), projectors);
+      });
+      const mail = openMailStore(projectId);
+      try {
+        mail.retract('worker', held.seq);
+      } finally {
+        mail.close();
+      }
+
+      expect(() =>
+        store.transaction((tx) => {
+          const [stored] = tx.append([
+            makeMailForwardEvent(projectId, 'lead', held.seq, 'coordinator'),
+          ]);
+          applyEvent(tx, decodeFn(stored!), projectors);
+        }),
+      ).toThrow(/retracted/i);
+
+      const row = store.transaction(
+        (tx) =>
+          (tx.raw as DatabaseSync)
+            .prepare('SELECT resolved, retracted FROM inbox WHERE seq = ?')
+            .get(held.seq) as { resolved: number; retracted: number },
+      );
+      expect(row).toEqual({ resolved: 0, retracted: 1 });
+    } finally {
+      store.close();
     }
   });
 

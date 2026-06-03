@@ -9,7 +9,7 @@ import { openConfigStore, type ConfigStore } from '../config/config-store.js';
  * modes". A **per-project mode** reshapes the publishing surface; the **review gate applies in all
  * three** — the mode only changes *where* reviewed work goes:
  *
- *   - `owner`        — gated `co_merge` / `co_push` to your own master; PRs optional; `co` house style.
+ *   - `owner`        — gated `co_merge` / `co_push` to your default branch; PRs optional; `co` house style.
  *   - `contributor`  — fork → PR to upstream; PRs required; yields to the host repo's conventions.
  *   - `offline`      — `co_merge` lands locally; **push / PR disabled**; `co` house style.
  *
@@ -205,7 +205,7 @@ export function resolveRepoMode(
 /** Whether a mode permits pushing to a remote and/or opening a PR — the publishing surface a mode
  * reshapes. */
 export interface RepoModeCapabilities {
-  /** May reviewed work be pushed to a remote? (`owner` → your master · `contributor` → your fork). */
+  /** May reviewed work be pushed to a remote? (`owner` → your default branch · `contributor` → your fork). */
   readonly push: boolean;
   /** May a PR be opened? (`owner` optional · `contributor` required · `offline` n/a). */
   readonly pr: boolean;
@@ -213,7 +213,7 @@ export interface RepoModeCapabilities {
 
 /**
  * The capability a mode grants — **the tested L3-ownable invariant: Offline disables push/PR.** Owner
- * and Contributor both allow push (owner → master, contributor → fork) and a PR per the table; only
+ * and Contributor both allow push (owner → default branch, contributor → fork) and a PR per the table; only
  * Offline refuses both. This is a pure capability LOOKUP — it does NOT enact anything. The *enactment*
  * (the gated verbs that consult it, the Contributor fork→PR flow, "the gate applies in all three") is
  * L5: see {@link RepoModeGateStub}. Exhaustive over {@link RepoMode} via {@link assertNever} — a new
@@ -222,7 +222,7 @@ export interface RepoModeCapabilities {
 export function repoModeCapabilities(mode: RepoMode): RepoModeCapabilities {
   switch (mode) {
     case 'owner':
-      return { push: true, pr: true }; // push to your master; PRs optional (allowed).
+      return { push: true, pr: true }; // push to your default branch; PRs optional (allowed).
     case 'contributor':
       return { push: true, pr: true }; // push to your fork; PRs required (allowed).
     case 'offline':
@@ -314,7 +314,7 @@ function defaultReadFileOrNull(path: string): string | null {
 export interface RepoModeGate {
   /**
    * Enact the publishing surface for a reviewed branch in `mode` — the gated `co_merge`/`co_push`
-   * (Owner → master · Offline → local only) and the Contributor fork→PR flow, with the review gate
+   * (Owner → default branch · Offline → local only) and the Contributor fork→PR flow, with the review gate
    * applied in all three. Returns `never`: L5 finalizes the params + lifecycle; this only marks the
    * seam.
    */
@@ -331,7 +331,7 @@ export interface RepoModeGate {
  * never a silent no-op. They throw regardless of arguments. */
 export class RepoModeGateStub implements RepoModeGate {
   // L5 PLUG-POINT (review-gates.md). The production gate must:
-  //  (1) enact the gated publish per mode — Owner → gated co_merge/co_push to master; Contributor →
+  //  (1) enact the gated publish per mode — Owner → gated co_merge/co_push to default branch; Contributor →
   //      fork→PR to upstream; Offline → local co_merge only (push/PR refused per repoModeCapabilities);
   //  (2) apply the review gate in ALL THREE modes (no path to master/remote/PR without a PASS);
   //  (3) yield a Contributor PR to the RICH host conventions (parse CONTRIBUTING.md / the PR template,

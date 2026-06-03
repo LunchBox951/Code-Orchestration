@@ -11,7 +11,7 @@ Closes #
 ## Review
 
 - [ ] Tests added/updated and `pnpm test` passes
-- [ ] `pnpm lint`, `pnpm typecheck`, `pnpm build` green
+- [ ] `pnpm lint`, `pnpm typecheck`, `pnpm build`, `pnpm format:check` green
 - [ ] Commits are Conventional and **signed off** (`git commit -s`, DCO)
 - [ ] No core logic duplicated into an adapter; no orchestration state added to the repo
 
