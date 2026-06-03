@@ -57,6 +57,14 @@ export const MAIL_APPROVAL_RESPONSE = 'approval_response' as const;
  * receipt emitted by the validated forward seam.
  */
 export const MAIL_ESCALATION = 'escalation' as const;
+/**
+ * L3-C activates `worker_done` — the deferred type a worker emits when it finishes through the gate.
+ * It is INFORMATIONAL (bus-visible, non-sticky — freeze #3): `co_finish` sends it from the finishing
+ * agent to the parent the sling recorded, carrying the shared `{subject, body}` prose (the commit +
+ * test summary). It demands no response, so it registers NO completion predicate; the durable,
+ * structured finish facts L5 consumes live in the worktree store's finish record, not in this ping.
+ */
+export const MAIL_WORKER_DONE = 'worker_done' as const;
 
 /** Registered seed-type enum — `send` rejects any type not in here (freeze #2, #5). */
 export const MAIL_TYPES = [
@@ -67,6 +75,7 @@ export const MAIL_TYPES = [
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
   MAIL_ESCALATION,
+  MAIL_WORKER_DONE,
 ] as const;
 export type MailType = (typeof MAIL_TYPES)[number];
 
@@ -185,6 +194,7 @@ export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [MAIL_APPROVAL, mailMessageSchema],
   [MAIL_APPROVAL_RESPONSE, approvalResponseSchema],
   [MAIL_ESCALATION, mailMessageSchema], // {subject, body}: a readable problem summary + context
+  [MAIL_WORKER_DONE, mailMessageSchema], // {subject, body}: the finish's commit + test summary
   [EVENT_MAIL_READ, mailReadSchema],
   [EVENT_MAIL_FORWARD, mailForwardSchema],
   [EVENT_MAIL_RETRACTED, mailRetractSchema], // infrastructure tombstone; never a MAIL_TYPES member
@@ -406,6 +416,7 @@ export const mailKinds: ReadonlyMap<MailType, MailKind> = new Map<MailType, Mail
   [MAIL_APPROVAL, 'actionable'], // asks the recipient to bless an outward action
   [MAIL_APPROVAL_RESPONSE, 'informational'], // the recorded decision; closes the approval
   [MAIL_ESCALATION, 'actionable'], // the holder must resolve-or-forward it (never drop)
+  [MAIL_WORKER_DONE, 'informational'], // a worker finished; bus-visible, demands no response
 ]);
 
 /**

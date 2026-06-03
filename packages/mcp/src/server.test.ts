@@ -29,6 +29,7 @@ const EXPECTED_TOOLS = [
   'co_worktree_info',
   'co_orient',
   'co_sling',
+  'co_finish',
 ];
 
 // ── Per-test program-data dir + live stores (mirrors the CO_DATA_DIR idiom in mail.test.ts) ──
