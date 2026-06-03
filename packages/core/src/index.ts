@@ -214,6 +214,30 @@ export {
   worktreePathFor,
   CO_BRANCH_PREFIX,
 } from './worktrees/sling.js';
+// L3-B worktree environment provisioning: place the gitignored working essentials into a slung
+// sandbox by the right mechanism per item (symlink large/stable deps · copy small/mutable env ·
+// isolated-copy a dep dir an agent will mutate), from a configurable manifest (smart defaults ⊕
+// per-project `worktree.provision` overrides via the config cascade). Reads the source repo, writes
+// only the sandbox (Principle 12 — pristine SOURCE). `co_sling` runs the `defaultProvisioner` after
+// `git worktree add`; the seam is additive (no new tool, no registry change).
+export type {
+  ProvisionMechanism,
+  ProvisionEntry,
+  ProvisioningManifest,
+  ProvisionOverride,
+  ProvisionParams,
+  ProvisionResult,
+  ProvisionContext,
+  Provisioner,
+} from './worktrees/provision.js';
+export {
+  DEFAULT_PROVISION_MANIFEST,
+  WORKTREE_PROVISION_CONFIG_KEY,
+  mergeProvisioningManifest,
+  resolveProvisioningManifest,
+  provisionWorktree,
+  defaultProvisioner,
+} from './worktrees/provision.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

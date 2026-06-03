@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { projectDataDir } from '../store/paths.js';
 import { detectBaseRef, defaultGitReader, resolveRefSha, type GitReader } from './detect-base.js';
 import type { TestOutcome } from './events.js';
+import { defaultProvisioner, type Provisioner } from './provision.js';
 import type { WorktreeStore } from './worktree-store.js';
 
 /**
@@ -72,6 +73,12 @@ export interface SlingDeps {
   readonly gitReader?: GitReader;
   readonly gitExec?: GitExec;
   readonly probe?: BaselineProbe;
+  /**
+   * Environment provisioning, run after `git worktree add` (phase B). Defaults to the real
+   * manifest-applying {@link defaultProvisioner}; inject a no-op/recording one in headless tests
+   * whose `gitExec` is faked (so no real sandbox dir exists to place into).
+   */
+  readonly provisioner?: Provisioner;
 }
 
 /** The recorded facts of a created sandbox (the structured result `co_sling` returns). */
@@ -111,13 +118,14 @@ export function worktreePathFor(projectId: string, branch: string): string {
  * ref, and capture the branch-off test baseline. This is the L3 foundation `co_sling` dispatches to.
  *
  * Steps: resolve the base (auto-detect unless `base` given) → resolve its sha (fail loud) → create
- * the worktree+branch under program-data (`git worktree add -b <branch> <path> <baseRef>`) → record
- * the worktree → capture + record the baseline → return the facts.
+ * the worktree+branch under program-data (`git worktree add -b <branch> <path> <baseRef>`) →
+ * PROVISION the gitignored working essentials into the sandbox (phase B — so it is runnable before
+ * the baseline is captured) → record the worktree → capture + record the baseline → return the facts.
  *
- * It does NOT spawn an agent into the sandbox (that is L7) and does NOT provision deps/env (phase
- * B) — the slung worktree may be bare. The worktree lives under program-data, NEVER in the repo
- * (Principle 12); the only git-side write is git's own `.git/worktrees/…` administration in the
- * main repo, which is git's bookkeeping, not orchestration state.
+ * It does NOT spawn an agent into the sandbox (that is L7). Provisioning READS from the main repo and
+ * WRITES only the sandbox, so the source repo stays pristine (Principle 12). The worktree lives under
+ * program-data, NEVER in the repo; the only git-side write is git's own `.git/worktrees/…`
+ * administration in the main repo, which is git's bookkeeping, not orchestration state.
  */
 export function slingWorktree(
   store: WorktreeStore,
@@ -127,6 +135,7 @@ export function slingWorktree(
   const gitReader = deps.gitReader ?? defaultGitReader;
   const gitExec = deps.gitExec ?? defaultGitExec;
   const probe = deps.probe ?? emptyBaselineProbe;
+  const provisioner = deps.provisioner ?? defaultProvisioner;
 
   const { parent, branch, base, repoCwd, projectId } = params;
   if (parent.length === 0) {
@@ -144,6 +153,10 @@ export function slingWorktree(
   const worktreePath = worktreePathFor(projectId, branch);
   mkdirSync(dirname(worktreePath), { recursive: true });
   gitExec(repoCwd, ['worktree', 'add', '-b', branch, worktreePath, baseRef]);
+
+  // 2b) Provision the gitignored working essentials into the sandbox (phase B): reads from the main
+  //     repo, writes only the sandbox, so it is runnable before the baseline is captured.
+  provisioner({ repoCwd, worktreePath, projectId });
 
   // 3) Record the sandbox.
   store.recordWorktree({ branch, baseRef, baseSha, path: worktreePath, parent });
