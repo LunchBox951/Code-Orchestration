@@ -1,0 +1,10 @@
+// L2 tool-registry foundation (phase A): the FROZEN cross-phase contracts every later
+// L2 tool plugs into. `ToolContext` is the invocation seam (what a handler receives);
+// `ToolSpec`/`ToolHandler` are the typed declaration (schemas = the single syntax source,
+// Principle 5); `ToolRegistry` + `createToolRegistry` are the append-only single source of
+// truth the MCP adapter mounts, the completeness gate checks, and the role-scoper filters;
+// `notImplemented` is the stub sentinel the gate detects. Phase A ships types + mechanism +
+// sentinel only — the real tools and the canonical registry instance arrive in phase B.
+export type { ToolContext } from './context.js';
+export type { ToolHandler, ToolSpec, ToolRegistry } from './registry.js';
+export { createToolRegistry, notImplemented } from './registry.js';
