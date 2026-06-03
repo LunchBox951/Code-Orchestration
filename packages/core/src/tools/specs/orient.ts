@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolSpec } from '../registry.js';
+import { orientContent } from '../orient-content.js';
 
 const orientInput = z.object({
   role: z
@@ -19,30 +20,16 @@ const orientOutput = z.object({
 type OrientOutput = z.infer<typeof orientOutput>;
 
 /**
- * WORKFLOW-ONLY guidance (Principle 5). This teaches the lifecycle — how to coordinate by
- * mail, finish through the gate, and escalate — and must NOT restate any tool's argument /
- * field list: the schemas are the single syntax source, and restating fields is the banned
- * drift. This is the MINIMAL but REAL handler; phase D replaces it with role-scoped,
- * anti-drift-checked content. Keep it workflow-only even as a placeholder.
+ * WORKFLOW-ONLY orientation (Principle 5). The handler is a thin pass-through to {@link orientContent}
+ * in core — which teaches the lifecycle (how to coordinate by mail, finish through the gate, and
+ * escalate), role-scoped, and NEVER restates a tool's argument / field list: the published zod
+ * schemas are the single syntax source, and restating fields is the banned drift the P5 anti-drift
+ * assertion kills. `orientContent` is a pure function of (role, topic) — `co` never bakes a target
+ * repo's `CLAUDE.md` / `AGENTS.md` into the guidance (the prompting split, Principle 11).
+ *
+ * The `role` input is a lenient self-declared string. It is NOT the mount-controlled scoping role:
+ * an agent cannot widen its offered toolset by asking orient for another role's guidance.
  */
-const ORIENT_GUIDANCE = [
-  'You are one agent in an orchestrated team. Coordinate entirely through mail — typed',
-  'messages to other agents — and act only as yourself.',
-  '',
-  'Lifecycle:',
-  '- Start by reading your inbox. Acknowledge what you have read, and answer anything that',
-  '  asks something of you by replying in the same thread so the question and its answer stay',
-  '  linked.',
-  '- Do the work in your worktree, committing small reviewable changes as you go.',
-  '- When you genuinely cannot proceed — an ambiguous intent, a blocker, a decision above your',
-  '  authority — raise it upward rather than guessing: ask your parent (a clarify request), and',
-  '  escalate if it is a true blocker. Never silently drop an item that was asked of you.',
-  '- When the work is done and verified, finish through the gate: commit, then hand off to the',
-  '  finisher, which dispatches review. Do not publish or merge your own work.',
-  '',
-  'If you are waiting on a reply, end your turn; the response arrives in your next inbox.',
-].join('\n');
-
 export const orientTool: ToolSpec<OrientInput, OrientOutput> = {
   name: 'co_orient',
   title: 'Orient',
@@ -51,12 +38,5 @@ export const orientTool: ToolSpec<OrientInput, OrientOutput> = {
     'by mail, finish through the gate, and escalate. Optionally tailored by role and topic.',
   inputSchema: orientInput,
   outputSchema: orientOutput,
-  handler: (_ctx, input): OrientOutput => {
-    const header =
-      input.role != null || input.topic != null
-        ? `Guidance${input.role != null ? ` for the ${input.role} role` : ''}` +
-          `${input.topic != null ? ` on ${input.topic}` : ''}:\n\n`
-        : '';
-    return { guidance: header + ORIENT_GUIDANCE };
-  },
+  handler: (_ctx, input): OrientOutput => ({ guidance: orientContent(input.role, input.topic) }),
 };

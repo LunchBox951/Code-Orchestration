@@ -27,3 +27,15 @@ export { toolInputShape, toolOutputShape } from './schema.js';
 // CI, and the review gate). Pure function; proven GREEN-on-real / RED-on-synthetic by its test.
 export type { ToolViolation } from './completeness.js';
 export { checkToolCompleteness } from './completeness.js';
+
+// L2-D role-scoped orientation: the WORKFLOW-ONLY, role-scoped `co_orient` body (AC-L2-4). A pure
+// function of (role, topic) — never restates a tool's field list (schemas are the syntax source,
+// Principle 5) and never bakes a target repo's project memory (the prompting split, Principle 11).
+export { orientContent } from './orient-content.js';
+
+// L2-D per-role tool-scoping (AC-L2-5): the base-role vocabulary + the SEED per-role toolsets over
+// the current nine tools, and `toolsForRole` — the relevance-scoping hook the MCP mount passes into
+// `createCoMcpServer({ tools })`. Fails loud on a phantom tool (the scoping analogue of the C gate);
+// authoritative rosters are an L6 concern.
+export type { Role } from './scoping.js';
+export { BASE_ROLES, roleToolsets, toolsForRole } from './scoping.js';

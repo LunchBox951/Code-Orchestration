@@ -1,7 +1,36 @@
-import { openMailStore, openRegistry, type ToolContext } from '@co/core';
+import {
+  BASE_ROLES,
+  openMailStore,
+  openRegistry,
+  toolsForRole,
+  type Role,
+  type ToolContext,
+  type ToolSpec,
+} from '@co/core';
 
 /** The launch-environment variable the mount reads the calling agent's identity from. */
 export const CO_AGENT_ENV = 'CO_AGENT';
+
+/** The launch-environment variable the mount reads the role to SCOPE the offered toolset by. */
+export const CO_ROLE_ENV = 'CO_ROLE';
+
+/**
+ * Resolve the offered toolset from the launch environment's `CO_ROLE`. The scoping role is
+ * MOUNT-controlled (this env), never self-declared — distinct from `co_orient`'s lenient `role`
+ * input, so an agent cannot widen its own toolset by claiming a role (mcp-tools.md / permissions.md).
+ *
+ * Returns the role-scoped {@link ToolSpec} list when `CO_ROLE` names a base role, or `undefined` —
+ * meaning "offer the full registry" — when it is absent or unrecognized. Scoping is RELEVANCE, not a
+ * security wall (permissions.md), so an unknown role fails SOFT to the full set rather than throwing;
+ * `toolsForRole` still fails loud on a phantom tool (a declaration bug), which this never masks.
+ */
+export function toolsFromEnv(): readonly ToolSpec[] | undefined {
+  const raw = process.env[CO_ROLE_ENV];
+  if (raw == null || raw.trim().length === 0) return undefined;
+  const role = raw.trim().toLowerCase();
+  if (!(BASE_ROLES as readonly string[]).includes(role)) return undefined;
+  return toolsForRole(role as Role);
+}
 
 /**
  * Build the default stdio {@link ToolContext} factory. The server serves a SINGLE agent for the
