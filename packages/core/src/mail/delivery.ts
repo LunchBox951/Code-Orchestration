@@ -8,6 +8,7 @@ import {
   makeMailForwardEvent,
   makeMailEvent,
   makeMailReadEvent,
+  makeMailRetractEvent,
   mailSchemas,
   mailUpcasters,
   type DeliveredMail,
@@ -80,6 +81,8 @@ export interface Delivery {
   ): DeliveredMail;
   /** Append a read-receipt for `recipient`'s mail at `seq`; returns the updated row. */
   markRead?(recipient: string, seq: number): DeliveredMail;
+  /** Append a retract-receipt for `sender`'s mail at `seq` (tombstone); returns the updated row. */
+  retract?(sender: string, seq: number): DeliveredMail;
 }
 
 /**
@@ -246,6 +249,36 @@ export class InProcessDelivery implements Delivery {
       return updated;
     });
   }
+
+  /**
+   * Append a retract-receipt and fold it in the SAME tx (mirrors {@link markRead}). Only the
+   * ORIGINAL SENDER may retract: the mail at `seq` must exist AND have been sent by `sender`,
+   * else fail loud (Principle 9) rather than write a dangling/forged tombstone. The mail is
+   * NOT deleted (Principle 14) — the returned row carries `retracted = true` and the mail drops
+   * out of the recipient's `inbox()`/`outstanding()`.
+   */
+  retract(sender: string, seq: number): DeliveredMail {
+    return this.store.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      ensureInboxTable(db);
+
+      const existing = selectMailBySeq(db, seq);
+      if (!existing || existing.sender !== sender) {
+        throw new Error(`InProcessDelivery.retract: no mail seq=${seq} sent by '${sender}'`);
+      }
+
+      const [stored] = tx.append([makeMailRetractEvent(this.projectId, sender, seq)]);
+      applyEvent(tx, decode(stored!, mailUpcasters, mailSchemas), this.projectors);
+
+      const updated = selectMailBySeq(db, seq);
+      if (!updated) {
+        throw new Error(
+          `InProcessDelivery.retract: inbox row missing after projection (seq=${seq})`,
+        );
+      }
+      return updated;
+    });
+  }
 }
 
 /**
@@ -289,6 +322,14 @@ export class LiveDeliveryStub implements Delivery {
       'LiveDeliveryStub.markRead: live (Conductor-side) read-receipts are not implemented at L1. ' +
         'This is the L7 plug-point: append the read-receipt Conductor-side (never from a worker ' +
         'sandbox). Use InProcessDelivery for headless flows.',
+    );
+  }
+
+  retract(): DeliveredMail {
+    throw new Error(
+      'LiveDeliveryStub.retract: live (Conductor-side) retraction is not implemented at L1. ' +
+        'This is the L7 plug-point: append the retract-receipt tombstone Conductor-side (never ' +
+        'from a worker sandbox). Use InProcessDelivery for headless flows.',
     );
   }
 }
