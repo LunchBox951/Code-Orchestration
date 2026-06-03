@@ -9,7 +9,7 @@ import { BASE_ROLES, roleToolsets, toolsForRole } from './scoping.js';
 // are no phantom tools (fail-loud — the scoping analogue of the C completeness gate). The
 // "self-describing schemas" half of AC-L2-5 is the C gate; cited (not duplicated) at the bottom.
 
-const NINE_TOOLS = [
+const ALL_TOOLS = [
   'co_mail_send',
   'co_mail_inbox',
   'co_mail_get',
@@ -19,6 +19,7 @@ const NINE_TOOLS = [
   'co_status',
   'co_worktree_info',
   'co_orient',
+  'co_sling',
 ];
 
 describe('AC-L2-5 — the seed map covers every base role', () => {
@@ -40,9 +41,9 @@ describe('AC-L2-5 — toolsForRole returns the role’s scoped tools, in registr
       expect([...got].sort()).toEqual([...offered].sort());
       // …emitted in REGISTRY order, never roster order…
       expect(got).toEqual(registryOrder.filter((n) => offered.includes(n)));
-      // …and always a subset of the canonical nine.
-      expect(got.length).toBeLessThanOrEqual(NINE_TOOLS.length);
-      for (const name of got) expect(NINE_TOOLS).toContain(name);
+      // …and always a subset of the canonical toolset.
+      expect(got.length).toBeLessThanOrEqual(ALL_TOOLS.length);
+      for (const name of got) expect(ALL_TOOLS).toContain(name);
     }
   });
 
@@ -53,11 +54,11 @@ describe('AC-L2-5 — toolsForRole returns the role’s scoped tools, in registr
     // the documented edge: the leaf reviewer is not offered retract; the implementer is.
     expect(reviewer).not.toContain('co_mail_retract');
     expect(implementer).toContain('co_mail_retract');
-    // both subsets of the nine; reviewer is strictly fewer than the full set.
-    expect(reviewer.length).toBeLessThan(NINE_TOOLS.length);
+    // both subsets of the full toolset; reviewer is strictly fewer than the full set.
+    expect(reviewer.length).toBeLessThan(ALL_TOOLS.length);
   });
 
-  it('registry order is preserved (the lead seed carries all nine → identical to the registry)', () => {
+  it('registry order is preserved (the lead seed carries all tools → identical to the registry)', () => {
     const order = buildCoreRegistry()
       .list()
       .map((t) => t.name);

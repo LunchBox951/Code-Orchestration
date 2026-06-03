@@ -10,6 +10,7 @@ import {
 import { statusTool } from './specs/status.js';
 import { worktreeInfoTool } from './specs/worktree-info.js';
 import { orientTool } from './specs/orient.js';
+import { slingTool } from './specs/sling.js';
 
 /**
  * Build the canonical core registry: a fresh {@link ToolRegistry} with every real core tool
@@ -34,5 +35,6 @@ export function buildCoreRegistry(): ToolRegistry {
   registry.register(statusTool);
   registry.register(worktreeInfoTool);
   registry.register(orientTool);
+  registry.register(slingTool);
   return registry;
 }
