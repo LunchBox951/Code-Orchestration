@@ -281,18 +281,20 @@ export function forwardOnTimeout(
  */
 export function waitingItems(mail: MailStore, agent: string): readonly DeliveredMail[] {
   const repliesToAgent = mail.inbox(agent);
-  return mail.sentBy(agent).filter(
-    (m) =>
-      m.type === MAIL_CLARIFY_REQUEST &&
-      !repliesToAgent.some(
-        (reply) =>
-          reply.type === MAIL_CLARIFY_RESPONSE &&
-          reply.sender === m.recipient &&
-          reply.recipient === m.sender &&
-          reply.correlationId === (m.correlationId ?? String(m.seq)) &&
-          reply.causationId === String(m.seq),
-      ),
-  );
+  return mail
+    .sentBy(agent)
+    .filter(
+      (m) =>
+        m.type === MAIL_CLARIFY_REQUEST &&
+        !repliesToAgent.some(
+          (reply) =>
+            reply.type === MAIL_CLARIFY_RESPONSE &&
+            reply.sender === m.recipient &&
+            reply.recipient === m.sender &&
+            reply.correlationId === (m.correlationId ?? String(m.seq)) &&
+            reply.causationId === String(m.seq),
+        ),
+    );
 }
 
 /** Whether `agent` is WAITING — it has at least one unanswered `clarify_request` it raised. */
