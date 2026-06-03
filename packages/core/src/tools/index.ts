@@ -17,3 +17,7 @@ export { buildCoreRegistry } from './core-registry.js';
 export { invokeTool } from './invoke.js';
 export type { WorktreeInfo } from './worktree.js';
 export { readWorktreeInfo } from './worktree.js';
+
+// L2-B2: schema-exposure helpers so the thin MCP adapter can mount each tool's zod schemas onto
+// the MCP SDK WITHOUT importing zod or reaching into a schema's internals (AC-L2-1 layering).
+export { toolInputShape, toolOutputShape } from './schema.js';
