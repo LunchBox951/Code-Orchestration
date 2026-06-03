@@ -176,7 +176,7 @@ function header(role: string | undefined, topic: string | undefined): string {
  * gets its lifecycle arc; an unknown / absent role gets generic workflow guidance.
  */
 export function orientContent(role?: string, topic?: string): string {
-  const body = asRole(role) ?? undefined;
+  const body = asRole(role);
   const arc = body === undefined ? GENERIC_GUIDANCE : roleGuidance(body);
   const focus = topic != null ? topicFocus(topic) : '';
   const sections = [SHARED_PREAMBLE, arc];
