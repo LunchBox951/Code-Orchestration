@@ -4,23 +4,32 @@ import type { Projector } from '../replay/projector.js';
 import type { StoredEvent, StoreTx } from '../store/types.js';
 import {
   EVENT_BASELINE_CAPTURED,
+  EVENT_FINISH_RECORDED,
   EVENT_WORKTREE_CREATED,
   type Baseline,
   type BaselineCaptured,
+  type FinishRecord,
+  type FinishRecorded,
   type TestOutcome,
   type WorktreeCreated,
   type WorktreeRecord,
 } from './events.js';
 
 /**
- * The L3 read-model: one `worktrees` row per slung branch and one `baselines` row per branch's
- * branch-off snapshot. Both keyed by `branch` (the natural identity of a sandbox). All columns are
- * log-derived, so a `rebuildAll` reproduces them byte-identical (AC-L0-2 / freeze #6): `created_ts`
- * / `captured_ts` come from the PERSISTED event ts, and the baseline `tests` are stored as the
- * deterministic JSON of the validated array (stable key order — zod yields `{name, passed}`).
+ * The L3 read-model: one `worktrees` row per slung branch, one `baselines` row per branch's
+ * branch-off snapshot, and one `finishes` row per branch's recorded finish. All keyed by `branch`
+ * (the natural identity of a sandbox). Every column is log-derived, so a `rebuildAll` reproduces
+ * them byte-identical (AC-L0-2 / freeze #6): `created_ts` / `captured_ts` / `recorded_ts` come from
+ * the PERSISTED event ts, and the `tests` arrays are stored as the deterministic JSON of the
+ * validated array (stable key order — zod yields `{name, passed}`).
  *
  * `removed` is the phase-E teardown flag (default 0); carried now so E lights up by folding a
  * `worktree.removed` event without reshaping the table.
+ *
+ * `finishes` is keyed by `branch` and folded as an UPSERT (last finish wins): unlike a one-shot
+ * `worktree.created`, a worker may finish more than once (a review kickback → fix → re-finish), so
+ * the read-model holds the LATEST finish per branch — which is the one L5 compares. Replaying the
+ * log in seq order reaches the same final row, so the rebuild stays byte-identical.
  */
 const CREATE_WORKTREE_TABLES = `
   CREATE TABLE IF NOT EXISTS worktrees (
@@ -38,6 +47,13 @@ const CREATE_WORKTREE_TABLES = `
     base_sha    TEXT NOT NULL,
     tests       TEXT NOT NULL,
     captured_ts INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS finishes (
+    branch      TEXT PRIMARY KEY,
+    base_sha    TEXT NOT NULL,
+    commit_sha  TEXT NOT NULL,
+    tests       TEXT NOT NULL,
+    recorded_ts INTEGER NOT NULL
   );
 `;
 
@@ -60,7 +76,11 @@ interface BaselineCapturedEvent extends StoredEvent {
   readonly type: typeof EVENT_BASELINE_CAPTURED;
   readonly payload: BaselineCaptured;
 }
-type WorktreeEvent = WorktreeCreatedEvent | BaselineCapturedEvent;
+interface FinishRecordedEvent extends StoredEvent {
+  readonly type: typeof EVENT_FINISH_RECORDED;
+  readonly payload: FinishRecorded;
+}
+type WorktreeEvent = WorktreeCreatedEvent | BaselineCapturedEvent | FinishRecordedEvent;
 
 /** Map a raw `worktrees` row (loosely typed at the SQLite boundary) to a {@link WorktreeRecord}. */
 export function rowToWorktreeRecord(row: Record<string, unknown>): WorktreeRecord {
@@ -86,8 +106,20 @@ export function rowToBaseline(row: Record<string, unknown>): Baseline {
   };
 }
 
+/** Map a raw `finishes` row to a {@link FinishRecord} (the `tests` JSON column is parsed back). */
+export function rowToFinishRecord(row: Record<string, unknown>): FinishRecord {
+  return {
+    branch: String(row.branch),
+    baseSha: String(row.base_sha),
+    commitSha: String(row.commit_sha),
+    tests: JSON.parse(String(row.tests)) as TestOutcome[],
+    recordedTs: Number(row.recorded_ts),
+  };
+}
+
 const WORKTREE_COLUMNS = 'branch, base_ref, base_sha, path, parent, created_ts, removed';
 const BASELINE_COLUMNS = 'branch, base_ref, base_sha, tests, captured_ts';
+const FINISH_COLUMNS = 'branch, base_sha, commit_sha, tests, recorded_ts';
 
 /** The worktree record for `branch`, or undefined. */
 export function selectWorktree(db: DatabaseSync, branch: string): WorktreeRecord | undefined {
@@ -112,6 +144,13 @@ export function selectBaseline(db: DatabaseSync, branch: string): Baseline | und
   return row ? rowToBaseline(row as Record<string, unknown>) : undefined;
 }
 
+/** The recorded finish for `branch`, or undefined. */
+export function selectFinish(db: DatabaseSync, branch: string): FinishRecord | undefined {
+  ensureWorktreeTables(db);
+  const row = db.prepare(`SELECT ${FINISH_COLUMNS} FROM finishes WHERE branch = ?`).get(branch);
+  return row ? rowToFinishRecord(row as Record<string, unknown>) : undefined;
+}
+
 /**
  * Folds the two L3 worktree events into the `worktrees` / `baselines` read-model, in the SAME tx as
  * the append so the log and the projection commit atomically; carries NO wall-clock field (freeze
@@ -122,7 +161,11 @@ export class WorktreeProjector implements Projector {
   readonly name = 'worktrees';
 
   handles(type: string): boolean {
-    return type === EVENT_WORKTREE_CREATED || type === EVENT_BASELINE_CAPTURED;
+    return (
+      type === EVENT_WORKTREE_CREATED ||
+      type === EVENT_BASELINE_CAPTURED ||
+      type === EVENT_FINISH_RECORDED
+    );
   }
 
   reset(tx: StoreTx): void {
@@ -130,6 +173,7 @@ export class WorktreeProjector implements Projector {
     ensureWorktreeTables(db);
     db.exec('DELETE FROM worktrees');
     db.exec('DELETE FROM baselines');
+    db.exec('DELETE FROM finishes');
   }
 
   apply(tx: StoreTx, event: StoredEvent): void {
@@ -153,6 +197,23 @@ export class WorktreeProjector implements Projector {
           `INSERT INTO baselines (branch, base_ref, base_sha, tests, captured_ts)
            VALUES (?, ?, ?, ?, ?)`,
         ).run(branch, baseRef, baseSha, JSON.stringify(tests), event.ts);
+        return;
+      }
+      case EVENT_FINISH_RECORDED: {
+        const { branch, baseSha, commitSha, tests } = worktreeEvent.payload;
+        // UPSERT (last finish wins) — a worker may re-finish after a review kickback, so the
+        // read-model holds the LATEST finish per branch. Replaying the log in seq order reaches
+        // the same final row, so the rebuild stays byte-identical. event.ts is the persisted
+        // record time (never wall-clock).
+        db.prepare(
+          `INSERT INTO finishes (branch, base_sha, commit_sha, tests, recorded_ts)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(branch) DO UPDATE SET
+             base_sha = excluded.base_sha,
+             commit_sha = excluded.commit_sha,
+             tests = excluded.tests,
+             recorded_ts = excluded.recorded_ts`,
+        ).run(branch, baseSha, commitSha, JSON.stringify(tests), event.ts);
         return;
       }
       default:

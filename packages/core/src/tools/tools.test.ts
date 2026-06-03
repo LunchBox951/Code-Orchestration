@@ -98,6 +98,7 @@ const ALL_TOOLS = [
   'co_worktree_info',
   'co_orient',
   'co_sling',
+  'co_finish',
 ];
 
 describe('buildCoreRegistry — the canonical single source of truth', () => {

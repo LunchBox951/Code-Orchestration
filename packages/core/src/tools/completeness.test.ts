@@ -21,6 +21,7 @@ const EXPECTED_TOOLS = [
   'co_worktree_info',
   'co_orient',
   'co_sling',
+  'co_finish',
 ] as const;
 
 const BOGUS = 'co_bogus';
