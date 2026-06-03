@@ -159,5 +159,16 @@ export { toolInputShape, toolOutputShape } from './tools/index.js';
 export type { ToolViolation } from './tools/index.js';
 export { checkToolCompleteness } from './tools/index.js';
 
+// L2-D role-scoped orientation + per-role tool-scoping. `orientContent` is the WORKFLOW-ONLY,
+// role-scoped body behind `co_orient` (AC-L2-4): a pure function of (role, topic) that never
+// restates a tool's field list (schemas are the syntax source, Principle 5) and never bakes a
+// target repo's project memory (the prompting split, Principle 11). `Role`/`BASE_ROLES`/
+// `roleToolsets`/`toolsForRole` are the per-role tool-scoping mechanism + seed over the current nine
+// tools (AC-L2-5): the relevance-scoping hook the MCP mount feeds into `createCoMcpServer({ tools })`,
+// fail-loud on a phantom tool. Authoritative rosters and sub-roles are an L6 concern.
+export { orientContent } from './tools/index.js';
+export type { Role } from './tools/index.js';
+export { BASE_ROLES, roleToolsets, toolsForRole } from './tools/index.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
