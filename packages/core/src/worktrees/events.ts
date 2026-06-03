@@ -27,6 +27,8 @@ export const EVENT_WORKTREE_CREATED = 'worktree.created' as const;
 export const EVENT_BASELINE_CAPTURED = 'baseline.captured' as const;
 /** A finish recorded by `co_finish` (L3-C): the house-style commit + the finish's test run (L5 input). */
 export const EVENT_FINISH_RECORDED = 'finish.recorded' as const;
+/** A sandbox was torn down (L3-E): its git worktree + program-data dir removed; the record is marked. */
+export const EVENT_WORKTREE_REMOVED = 'worktree.removed' as const;
 
 /** Scope prefix for the per-branch worktree-record stream; the suffix is the branch. */
 export const WORKTREE_SCOPE_PREFIX = 'worktree:';
@@ -100,11 +102,24 @@ export const finishRecordedSchema = z.object({
 });
 export type FinishRecorded = z.infer<typeof finishRecordedSchema>;
 
+/**
+ * The `worktree.removed` payload (L3-E teardown): just the `branch` whose sandbox was torn down. It
+ * folds onto the SAME `worktree:<branch>` stream as `worktree.created` (one stream per sandbox), and
+ * marks the read-model record `removed = 1`. Idempotent + replay-safe: a re-removal re-asserts the
+ * same flag. Carries NO path/fs detail — the dir deletion is teardown's side effect, not orchestration
+ * state; the record already holds the path.
+ */
+export const worktreeRemovedSchema = z.object({
+  branch: z.string().min(1),
+});
+export type WorktreeRemoved = z.infer<typeof worktreeRemovedSchema>;
+
 /** Current-version schema per L3 worktree event type — validated on append AND on read (decode). */
 export const worktreeSchemas: SchemaMap = new Map<string, z.ZodType>([
   [EVENT_WORKTREE_CREATED, worktreeCreatedSchema],
   [EVENT_BASELINE_CAPTURED, baselineCapturedSchema],
   [EVENT_FINISH_RECORDED, finishRecordedSchema],
+  [EVENT_WORKTREE_REMOVED, worktreeRemovedSchema],
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -146,6 +161,22 @@ export function makeFinishRecordedEvent(projectId: string, f: FinishRecorded): N
     projectId,
     scope: finishScope(payload.branch),
     type: EVENT_FINISH_RECORDED,
+    v: WORKTREE_EVENT_V,
+    payload,
+  };
+}
+
+/**
+ * Build + validate a `worktree.removed` `NewEvent` (L3-E teardown). It reuses the branch's
+ * `worktree:<branch>` scope — the SAME stream as `worktree.created` — so a sandbox's create + remove
+ * are one ordered history. Self-validating like the other `make*Event`s.
+ */
+export function makeWorktreeRemovedEvent(projectId: string, r: WorktreeRemoved): NewEvent {
+  const payload = worktreeRemovedSchema.parse(r);
+  return {
+    projectId,
+    scope: worktreeScope(payload.branch),
+    type: EVENT_WORKTREE_REMOVED,
     v: WORKTREE_EVENT_V,
     payload,
   };
