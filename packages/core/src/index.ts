@@ -148,6 +148,9 @@ export { createToolRegistry, notImplemented } from './tools/index.js';
 // is in core; B2 is a thin transport over this.
 export type { WorktreeInfo } from './tools/index.js';
 export { buildCoreRegistry, invokeTool, readWorktreeInfo } from './tools/index.js';
+// L2-B2 schema-exposure helpers: the zod `.shape` of a tool's input/output schemas, so the thin
+// MCP adapter mounts each tool's self-describing schema onto the SDK without importing zod itself.
+export { toolInputShape, toolOutputShape } from './tools/index.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
