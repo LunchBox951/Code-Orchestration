@@ -235,7 +235,11 @@ describe('AC-L1-6 — the resolve-or-forward chain (every forward advances + sha
     const resolver = prototypeParentResolver(CHAIN);
     const mail = openMailStore('p-esc-chain-answer');
     try {
-      const e1 = escalate(mail, resolver, { from: CHAIN.implementer, subject: 'blocked', body: 'b' });
+      const e1 = escalate(mail, resolver, {
+        from: CHAIN.implementer,
+        subject: 'blocked',
+        body: 'b',
+      });
       const e2 = forwardEscalation(
         mail,
         resolver,
