@@ -142,7 +142,7 @@ export { checkMailTypeCompleteness } from './mail/completeness.js';
 export type { ToolContext, ToolHandler, ToolSpec, ToolRegistry } from './tools/index.js';
 export { createToolRegistry, notImplemented } from './tools/index.js';
 
-// L2-B1 first real tools: the canonical registry of the nine `co_*` tools (`buildCoreRegistry`),
+// L2-B1 first real tools: the canonical registry of the `co_*` tools (`buildCoreRegistry`),
 // the transport-agnostic headless invocation harness (`invokeTool`) the MCP adapter (B2) mounts,
 // and the read-only git worktree helper behind `co_worktree_info` (`readWorktreeInfo`). All logic
 // is in core; B2 is a thin transport over this.
@@ -163,12 +163,57 @@ export { checkToolCompleteness } from './tools/index.js';
 // role-scoped body behind `co_orient` (AC-L2-4): a pure function of (role, topic) that never
 // restates a tool's field list (schemas are the syntax source, Principle 5) and never bakes a
 // target repo's project memory (the prompting split, Principle 11). `Role`/`BASE_ROLES`/
-// `roleToolsets`/`toolsForRole` are the per-role tool-scoping mechanism + seed over the current nine
+// `roleToolsets`/`toolsForRole` are the per-role tool-scoping mechanism + seed over the current
 // tools (AC-L2-5): the relevance-scoping hook the MCP mount feeds into `createCoMcpServer({ tools })`,
 // fail-loud on a phantom tool. Authoritative rosters and sub-roles are an L6 concern.
 export { orientContent } from './tools/index.js';
 export type { Role } from './tools/index.js';
 export { BASE_ROLES, roleToolsets, toolsForRole } from './tools/index.js';
+
+// L3-A worktrees & git: `co_sling`'s core — base auto-detect (origin/HEAD → main → master → local
+// HEAD, NEVER a hard-coded master), the program-data worktree store (worktree records + branch-off
+// baselines, never in the repo — Principle 12), and the create+record+capture orchestration
+// `co_sling` dispatches to. The mount opens `openWorktreeStore(projectId)` and injects it onto the
+// (optional, additive) `ToolContext.worktrees`; L5 consumes the captured baseline, L7 spawns into
+// the sandbox, phase B provisions it — none of which this layer builds.
+export type {
+  WorktreeCreated,
+  BaselineCaptured,
+  TestOutcome,
+  WorktreeRecord,
+  Baseline,
+} from './worktrees/events.js';
+export {
+  WORKTREE_EVENT_V,
+  EVENT_WORKTREE_CREATED,
+  EVENT_BASELINE_CAPTURED,
+  worktreeScope,
+  baselineScope,
+  worktreeSchemas,
+  worktreeUpcasters,
+  makeWorktreeCreatedEvent,
+  makeBaselineCapturedEvent,
+} from './worktrees/events.js';
+export { WorktreeProjector } from './worktrees/worktree-projector.js';
+export type { WorktreeStore } from './worktrees/worktree-store.js';
+export { openWorktreeStore } from './worktrees/worktree-store.js';
+export type { GitReader } from './worktrees/detect-base.js';
+export { detectBaseRef, defaultGitReader, resolveRefSha } from './worktrees/detect-base.js';
+export type {
+  GitExec,
+  BaselineProbe,
+  BaselineProbeContext,
+  SlingParams,
+  SlingDeps,
+  SlingResult,
+} from './worktrees/sling.js';
+export {
+  slingWorktree,
+  defaultGitExec,
+  emptyBaselineProbe,
+  worktreePathFor,
+  CO_BRANCH_PREFIX,
+} from './worktrees/sling.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

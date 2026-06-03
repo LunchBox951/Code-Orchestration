@@ -2,6 +2,7 @@ import {
   BASE_ROLES,
   openMailStore,
   openRegistry,
+  openWorktreeStore,
   toolsForRole,
   type Role,
   type ToolContext,
@@ -66,6 +67,10 @@ export function defaultContextFactory(): () => ToolContext {
   }
 
   const mail = openMailStore(projectId);
-  const ctx: ToolContext = { agent, projectId, cwd, mail, registry };
+  // L3: open + inject the worktree store alongside mail (a second connection on the same per-project
+  // store.db is safe — node:sqlite is synchronous and the two own different scopes/tables). A tool
+  // never opens its own store; the mount resolves and injects it.
+  const worktrees = openWorktreeStore(projectId);
+  const ctx: ToolContext = { agent, projectId, cwd, mail, registry, worktrees };
   return () => ctx;
 }
