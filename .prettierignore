@@ -17,7 +17,9 @@ package.json
 **/package.json
 pnpm-workspace.yaml
 
-# Prototype footprint (temporary tenant — removed at migration; see docs/migration.md)
+# Prototype footprint (temporary tenant — removed at migration; see docs/migration.md).
+# Includes the review harness's scratch files (REVIEW_*), injected into a reviewer's worktree
+# during review and never committed — the same temporary-tenant class, removed at migration.
 .co/
 .claude/
 .codex/
@@ -25,6 +27,8 @@ pnpm-workspace.yaml
 .research/
 PORTING-CO.md
 PRINCIPLES.md
+REVIEW_*.md
+REVIEW_*.json
 
 # Docs corpus (authored prose, including the migrated design corpus — not prettier-managed)
 docs/

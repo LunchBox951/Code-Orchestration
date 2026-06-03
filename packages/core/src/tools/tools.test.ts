@@ -1,0 +1,463 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { assertRepoPristine } from '../config/pristine.js';
+import { MAIL_CHAT, MAIL_CLARIFY_REQUEST, MAIL_CLARIFY_RESPONSE } from '../mail/events.js';
+import { openMailStore, type MailStore } from '../mail/mail-store.js';
+import { openRegistry, type ProjectRegistry } from '../registry/registry.js';
+import type { ToolContext } from './context.js';
+import { buildCoreRegistry } from './core-registry.js';
+import { invokeTool } from './invoke.js';
+import { notImplemented, type ToolRegistry } from './registry.js';
+import type { WireMail } from './specs/wire.js';
+
+// ── temp program-data dir + repo fixtures per test (mirrors mail.test.ts) ─────
+const ORIGINAL_ENV = process.env;
+let dataDirs: string[] = [];
+let repoDirs: string[] = [];
+const CWD = '/work/p-tools'; // a fixed logical worktree path; the mail/status tools never touch disk
+
+function useDataDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'co-tools-'));
+  dataDirs.push(dir);
+  process.env.CO_DATA_DIR = dir;
+  return dir;
+}
+
+beforeEach(() => {
+  process.env = { ...ORIGINAL_ENV };
+  dataDirs = [];
+  repoDirs = [];
+  useDataDir();
+});
+
+afterEach(() => {
+  process.env = ORIGINAL_ENV;
+  for (const dir of dataDirs) rmSync(dir, { recursive: true, force: true });
+  for (const dir of repoDirs) rmSync(dir, { recursive: true, force: true });
+  dataDirs = [];
+  repoDirs = [];
+});
+
+function makeRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'co-tools-repo-'));
+  repoDirs.push(dir);
+  writeFileSync(join(dir, 'README.md'), 'hello\n');
+  mkdirSync(join(dir, '.git', 'refs', 'heads'), { recursive: true });
+  writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  return dir;
+}
+
+/** A harness over a real temp store: a shared mail bus + registry, and per-agent contexts. */
+function setup(): {
+  reg: ToolRegistry;
+  ctx: (agent: string) => ToolContext;
+  close: () => void;
+} {
+  const mail: MailStore = openMailStore('p-tools');
+  const registry: ProjectRegistry = openRegistry();
+  const reg = buildCoreRegistry();
+  return {
+    reg,
+    ctx: (agent: string): ToolContext => ({
+      agent,
+      projectId: 'p-tools',
+      cwd: CWD,
+      mail,
+      registry,
+    }),
+    close: () => {
+      mail.close();
+      registry.close();
+    },
+  };
+}
+
+// Structural views of the validated structured outputs (avoid `any`).
+type ListOut = { mail: WireMail[] };
+type OneOut = { mail: WireMail };
+type AckOut = { acked: WireMail[] };
+type StatusOut = {
+  agent: string;
+  project_id: string;
+  cwd: string;
+  outstanding: number;
+  inbox_unread: number;
+};
+type OrientOut = { guidance: string };
+
+const NINE_TOOLS = [
+  'co_mail_send',
+  'co_mail_inbox',
+  'co_mail_get',
+  'co_mail_thread',
+  'co_mail_ack',
+  'co_mail_retract',
+  'co_status',
+  'co_worktree_info',
+  'co_orient',
+];
+
+describe('buildCoreRegistry — the canonical single source of truth', () => {
+  it('registers exactly the nine real tools, in order, with non-stub handlers', () => {
+    const reg = buildCoreRegistry();
+    expect(reg.list().map((t) => t.name)).toEqual(NINE_TOOLS);
+    for (const spec of reg.list()) {
+      expect(spec.handler).not.toBe(notImplemented); // no stubs reach the canonical registry
+      expect(spec.description.length).toBeGreaterThan(0); // every tool self-describes
+      expect(spec.inputSchema).toBeDefined();
+      expect(spec.outputSchema).toBeDefined();
+    }
+  });
+});
+
+describe('invokeTool — the transport-agnostic headless harness', () => {
+  it('fails loud on an unknown tool (Principle 9)', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      await expect(invokeTool(reg, ctx('alice'), 'co_does_not_exist', {})).rejects.toThrow(
+        /unknown tool/i,
+      );
+    } finally {
+      close();
+    }
+  });
+
+  it('rejects input that fails the input schema — never a silent default', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      // Missing the required `subject` → schema rejects before the bus is touched.
+      await expect(
+        invokeTool(reg, ctx('alice'), 'co_mail_send', { to: 'bob', type: MAIL_CHAT, body: 'x' }),
+      ).rejects.toThrow(/schema validation/i);
+      // Wrong type for `id` (string, not number).
+      await expect(invokeTool(reg, ctx('alice'), 'co_mail_get', { id: 'oops' })).rejects.toThrow(
+        /schema validation/i,
+      );
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('co_mail_send / co_mail_inbox — send round-trips into the recipient inbox', () => {
+  it('a sent message lands in the recipient inbox, structured and typed', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const sent = (await invokeTool(reg, ctx('alice'), 'co_mail_send', {
+        to: 'bob',
+        type: MAIL_CHAT,
+        subject: 'hi',
+        body: 'hello',
+      })) as WireMail;
+      expect(sent.sender).toBe('alice');
+      expect(sent.recipient).toBe('bob');
+      expect(sent.type).toBe(MAIL_CHAT);
+
+      const inbox = (await invokeTool(reg, ctx('bob'), 'co_mail_inbox', {})) as ListOut;
+      expect(inbox.mail).toHaveLength(1);
+      expect(inbox.mail[0]?.seq).toBe(sent.seq);
+      expect(inbox.mail[0]?.subject).toBe('hi');
+
+      // The sender never appears in its own (recipient) inbox.
+      const aliceInbox = (await invokeTool(reg, ctx('alice'), 'co_mail_inbox', {})) as ListOut;
+      expect(aliceInbox.mail).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it('a threaded reply (in_reply_to) lands with correct correlation_id/causation_id', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const req = (await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'which db?',
+        body: 'sqlite or pg?',
+      })) as WireMail;
+
+      const reply = (await invokeTool(reg, ctx('lead'), 'co_mail_send', {
+        type: MAIL_CLARIFY_RESPONSE,
+        in_reply_to: req.seq,
+        subject: 're: which db?',
+        body: 'sqlite',
+      })) as WireMail;
+
+      expect(reply.sender).toBe('lead');
+      expect(reply.recipient).toBe('worker'); // recipient derived from the answered mail
+      expect(reply.correlation_id).toBe(String(req.seq)); // thread id = root seq (freeze #7)
+      expect(reply.causation_id).toBe(String(req.seq)); // answers the request
+    } finally {
+      close();
+    }
+  });
+
+  it('unread_only narrows the inbox to mail still needing attention', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const a = (await invokeTool(reg, ctx('alice'), 'co_mail_send', {
+        to: 'bob',
+        type: MAIL_CHAT,
+        subject: 'one',
+        body: 'b',
+      })) as WireMail;
+      await invokeTool(reg, ctx('alice'), 'co_mail_send', {
+        to: 'bob',
+        type: MAIL_CHAT,
+        subject: 'two',
+        body: 'b',
+      });
+      await invokeTool(reg, ctx('bob'), 'co_mail_ack', { ids: [a.seq] }); // read the first
+
+      const unread = (await invokeTool(reg, ctx('bob'), 'co_mail_inbox', {
+        unread_only: true,
+      })) as ListOut;
+      expect(unread.mail.map((m) => m.subject)).toEqual(['two']);
+    } finally {
+      close();
+    }
+  });
+
+  it('a reply to a mail NOT in the caller inbox fails loud', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const req = (await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'q',
+        body: '?',
+      })) as WireMail;
+      // The worker is the SENDER, not the recipient — it cannot reply to its own request.
+      await expect(
+        invokeTool(reg, ctx('worker'), 'co_mail_send', {
+          type: MAIL_CLARIFY_RESPONSE,
+          in_reply_to: req.seq,
+          subject: 're',
+          body: 'a',
+        }),
+      ).rejects.toThrow(/not in worker's inbox/);
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('co_mail_get — authorizes by sender/recipient (no cross-agent peeking)', () => {
+  it('the sender and recipient can get it; a third party cannot', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const sent = (await invokeTool(reg, ctx('alice'), 'co_mail_send', {
+        to: 'bob',
+        type: MAIL_CHAT,
+        subject: 's',
+        body: 'b',
+      })) as WireMail;
+
+      const byBob = (await invokeTool(reg, ctx('bob'), 'co_mail_get', { id: sent.seq })) as OneOut;
+      expect(byBob.mail.seq).toBe(sent.seq);
+      const byAlice = (await invokeTool(reg, ctx('alice'), 'co_mail_get', {
+        id: sent.seq,
+      })) as OneOut;
+      expect(byAlice.mail.seq).toBe(sent.seq);
+
+      await expect(invokeTool(reg, ctx('carol'), 'co_mail_get', { id: sent.seq })).rejects.toThrow(
+        /not found or not visible to carol/,
+      );
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('co_mail_thread — every visible mail in the thread, in order', () => {
+  it('returns the request and its reply, oldest first', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const req = (await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'q',
+        body: '?',
+      })) as WireMail;
+      const reply = (await invokeTool(reg, ctx('lead'), 'co_mail_send', {
+        type: MAIL_CLARIFY_RESPONSE,
+        in_reply_to: req.seq,
+        subject: 'a',
+        body: 'answer',
+      })) as WireMail;
+
+      const thread = (await invokeTool(reg, ctx('worker'), 'co_mail_thread', {
+        thread_id: String(req.seq),
+      })) as ListOut;
+      expect(thread.mail.map((m) => m.seq)).toEqual([req.seq, reply.seq]);
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('co_mail_ack — flips read on the caller mail', () => {
+  it('marks received mail read; the inbox reflects it', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const sent = (await invokeTool(reg, ctx('alice'), 'co_mail_send', {
+        to: 'bob',
+        type: MAIL_CHAT,
+        subject: 's',
+        body: 'b',
+      })) as WireMail;
+      expect(sent.read).toBe(false);
+
+      const acked = (await invokeTool(reg, ctx('bob'), 'co_mail_ack', {
+        ids: [sent.seq],
+      })) as AckOut;
+      expect(acked.acked[0]?.read).toBe(true);
+
+      const inbox = (await invokeTool(reg, ctx('bob'), 'co_mail_inbox', {})) as ListOut;
+      expect(inbox.mail.find((m) => m.seq === sent.seq)?.read).toBe(true);
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('co_mail_retract — the sender withdraws; a non-sender cannot', () => {
+  it('removes the mail from the recipient inbox; a non-sender retract throws', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const sent = (await invokeTool(reg, ctx('alice'), 'co_mail_send', {
+        to: 'bob',
+        type: MAIL_CHAT,
+        subject: 's',
+        body: 'b',
+      })) as WireMail;
+
+      // A non-sender cannot retract.
+      await expect(
+        invokeTool(reg, ctx('bob'), 'co_mail_retract', { id: sent.seq }),
+      ).rejects.toThrow();
+
+      // The sender can — it becomes a tombstone and leaves bob's inbox.
+      const r = (await invokeTool(reg, ctx('alice'), 'co_mail_retract', {
+        id: sent.seq,
+      })) as OneOut;
+      expect(r.mail.retracted).toBe(true);
+      const bobInbox = (await invokeTool(reg, ctx('bob'), 'co_mail_inbox', {})) as ListOut;
+      expect(bobInbox.mail).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('co_status — the honest L2 agent record; counts track the bus', () => {
+  it('reports identity + live coordination state, and the counts move with the mail', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const before = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(before).toMatchObject({
+        agent: 'lead',
+        project_id: 'p-tools',
+        cwd: CWD,
+        outstanding: 0,
+        inbox_unread: 0,
+      });
+
+      // An actionable item to the lead lifts both outstanding and inbox_unread.
+      const req = (await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'q',
+        body: '?',
+      })) as WireMail;
+      const afterSend = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(afterSend.outstanding).toBe(1);
+      expect(afterSend.inbox_unread).toBe(1);
+
+      // Acking clears unread but NOT the outstanding actionable (viewing never resolves it).
+      await invokeTool(reg, ctx('lead'), 'co_mail_ack', { ids: [req.seq] });
+      const afterAck = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(afterAck.inbox_unread).toBe(0);
+      expect(afterAck.outstanding).toBe(1);
+
+      // The worker retracting its request drops the outstanding count to zero.
+      await invokeTool(reg, ctx('worker'), 'co_mail_retract', { id: req.seq });
+      const afterRetract = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(afterRetract.outstanding).toBe(0);
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('co_orient — workflow-only guidance (Principle 5: schemas are the syntax source)', () => {
+  it('returns non-empty workflow guidance and restates NO tool field-name list', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const out = (await invokeTool(reg, ctx('worker'), 'co_orient', {})) as OrientOut;
+      expect(out.guidance.length).toBeGreaterThan(0);
+      expect(out.guidance.toLowerCase()).toContain('mail'); // it teaches the coordination workflow
+
+      // The schemas are the single syntax source — orient must not restate any tool's fields.
+      const FORBIDDEN_FIELD_TOKENS = [
+        'in_reply_to',
+        'idempotency_key',
+        'unread_only',
+        'thread_id',
+        'head_sha',
+        'inbox_unread',
+        'correlation_id',
+        'causation_id',
+      ];
+      for (const token of FORBIDDEN_FIELD_TOKENS) {
+        expect(out.guidance).not.toContain(token);
+      }
+    } finally {
+      close();
+    }
+  });
+
+  it('still returns guidance (and no field list) when given role/topic', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const out = (await invokeTool(reg, ctx('worker'), 'co_orient', {
+        role: 'implementer',
+        topic: 'finish',
+      })) as OrientOut;
+      expect(out.guidance).toContain('implementer');
+      expect(out.guidance).not.toContain('in_reply_to');
+    } finally {
+      close();
+    }
+  });
+});
+
+describe('tools are repo-pristine — a representative tool call writes no repo footprint', () => {
+  it('wrapping a co_mail_send (via invokeTool) in assertRepoPristine does not throw', async () => {
+    const repo = makeRepo();
+    const { reg, ctx, close } = setup();
+    try {
+      // The in-process store write happens synchronously inside the handler (before invokeTool's
+      // first await), so assertRepoPristine — which hashes the repo right after fn() returns the
+      // pending promise — sees the full effect. The write goes only to CO_DATA_DIR, so the target
+      // repo stays byte-identical (Principle 12). Awaiting the returned promise then yields the mail.
+      const sent = (await assertRepoPristine(repo, () =>
+        invokeTool(reg, ctx('alice'), 'co_mail_send', {
+          to: 'bob',
+          type: MAIL_CHAT,
+          subject: 's',
+          body: 'b',
+        }),
+      )) as WireMail;
+      expect(sent.recipient).toBe('bob');
+
+      // The send really happened — pristine did not block it, it just proved no repo write.
+      const inbox = (await invokeTool(reg, ctx('bob'), 'co_mail_inbox', {})) as ListOut;
+      expect(inbox.mail).toHaveLength(1);
+    } finally {
+      close();
+    }
+  });
+});

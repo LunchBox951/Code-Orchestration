@@ -44,6 +44,7 @@ export type {
   MailMessage,
   MailRead,
   MailForward,
+  MailRetract,
   MailKind,
   CompletionPredicate,
   ApprovalDecision,
@@ -63,11 +64,13 @@ export {
   MAIL_TYPES,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
+  EVENT_MAIL_RETRACTED,
   MAIL_EVENT_V,
   mailMessageSchema,
   approvalResponseSchema,
   mailReadSchema,
   mailForwardSchema,
+  mailRetractSchema,
   mailSchemas,
   mailUpcasters,
   mailScope,
@@ -75,6 +78,7 @@ export {
   makeMailEvent,
   makeMailReadEvent,
   makeMailForwardEvent,
+  makeMailRetractEvent,
   mailKinds,
   mailKind,
   completionPredicates,
@@ -127,6 +131,44 @@ export { createRendererRegistry, defaultMailRenderer } from './mail/renderer.js'
 // the full build-time gate is L2.
 export type { MailTypeViolation } from './mail/completeness.js';
 export { checkMailTypeCompleteness } from './mail/completeness.js';
+
+// L2-A tool-registry foundation: the FROZEN cross-phase contracts the single MCP agent surface
+// is built from (Principle 4 — one-agent-surface). `ToolContext` is the headless invocation seam;
+// `ToolSpec`/`ToolHandler` are the typed tool declaration (schemas = the single syntax source,
+// Principle 5); `ToolRegistry` + `createToolRegistry` are the append-only single source of truth
+// the adapter mounts / the gate checks / the role-scoper filters; `notImplemented` is the stub
+// sentinel the L2 completeness gate detects. Phase A is types + mechanism + sentinel only — the
+// real tools and the canonical registry instance land in phase B.
+export type { ToolContext, ToolHandler, ToolSpec, ToolRegistry } from './tools/index.js';
+export { createToolRegistry, notImplemented } from './tools/index.js';
+
+// L2-B1 first real tools: the canonical registry of the nine `co_*` tools (`buildCoreRegistry`),
+// the transport-agnostic headless invocation harness (`invokeTool`) the MCP adapter (B2) mounts,
+// and the read-only git worktree helper behind `co_worktree_info` (`readWorktreeInfo`). All logic
+// is in core; B2 is a thin transport over this.
+export type { WorktreeInfo } from './tools/index.js';
+export { buildCoreRegistry, invokeTool, readWorktreeInfo } from './tools/index.js';
+// L2-B2 schema-exposure helpers: the zod `.shape` of a tool's input/output schemas, so the thin
+// MCP adapter mounts each tool's self-describing schema onto the SDK without importing zod itself.
+export { toolInputShape, toolOutputShape } from './tools/index.js';
+// L2-C completeness gate (THE keystone, AC-L2-3): the no-stub assertion generalized from L1's
+// mail-type check to the WHOLE tool registry — flags any tool lacking a self-describing input
+// schema, a structured output schema, a real (non-`notImplemented`) handler, or mountability. A
+// pure function run as a test over `buildCoreRegistry()`; riding `pnpm test` makes a stubbed tool
+// turn CI (and the review gate) red.
+export type { ToolViolation } from './tools/index.js';
+export { checkToolCompleteness } from './tools/index.js';
+
+// L2-D role-scoped orientation + per-role tool-scoping. `orientContent` is the WORKFLOW-ONLY,
+// role-scoped body behind `co_orient` (AC-L2-4): a pure function of (role, topic) that never
+// restates a tool's field list (schemas are the syntax source, Principle 5) and never bakes a
+// target repo's project memory (the prompting split, Principle 11). `Role`/`BASE_ROLES`/
+// `roleToolsets`/`toolsForRole` are the per-role tool-scoping mechanism + seed over the current nine
+// tools (AC-L2-5): the relevance-scoping hook the MCP mount feeds into `createCoMcpServer({ tools })`,
+// fail-loud on a phantom tool. Authoritative rosters and sub-roles are an L6 concern.
+export { orientContent } from './tools/index.js';
+export type { Role } from './tools/index.js';
+export { BASE_ROLES, roleToolsets, toolsForRole } from './tools/index.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
