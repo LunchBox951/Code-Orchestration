@@ -9,7 +9,7 @@ import { notImplemented, type ToolHandler, type ToolRegistry, type ToolSpec } fr
 // stubbed/partial tool added to a fresh copy of it. Because this rides `pnpm test`, shipping a real
 // stub later turns the suite (and CI, and the review gate) red — the AC-L2-3 verify.
 
-/** The nine real `co_*` tools the canonical registry declares (non-vacuous GREEN guard). */
+/** The real `co_*` tools the canonical registry declares (non-vacuous GREEN guard). */
 const EXPECTED_TOOLS = [
   'co_mail_send',
   'co_mail_inbox',
@@ -20,6 +20,8 @@ const EXPECTED_TOOLS = [
   'co_status',
   'co_worktree_info',
   'co_orient',
+  'co_sling',
+  'co_finish',
 ] as const;
 
 const BOGUS = 'co_bogus';
@@ -62,7 +64,7 @@ describe('AC-L2-3 — completeness gate: GREEN over the real registry', () => {
     expect(checkToolCompleteness(buildCoreRegistry())).toEqual([]);
   });
 
-  it('proves it is not vacuous — exactly the nine expected co_* tools are declared', () => {
+  it('proves it is not vacuous — exactly the expected co_* tools are declared', () => {
     const names = buildCoreRegistry()
       .list()
       .map((t) => t.name);

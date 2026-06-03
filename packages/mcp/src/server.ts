@@ -17,7 +17,7 @@ const SERVER_VERSION = '0.0.0';
 
 export interface CoMcpServerOptions {
   /**
-   * The tools to offer. Defaults to {@link buildCoreRegistry}().list() — the canonical nine
+   * The tools to offer. Defaults to {@link buildCoreRegistry}().list() — the canonical
    * `co_*` tools. Phase D passes a role-scoped subset here; the exposed tool list is ALWAYS
    * exactly these specs (1:1 with the registry — nothing added, nothing dropped).
    */
