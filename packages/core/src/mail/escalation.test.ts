@@ -850,7 +850,7 @@ describe('AC-L1-6 — threaded brainstorm + never-guess + asker-blocked (WAITING
     }
   });
 
-  it('a clarify the asker RETRACTED no longer counts as waiting (review #81)', () => {
+  it('a clarify_request the asker retracted no longer counts as waiting (review #81)', () => {
     const mail = openMailStore('p-esc-waiting-retract');
     let reqSeq = -1;
     try {
