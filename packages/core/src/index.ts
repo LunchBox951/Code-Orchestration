@@ -151,6 +151,13 @@ export { buildCoreRegistry, invokeTool, readWorktreeInfo } from './tools/index.j
 // L2-B2 schema-exposure helpers: the zod `.shape` of a tool's input/output schemas, so the thin
 // MCP adapter mounts each tool's self-describing schema onto the SDK without importing zod itself.
 export { toolInputShape, toolOutputShape } from './tools/index.js';
+// L2-C completeness gate (THE keystone, AC-L2-3): the no-stub assertion generalized from L1's
+// mail-type check to the WHOLE tool registry — flags any tool lacking a self-describing input
+// schema, a structured output schema, a real (non-`notImplemented`) handler, or mountability. A
+// pure function run as a test over `buildCoreRegistry()`; riding `pnpm test` makes a stubbed tool
+// turn CI (and the review gate) red.
+export type { ToolViolation } from './tools/index.js';
+export { checkToolCompleteness } from './tools/index.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

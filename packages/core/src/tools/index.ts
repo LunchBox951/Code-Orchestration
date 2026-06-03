@@ -21,3 +21,9 @@ export { readWorktreeInfo } from './worktree.js';
 // L2-B2: schema-exposure helpers so the thin MCP adapter can mount each tool's zod schemas onto
 // the MCP SDK WITHOUT importing zod or reaching into a schema's internals (AC-L2-1 layering).
 export { toolInputShape, toolOutputShape } from './schema.js';
+
+// L2-C completeness gate (the keystone): the no-stub assertion over the WHOLE tool registry — heir
+// to L1's mail-type no-stub check. A declared-but-stubbed/partial tool fails it (and so the suite,
+// CI, and the review gate). Pure function; proven GREEN-on-real / RED-on-synthetic by its test.
+export type { ToolViolation } from './completeness.js';
+export { checkToolCompleteness } from './completeness.js';

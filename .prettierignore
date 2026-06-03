@@ -26,6 +26,10 @@ pnpm-workspace.yaml
 PORTING-CO.md
 PRINCIPLES.md
 
+# Review-harness scratch (injected into a reviewer's worktree during review; never committed)
+REVIEW_*.md
+REVIEW_*.json
+
 # Docs corpus (authored prose, including the migrated design corpus — not prettier-managed)
 docs/
 
