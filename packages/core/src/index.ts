@@ -472,5 +472,39 @@ export {
 export type { DispatchResolution } from './dispatch/throttle.js';
 export { MAXED_THRESHOLD_PCT_DEFAULT, resolveDispatch, canResume } from './dispatch/throttle.js';
 
+// L4-5 dispatch integration: placement.decided event (the WRITER — completes reader-with-writer),
+// DispatchStore.recordPlacement, and operator-only render/preview fns (CLI only, AC8 — no new
+// agent tool; usage/cost/placement are program-data only, never agent-facing). P3: render-per-audience.
+export type {
+  PlacementDecidedPlaced,
+  PlacementDecidedWaiting,
+  PlacementDecided,
+  PlacementRecord,
+} from './dispatch/events.js';
+export {
+  EVENT_PLACEMENT_DECIDED,
+  PLACEMENT_SCOPE_PREFIX,
+  placementScope,
+  placementDecidedPlacedSchema,
+  placementDecidedWaitingSchema,
+  placementDecidedSchema,
+  makePlacementDecidedEvent,
+} from './dispatch/events.js';
+export {
+  PlacementProjector,
+  ensurePlacementTable,
+  rowToPlacementRecord,
+  selectAllPlacements,
+  selectPlacementBySeq,
+  selectPlacementsByAgent,
+} from './dispatch/placement-projector.js';
+export type { PreviewPlacementInput } from './dispatch/cli-render.js';
+export {
+  renderUsageReport,
+  renderCostReport,
+  previewPlacement,
+  renderDispatchResolution,
+} from './dispatch/cli-render.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
