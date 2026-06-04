@@ -1,6 +1,7 @@
 import type { MailStore } from '../mail/mail-store.js';
 import type { ProjectRegistry, ProjectId } from '../registry/registry.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
+import type { DispatchStore } from '../dispatch/dispatch-store.js';
 
 /**
  * What every tool handler receives. Assembled by whoever MOUNTS the surface — the
@@ -26,4 +27,11 @@ export interface ToolContext {
    * that needs it loud-fails when it is absent (Principle 9), mirroring L1's optional-method seams.
    */
   readonly worktrees?: WorktreeStore;
+  /**
+   * OPTIONAL L4 program-data handle: the dispatch store (usage/cost/placement records), opened +
+   * injected by the mount alongside {@link worktrees}. Optional + additive so every existing
+   * ToolContext construction site (L1/L2/L3 tests, mcp/cli) keeps compiling; an L4 tool that needs
+   * it loud-fails when absent (Principle 9), mirroring the worktrees seam.
+   */
+  readonly dispatch?: DispatchStore;
 }
