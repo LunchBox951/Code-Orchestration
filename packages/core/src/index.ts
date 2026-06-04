@@ -468,5 +468,9 @@ export {
   placeAgentFromStore,
 } from './dispatch/balancer.js';
 
+// L4-4 pure throttle-as-WAITING: PlacementDecision + headrooms → PLACED or WAITING (ETA + loud message); canResume predicate (AC4, P9, P13, P16).
+export type { DispatchResolution } from './dispatch/throttle.js';
+export { MAXED_THRESHOLD_PCT_DEFAULT, resolveDispatch, canResume } from './dispatch/throttle.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
