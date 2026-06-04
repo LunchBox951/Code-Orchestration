@@ -167,6 +167,9 @@ export function resolveDispatch(
  * (L7, stubbed) re-evaluates as headroom refreshes to re-wake a WAITING agent. PURE over injected
  * candidates + threshold — identical inputs always return the same boolean (AC10, P16). The actual
  * re-wake mechanism is L7; this predicate is the policy substrate only.
+ *
+ * `opts.nowMs` mirrors the `resolveDispatch` signature for API symmetry; it is not used internally
+ * because the resume check is purely over current headroom percentages, not wall-clock time.
  */
 export function canResume(
   candidates: readonly ProviderHeadroom[],
