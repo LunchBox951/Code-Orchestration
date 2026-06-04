@@ -504,22 +504,25 @@ describe('bindingProviderHeadroom — picks the most-constrained window', () => 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // Non-pure adapter over the DispatchStore + config cascade (program-data only, AC9/P12)
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-const ORIGINAL_ENV = process.env;
-let dataDirs: string[] = [];
-
-beforeEach(() => {
-  process.env = { ...ORIGINAL_ENV };
-  dataDirs = [];
-  const dir = mkdtempSync(join(tmpdir(), 'co-balancer-'));
-  dataDirs.push(dir);
-  process.env.CO_DATA_DIR = dir;
-});
-
-afterEach(() => {
-  process.env = ORIGINAL_ENV;
-  for (const dir of dataDirs) rmSync(dir, { recursive: true, force: true });
-  dataDirs = [];
-});
+/**
+ * Register a per-test temp `CO_DATA_DIR`, SCOPED to the describe block that calls this — so the pure
+ * placeAgent / headroomScore / bindingProviderHeadroom tests above pay no temp-dir overhead. Call it as
+ * the first statement of a describe whose tests open a real store / config.
+ */
+function useTempDataDir(): void {
+  const originalEnv = process.env;
+  let dataDir: string | undefined;
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    dataDir = mkdtempSync(join(tmpdir(), 'co-balancer-'));
+    process.env.CO_DATA_DIR = dataDir;
+  });
+  afterEach(() => {
+    process.env = originalEnv;
+    if (dataDir !== undefined) rmSync(dataDir, { recursive: true, force: true });
+    dataDir = undefined;
+  });
+}
 
 const claudeHealthy: UsageSnapshot = {
   provider: 'claude',
@@ -548,6 +551,8 @@ const ACCOUNTS = [
 ];
 
 describe('candidatesFromStore + placeAgentFromStore — reads live state, routes around the dead one', () => {
+  useTempDataDir();
+
   it('candidatesFromStore derives healthy claude + dead codex from recorded snapshots', async () => {
     const source = new FakeUsageSource({
       snapshots: { claude: claudeHealthy, codex: codexDown },
@@ -667,6 +672,8 @@ describe('candidatesFromStore + placeAgentFromStore — reads live state, routes
 // resolvePinTable — config cascade + fail-loud validation (P9)
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describe('resolvePinTable — global ⊕ project (project wins), fail-loud on malformed', () => {
+  useTempDataDir();
+
   it('returns {} when no pins are configured', () => {
     const config = openConfigStore();
     try {

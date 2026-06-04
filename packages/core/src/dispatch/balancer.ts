@@ -342,12 +342,16 @@ function placementFromPin(
   };
 }
 
-/** A legible exclusion reason for an unhealthy candidate (P9 — never a silent drop). */
+/**
+ * A legible exclusion reason for an unhealthy candidate (P9 — never a silent drop). Only ever called on
+ * EXCLUDED candidates, so a `known` headroom can ONLY reach here when the account is unavailable —
+ * availability shadows the reading, and a `known` + available candidate is healthy (scored, not
+ * excluded). An `unknown` headroom is excluded whether or not the account is nominally available.
+ */
 function exclusionReason(candidate: ProviderHeadroom): string {
   switch (candidate.headroom.kind) {
     case 'known':
-      // Known headroom but excluded ⇒ the account is unavailable (availability shadows the reading).
-      return candidate.available ? 'healthy' : 'account unavailable';
+      return 'account unavailable'; // known + excluded ⇒ unavailable (a healthy candidate is scored).
     case 'unknown':
       return candidate.available
         ? `headroom unknown: ${candidate.headroom.reason}`
