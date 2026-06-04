@@ -104,8 +104,16 @@ export function selectPlacementBySeq(
  * One row per event (keyed by `seq`), so a `rebuildAll` reproduces byte-identical rows (AC5, P14).
  */
 export class PlacementProjector implements Projector {
+  readonly name = 'placement';
+
   handles(eventType: string): boolean {
     return eventType === EVENT_PLACEMENT_DECIDED;
+  }
+
+  reset(tx: StoreTx): void {
+    const db = tx.raw as DatabaseSync;
+    ensurePlacementTable(db);
+    db.exec('DELETE FROM placement_records');
   }
 
   apply(tx: StoreTx, event: StoredEvent): void {
