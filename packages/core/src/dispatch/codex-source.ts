@@ -141,15 +141,42 @@ export function parseCodexRateLimits(
   return account !== undefined ? { ...reading, account } : reading;
 }
 
-/** Resolve a window's ISO reset: `reset_at` (verified) first, else relative `resets_in_seconds` + sample time. */
+/**
+ * Resolve a window's ISO reset — DEFENSIVE over the two shapes Codex emits. An explicit
+ * `reset_at` / `resets_at` wins: a NUMBER (the verified live shape) is epoch SECONDS → ISO; an ISO-8601
+ * string (the synthetic Phase-6 shape) is kept verbatim. Failing that, a relative `reset_after_seconds`
+ * (the verified live alias) / `resets_in_seconds` is added to the sample time. Undefined when neither is
+ * present.
+ */
 function resolveResetAt(window: Record<string, unknown>, sampledMs: number): string | undefined {
-  const explicit = stringish(pick(window, 'reset_at', 'resets_at', 'resetAt', 'resetsAt'));
+  const explicit = resolveExplicitResetAt(
+    pick(window, 'reset_at', 'resets_at', 'resetAt', 'resetsAt'),
+  );
   if (explicit !== undefined) return explicit;
-  const relSeconds = numberish(pick(window, 'resets_in_seconds', 'reset_in_seconds', 'resets_in'));
+  const relSeconds = numberish(
+    pick(window, 'reset_after_seconds', 'resets_in_seconds', 'reset_in_seconds', 'resets_in'),
+  );
   if (relSeconds !== undefined && Number.isFinite(sampledMs)) {
     return new Date(sampledMs + relSeconds * 1000).toISOString();
   }
   return undefined;
+}
+
+/**
+ * Resolve an explicit `reset_at` value to an ISO string. The verified live payload reports it as a NUMBER
+ * of epoch SECONDS (e.g. `1780538257` ≈ 2026, NOT milliseconds), while the synthetic Phase-6 fixtures use
+ * an ISO-8601 string. A number (or numeric string) is treated as epoch seconds → ISO; an ISO-parseable
+ * string is returned verbatim. Undefined when absent or unparseable.
+ */
+function resolveExplicitResetAt(value: unknown): string | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? new Date(value * 1000).toISOString() : undefined;
+  }
+  const text = stringish(value);
+  if (text === undefined) return undefined;
+  if (!Number.isNaN(Date.parse(text))) return text; // already an ISO timestamp — keep verbatim
+  const seconds = numberish(text);
+  return seconds !== undefined ? new Date(seconds * 1000).toISOString() : undefined;
 }
 
 /**
@@ -350,54 +377,169 @@ function quoteIdent(name: string): string {
 }
 
 /**
+ * The verified signature of a real Codex `codex.rate_limits` event as it is stored in a `feedback_log_body`
+ * row: an OpenTelemetry span-context prefix, then `websocket event: {"type":"codex.rate_limits"…}`. Used
+ * to pin the latest GENUINE event with a SQL `LIKE`, past prose that merely mentions the event name.
+ */
+const RATE_LIMITS_SIGNATURE = 'websocket event: {"type":"codex.rate_limits"';
+
+/**
  * Scan a Codex log database (read-only) for the LATEST `codex.rate_limits` payload — DEFENSIVE over an
- * unknown-but-host-validated schema (spec §Fixtures). It walks every table's text-ish columns newest-row
- * first, and returns the first JSON value that parses into a rate-limits structure (a `primary`/
- * `secondary` window set, possibly wrapped). Bounded by `scanLimit` rows per column. Returns undefined
- * when no rate-limits payload is found. The exact table/column the host uses is validated by the
- * host-side live run; any delta is a small follow-up.
+ * unknown-but-host-validated schema (spec §Fixtures). Two passes, PRIORITIZED first:
+ *
+ *   1. A targeted SQL `LIKE` on the {@link RATE_LIMITS_SIGNATURE} pins the newest GENUINE websocket event,
+ *      even when the logs are polluted with assistant-message prose that merely mentions
+ *      `codex.rate_limits` / `used_percent` and could otherwise fall outside (or outrank) a fixed window.
+ *   2. A defensive blind newest-`scanLimit`-row text scan per column, so a host whose schema lacks the
+ *      exact `feedback_log_body` shape still resolves.
+ *
+ * Both passes EXTRACT the embedded JSON (real bodies are not pure JSON — see {@link extractEmbeddedJson})
+ * before parsing, then return the first value that resolves into a rate-limits structure (a `primary` /
+ * `secondary` window set, possibly wrapped). Returns undefined when no rate-limits payload is found.
  */
 export function readLatestCodexRateLimits(
   db: DatabaseSync,
   opts: { readonly scanLimit?: number } = {},
 ): unknown | undefined {
   const scanLimit = opts.scanLimit ?? 500;
+  const columns = collectTextColumns(db);
+
+  // 1. PRIORITIZED — the latest row carrying the real codex.rate_limits websocket-event signature.
+  for (const { table, column } of columns) {
+    const hit = readSignatureRateLimits(db, table, column);
+    if (hit !== undefined) return hit;
+  }
+
+  // 2. DEFENSIVE FALLBACK — a blind newest-N-per-column scan for other / unknown schemas.
+  for (const { table, column } of columns) {
+    const hit = scanColumnRateLimits(db, table, column, scanLimit);
+    if (hit !== undefined) return hit;
+  }
+  return undefined;
+}
+
+/** Collect every (table, text-ish column) pair in a Codex log DB — the search space for both scan passes. */
+function collectTextColumns(db: DatabaseSync): Array<{ table: string; column: string }> {
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<
     Record<string, unknown>
   >;
-
+  const pairs: Array<{ table: string; column: string }> = [];
   for (const table of tables) {
     const tableName = stringish(table.name);
     if (!tableName) continue;
     const columns = db.prepare(`PRAGMA table_info(${quoteIdent(tableName)})`).all() as Array<
       Record<string, unknown>
     >;
-    const textColumns = columns
-      .map((c) => ({ name: stringish(c.name), type: String(c.type ?? '') }))
-      .filter((c) => c.name && /text|char|clob|json|blob|^$/i.test(c.type));
-
-    for (const column of textColumns) {
-      let rows: Array<Record<string, unknown>>;
-      try {
-        rows = db
-          .prepare(
-            `SELECT ${quoteIdent(column.name as string)} AS value FROM ${quoteIdent(tableName)} ` +
-              `ORDER BY rowid DESC LIMIT ${scanLimit}`,
-          )
-          .all() as Array<Record<string, unknown>>;
-      } catch {
-        continue; // a column that cannot be ordered/selected is skipped.
-      }
-      for (const row of rows) {
-        const text = row.value;
-        if (typeof text !== 'string') continue;
-        if (!/rate_limit|used_percent/i.test(text)) continue;
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined && findRateLimitsBody(parsed)) return parsed;
+    for (const c of columns) {
+      const name = stringish(c.name);
+      if (name && /text|char|clob|json|blob|^$/i.test(String(c.type ?? ''))) {
+        pairs.push({ table: tableName, column: name });
       }
     }
   }
+  return pairs;
+}
+
+/** Query the single LATEST row whose column carries the real `codex.rate_limits` websocket-event signature. */
+function readSignatureRateLimits(
+  db: DatabaseSync,
+  table: string,
+  column: string,
+): unknown | undefined {
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = db
+      .prepare(
+        `SELECT ${quoteIdent(column)} AS value FROM ${quoteIdent(table)} ` +
+          `WHERE ${quoteIdent(column)} LIKE ? ESCAPE '\\' ORDER BY rowid DESC LIMIT 1`,
+      )
+      .all(`%${escapeLikeLiteral(RATE_LIMITS_SIGNATURE)}%`) as Array<Record<string, unknown>>;
+  } catch {
+    return undefined; // a column a text LIKE cannot bind against is skipped.
+  }
+  return firstRateLimitsPayload(rows);
+}
+
+/** Blind newest-`scanLimit` scan of one column for any row that resolves into a rate-limits payload. */
+function scanColumnRateLimits(
+  db: DatabaseSync,
+  table: string,
+  column: string,
+  scanLimit: number,
+): unknown | undefined {
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = db
+      .prepare(
+        `SELECT ${quoteIdent(column)} AS value FROM ${quoteIdent(table)} ` +
+          `ORDER BY rowid DESC LIMIT ${scanLimit}`,
+      )
+      .all() as Array<Record<string, unknown>>;
+  } catch {
+    return undefined; // a column that cannot be ordered/selected is skipped.
+  }
+  const hinted = rows.filter(
+    (row) => typeof row.value === 'string' && /rate_limit|used_percent/i.test(row.value),
+  );
+  return firstRateLimitsPayload(hinted);
+}
+
+/** Extract + parse the first row whose (possibly prefixed) text body resolves into a rate-limits payload. */
+function firstRateLimitsPayload(rows: Array<Record<string, unknown>>): unknown | undefined {
+  for (const row of rows) {
+    const text = row.value;
+    if (typeof text !== 'string') continue;
+    const parsed = tryParseJson(extractEmbeddedJson(text));
+    if (parsed !== undefined && findRateLimitsBody(parsed)) return parsed;
+  }
   return undefined;
+}
+
+/** Escape a literal for a SQLite `LIKE … ESCAPE '\'` clause — `%`, `_`, and `\` are special there. */
+function escapeLikeLiteral(text: string): string {
+  return text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/** The marker that precedes the embedded JSON in a Codex `feedback_log_body` websocket-event row. */
+const WEBSOCKET_EVENT_MARKER = 'websocket event: ';
+
+/**
+ * Extract the embedded JSON object from a Codex log body — DEFENSIVE. Real `feedback_log_body` rows are
+ * NOT pure JSON: they carry an OpenTelemetry span-context prefix, then `websocket event: {…JSON…}`. When
+ * the marker is present this scans from the first `{` AFTER it; otherwise it scans from the first `{` in
+ * the text. Either way it returns the balanced top-level object so trailing noise is dropped too. Text
+ * with no `{` is returned unchanged (a pure-JSON body flows straight through {@link tryParseJson}).
+ */
+function extractEmbeddedJson(text: string): string {
+  const markerAt = text.indexOf(WEBSOCKET_EVENT_MARKER);
+  const searchFrom = markerAt >= 0 ? markerAt + WEBSOCKET_EVENT_MARKER.length : 0;
+  const start = text.indexOf('{', searchFrom);
+  if (start < 0) return text;
+  const end = matchBalancedObjectEnd(text, start);
+  return end >= 0 ? text.slice(start, end + 1) : text.slice(start);
+}
+
+/**
+ * Index of the `}` closing the top-level `{` at `start`, honoring JSON string literals (a brace inside a
+ * quoted value does not skew the depth count). Returns -1 when the object never closes (a truncated body).
+ */
+function matchBalancedObjectEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return i;
+  }
+  return -1;
 }
 
 /** Parse JSON, returning undefined instead of throwing on malformed text. */
@@ -436,7 +578,7 @@ export async function readLatestRolloutRateLimits(
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i];
       if (!line || !/rate_limit|used_percent/i.test(line)) continue;
-      const parsed = tryParseJson(line);
+      const parsed = tryParseJson(extractEmbeddedJson(line));
       if (parsed !== undefined && findRateLimitsBody(parsed)) return parsed;
     }
   }
