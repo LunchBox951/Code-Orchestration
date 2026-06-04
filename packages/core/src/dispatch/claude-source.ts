@@ -17,9 +17,9 @@
  * **AC11 (HARD RULE — Principle 2 authentic-terminal + billing):** this adapter NEVER runs inference or
  * spends API-billed tokens. There is NO `claude -p`, no streaming completion, no token-spending SDK
  * query anywhere in it — its only process call is the metadata `auth status` subcommand, and its only
- * network call is the (gated) metadata usage endpoint. Harvesting the live hosted-session
- * `rate_limit_event` stream is the L7 streaming source, NOT here. `claude-source.test.ts` proves the
- * adapter never reaches an inference path (mandatory).
+ * network calls are the (gated) metadata OAuth token and usage endpoints. Harvesting the live
+ * hosted-session `rate_limit_event` stream is the L7 streaming source, NOT here.
+ * `claude-source.test.ts` proves the adapter never reaches an inference path (mandatory).
  */
 
 import { execFile } from 'node:child_process';
@@ -47,11 +47,40 @@ export const CLAUDE_AUTH_STATUS_ARGS: readonly string[] = ['auth', 'status', '--
 /** The account usage endpoint for the gated idle/cold read (metadata, no turn — AC11). */
 export const CLAUDE_USAGE_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
 
+/** The OAuth refresh-token endpoint for retrieving a metadata-read access token. */
+export const CLAUDE_OAUTH_TOKEN_ENDPOINT = 'https://platform.claude.com/v1/oauth/token';
+
+/** Claude Code's public OAuth client ID for Claude subscription auth. */
+export const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+
+/** The Claude AI OAuth scopes used by Claude Code for subscription-backed metadata reads. */
+const CLAUDE_AI_OAUTH_SCOPES = [
+  'user:profile',
+  'user:inference',
+  'user:sessions:claude_code',
+  'user:mcp_servers',
+  'user:file_upload',
+] as const;
+
 /** Env var naming the file where the host captures the latest Claude Code statusLine payload. */
 export const CLAUDE_STATUSLINE_PATH_ENV = 'CO_CLAUDE_STATUSLINE_PATH';
 
-/** Env var carrying the OAuth bearer token for the gated idle usage read (host provides; never read from the repo). */
+/** Env var carrying a Claude OAuth refresh token for the gated idle usage read (host provides; never repo). */
+export const CLAUDE_OAUTH_REFRESH_TOKEN_ENV = 'CO_CLAUDE_OAUTH_REFRESH_TOKEN';
+
+/** Env var carrying a direct OAuth access token override for local debugging (host provides; never repo). */
+export const CLAUDE_OAUTH_ACCESS_TOKEN_ENV = 'CO_CLAUDE_OAUTH_ACCESS_TOKEN';
+
+/** Deprecated env var for a direct OAuth access token; kept as a compatibility alias. */
 export const CLAUDE_OAUTH_TOKEN_ENV = 'CO_CLAUDE_OAUTH_TOKEN';
+
+/** Env var overriding the bounded exponential usage-429 backoff base, in milliseconds. */
+export const CLAUDE_OAUTH_BACKOFF_MS_ENV = 'CO_CLAUDE_OAUTH_BACKOFF_MS';
+
+const CLAUDE_OAUTH_BACKOFF_MS_DEFAULT = 30_000;
+const CLAUDE_OAUTH_BACKOFF_MS_MAX = 15 * 60_000;
+const CLAUDE_OAUTH_TOKEN_CACHE_MS_DEFAULT = 5 * 60_000;
+const CLAUDE_OAUTH_TOKEN_EXPIRY_SKEW_MS = 60_000;
 
 /** What the metadata preflight resolves: whether the account is logged in, and its label. */
 export interface ClaudeAccountInfo {
@@ -118,8 +147,9 @@ export function parseClaudeAuthStatus(payload: unknown): ClaudeAccountInfo {
 export function parseClaudeStatusLine(payload: unknown): ClaudeStatusLineReading {
   const root = asRecord(payload);
   if (!root) return { windows: [] };
-  const rateLimits = asRecord(pick(root, 'rate_limits', 'rateLimits'));
-  if (!rateLimits) return { windows: [] };
+  const body = findClaudeRateLimitsBody(root) ?? root;
+  const rateLimits = asRecord(pick(body, 'rate_limits', 'rateLimits')) ?? body;
+  if (!hasClaudeUsageWindowEntries(rateLimits)) return { windows: [] };
 
   const windows: UsageWindow[] = [];
   for (const [key, raw] of Object.entries(rateLimits)) {
@@ -133,8 +163,39 @@ export function parseClaudeStatusLine(payload: unknown): ClaudeStatusLineReading
     windows.push({ kind: canonicalWindowKind(key), used_pct: used, reset_at: reset });
   }
 
-  const account = stringish(pick(root, 'account', 'organization', 'org'));
+  const account =
+    stringish(pick(root, 'account', 'organization', 'org')) ??
+    stringish(pick(body, 'account', 'organization', 'org'));
   return account !== undefined ? { account, windows } : { windows };
+}
+
+/** Find a shallow rate-limits envelope, e.g. `{ data: { rate_limits: ... } }`, without over-fitting. */
+function findClaudeRateLimitsBody(
+  value: Record<string, unknown>,
+  depth = 0,
+): Record<string, unknown> | undefined {
+  if (asRecord(pick(value, 'rate_limits', 'rateLimits'))) return value;
+  if (hasClaudeUsageWindowEntries(value)) return value;
+  if (depth >= 2) return undefined;
+  for (const child of Object.values(value)) {
+    const record = asRecord(child);
+    if (!record) continue;
+    const found = findClaudeRateLimitsBody(record, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function hasClaudeUsageWindowEntries(value: Record<string, unknown>): boolean {
+  return Object.values(value).some((raw) => {
+    const window = asRecord(raw);
+    if (!window) return false;
+    const used = numberish(
+      pick(window, 'used_percentage', 'used_percent', 'used_pct', 'utilization'),
+    );
+    const reset = stringish(pick(window, 'resets_at', 'reset_at', 'resetsAt'));
+    return used !== undefined && reset !== undefined;
+  });
 }
 
 /** Canonicalize a statusLine window key to the frozen labels where known; otherwise keep it verbatim. */
@@ -234,11 +295,16 @@ export class ClaudeUsageSource implements ProviderUsageSource {
 /** A spawn of the real `claude` binary for a METADATA subcommand only (AC11 — never an inference call). */
 export type ClaudeCli = (args: readonly string[]) => Promise<string>;
 
+/** Fetch-compatible HTTP seam for the real Claude OAuth metadata endpoints. */
+export type ClaudeOAuthFetch = (input: string, init?: RequestInit) => Promise<Response>;
+
 /** Options for {@link defaultClaudeDeps}: override any seam (tests do) or accept the real defaults. */
 export interface DefaultClaudeDepsOptions {
   readonly cli?: ClaudeCli;
   readonly readStatusLine?: () => Promise<unknown>;
   readonly fetchUsageEndpoint?: () => Promise<unknown>;
+  readonly fetchOAuth?: ClaudeOAuthFetch;
+  readonly env?: Record<string, string | undefined>;
   readonly now?: () => number;
 }
 
@@ -249,6 +315,14 @@ export interface DefaultClaudeDepsOptions {
  */
 export function defaultClaudeDeps(options: DefaultClaudeDepsOptions = {}): ClaudeUsageSourceDeps {
   const cli = options.cli ?? realClaudeCli;
+  const oauth =
+    options.fetchUsageEndpoint === undefined
+      ? new ClaudeOAuthUsageClient({
+          fetchOAuth: options.fetchOAuth ?? realFetch,
+          env: options.env ?? process.env,
+          now: options.now ?? Date.now,
+        })
+      : undefined;
   return {
     authStatus: async () => {
       const out = await cli(CLAUDE_AUTH_STATUS_ARGS);
@@ -261,9 +335,149 @@ export function defaultClaudeDeps(options: DefaultClaudeDepsOptions = {}): Claud
       return parseClaudeAuthStatus(parsed);
     },
     statusLine: options.readStatusLine ?? realReadStatusLine,
-    idleUsageRead: options.fetchUsageEndpoint ?? realFetchClaudeUsage,
+    idleUsageRead: options.fetchUsageEndpoint ?? (() => oauth!.readUsage()),
     ...(options.now ? { now: options.now } : {}),
   };
+}
+
+interface ClaudeOAuthUsageClientOptions {
+  readonly fetchOAuth: ClaudeOAuthFetch;
+  readonly env: Record<string, string | undefined>;
+  readonly now: () => number;
+}
+
+interface CachedAccessToken {
+  readonly token: string;
+  readonly expiresAtMs: number;
+}
+
+/** A short-lived in-memory OAuth usage reader. It never writes secrets or samples to disk. */
+class ClaudeOAuthUsageClient {
+  private readonly fetchOAuth: ClaudeOAuthFetch;
+  private readonly env: Record<string, string | undefined>;
+  private readonly now: () => number;
+  private readonly baseBackoffMs: number;
+  private cachedAccessToken?: CachedAccessToken;
+  private cachedRefreshToken?: string;
+  private backoffUntilMs = 0;
+  private nextBackoffMs: number;
+
+  constructor(options: ClaudeOAuthUsageClientOptions) {
+    this.fetchOAuth = options.fetchOAuth;
+    this.env = options.env;
+    this.now = options.now;
+    this.baseBackoffMs = configuredBackoffMs(this.env[CLAUDE_OAUTH_BACKOFF_MS_ENV]);
+    this.nextBackoffMs = this.baseBackoffMs;
+  }
+
+  async readUsage(): Promise<unknown> {
+    const nowMs = this.now();
+    if (this.backoffUntilMs > nowMs) {
+      throw new Error(
+        `Claude OAuth usage read is rate limited until ${new Date(this.backoffUntilMs).toISOString()}`,
+      );
+    }
+
+    const accessToken = await this.accessToken(nowMs);
+    const res = await this.fetchOAuth(CLAUDE_USAGE_ENDPOINT, {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'anthropic-beta': 'oauth-2025-04-20',
+        'anthropic-version': '2023-06-01',
+      },
+    });
+    if (res.status === 429) {
+      this.recordRateLimit(res, nowMs);
+      throw new Error('Claude OAuth usage endpoint returned 429');
+    }
+    if (!res.ok) throw new Error(`usage endpoint returned ${res.status}`);
+
+    this.resetBackoff();
+    return res.json();
+  }
+
+  private async accessToken(nowMs: number): Promise<string> {
+    const direct =
+      stringish(this.env[CLAUDE_OAUTH_ACCESS_TOKEN_ENV]) ??
+      stringish(this.env[CLAUDE_OAUTH_TOKEN_ENV]);
+    if (direct !== undefined) return direct;
+
+    if (this.cachedAccessToken && this.cachedAccessToken.expiresAtMs > nowMs) {
+      return this.cachedAccessToken.token;
+    }
+
+    const refreshToken =
+      this.cachedRefreshToken ?? stringish(this.env[CLAUDE_OAUTH_REFRESH_TOKEN_ENV]);
+    if (refreshToken === undefined) {
+      throw new Error(
+        `set ${CLAUDE_OAUTH_REFRESH_TOKEN_ENV}, ${CLAUDE_OAUTH_ACCESS_TOKEN_ENV}, or ${CLAUDE_OAUTH_TOKEN_ENV} for the gated idle usage read`,
+      );
+    }
+
+    const body = {
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: CLAUDE_OAUTH_CLIENT_ID,
+      scope: CLAUDE_AI_OAUTH_SCOPES.join(' '),
+    };
+    const res = await this.fetchOAuth(CLAUDE_OAUTH_TOKEN_ENDPOINT, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 429) {
+      this.recordRateLimit(res, nowMs);
+      throw new Error('Claude OAuth token endpoint returned 429');
+    }
+    if (!res.ok) throw new Error(`token endpoint returned ${res.status}`);
+
+    const payload = asRecord(await res.json());
+    const token = payload ? stringish(pick(payload, 'access_token', 'accessToken')) : undefined;
+    if (token === undefined) throw new Error('token endpoint did not return access_token');
+    const rotatedRefreshToken = payload
+      ? stringish(pick(payload, 'refresh_token', 'refreshToken'))
+      : undefined;
+    if (rotatedRefreshToken !== undefined) this.cachedRefreshToken = rotatedRefreshToken;
+
+    const expiresInSeconds = payload
+      ? numberish(pick(payload, 'expires_in', 'expiresIn'))
+      : undefined;
+    const ttlMs =
+      expiresInSeconds !== undefined
+        ? Math.max(0, expiresInSeconds * 1000 - CLAUDE_OAUTH_TOKEN_EXPIRY_SKEW_MS)
+        : CLAUDE_OAUTH_TOKEN_CACHE_MS_DEFAULT;
+    this.cachedAccessToken = { token, expiresAtMs: nowMs + ttlMs };
+    return token;
+  }
+
+  private recordRateLimit(res: Response, nowMs: number): void {
+    const retryAfterMs = retryAfterDeadlineMs(res.headers.get('retry-after'), nowMs);
+    if (retryAfterMs !== undefined) {
+      this.backoffUntilMs = retryAfterMs;
+      return;
+    }
+    this.backoffUntilMs = nowMs + this.nextBackoffMs;
+    this.nextBackoffMs = Math.min(this.nextBackoffMs * 2, CLAUDE_OAUTH_BACKOFF_MS_MAX);
+  }
+
+  private resetBackoff(): void {
+    this.backoffUntilMs = 0;
+    this.nextBackoffMs = this.baseBackoffMs;
+  }
+}
+
+function configuredBackoffMs(raw: string | undefined): number {
+  const parsed = numberish(raw);
+  if (parsed === undefined || parsed <= 0) return CLAUDE_OAUTH_BACKOFF_MS_DEFAULT;
+  return Math.min(parsed, CLAUDE_OAUTH_BACKOFF_MS_MAX);
+}
+
+function retryAfterDeadlineMs(raw: string | null, nowMs: number): number | undefined {
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return nowMs + seconds * 1000;
+  const dateMs = Date.parse(raw);
+  return Number.isNaN(dateMs) ? undefined : Math.max(dateMs, nowMs);
 }
 
 /** Spawn `claude` with metadata args and capture stdout. Metadata-only by construction (AC11). */
@@ -286,13 +500,4 @@ async function realReadStatusLine(): Promise<unknown> {
   return JSON.parse(await readFile(path, 'utf8'));
 }
 
-/** Fetch the account usage endpoint (metadata, no turn — AC11). Operator-gated; host provides the token. */
-async function realFetchClaudeUsage(): Promise<unknown> {
-  const token = process.env[CLAUDE_OAUTH_TOKEN_ENV];
-  if (!token) throw new Error(`set ${CLAUDE_OAUTH_TOKEN_ENV} for the gated idle usage read`);
-  const res = await fetch(CLAUDE_USAGE_ENDPOINT, {
-    headers: { authorization: `Bearer ${token}`, 'anthropic-version': '2023-06-01' },
-  });
-  if (!res.ok) throw new Error(`usage endpoint returned ${res.status}`);
-  return res.json();
-}
+const realFetch: ClaudeOAuthFetch = (input, init) => fetch(input, init);

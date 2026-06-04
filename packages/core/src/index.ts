@@ -526,6 +526,7 @@ export type {
   ClaudeUsageSourceDeps,
   ClaudeUsageSourceOptions,
   ClaudeCli,
+  ClaudeOAuthFetch,
   DefaultClaudeDepsOptions,
 } from './dispatch/claude-source.js';
 export {
@@ -533,8 +534,13 @@ export {
   CLAUDE_DEFAULT_ACCOUNT,
   CLAUDE_AUTH_STATUS_ARGS,
   CLAUDE_USAGE_ENDPOINT,
+  CLAUDE_OAUTH_TOKEN_ENDPOINT,
+  CLAUDE_OAUTH_CLIENT_ID,
   CLAUDE_STATUSLINE_PATH_ENV,
+  CLAUDE_OAUTH_REFRESH_TOKEN_ENV,
+  CLAUDE_OAUTH_ACCESS_TOKEN_ENV,
   CLAUDE_OAUTH_TOKEN_ENV,
+  CLAUDE_OAUTH_BACKOFF_MS_ENV,
   defaultClaudeDeps,
   parseClaudeAuthStatus,
   parseClaudeStatusLine,

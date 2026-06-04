@@ -27,11 +27,15 @@ describe('gated live E2E — skip gate (hermetic, always runs)', () => {
 describe.skipIf(!live)(
   `LIVE E2E [skipped unless ${CO_LIVE_E2E_ENV}=1 + creds]: REAL Claude (Max) + Codex (pro) usage, non-mocked`,
   () => {
-    it('retrieves REAL Claude (Max) usage/limits via the real statusLine adapter', async () => {
-      const source = createProviderUsageSource('claude'); // real seams — NO fixtures
+    it('retrieves REAL Claude (Max) usage/limits via the real OAuth usage adapter', async () => {
+      const source = createProviderUsageSource('claude', {
+        enableIdleUsageRead: true,
+        readStatusLine: () => Promise.resolve({}),
+      });
       const snap = await source.read('claude');
       expect(snap.provider).toBe('claude');
       expect(snap.available).toBe(true);
+      expect(snap.source).toBe('oauth-usage');
       expect(snap.windows.length).toBeGreaterThan(0);
       for (const window of snap.windows) {
         expect(typeof window.used_pct).toBe('number');
