@@ -93,6 +93,28 @@ export interface PreviewPlacementInput {
 }
 
 /**
+ * The shared dispatch-policy resolver: `resolvePinTable → candidatesFromStore → placeAgent →
+ * resolveDispatch`. Called from both the record path (`co_sling` handler) and the read-only
+ * preview path (`previewPlacement`/`co sling --dry-run`) so the two never drift. Pure over
+ * the injected store + inputs; the write vs. read-only distinction stays at the CALL SITES
+ * (only `co_sling` records `placement.decided`; preview writes nothing). AC10/P16.
+ */
+export function runDispatchPolicy(
+  store: DispatchStore,
+  projectId: string,
+  role: string,
+  workSize: WorkSize,
+  reasoningBudget: ReasoningBudget,
+  accounts: readonly ProviderAccount[],
+  nowMs: number,
+): DispatchResolution {
+  const pins = resolvePinTable(projectId);
+  const candidates = candidatesFromStore(store, accounts);
+  const decision = placeAgent({ role, workSize, reasoningBudget, pins, candidates, nowMs });
+  return resolveDispatch(decision, candidates, { nowMs });
+}
+
+/**
  * Preview where a dispatch WOULD land for the given inputs — purely read-only: resolves the same
  * policy as `co_sling` with routing inputs but writes NOTHING (no `placement.decided` event, no
  * worktree, no side-effects). This is the operator's dry-run preview (spec §E, AC8). Injectable
@@ -103,10 +125,7 @@ export function previewPlacement(input: PreviewPlacementInput): DispatchResoluti
   const ds = input.store ?? openDispatchStore(projectId);
   const ownsStore = input.store === undefined;
   try {
-    const pins = resolvePinTable(projectId);
-    const candidates = candidatesFromStore(ds, accounts);
-    const decision = placeAgent({ role, workSize, reasoningBudget, pins, candidates, nowMs });
-    return resolveDispatch(decision, candidates, { nowMs });
+    return runDispatchPolicy(ds, projectId, role, workSize, reasoningBudget, accounts, nowMs);
   } finally {
     if (ownsStore) ds.close();
   }

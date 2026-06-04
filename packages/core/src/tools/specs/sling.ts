@@ -1,9 +1,8 @@
 import { z } from 'zod';
 import { slingWorktree } from '../../worktrees/sling.js';
 import type { ToolSpec } from '../registry.js';
-import { candidatesFromStore, placeAgent, resolvePinTable } from '../../dispatch/balancer.js';
 import type { ProviderAccount } from '../../dispatch/balancer.js';
-import { resolveDispatch } from '../../dispatch/throttle.js';
+import { runDispatchPolicy } from '../../dispatch/cli-render.js';
 import { providerSchema } from '../../dispatch/events.js';
 import type { PlacementDecided } from '../../dispatch/events.js';
 import { workSizeSchema, reasoningBudgetSchema } from '../../dispatch/tier.js';
@@ -191,10 +190,15 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     // Inject nowMs at handler level (the thin impure shell); pass into pure policy (AC10, P16).
     const nowMs = Date.now();
 
-    const pins = resolvePinTable(ctx.projectId);
-    const candidates = candidatesFromStore(ctx.dispatch, accounts);
-    const decision = placeAgent({ role, workSize, reasoningBudget, pins, candidates, nowMs });
-    const resolution = resolveDispatch(decision, candidates, { nowMs });
+    const resolution = runDispatchPolicy(
+      ctx.dispatch,
+      ctx.projectId,
+      role,
+      workSize,
+      reasoningBudget,
+      accounts,
+      nowMs,
+    );
 
     // Record the decision (the WRITER — completes the reader-with-writer loop, P14).
     const placedPayload: PlacementDecided =
