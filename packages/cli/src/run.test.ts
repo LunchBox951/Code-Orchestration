@@ -193,6 +193,28 @@ describe('co sling --dry-run', () => {
     );
     expect(result.exitCode).toBe(1);
   });
+
+  it('exits with code 1 and a readable message for a malformed --account value (P9 — no crash)', () => {
+    const { dir } = makeRegisteredProject();
+    // 'badformat' has no colon separator — parseAccounts should throw and be caught cleanly.
+    const result = run(
+      [
+        'sling',
+        '--dry-run',
+        '--role',
+        'implementer',
+        '--work-size',
+        'average',
+        '--reasoning-budget',
+        'standard',
+        '--account',
+        'badformat',
+      ],
+      dir,
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/badformat|invalid.*account|account.*format/i);
+  });
 });
 
 describe('co help / unknown command', () => {

@@ -500,6 +500,7 @@ export {
 } from './dispatch/placement-projector.js';
 export type { PreviewPlacementInput } from './dispatch/cli-render.js';
 export {
+  runDispatchPolicy,
   renderUsageReport,
   renderCostReport,
   previewPlacement,

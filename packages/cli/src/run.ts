@@ -96,19 +96,25 @@ export function run(
           exitCode: 0,
         };
       }
-      const role = getArg(rest, '--role') ?? 'implementer';
-      const workSize = (getArg(rest, '--work-size') ?? 'average') as WorkSize;
-      const reasoningBudget = (getArg(rest, '--reasoning-budget') ?? 'standard') as ReasoningBudget;
-      const accounts = parseAccounts(rest) ?? DEFAULT_ACCOUNTS;
-      const resolution = previewPlacement({
-        projectId,
-        role,
-        workSize,
-        reasoningBudget,
-        accounts,
-        nowMs: Date.now(),
-      });
-      return { output: renderDispatchResolution(resolution), exitCode: 0 };
+      try {
+        const role = getArg(rest, '--role') ?? 'implementer';
+        const workSize = (getArg(rest, '--work-size') ?? 'average') as WorkSize;
+        const reasoningBudget = (getArg(rest, '--reasoning-budget') ??
+          'standard') as ReasoningBudget;
+        const accounts = parseAccounts(rest) ?? DEFAULT_ACCOUNTS;
+        const resolution = previewPlacement({
+          projectId,
+          role,
+          workSize,
+          reasoningBudget,
+          accounts,
+          nowMs: Date.now(),
+        });
+        return { output: renderDispatchResolution(resolution), exitCode: 0 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { output: `co sling: ${msg}\n`, exitCode: 1 };
+      }
     }
 
     default: {
