@@ -468,5 +468,14 @@ export {
   placeAgentFromStore,
 } from './dispatch/balancer.js';
 
+// L4-4 pure throttle-as-WAITING policy (AC4, AC10, P9, P13, P16). Layered on the Phase 3 balancer:
+// PlacementDecision + live headrooms → DispatchResolution. Only two outcomes: PLACED (real headroom)
+// or WAITING (all suitable providers maxed/unhealthy — ETA + loud agent message + maxedProviders).
+// A pinned provider that is maxed waits for ITS reset, never re-routes (P9, P13). canResume is the
+// pure re-wake predicate the Conductor (L7, stubbed) polls. No new MCP tool (AC8). No I/O or clock
+// reads (AC9/P12). Identical inputs → identical resolution (AC10, P16 — decisions-deferred).
+export type { DispatchResolution } from './dispatch/throttle.js';
+export { MAXED_THRESHOLD_PCT_DEFAULT, resolveDispatch, canResume } from './dispatch/throttle.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
