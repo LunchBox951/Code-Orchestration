@@ -431,5 +431,42 @@ export {
   normalizeLegacyDifficulty,
 } from './dispatch/tier.js';
 
+// L4-3 rate-limit-aware balancer: the PURE provider resolver `placeAgent` (pins never overridden →
+// AC1; floating → roomiest HEALTHY provider, reset-aware + hysteresis → AC2; exclude unhealthy/unknown,
+// route around a dead provider → AC3) over an injected bucket/headroom snapshot. The first-class
+// `no-candidate` variant surfaces the all-excluded signal for Phase 4 (throttle/WAITING) — never a throw,
+// never a silent degrade (P9), and NO tier degradation here. `headroomScore` is the reset-aware scoring;
+// `bindingProviderHeadroom` reduces an account's windows to the most-constrained one. The non-pure
+// adapter (`candidatesFromStore`/`resolvePinTable`/`placeAgentFromStore`) only READS the DispatchStore +
+// config cascade (`dispatch.pins`) — writes nothing (AC9/P12) and adds no MCP tool (AC8). AC10/P16: pure
+// over injected inputs (incl. `nowMs` + `previous`), identical inputs → identical PlacementDecision.
+export type {
+  Pin,
+  PinTable,
+  ProviderHeadroom,
+  Placement,
+  RankedCandidate,
+  ExcludedCandidate,
+  PlacementDecision,
+  HysteresisConfig,
+  PlaceAgentInput,
+  ProviderAccount,
+  PlaceFromStoreInput,
+  PlaceFromStoreDeps,
+} from './dispatch/balancer.js';
+export {
+  pinSchema,
+  pinTableSchema,
+  DISPATCH_PINS_CONFIG_KEY,
+  HYSTERESIS_MARGIN_DEFAULT,
+  RESET_HORIZON_MS_DEFAULT,
+  headroomScore,
+  placeAgent,
+  bindingProviderHeadroom,
+  candidatesFromStore,
+  resolvePinTable,
+  placeAgentFromStore,
+} from './dispatch/balancer.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
