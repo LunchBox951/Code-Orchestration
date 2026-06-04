@@ -413,5 +413,23 @@ export {
   resolveBudgetCap,
 } from './dispatch/dispatch-store.js';
 
+// L4-2 pure tier-matrix policy: (WorkSize × ReasoningBudget) → {model, effort, context} per
+// Provider. Routing vocabulary (WorkSize, ReasoningBudget + zod schemas) + default capability
+// matrix (resolveTier) + legacy difficulty shim (normalizeLegacyDifficulty). AC10/P16: pure
+// deterministic function, no I/O, no clock. AC8: no new MCP tool. AC9/P12: no repo writes.
+export type {
+  WorkSize,
+  ReasoningBudget,
+  Effort,
+  ContextWindow,
+  TierPlacement,
+} from './dispatch/tier.js';
+export {
+  workSizeSchema,
+  reasoningBudgetSchema,
+  resolveTier,
+  normalizeLegacyDifficulty,
+} from './dispatch/tier.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
