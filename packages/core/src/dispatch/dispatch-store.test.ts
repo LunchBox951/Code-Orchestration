@@ -499,3 +499,110 @@ describe('AC9 — assertRepoPristine holds around the dispatch recording cores',
     }
   });
 });
+
+// ── DispatchStore.recordPlacement — placement.decided record + read-back ──────────────────────────
+describe('DispatchStore.recordPlacement — record + read-back', () => {
+  it('records a placed decision and reads it back correctly', () => {
+    const store = openDispatchStore('p-placement-placed');
+    try {
+      const record = store.recordPlacement('agent-1', {
+        kind: 'placed',
+        role: 'implementer',
+        work_size: 'average',
+        reasoning_budget: 'standard',
+        provider: 'claude',
+        model: 'claude-sonnet-4-6',
+        effort: 'high',
+        context: 'standard',
+      });
+      expect(record.kind).toBe('placed');
+      expect(record.agent).toBe('agent-1');
+      expect(record.role).toBe('implementer');
+      expect(record.workSize).toBe('average');
+      expect(record.reasoningBudget).toBe('standard');
+      expect(record.provider).toBe('claude');
+      expect(record.model).toBe('claude-sonnet-4-6');
+      expect(record.effort).toBe('high');
+      expect(record.context).toBe('standard');
+      expect(record.seq).toBeGreaterThan(0);
+      expect(record.recordedTs).toBeGreaterThan(0);
+
+      const all = store.readPlacements();
+      expect(all).toHaveLength(1);
+      expect(all[0]).toEqual(record);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('records a waiting decision and reads it back correctly', () => {
+    const store = openDispatchStore('p-placement-waiting');
+    try {
+      const record = store.recordPlacement('agent-2', {
+        kind: 'waiting',
+        role: 'reviewer',
+        work_size: 'simple',
+        reasoning_budget: 'economy',
+        eta_reset_at: '2026-06-04T10:00:00Z',
+        reason: 'all providers maxed',
+        maxed_providers: ['claude', 'codex'],
+      });
+      expect(record.kind).toBe('waiting');
+      expect(record.agent).toBe('agent-2');
+      expect(record.role).toBe('reviewer');
+      expect(record.etaResetAt).toBe('2026-06-04T10:00:00Z');
+      expect(record.reason).toBe('all providers maxed');
+      expect(record.maxedProviders).toEqual(['claude', 'codex']);
+
+      const byAgent = store.readPlacements('agent-2');
+      expect(byAgent).toHaveLength(1);
+      expect(byAgent[0]!.kind).toBe('waiting');
+
+      // readPlacements with a different agent returns empty
+      expect(store.readPlacements('other-agent')).toHaveLength(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('readPlacements replay-equal: a fresh store instance reproduces the same rows', () => {
+    const store = openDispatchStore('p-placement-replay');
+    try {
+      store.recordPlacement('agent-3', {
+        kind: 'placed',
+        role: 'coordinator',
+        work_size: 'technical',
+        reasoning_budget: 'deep',
+        provider: 'claude',
+        model: 'claude-opus-4-8',
+        effort: 'max',
+        context: 'extended',
+      });
+      store.recordPlacement('agent-3', {
+        kind: 'waiting',
+        role: 'coordinator',
+        work_size: 'technical',
+        reasoning_budget: 'deep',
+        reason: 'claude maxed',
+        maxed_providers: ['claude'],
+      });
+      const beforeRebuild = store.readPlacements();
+      expect(beforeRebuild).toHaveLength(2);
+    } finally {
+      store.close();
+    }
+
+    // Open a second instance over the same data dir — should replay identically.
+    const store2 = openDispatchStore('p-placement-replay');
+    try {
+      const afterRebuild = store2.readPlacements();
+      expect(afterRebuild).toHaveLength(2);
+      expect(afterRebuild[0]!.kind).toBe('placed');
+      expect(afterRebuild[1]!.kind).toBe('waiting');
+      expect(afterRebuild[0]!.model).toBe('claude-opus-4-8');
+      expect(afterRebuild[1]!.maxedProviders).toEqual(['claude']);
+    } finally {
+      store2.close();
+    }
+  });
+});
