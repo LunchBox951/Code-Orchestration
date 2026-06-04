@@ -8,11 +8,14 @@ import {
   dispatchUpcasters,
   makeCostNearBudgetEvent,
   makeCostRecordedEvent,
+  makePlacementDecidedEvent,
   makeUsageObservedEvent,
   type CostRecorded,
   type CostRollup,
   type CostRollupKind,
   type NearBudgetRecord,
+  type PlacementDecided,
+  type PlacementRecord,
   type UsageAccountStatus,
   type UsageBucket,
   type UsageObserved,
@@ -25,6 +28,13 @@ import {
   selectNearBudgetBySeq,
   selectNearBudgetEvents,
 } from './cost-projector.js';
+import {
+  PlacementProjector,
+  ensurePlacementTable,
+  selectAllPlacements,
+  selectPlacementBySeq,
+  selectPlacementsByAgent,
+} from './placement-projector.js';
 import {
   UsageProjector,
   ensureUsageTables,
@@ -123,6 +133,10 @@ export interface DispatchStore {
   readRollups(): readonly CostRollup[];
   /** Every recorded near-budget crossing in seq order; optionally filtered to one task. */
   readNearBudget(task?: string): readonly NearBudgetRecord[];
+  /** Record a placement decision (append `placement.decided` + fold); returns the stored record. */
+  recordPlacement(agent: string, payload: PlacementDecided): PlacementRecord;
+  /** All recorded placement decisions in seq order; optionally filtered to one agent. */
+  readPlacements(agent?: string): readonly PlacementRecord[];
   /** Close the underlying project store. */
   close(): void;
 }
@@ -133,12 +147,17 @@ export interface DispatchStore {
  */
 export function openDispatchStore(projectId: string): DispatchStore {
   const store = openProjectStore(projectId);
-  const projectors: readonly Projector[] = [new UsageProjector(), new CostProjector()];
+  const projectors: readonly Projector[] = [
+    new UsageProjector(),
+    new CostProjector(),
+    new PlacementProjector(),
+  ];
 
-  /** Ensure BOTH read-model table sets exist before a read/record path touches them. */
+  /** Ensure all read-model table sets exist before a read/record path touches them. */
   const ensureTables = (db: DatabaseSync): void => {
     ensureUsageTables(db);
     ensureCostTables(db);
+    ensurePlacementTable(db);
   };
 
   return {
@@ -261,6 +280,32 @@ export function openDispatchStore(projectId: string): DispatchStore {
 
     readNearBudget(task?: string): readonly NearBudgetRecord[] {
       return store.transaction((tx) => selectNearBudgetEvents(tx.raw as DatabaseSync, task));
+    },
+
+    recordPlacement(agent: string, payload: PlacementDecided): PlacementRecord {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureTables(db);
+        const [stored] = tx.append([makePlacementDecidedEvent(projectId, agent, payload)]);
+        applyEvent(tx, decode(stored!, dispatchUpcasters, dispatchSchemas), projectors);
+        const record = selectPlacementBySeq(db, stored!.seq);
+        if (!record) {
+          throw new Error(
+            `openDispatchStore.recordPlacement: placement row missing after projection ` +
+              `(agent='${agent}', kind='${payload.kind}')`,
+          );
+        }
+        return record;
+      });
+    },
+
+    readPlacements(agent?: string): readonly PlacementRecord[] {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        return agent !== undefined
+          ? selectPlacementsByAgent(db, agent)
+          : selectAllPlacements(db);
+      });
     },
 
     close(): void {
