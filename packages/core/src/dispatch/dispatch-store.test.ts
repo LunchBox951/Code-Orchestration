@@ -25,6 +25,7 @@ import {
   resolveBudgetCapCents,
 } from './dispatch-store.js';
 import { FakeUsageSource, UsageUnavailableError, type UsageSnapshot } from './usage-source.js';
+import { isStale } from './policy.js';
 
 // ── Program-data dir per test (mirrors worktree-store.test.ts) ────────────────────────────────────
 const ORIGINAL_ENV = process.env;
@@ -285,6 +286,35 @@ describe('fail-loud (AC6, Principle 9) — unavailable usage never reads as heal
       expect(store.getHeadroom('claude:max', 'five_hour').kind).toBe('unknown');
       // The stale bucket row still exists, but it is shadowed by the account status — not surfaced.
       expect(store.getBucket('claude:max', 'five_hour')?.usedPct).toBe(42);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a transient source THROW after a known reading surfaces loudly but does not clobber the bucket; staleness governs eventual unknown', async () => {
+    // Intentional Phase-1 contract: a source throw carries no account, so observeUsage cannot know
+    // which account to mark unknown — it surfaces the error to the caller (fail-loud) and leaves the
+    // last good reading in place. Freshness is then governed by isStale (the Phase-3 balancer reads
+    // it); Phase-6 layered source ordering tries other sources before the reading ages out.
+    const store = openDispatchStore('p-transient');
+    try {
+      store.recordSnapshot(claudeSnap); // a recent KNOWN reading: 42% @ sampled 2026-06-03T00:00Z
+      const knownBefore = store.getHeadroom('claude:max', 'five_hour');
+      expect(knownBefore.kind).toBe('known');
+
+      const thrower = new FakeUsageSource({ errors: { claude: new Error('socket reset') } });
+      // The throw still surfaces loudly to the caller …
+      await expect(observeUsage(thrower, 'claude', store)).rejects.toBeInstanceOf(
+        UsageUnavailableError,
+      );
+      // … but the prior good reading is NOT clobbered by the transient throw.
+      expect(store.getHeadroom('claude:max', 'five_hour')).toEqual(knownBefore);
+
+      // Freshness is what eventually demotes it: fresh just after sampling, stale once past the TTL.
+      const bucket = store.getBucket('claude:max', 'five_hour')!;
+      const sampledMs = Date.parse(bucket.sampledAt);
+      expect(isStale(bucket, sampledMs + 60_000)).toBe(false); // still fresh right after the sample
+      expect(isStale(bucket, Date.parse(bucket.resetAt) + 1)).toBe(true); // past reset → stale
     } finally {
       store.close();
     }
