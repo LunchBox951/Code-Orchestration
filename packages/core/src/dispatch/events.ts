@@ -3,6 +3,7 @@ import type { NewEvent } from '../store/types.js';
 import type { SchemaMap } from '../replay/decode.js';
 import type { UpcasterRegistry } from '../replay/upcaster.js';
 import type { Provider } from './usage-source.js';
+import { workSizeSchema, reasoningBudgetSchema } from './tier.js';
 
 /**
  * L4 dispatch events live in the PROJECT store (one per registered project), exactly like the L1 mail
@@ -131,11 +132,92 @@ export const costNearBudgetSchema = z.object({
 });
 export type CostNearBudget = z.infer<typeof costNearBudgetSchema>;
 
+// ── placement.decided ────────────────────────────────────────────────────────────────────────────
+/**
+ * `placement.decided` records the final dispatch resolution for one seat — either PLACED on a
+ * concrete provider or WAITING (all providers at capacity). This is the WRITER that completes the
+ * reader-with-writer loop: Phase 5 records a decision so Phase 6+ (and the operator CLI) can read
+ * back placement history and throttle signals. Filed under `placement:<agent>` (one stream per
+ * requesting agent), mirroring how `cost.recorded` is filed under `cost:<agent>`.
+ *
+ * AC8: placement.decided is INTERNAL orchestration state — not agent-facing. The only surface
+ * change is the enriched co_sling response; the event itself is program-data only (AC9, P12).
+ */
+export const EVENT_PLACEMENT_DECIDED = 'placement.decided' as const;
+
+/** Scope prefix for the per-agent placement-decision stream. */
+export const PLACEMENT_SCOPE_PREFIX = 'placement:';
+
+/** A placement-decision stream scope: `placement:<agent>`. */
+export function placementScope(agent: string): string {
+  return PLACEMENT_SCOPE_PREFIX + agent;
+}
+
+/** zod effort enum (mirrors balancer.ts private copy; re-defined here so events.ts is self-contained). */
+const effortEnumSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+
+/** zod context-window enum. */
+const contextWindowEnumSchema = z.enum(['standard', 'extended']);
+
+export const placementDecidedPlacedSchema = z.object({
+  kind: z.literal('placed'),
+  role: z.string().min(1),
+  work_size: workSizeSchema,
+  reasoning_budget: reasoningBudgetSchema,
+  provider: providerSchema,
+  model: z.string().min(1),
+  effort: effortEnumSchema,
+  context: contextWindowEnumSchema,
+});
+
+export const placementDecidedWaitingSchema = z.object({
+  kind: z.literal('waiting'),
+  role: z.string().min(1),
+  work_size: workSizeSchema,
+  reasoning_budget: reasoningBudgetSchema,
+  eta_reset_at: z.string().optional(),
+  reason: z.string().min(1),
+  maxed_providers: z.array(providerSchema),
+});
+
+export const placementDecidedSchema = z.discriminatedUnion('kind', [
+  placementDecidedPlacedSchema,
+  placementDecidedWaitingSchema,
+]);
+export type PlacementDecidedPlaced = z.infer<typeof placementDecidedPlacedSchema>;
+export type PlacementDecidedWaiting = z.infer<typeof placementDecidedWaitingSchema>;
+export type PlacementDecided = z.infer<typeof placementDecidedSchema>;
+
+/**
+ * A recorded dispatch decision — one row per `placement.decided` event. `seq` is the persisted L0
+ * sequence (its stable identity); `recordedTs` is the persisted event ts (freeze #6). The `placed`
+ * fields are present only when `kind === 'placed'`; the `waiting` fields when `kind === 'waiting'`.
+ */
+export interface PlacementRecord {
+  readonly seq: number;
+  readonly agent: string;
+  readonly role: string;
+  readonly workSize: string;
+  readonly reasoningBudget: string;
+  readonly kind: 'placed' | 'waiting';
+  /** placed only */
+  readonly provider?: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly context?: string;
+  /** waiting only */
+  readonly etaResetAt?: string;
+  readonly reason?: string;
+  readonly maxedProviders?: readonly string[];
+  readonly recordedTs: number;
+}
+
 /** Current-version schema per L4 dispatch event type — validated on append AND on read (decode). */
 export const dispatchSchemas: SchemaMap = new Map<string, z.ZodType>([
   [EVENT_USAGE_OBSERVED, usageObservedSchema],
   [EVENT_COST_RECORDED, costRecordedSchema],
   [EVENT_COST_NEAR_BUDGET, costNearBudgetSchema],
+  [EVENT_PLACEMENT_DECIDED, placementDecidedSchema],
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -265,4 +347,21 @@ export interface NearBudgetRecord {
   readonly capCents: number;
   readonly thresholdPct: number;
   readonly recordedTs: number;
+}
+
+/** Build + validate a `placement.decided` `NewEvent`, filed under `placement:<agent>`. */
+export function makePlacementDecidedEvent(
+  projectId: string,
+  agent: string,
+  payload: PlacementDecided,
+): NewEvent {
+  const validated = placementDecidedSchema.parse(payload);
+  return {
+    projectId,
+    scope: placementScope(agent),
+    type: EVENT_PLACEMENT_DECIDED,
+    v: DISPATCH_EVENT_V,
+    payload: validated,
+    actor: agent,
+  };
 }
