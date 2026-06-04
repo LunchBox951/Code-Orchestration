@@ -311,5 +311,107 @@ export {
   defaultProvisioner,
 } from './worktrees/provision.js';
 
+// L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
+// seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/
+// `ProviderUsageSource` are the verbatim contract; `FakeUsageSource` is the production-quality double
+// that drives phases 3–5's headless policy tests; `UsageUnavailableError`/`USAGE_UNAVAILABLE_CODE` are
+// the fail-loud "no usage source succeeded" surface (AC6, Principle 9). AC11: the source contract is a
+// passive/metadata read ONLY — it NEVER runs inference or spends API-billed tokens (the real adapters
+// land in Phase 6). NO new agent MCP tool is added (AC8); usage/cost are internal substrate, and the
+// policy (rollup math, near-budget, staleness) is PURE over injected inputs (AC10, Principle 16).
+export type {
+  Provider,
+  UsageWindow,
+  UsageSnapshot,
+  ProviderUsageSource,
+  FakeUsageSourceInit,
+} from './dispatch/usage-source.js';
+export {
+  FakeUsageSource,
+  UsageUnavailableError,
+  USAGE_UNAVAILABLE_CODE,
+} from './dispatch/usage-source.js';
+export type {
+  UsageObserved,
+  UsageObservedAvailable,
+  UsageObservedUnavailable,
+  CostRecorded,
+  CostNearBudget,
+  UsageBucket,
+  UsageAccountStatus,
+  CostRollup,
+  CostRollupKind,
+  NearBudgetRecord,
+} from './dispatch/events.js';
+export {
+  DISPATCH_EVENT_V,
+  EVENT_USAGE_OBSERVED,
+  EVENT_COST_RECORDED,
+  EVENT_COST_NEAR_BUDGET,
+  USAGE_SCOPE_PREFIX,
+  COST_SCOPE_PREFIX,
+  usageScope,
+  costScope,
+  providerSchema,
+  usageObservedAvailableSchema,
+  usageObservedUnavailableSchema,
+  usageObservedSchema,
+  costRecordedSchema,
+  costNearBudgetSchema,
+  dispatchSchemas,
+  dispatchUpcasters,
+  makeUsageObservedEvent,
+  makeCostRecordedEvent,
+  makeCostNearBudgetEvent,
+} from './dispatch/events.js';
+export {
+  UsageProjector,
+  ensureUsageTables,
+  rowToUsageBucket,
+  rowToUsageAccountStatus,
+  selectUsageBucket,
+  selectAllUsageBuckets,
+  selectUsageAccount,
+  selectAllUsageAccounts,
+} from './dispatch/usage-projector.js';
+export {
+  CostProjector,
+  ensureCostTables,
+  rowToCostRollup,
+  rowToNearBudgetRecord,
+  selectCostRollup,
+  selectAllCostRollups,
+  selectNearBudgetBySeq,
+  selectNearBudgetEvents,
+} from './dispatch/cost-projector.js';
+// L4-1 PURE policy (AC10, Principle 16): headroom as a discriminated value (never a magic number),
+// near-budget edge trigger, and a clock-free staleness predicate (injected `now` — replay-deterministic).
+export type { Headroom, StaleInput, BudgetInput } from './dispatch/policy.js';
+export {
+  NEAR_BUDGET_THRESHOLD_PCT_DEFAULT,
+  USAGE_BUCKET_TTL_MS_DEFAULT,
+  isStale,
+  nearBudget,
+  crossesNearBudget,
+  deriveHeadroom,
+} from './dispatch/policy.js';
+// L4-1 store facade: `openDispatchStore(projectId)` records usage + cost over L0 (program-data only,
+// AC9), with the near-budget observability emit + the fail-loud `observeUsage` read seam, and the
+// config-cascade budget-cap resolution (heir to `cost_budget_cents`).
+export type {
+  DispatchStore,
+  BudgetCap,
+  CostRecordResult,
+  UsageObservedResult,
+  SnapshotIngestResult,
+} from './dispatch/dispatch-store.js';
+export {
+  COST_BUDGET_CENTS_KEY,
+  openDispatchStore,
+  observeUsage,
+  resolveBudgetCapCents,
+  resolveBudgetCap,
+} from './dispatch/dispatch-store.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
