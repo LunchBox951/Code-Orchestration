@@ -2,11 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { assertNever } from '../assert-never.js';
 import type { Projector } from '../replay/projector.js';
 import type { StoredEvent, StoreTx } from '../store/types.js';
-import {
-  EVENT_PLACEMENT_DECIDED,
-  type PlacementDecided,
-  type PlacementRecord,
-} from './events.js';
+import { EVENT_PLACEMENT_DECIDED, type PlacementDecided, type PlacementRecord } from './events.js';
 
 const CREATE_PLACEMENT_TABLE = `
   CREATE TABLE IF NOT EXISTS placement_records (
@@ -57,13 +53,10 @@ export function rowToPlacementRecord(row: Record<string, unknown>): PlacementRec
   // waiting
   const maxedRaw = row['maxed_providers'];
   const maxedProviders: readonly string[] =
-    typeof maxedRaw === 'string' && maxedRaw.length > 0
-      ? (JSON.parse(maxedRaw) as string[])
-      : [];
+    typeof maxedRaw === 'string' && maxedRaw.length > 0 ? (JSON.parse(maxedRaw) as string[]) : [];
   return {
     ...base,
-    etaResetAt:
-      row['eta_reset_at'] != null ? (row['eta_reset_at'] as string) : undefined,
+    etaResetAt: row['eta_reset_at'] != null ? (row['eta_reset_at'] as string) : undefined,
     reason: row['reason'] as string,
     maxedProviders,
   };
@@ -71,9 +64,10 @@ export function rowToPlacementRecord(row: Record<string, unknown>): PlacementRec
 
 export function selectAllPlacements(db: DatabaseSync): readonly PlacementRecord[] {
   ensurePlacementTable(db);
-  const rows = db
-    .prepare('SELECT * FROM placement_records ORDER BY seq')
-    .all() as Record<string, unknown>[];
+  const rows = db.prepare('SELECT * FROM placement_records ORDER BY seq').all() as Record<
+    string,
+    unknown
+  >[];
   return rows.map(rowToPlacementRecord);
 }
 
@@ -88,14 +82,11 @@ export function selectPlacementsByAgent(
   return rows.map(rowToPlacementRecord);
 }
 
-export function selectPlacementBySeq(
-  db: DatabaseSync,
-  seq: number,
-): PlacementRecord | undefined {
+export function selectPlacementBySeq(db: DatabaseSync, seq: number): PlacementRecord | undefined {
   ensurePlacementTable(db);
-  const row = db
-    .prepare('SELECT * FROM placement_records WHERE seq = ?')
-    .get(seq) as Record<string, unknown> | undefined;
+  const row = db.prepare('SELECT * FROM placement_records WHERE seq = ?').get(seq) as
+    | Record<string, unknown>
+    | undefined;
   return row ? rowToPlacementRecord(row) : undefined;
 }
 

@@ -1,9 +1,5 @@
 import { openDispatchStore, type DispatchStore } from './dispatch-store.js';
-import {
-  candidatesFromStore,
-  placeAgent,
-  resolvePinTable,
-} from './balancer.js';
+import { candidatesFromStore, placeAgent, resolvePinTable } from './balancer.js';
 import type { ProviderAccount } from './balancer.js';
 import { resolveDispatch } from './throttle.js';
 import type { DispatchResolution } from './throttle.js';
