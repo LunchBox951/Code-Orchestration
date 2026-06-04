@@ -302,9 +302,7 @@ export function openDispatchStore(projectId: string): DispatchStore {
     readPlacements(agent?: string): readonly PlacementRecord[] {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
-        return agent !== undefined
-          ? selectPlacementsByAgent(db, agent)
-          : selectAllPlacements(db);
+        return agent !== undefined ? selectPlacementsByAgent(db, agent) : selectAllPlacements(db);
       });
     },
 

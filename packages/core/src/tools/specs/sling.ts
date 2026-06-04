@@ -1,11 +1,7 @@
 import { z } from 'zod';
 import { slingWorktree } from '../../worktrees/sling.js';
 import type { ToolSpec } from '../registry.js';
-import {
-  candidatesFromStore,
-  placeAgent,
-  resolvePinTable,
-} from '../../dispatch/balancer.js';
+import { candidatesFromStore, placeAgent, resolvePinTable } from '../../dispatch/balancer.js';
 import type { ProviderAccount } from '../../dispatch/balancer.js';
 import { resolveDispatch } from '../../dispatch/throttle.js';
 import { providerSchema } from '../../dispatch/events.js';
@@ -104,13 +100,13 @@ const slingOutput = z.object({
     .describe('Present when routing inputs were supplied and the dispatch was placed.'),
   waiting: z
     .object({
-      message: z.string().describe('Loud agent-facing pacing message (spec §3 — never silent, P9).'),
+      message: z
+        .string()
+        .describe('Loud agent-facing pacing message (spec §3 — never silent, P9).'),
       eta_reset_at: z
         .string()
         .optional()
-        .describe(
-          'ISO-8601 when the soonest binding window refreshes (absent if unknown).',
-        ),
+        .describe('ISO-8601 when the soonest binding window refreshes (absent if unknown).'),
       reason: z.string().describe('Human-readable reason all providers are at capacity.'),
       maxed_providers: z
         .array(z.string())
@@ -188,7 +184,8 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
 
     const role = input.role ?? 'implementer';
     const workSize: WorkSize = (input.work_size ?? 'average') as WorkSize;
-    const reasoningBudget: ReasoningBudget = (input.reasoning_budget ?? 'standard') as ReasoningBudget;
+    const reasoningBudget: ReasoningBudget = (input.reasoning_budget ??
+      'standard') as ReasoningBudget;
     const accounts: readonly ProviderAccount[] = input.accounts ?? DEFAULT_ACCOUNTS;
 
     // Inject nowMs at handler level (the thin impure shell); pass into pure policy (AC10, P16).
@@ -217,9 +214,7 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
             role,
             work_size: workSize,
             reasoning_budget: reasoningBudget,
-            ...(resolution.etaResetAt !== undefined
-              ? { eta_reset_at: resolution.etaResetAt }
-              : {}),
+            ...(resolution.etaResetAt !== undefined ? { eta_reset_at: resolution.etaResetAt } : {}),
             reason: resolution.reason,
             maxed_providers: [...resolution.maxedProviders],
           };
@@ -230,9 +225,7 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       return {
         waiting: {
           message: resolution.message,
-          ...(resolution.etaResetAt !== undefined
-            ? { eta_reset_at: resolution.etaResetAt }
-            : {}),
+          ...(resolution.etaResetAt !== undefined ? { eta_reset_at: resolution.etaResetAt } : {}),
           reason: resolution.reason,
           maxed_providers: [...resolution.maxedProviders],
         },
