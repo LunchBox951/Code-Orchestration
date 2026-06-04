@@ -507,5 +507,77 @@ export {
   renderDispatchResolution,
 } from './dispatch/cli-render.js';
 
+// L4-6 LIVE provider usage adapters (spec §2.6, §4.3; AC7, AC11): the real per-provider
+// `ProviderUsageSource` implementations that turn the frozen seam into live measurement. Each is
+// layered (passive-first), cached (program-data), and fail-loud, with ALL live I/O behind injected
+// read-only seams (default = the real impl; tests inject fixtures so `pnpm test` stays hermetic).
+//
+//   - `ClaudeUsageSource` (Max): metadata `auth status` preflight → passive `statusLine` parse → a
+//     gated, default-OFF idle usage-endpoint read. NO INFERENCE (AC11) — no `claude -p`, ever.
+//   - `CodexUsageSource` (pro): `codex doctor` preflight → passive read-only `codex.rate_limits` from
+//     `logs_2.sqlite` → optional active app-server read (detect & fall back) → session-jsonl fallback.
+//   - `createProviderUsageSource` / `defaultProviderUsageSource` construct the real adapter with real
+//     seams (AC7 — wired as default); `readProviderUsageCached` adds the §4.3 program-data cache
+//     (reuses `isStale` + `observeUsage`); `isLiveE2EEnabled` gates the local live E2E (default OFF →
+//     it SKIPS in the sandbox/CI). AC8: no new agent tool. AC10/P16: the policy is unchanged.
+export type {
+  ClaudeAccountInfo,
+  ClaudeStatusLineReading,
+  ClaudeUsageSourceDeps,
+  ClaudeUsageSourceOptions,
+  ClaudeCli,
+  DefaultClaudeDepsOptions,
+} from './dispatch/claude-source.js';
+export {
+  ClaudeUsageSource,
+  CLAUDE_DEFAULT_ACCOUNT,
+  CLAUDE_AUTH_STATUS_ARGS,
+  CLAUDE_USAGE_ENDPOINT,
+  CLAUDE_STATUSLINE_PATH_ENV,
+  CLAUDE_OAUTH_TOKEN_ENV,
+  defaultClaudeDeps,
+  parseClaudeAuthStatus,
+  parseClaudeStatusLine,
+} from './dispatch/claude-source.js';
+export type {
+  CodexAccountInfo,
+  CodexRateLimitsReading,
+  CodexUsageSourceDeps,
+  CodexUsageSourceOptions,
+  CodexCli,
+  DefaultCodexDepsOptions,
+} from './dispatch/codex-source.js';
+export {
+  CodexUsageSource,
+  CODEX_DEFAULT_ACCOUNT,
+  CODEX_DOCTOR_ARGS,
+  CODEX_LOGS_DB_ENV,
+  CODEX_SESSIONS_DIR_ENV,
+  defaultCodexDeps,
+  defaultCodexLogsDbPath,
+  defaultCodexSessionsDir,
+  openCodexLogsDb,
+  parseCodexDoctor,
+  parseCodexRateLimits,
+  readLatestCodexRateLimits,
+  readLatestRolloutRateLimits,
+} from './dispatch/codex-source.js';
+export type { UsageSourceAttempt } from './dispatch/usage-adapter-common.js';
+export { buildSnapshot, layeredRead } from './dispatch/usage-adapter-common.js';
+export type {
+  ClaudeSourceConfig,
+  CodexSourceConfig,
+  CachedUsageReadOptions,
+} from './dispatch/provider-source.js';
+export {
+  accountForProvider,
+  createProviderUsageSource,
+  defaultProviderUsageSource,
+  readProviderUsageCached,
+  isLiveE2EEnabled,
+  CACHE_SOURCE,
+  CO_LIVE_E2E_ENV,
+} from './dispatch/provider-source.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
