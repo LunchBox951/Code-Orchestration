@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { openMailStore, type MailStore } from '../../mail/mail-store.js';
 import { openRegistry, type ProjectRegistry } from '../../registry/registry.js';
 import { openWorktreeStore, type WorktreeStore } from '../../worktrees/worktree-store.js';
+import { openDispatchStore, type DispatchStore } from '../../dispatch/dispatch-store.js';
+import type { UsageSnapshot } from '../../dispatch/usage-source.js';
 import { buildCoreRegistry } from '../core-registry.js';
 import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
@@ -18,6 +20,7 @@ const ORIGINAL_ENV = process.env;
 let tmpDirs: string[] = [];
 let mails: MailStore[] = [];
 let worktreeStores: WorktreeStore[] = [];
+let dispatchStores: DispatchStore[] = [];
 let regs: ProjectRegistry[] = [];
 
 beforeEach(() => {
@@ -25,6 +28,7 @@ beforeEach(() => {
   tmpDirs = [];
   mails = [];
   worktreeStores = [];
+  dispatchStores = [];
   regs = [];
   const data = mkdtempSync(join(tmpdir(), 'co-sling-tool-data-'));
   tmpDirs.push(data);
@@ -34,12 +38,14 @@ beforeEach(() => {
 afterEach(() => {
   for (const m of mails) m.close();
   for (const w of worktreeStores) w.close();
+  for (const d of dispatchStores) d.close();
   for (const r of regs) r.close();
   process.env = ORIGINAL_ENV;
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
   tmpDirs = [];
   mails = [];
   worktreeStores = [];
+  dispatchStores = [];
   regs = [];
 });
 
@@ -140,5 +146,154 @@ describe('co_sling — via invokeTool', () => {
     await expect(
       invokeTool(buildCoreRegistry(), ctx, 'co_sling', { parent: 'lead-7', branch: 'co/x' }),
     ).rejects.toThrow(/did not inject a worktree store/i);
+  });
+});
+
+// ── Phase 5 routing tests ───────────────────────────────────────────────────────────────────────
+
+const healthySnapshot: UsageSnapshot = {
+  provider: 'claude',
+  account: 'default',
+  available: true,
+  source: 'fake',
+  sampled_at: new Date().toISOString(),
+  windows: [
+    {
+      kind: 'five_hour',
+      used_pct: 20,
+      reset_at: new Date(Date.now() + 5 * 3600_000).toISOString(),
+    },
+  ],
+};
+
+const maxedSnapshot: UsageSnapshot = {
+  provider: 'claude',
+  account: 'default',
+  available: true,
+  source: 'fake',
+  sampled_at: new Date().toISOString(),
+  windows: [
+    {
+      kind: 'five_hour',
+      used_pct: 99,
+      reset_at: new Date(Date.now() + 5 * 3600_000).toISOString(),
+    },
+  ],
+};
+
+function makeContextWithDispatch(
+  agent: string,
+  repo: string,
+  snapshot: UsageSnapshot,
+): ToolContext {
+  const registry = openRegistry();
+  regs.push(registry);
+  const projectId = registry.register(repo);
+  const mail = openMailStore(projectId);
+  mails.push(mail);
+  const worktrees = openWorktreeStore(projectId);
+  worktreeStores.push(worktrees);
+  const dispatch = openDispatchStore(projectId);
+  dispatchStores.push(dispatch);
+  dispatch.recordSnapshot(snapshot);
+  return { agent, projectId, cwd: repo, mail, registry, worktrees, dispatch };
+}
+
+describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () => {
+  it('placed: records placement.decided and returns placement in output; creates sandbox', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/routed-placed',
+      role: 'implementer',
+      work_size: 'average',
+      reasoning_budget: 'standard',
+      accounts: [{ provider: 'claude', account: 'default' }],
+    })) as Record<string, unknown>;
+
+    // Worktree was created
+    expect(out['branch']).toBe('co/routed-placed');
+    expect(out['worktree_path']).toBeTruthy();
+
+    // Placement returned in output
+    expect(out['placement']).toBeDefined();
+    const pl = out['placement'] as Record<string, unknown>;
+    expect(pl['provider']).toBe('claude');
+    expect(typeof pl['model']).toBe('string');
+    expect(typeof pl['effort']).toBe('string');
+
+    // placement.decided recorded in the dispatch store
+    const placements = ctx.dispatch!.readPlacements('lead-7');
+    expect(placements).toHaveLength(1);
+    expect(placements[0]!.kind).toBe('placed');
+    expect(placements[0]!.role).toBe('implementer');
+
+    // No WAITING in output
+    expect(out['waiting']).toBeUndefined();
+  });
+
+  it('waiting: records placement.decided(waiting) and returns loud message; does NOT create sandbox', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, maxedSnapshot);
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/routed-waiting',
+      role: 'implementer',
+      work_size: 'average',
+      reasoning_budget: 'standard',
+      accounts: [{ provider: 'claude', account: 'default' }],
+    })) as Record<string, unknown>;
+
+    // WAITING result
+    expect(out['waiting']).toBeDefined();
+    const w = out['waiting'] as Record<string, unknown>;
+    expect(typeof w['message']).toBe('string');
+    expect((w['message'] as string).length).toBeGreaterThan(0);
+
+    // No sandbox created (branch/worktree_path absent)
+    expect(out['branch']).toBeUndefined();
+    expect(out['worktree_path']).toBeUndefined();
+    expect(ctx.worktrees?.getWorktree('co/routed-waiting')).toBeUndefined();
+
+    // placement.decided(waiting) recorded
+    const placements = ctx.dispatch!.readPlacements('lead-7');
+    expect(placements).toHaveLength(1);
+    expect(placements[0]!.kind).toBe('waiting');
+  });
+
+  it('routing inputs absent: behaves exactly as L3 (no dispatch store needed)', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContext('lead-7', repo);
+    const reg = buildCoreRegistry();
+    const headSha = git(repo, 'rev-parse', 'HEAD');
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/no-routing',
+    })) as Record<string, unknown>;
+
+    expect(out['branch']).toBe('co/no-routing');
+    expect(out['base_sha']).toBe(headSha);
+    expect(out['placement']).toBeUndefined();
+    expect(out['waiting']).toBeUndefined();
+  });
+
+  it('routing inputs present but ctx.dispatch absent: loud-fail (Principle 9)', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContext('lead-7', repo);
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        branch: 'co/needs-dispatch',
+        role: 'implementer',
+        work_size: 'average',
+        reasoning_budget: 'standard',
+      }),
+    ).rejects.toThrow(/dispatch/i);
   });
 });
