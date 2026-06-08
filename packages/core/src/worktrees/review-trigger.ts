@@ -33,6 +33,13 @@ export interface ReviewTriggerRequest {
    * When absent, the gate defaults to the `agent` path. Additive: existing callers compile unchanged.
    */
   readonly projectId?: string;
+  /**
+   * The source's acceptance-criteria reference (e.g. a path into `.co/specs/…locked.md#AC-…`).
+   * When present and non-empty, the assembled review records `{ kind: 'criteria', ref }`.
+   * When absent or empty, the gate records the explicit `{ kind: 'no-locked-spec' }` marker —
+   * never a `<TODO>` placeholder (AC-L5-8). Additive: existing callers compile unchanged.
+   */
+  readonly specRef?: string;
 }
 
 /** The recorded-request facts {@link FinishReviewGate.triggerReview} returns (ts persisted by the store). */
