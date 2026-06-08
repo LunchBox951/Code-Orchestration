@@ -93,7 +93,8 @@ type MergeOutput = z.infer<typeof mergeOutput>;
  * PASS. It refuses unless `ctx.reviews.getVerdict(target, branch)` is a recorded `PASS` (absent or
  * `ISSUES` ⇒ refuse, loud — there is NO un-gated merge path), renders the house-style merge message
  * (`[reviewed: PASS]`), and enacts the merge for `owner` + `offline` modes (a local `--no-ff` merge).
- * `contributor` publishing (fork→PR) is refused as Phase C (co_push / co_pr_merge).
+ * `contributor` local merge is refused; contributors publish through the gated co_push /
+ * co_pr_merge path.
  *
  * The handler loud-fails if the mount did not inject the review or worktree store (Principle 9 — a tool
  * never opens its own store). It delegates to {@link CoReviewGate} — the single gated merge core — so
@@ -106,7 +107,8 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
   description:
     'Integrate a reviewed branch into your target branch — only if a PASS verdict is recorded for it. ' +
     'co renders the house-style merge message from your intent and merges in owner/offline mode. It ' +
-    'refuses without a recorded PASS; contributor fork→PR publishing is a later phase.',
+    'refuses without a recorded PASS; contributor mode publishes through the gated co_push / ' +
+    'co_pr_merge path.',
   inputSchema: mergeInput,
   outputSchema: mergeOutput,
   handler: (ctx, input): MergeOutput => {

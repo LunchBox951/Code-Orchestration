@@ -164,7 +164,7 @@ describe('resolveRepoMode — override beats detection, persisted per project (A
     }
   });
 
-  it('ignores a malformed override and falls through to detection', () => {
+  it('fails loud on a malformed override instead of falling through to detection', () => {
     const cfg = openConfigStore();
     try {
       cfg.setProjectOverride('p-alpha', REPO_MODE_CONFIG_KEY, 'not-a-mode');
@@ -173,7 +173,9 @@ describe('resolveRepoMode — override beats detection, persisted per project (A
         isForkOfDifferentOwner: false,
         canPush: false,
       });
-      expect(resolveRepoMode('p-alpha', '/x', { probe, config: cfg })).toBe('offline');
+      expect(() => resolveRepoMode('p-alpha', '/x', { probe, config: cfg })).toThrow(
+        /repo\.mode.*not-a-mode.*owner.*contributor.*offline/i,
+      );
     } finally {
       cfg.close();
     }
@@ -312,11 +314,11 @@ describe('CoRepoModeGate — the L5 merge enactment (owner + offline real; the r
     },
   );
 
-  it('enactPublish in contributor mode throws (fork→PR publishing is Phase C)', () => {
+  it('enactPublish in contributor mode points at the available gated push/PR path', () => {
     const git = recordingGitExec();
     expect(() =>
       new CoRepoModeGate().enactPublish(req, 'contributor', { gitExec: git.exec }),
-    ).toThrow(/contributor publishing \(fork→PR\) is Phase C/);
+    ).toThrow(/gated co_push \/ co_pr_merge path/);
     expect(git.calls).toEqual([]); // it refuses BEFORE touching git.
   });
 

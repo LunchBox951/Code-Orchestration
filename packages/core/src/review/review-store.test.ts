@@ -18,7 +18,7 @@ import {
   type ReviewRequested,
   type ReviewVerdictRecorded,
 } from './events.js';
-import { ReviewProjector } from './review-projector.js';
+import { ensureReviewTables, ReviewProjector } from './review-projector.js';
 import { openReviewStore } from './review-store.js';
 import { renderReviewSpecRef } from './spec-ref.js';
 
@@ -73,11 +73,60 @@ const request = (over: Partial<ReviewRequested> = {}): ReviewRequested => ({
 });
 
 describe('ReviewStore — record + read verdicts', () => {
+  it('migrates a legacy reviews projection that predates spec-ref columns', () => {
+    const raw = openProjectStore('p-legacy-reviews');
+    try {
+      raw.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        db.exec(`
+          CREATE TABLE reviews (
+            target          TEXT NOT NULL,
+            branch          TEXT NOT NULL,
+            review_id       TEXT,
+            verdict         TEXT,
+            blockers        TEXT,
+            suggestions     TEXT,
+            verification    TEXT,
+            reviewer        TEXT,
+            verdict_ts      INTEGER,
+            requested_by    TEXT,
+            requested_ts    INTEGER,
+            strikes         INTEGER NOT NULL DEFAULT 0,
+            serialized      INTEGER NOT NULL DEFAULT 0,
+            overridden      INTEGER NOT NULL DEFAULT 0,
+            override_reason TEXT,
+            override_by     TEXT,
+            PRIMARY KEY (target, branch)
+          );
+        `);
+        ensureReviewTables(db);
+        const columns = db.prepare('PRAGMA table_info(reviews)').all() as Array<{ name: string }>;
+        expect(columns.map((c) => c.name)).toEqual(
+          expect.arrayContaining(['scope', 'spec_ref_kind', 'spec_ref_ref']),
+        );
+      });
+    } finally {
+      raw.close();
+    }
+
+    const store = openReviewStore('p-legacy-reviews');
+    try {
+      const ref = 'docs/specs/stage-5.locked.md#AC-L5-8';
+      const saved = store.recordReviewRequested(
+        request({ specRefKind: 'criteria', specRefRef: ref }),
+      );
+      expect(saved.specRef).toEqual({ kind: 'criteria', ref });
+    } finally {
+      store.close();
+    }
+  });
+
   it('records a PASS verdict and reads it back, structured (per target + branch)', () => {
     const store = openReviewStore('p-verdict');
     try {
       const saved = store.recordVerdict(verdict({ suggestions: [{ summary: 'tidy a comment' }] }));
       expect(saved.verdict).toBe('PASS');
+      expect(saved.scope).toBe('worker_merge');
       expect(saved.target).toBe('co/l5-review-gate');
       expect(saved.branch).toBe('co/l5-phase-a');
       expect(saved.reviewer).toBe('rev-7');
@@ -114,6 +163,20 @@ describe('ReviewStore — record + read verdicts', () => {
         suite_result: 'fail',
         baseline_compared: true,
       });
+    } finally {
+      store.close();
+    }
+  });
+
+  it('records verdict scope and lets callers require the matching scope', () => {
+    const store = openReviewStore('p-scope');
+    try {
+      store.recordVerdict(verdict({ scope: 'worker_merge' }));
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a')?.scope).toBe('worker_merge');
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a', 'pr_merge')).toBeUndefined();
+
+      const prPass = store.recordVerdict(verdict({ reviewId: 'rev-pr', scope: 'pr_merge' }));
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a', 'pr_merge')).toEqual(prPass);
     } finally {
       store.close();
     }
@@ -169,11 +232,25 @@ describe('ReviewStore — record + read verdicts', () => {
     try {
       const saved = store.recordReviewRequested(request());
       expect(saved.reviewId).toBe('rev-1');
+      expect(saved.scope).toBe('worker_merge');
       expect(saved.requestedBy).toBe('lead-2');
       expect(saved.requestedTs).toBeGreaterThan(0);
       expect(store.getReviewRequest('co/l5-review-gate', 'co/l5-phase-a')).toEqual(saved);
       // A request alone is NOT a verdict.
       expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('records review request scope so human re-entry can replay the same strictness', () => {
+    const store = openReviewStore('p-request-scope');
+    try {
+      const saved = store.recordReviewRequested(
+        request({ reviewId: 'rev-pr-request', scope: 'pr_merge' }),
+      );
+      expect(saved.scope).toBe('pr_merge');
+      expect(store.getReviewRequest('co/l5-review-gate', 'co/l5-phase-a')?.scope).toBe('pr_merge');
     } finally {
       store.close();
     }
@@ -188,6 +265,51 @@ describe('ReviewStore — record + read verdicts', () => {
       const v = store.getVerdict('co/l5-review-gate', 'co/l5-phase-a');
       expect(v?.verdict).toBe('PASS');
       expect(v?.reviewId).toBe('rev-9');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a verdict inherits the matching request scope when no verdict scope is supplied', () => {
+    const store = openReviewStore('p-verdict-inherits-request-scope');
+    try {
+      store.recordReviewRequested(request({ reviewId: 'rev-pr', scope: 'pr_merge' }));
+      const saved = store.recordVerdict(verdict({ reviewId: 'rev-pr' }));
+      expect(saved.scope).toBe('pr_merge');
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a', 'pr_merge')).toEqual(saved);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects a verdict whose scope does not match the latest request scope', () => {
+    const store = openReviewStore('p-verdict-request-scope-mismatch');
+    try {
+      store.recordReviewRequested(request({ reviewId: 'rev-worker', scope: 'worker_merge' }));
+      expect(() =>
+        store.recordVerdict(verdict({ reviewId: 'rev-worker', scope: 'pr_merge' })),
+      ).toThrow(/scope.*pr_merge.*worker_merge/i);
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a new review request clears the prior verdict for the same target and branch', () => {
+    const store = openReviewStore('p-request-clears-verdict');
+    try {
+      store.recordVerdict(verdict({ reviewId: 'rev-old', scope: 'pr_merge' }));
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a', 'pr_merge')?.verdict).toBe(
+        'PASS',
+      );
+
+      store.recordReviewRequested(request({ reviewId: 'rev-new' }));
+
+      expect(store.getReviewRequest('co/l5-review-gate', 'co/l5-phase-a')?.reviewId).toBe(
+        'rev-new',
+      );
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a')).toBeUndefined();
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a', 'pr_merge')).toBeUndefined();
     } finally {
       store.close();
     }
@@ -215,7 +337,7 @@ describe('AC-L5-11 — review read-model rebuilds byte-identical (all five event
     return JSON.stringify(
       db
         .prepare(
-          'SELECT target, branch, review_id, verdict, blockers, suggestions, verification, reviewer, ' +
+          'SELECT target, branch, scope, review_id, verdict, blockers, suggestions, verification, reviewer, ' +
             'verdict_ts, requested_by, requested_ts, strikes, serialized, overridden, override_reason, ' +
             'override_by FROM reviews ORDER BY target, branch',
         )
@@ -635,7 +757,7 @@ describe('AC-L5-8 + AC-L5-11 — specRef on review.requested replays byte-identi
     return JSON.stringify(
       db
         .prepare(
-          'SELECT target, branch, spec_ref_kind, spec_ref_ref FROM reviews ORDER BY target, branch',
+          'SELECT target, branch, scope, spec_ref_kind, spec_ref_ref FROM reviews ORDER BY target, branch',
         )
         .all(),
     );

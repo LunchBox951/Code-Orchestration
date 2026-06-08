@@ -162,6 +162,12 @@ function recordPass(reviewStore: ReviewStore, worktreeStore: WorktreeStore): voi
 }
 
 describe('co_merge (AC-L5-1, AC-L5-3)', () => {
+  it('metadata points contributor users at the available gated push/PR path', () => {
+    const merge = buildCoreRegistry().get('co_merge');
+    expect(merge?.description).toMatch(/co_push \/ co_pr_merge/);
+    expect(merge?.description).not.toMatch(/later phase/i);
+  });
+
   it('merges a reviewed branch into the target on a recorded PASS (offline mode)', async () => {
     const repo = makeRepo();
     const reg = buildCoreRegistry();

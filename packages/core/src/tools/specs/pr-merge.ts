@@ -33,7 +33,9 @@ const prMergeInput = z.object({
   branch: z
     .string()
     .min(1)
-    .describe('The reviewed source branch to open a pull request for. Must have a recorded PASS.'),
+    .describe(
+      'The reviewed source branch to open a pull request for. Must have a recorded pr_merge PASS.',
+    ),
   into: z
     .string()
     .min(1)
@@ -110,7 +112,7 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
   name: 'co_pr_merge',
   title: 'Open a pull request for reviewed work',
   description:
-    'Open a pull request for the reviewed branch — only if a PASS verdict is recorded for it. ' +
+    'Open a pull request for the reviewed branch — only if a pr_merge PASS verdict is recorded for it. ' +
     'co renders the house-style PR description from your structured intent (four sections: Why / ' +
     'What changed / Verification / Conventions). Contributor and owner modes create the PR via gh; ' +
     'offline refuses. There is no un-gated PR path.',

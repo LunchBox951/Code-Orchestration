@@ -339,8 +339,9 @@ export {
 // projected now so B–F add only writers), the per-(target, branch) review store, and the gated merge
 // core (CoReviewGate) the lead-facing co_merge consumes. Nothing reaches a merge without a recorded
 // PASS; the verdict is a structured RECORDED EVENT (Principle 5), never a prose blob or a shell exit
-// code. The honest-verification baseline (B), strictness ladder + push/PR (C), 3-strike (D), human
-// review (E), and serialization/override (F) are later phases.
+// code. The honest-verification baseline, strictness ladder + push/PR, strike policy, human-review
+// routing, and serialization/override records are now folded into the L5 gate; rich live reviewer
+// dispatch and operator UI seams remain delegated to later layers.
 export type {
   Verdict,
   Blocker,

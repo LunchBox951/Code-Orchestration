@@ -72,6 +72,7 @@ describe('co_review_finalize (AC-L5-1, AC-L5-3)', () => {
     const out = (await invokeTool(reg, ctx, 'co_review_finalize', {
       target: 'co/l5-review-gate',
       branch: 'co/l5-phase-a',
+      scope: 'pr_merge',
       review_id: 'rev-1',
       verdict: 'PASS',
       blockers: [],
@@ -79,8 +80,9 @@ describe('co_review_finalize (AC-L5-1, AC-L5-3)', () => {
       verification: { commands_run: ['pnpm test'], suite_result: 'pass', baseline_compared: true },
     })) as FinalizeOut;
     expect(out).toEqual({ review_id: 'rev-1', verdict: 'PASS', recorded: true });
-    const recorded = review!.getVerdict('co/l5-review-gate', 'co/l5-phase-a');
+    const recorded = review!.getVerdict('co/l5-review-gate', 'co/l5-phase-a', 'pr_merge');
     expect(recorded?.verdict).toBe('PASS');
+    expect(recorded?.scope).toBe('pr_merge');
     expect(recorded?.reviewer).toBe('rev-7');
     expect(recorded?.suggestions).toEqual([{ summary: 'tidy a comment' }]);
     expect(recorded?.verification).toEqual({

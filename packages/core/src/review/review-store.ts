@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { decode } from '../replay/decode.js';
 import { applyEvent, type Projector } from '../replay/projector.js';
 import { openProjectStore } from '../store/sqlite-store.js';
+import type { ReviewScope } from './ladder.js';
 import {
   EVENT_MERGE_SERIALIZED,
   makeMergeSerializedEvent,
@@ -58,7 +59,7 @@ export interface ReviewStore {
    * The latest verdict for `branch` on `target`, or undefined. UPSERT/last-wins (like `recordFinish`):
    * a re-review after an ISSUES→fix returns the LATEST verdict — which is the one `co_merge` gates on.
    */
-  getVerdict(target: string, branch: string): ReviewVerdictRecord | undefined;
+  getVerdict(target: string, branch: string, scope?: ReviewScope): ReviewVerdictRecord | undefined;
   /** Every recorded verdict on `target`, oldest-recorded first. */
   listVerdicts(target: string): readonly ReviewVerdictRecord[];
   /**
@@ -114,21 +115,42 @@ export function openReviewStore(projectId: string): ReviewStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensureReviewTables(db);
-        const [stored] = tx.append([makeReviewVerdictEvent(projectId, v)]);
+        const request = selectReviewRequest(db, v.target, v.branch);
+        if (request != null && request.reviewId !== v.reviewId) {
+          throw new Error(
+            `openReviewStore.recordVerdict: stale review verdict '${v.reviewId}' for ` +
+              `'${v.branch}' into '${v.target}' does not match the latest request ` +
+              `'${request.reviewId}'`,
+          );
+        }
+        if (request != null && v.scope != null && v.scope !== request.scope) {
+          throw new Error(
+            `openReviewStore.recordVerdict: verdict scope '${v.scope}' for '${v.branch}' into ` +
+              `'${v.target}' does not match the latest request scope '${request.scope}'`,
+          );
+        }
+        const verdict = request != null && v.scope == null ? { ...v, scope: request.scope } : v;
+        const [stored] = tx.append([makeReviewVerdictEvent(projectId, verdict)]);
         applyEvent(tx, decode(stored!, reviewUpcasters, reviewSchemas), projectors);
-        const row = selectVerdict(db, v.target, v.branch);
+        const row = selectVerdict(db, verdict.target, verdict.branch, verdict.scope);
         if (!row) {
           throw new Error(
             `openReviewStore.recordVerdict: row missing after projection ` +
-              `(target='${v.target}', branch='${v.branch}')`,
+              `(target='${verdict.target}', branch='${verdict.branch}')`,
           );
         }
         return row;
       });
     },
 
-    getVerdict(target: string, branch: string): ReviewVerdictRecord | undefined {
-      return store.transaction((tx) => selectVerdict(tx.raw as DatabaseSync, target, branch));
+    getVerdict(
+      target: string,
+      branch: string,
+      scope?: ReviewScope,
+    ): ReviewVerdictRecord | undefined {
+      return store.transaction((tx) =>
+        selectVerdict(tx.raw as DatabaseSync, target, branch, scope),
+      );
     },
 
     listVerdicts(target: string): readonly ReviewVerdictRecord[] {

@@ -12,6 +12,7 @@ import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import type { GhExec, RepoMode } from '../worktrees/repo-mode.js';
 import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
+import type { ReviewScope } from './ladder.js';
 import { openReviewStore, type ReviewStore } from './review-store.js';
 import { CoReviewGate, ReviewerSpawnGateStub } from './merge.js';
 import { acquireMergeSlot } from './serialize.js';
@@ -83,7 +84,11 @@ const mergeReq = {
 };
 
 /** Seed baseline + finish with clean (all-passing) test data, and record a PASS verdict with a marker. */
-function recordPass(reviews: ReviewStore, worktrees: WorktreeStore): void {
+function recordPass(
+  reviews: ReviewStore,
+  worktrees: WorktreeStore,
+  scope: ReviewScope = 'worker_merge',
+): void {
   worktrees.recordWorktreeAndBaseline(
     { branch: BRANCH, baseRef: TARGET, baseSha: FAKE_SHA, path: '/tmp/fake', parent: 'lead-1' },
     {
@@ -103,6 +108,7 @@ function recordPass(reviews: ReviewStore, worktrees: WorktreeStore): void {
     reviewId: 'rev-1',
     target: TARGET,
     branch: BRANCH,
+    scope,
     reviewer: 'rev-7',
     verdict: 'PASS',
     blockers: [],
@@ -192,14 +198,14 @@ describe('CoReviewGate.merge — the PASS gate (AC-L5-1)', () => {
     );
   });
 
-  it('refuses contributor mode (fork→PR publishing is Phase C), without touching git', () => {
+  it('refuses local merge in contributor mode and points at the gated push/PR path', () => {
     const reviews = openReviewStore('p-merge');
     reviewStores.push(reviews);
     const worktrees = openWorktreeStore('p-merge');
     worktreeStores.push(worktrees);
     recordPass(reviews, worktrees);
     const { gate, git } = fakeGate(reviews, worktrees, 'contributor');
-    expect(() => gate.merge(mergeReq)).toThrow(/contributor publishing is Phase C/);
+    expect(() => gate.merge(mergeReq)).toThrow(/gated co_push \/ co_pr_merge path/);
     expect(git.calls).toEqual([]);
   });
 
@@ -524,6 +530,7 @@ describe('CoReviewGate.push — PASS gate + push enactment', () => {
       reviewId: 'rev-1',
       target: TARGET,
       branch: BRANCH,
+      scope: 'pr_merge',
       reviewer: 'rev-7',
       verdict: 'ISSUES',
       blockers: [{ summary: 'regression' }],
@@ -534,12 +541,40 @@ describe('CoReviewGate.push — PASS gate + push enactment', () => {
     expect(git.calls).toEqual([]);
   });
 
-  it('owner mode: pushes the integration branch (into) on a recorded PASS', () => {
+  it('refuses a push when only a worker-scope PASS is recorded', () => {
     const reviews = openReviewStore('p-merge');
     reviewStores.push(reviews);
     const worktrees = openWorktreeStore('p-merge');
     worktreeStores.push(worktrees);
     recordPass(reviews, worktrees);
+    const { gate, git } = fakeGate(reviews, worktrees, 'owner');
+    expect(() => gate.push(pushReq)).toThrow(/pr_merge.*PASS/i);
+    expect(git.calls).toEqual([]);
+  });
+
+  it('refuses a push after a new review is requested until a fresh pr_merge PASS is recorded', () => {
+    const reviews = openReviewStore('p-merge');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge');
+    worktreeStores.push(worktrees);
+    recordPass(reviews, worktrees, 'pr_merge');
+    reviews.recordReviewRequested({
+      reviewId: 'rev-2',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+    });
+    const { gate, git } = fakeGate(reviews, worktrees, 'owner');
+    expect(() => gate.push(pushReq)).toThrow(/no review verdict is recorded/);
+    expect(git.calls).toEqual([]);
+  });
+
+  it('owner mode: pushes the integration branch (into) on a recorded PASS', () => {
+    const reviews = openReviewStore('p-merge');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge');
+    worktreeStores.push(worktrees);
+    recordPass(reviews, worktrees, 'pr_merge');
     const { gate, git } = fakeGate(reviews, worktrees, 'owner');
     const result = gate.push(pushReq);
     expect(result.pushed).toBe(true);
@@ -553,7 +588,7 @@ describe('CoReviewGate.push — PASS gate + push enactment', () => {
     reviewStores.push(reviews);
     const worktrees = openWorktreeStore('p-merge');
     worktreeStores.push(worktrees);
-    recordPass(reviews, worktrees);
+    recordPass(reviews, worktrees, 'pr_merge');
     const { gate, git } = fakeGate(reviews, worktrees, 'contributor');
     const result = gate.push(pushReq);
     expect(result.pushed).toBe(true);
@@ -566,7 +601,7 @@ describe('CoReviewGate.push — PASS gate + push enactment', () => {
     reviewStores.push(reviews);
     const worktrees = openWorktreeStore('p-merge');
     worktreeStores.push(worktrees);
-    recordPass(reviews, worktrees);
+    recordPass(reviews, worktrees, 'pr_merge');
     const { gate, git } = fakeGate(reviews, worktrees, 'offline');
     expect(() => gate.push(pushReq)).toThrow(/push capability is false/);
     expect(git.calls).toEqual([]);
@@ -625,7 +660,7 @@ describe('CoReviewGate.prMerge — PASS gate + PR creation via renderPrMessage',
     reviewStores.push(reviews);
     const worktrees = openWorktreeStore('p-merge');
     worktreeStores.push(worktrees);
-    recordPass(reviews, worktrees);
+    recordPass(reviews, worktrees, 'pr_merge');
     const gh = recordingGhExec();
     const gate = new CoReviewGate({
       reviews,
@@ -639,12 +674,56 @@ describe('CoReviewGate.prMerge — PASS gate + PR creation via renderPrMessage',
     expect(gh.calls).toEqual([]);
   });
 
-  it('contributor mode: creates PR using renderPrMessage for the description (Principle 3)', () => {
+  it('prMerge refuses a worker-scope PASS for the same target and branch', () => {
     const reviews = openReviewStore('p-merge');
     reviewStores.push(reviews);
     const worktrees = openWorktreeStore('p-merge');
     worktreeStores.push(worktrees);
     recordPass(reviews, worktrees);
+    const gh = recordingGhExec();
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'contributor',
+      gitExec: recordingGitExec().exec,
+      headReader: () => 'c'.repeat(40),
+      ghExec: gh.exec,
+    });
+    expect(() => gate.prMerge(prReq)).toThrow(/pr_merge.*PASS/i);
+    expect(gh.calls).toEqual([]);
+  });
+
+  it('prMerge refuses after a new review is requested until a fresh pr_merge PASS is recorded', () => {
+    const reviews = openReviewStore('p-merge');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge');
+    worktreeStores.push(worktrees);
+    recordPass(reviews, worktrees, 'pr_merge');
+    reviews.recordReviewRequested({
+      reviewId: 'rev-2',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+    });
+    const gh = recordingGhExec();
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'contributor',
+      gitExec: recordingGitExec().exec,
+      headReader: () => 'c'.repeat(40),
+      ghExec: gh.exec,
+    });
+    expect(() => gate.prMerge(prReq)).toThrow(/no review verdict is recorded/);
+    expect(gh.calls).toEqual([]);
+  });
+
+  it('contributor mode: creates PR using renderPrMessage for the description (Principle 3)', () => {
+    const reviews = openReviewStore('p-merge');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge');
+    worktreeStores.push(worktrees);
+    recordPass(reviews, worktrees, 'pr_merge');
     const gh = recordingGhExec();
     const gate = new CoReviewGate({
       reviews,
@@ -676,7 +755,7 @@ describe('CoReviewGate.prMerge — PASS gate + PR creation via renderPrMessage',
     reviewStores.push(reviews);
     const worktrees = openWorktreeStore('p-merge');
     worktreeStores.push(worktrees);
-    recordPass(reviews, worktrees);
+    recordPass(reviews, worktrees, 'pr_merge');
     const gh = recordingGhExec();
     const gate = new CoReviewGate({
       reviews,
@@ -695,7 +774,11 @@ describe('CoReviewGate.prMerge — PASS gate + PR creation via renderPrMessage',
 // ── AC-L5-3 baseline-failure escalation via push + prMerge (never silent) ────────────────────────
 describe('CoReviewGate.push + prMerge — baseline-failure escalation (AC-L5-3)', () => {
   /** Seed a baseline with one failing test, finish keeping it failing, record a PASS. */
-  function recordBaselineFailurePass(reviews: ReviewStore, worktrees: WorktreeStore): void {
+  function recordBaselineFailurePass(
+    reviews: ReviewStore,
+    worktrees: WorktreeStore,
+    scope: ReviewScope = 'worker_merge',
+  ): void {
     worktrees.recordWorktreeAndBaseline(
       { branch: BRANCH, baseRef: TARGET, baseSha: FAKE_SHA, path: '/tmp/fake', parent: 'lead-1' },
       {
@@ -721,6 +804,7 @@ describe('CoReviewGate.push + prMerge — baseline-failure escalation (AC-L5-3)'
       reviewId: 'rev-1',
       target: TARGET,
       branch: BRANCH,
+      scope,
       reviewer: 'rev-7',
       verdict: 'PASS',
       blockers: [],
@@ -737,7 +821,7 @@ describe('CoReviewGate.push + prMerge — baseline-failure escalation (AC-L5-3)'
     const mail = openMailStore('p-merge');
     mailStores.push(mail);
 
-    recordBaselineFailurePass(reviews, worktrees);
+    recordBaselineFailurePass(reviews, worktrees, 'pr_merge');
     const parentResolver = { parentOf: () => 'coordinator-1' };
     const gate = new CoReviewGate({
       reviews,
@@ -771,7 +855,7 @@ describe('CoReviewGate.push + prMerge — baseline-failure escalation (AC-L5-3)'
     const mail = openMailStore('p-merge');
     mailStores.push(mail);
 
-    recordBaselineFailurePass(reviews, worktrees);
+    recordBaselineFailurePass(reviews, worktrees, 'pr_merge');
     const parentResolver = { parentOf: () => 'coordinator-1' };
     const ghExec: GhExec = () => 'https://fake/pr/1';
     const gate = new CoReviewGate({
@@ -808,7 +892,7 @@ describe('CoReviewGate.push + prMerge — baseline-failure escalation (AC-L5-3)'
     const mail = openMailStore('p-merge');
     mailStores.push(mail);
 
-    recordPass(reviews, worktrees);
+    recordPass(reviews, worktrees, 'pr_merge');
     const parentResolver = { parentOf: () => 'coordinator-1' };
     const gate = new CoReviewGate({
       reviews,
@@ -1266,11 +1350,12 @@ describe('CoReviewGate.triggerReview — agent reviewer placement (AC-L5-11)', (
 
 // ── #135 nit: the human-path mail guard fails loud (Principle 9) ─────────────────────────────────
 describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
-  it('a human review requested WITHOUT a mail store fails loud (no silent drop)', () => {
+  it('a human review requested WITHOUT a mail store fails loud and records nothing', () => {
     const reviews = openReviewStore('p-135');
     reviewStores.push(reviews);
     const worktrees = openWorktreeStore('p-135');
     worktreeStores.push(worktrees);
+    recordPass(reviews, worktrees);
     const config = fakeConfig({ 'review.worker_merge.reviewer': 'human' });
     const gate = new CoReviewGate({ reviews, worktrees, resolveMode: () => 'offline', config }); // NO mail
     expect(() =>
@@ -1283,5 +1368,7 @@ describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
         projectId: 'p-135',
       }),
     ).toThrow(/no mail store is wired/);
+    expect(reviews.getReviewRequest(TARGET, BRANCH)).toBeUndefined();
+    expect(reviews.getVerdict(TARGET, BRANCH)?.reviewId).toBe('rev-1');
   });
 });

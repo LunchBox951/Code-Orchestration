@@ -3,7 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertRepoPristine } from '../config/pristine.js';
-import { MAIL_CHAT, MAIL_CLARIFY_REQUEST, MAIL_CLARIFY_RESPONSE } from '../mail/events.js';
+import {
+  MAIL_CHAT,
+  MAIL_CLARIFY_REQUEST,
+  MAIL_CLARIFY_RESPONSE,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
+  OPERATOR,
+} from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { openRegistry, type ProjectRegistry } from '../registry/registry.js';
 import type { ToolContext } from './context.js';
@@ -116,6 +123,16 @@ describe('buildCoreRegistry — the canonical single source of truth', () => {
       expect(spec.outputSchema).toBeDefined();
     }
   });
+
+  it('co_push public contract names the required pr_merge PASS', () => {
+    const push = buildCoreRegistry().get('co_push');
+    expect(push?.description).toMatch(/pr_merge PASS/);
+  });
+
+  it('co_pr_merge public contract names the required pr_merge PASS', () => {
+    const prMerge = buildCoreRegistry().get('co_pr_merge');
+    expect(prMerge?.description).toMatch(/pr_merge PASS/);
+  });
 });
 
 describe('invokeTool — the transport-agnostic headless harness', () => {
@@ -195,6 +212,43 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
       expect(reply.recipient).toBe('worker'); // recipient derived from the answered mail
       expect(reply.correlation_id).toBe(String(req.seq)); // thread id = root seq (freeze #7)
       expect(reply.causation_id).toBe(String(req.seq)); // answers the request
+    } finally {
+      close();
+    }
+  });
+
+  it('a review_response carries review_verdict through send, inbox, get, and thread', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const req = (await invokeTool(reg, ctx('lead'), 'co_mail_send', {
+        to: OPERATOR,
+        type: MAIL_REVIEW_REQUEST,
+        subject: 'review?',
+        body: 'please review',
+      })) as WireMail;
+
+      const reply = (await invokeTool(reg, ctx(OPERATOR), 'co_mail_send', {
+        type: MAIL_REVIEW_RESPONSE,
+        in_reply_to: req.seq,
+        subject: 're: review?',
+        body: 'passes',
+        review_verdict: 'PASS',
+      })) as WireMail;
+
+      expect(reply.review_verdict).toBe('PASS');
+
+      const inbox = (await invokeTool(reg, ctx('lead'), 'co_mail_inbox', {})) as ListOut;
+      expect(inbox.mail.find((m) => m.seq === reply.seq)?.review_verdict).toBe('PASS');
+
+      const byGet = (await invokeTool(reg, ctx('lead'), 'co_mail_get', {
+        id: reply.seq,
+      })) as OneOut;
+      expect(byGet.mail.review_verdict).toBe('PASS');
+
+      const thread = (await invokeTool(reg, ctx('lead'), 'co_mail_thread', {
+        thread_id: String(req.seq),
+      })) as ListOut;
+      expect(thread.mail.find((m) => m.seq === reply.seq)?.review_verdict).toBe('PASS');
     } finally {
       close();
     }

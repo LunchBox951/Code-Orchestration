@@ -8,8 +8,8 @@ import type { ReviewScope } from '../review/ladder.js';
  * review and the gated merge are L5's job — and this interface is now the typed contract for them
  * (the real implementation is {@link import('../review/merge.js').CoReviewGate}, consumed by `co_merge`).
  *
- * `co_finish` STILL does not call this (unchanged — it stops short by design). The gate is reached only
- * through the lead-facing `co_merge` (merge) and, in a later phase, the request flow (triggerReview).
+ * `co_finish` STILL does not call this (unchanged — it stops short by design). The gate is reached
+ * through the lead-facing review, merge, push, and PR tools.
  */
 
 /** What {@link FinishReviewGate.triggerReview} records: a request to review `branch` into `target`. */
@@ -101,7 +101,8 @@ export interface ReviewMergeResult {
  *     consumer is Phase E; the recorder is real now).
  *   - `merge` enacts the **gated** merge — it refuses unless a `PASS` verdict is recorded for the
  *     branch on the target (AC-L5-1), renders the house-style merge message, and enacts owner/offline
- *     via {@link import('./repo-mode.js').CoRepoModeGate} (contributor publishing is Phase C).
+ *     via {@link import('./repo-mode.js').CoRepoModeGate}. Contributor mode publishes through the
+ *     gated push/PR path rather than local merge.
  */
 export interface FinishReviewGate {
   triggerReview(req: ReviewTriggerRequest): ReviewTriggerResult;
