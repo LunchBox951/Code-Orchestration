@@ -3,11 +3,17 @@ import { decode } from '../replay/decode.js';
 import { applyEvent, type Projector } from '../replay/projector.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import {
+  EVENT_MERGE_SERIALIZED,
+  makeMergeSerializedEvent,
+  makeReviewOverrideEvent,
   makeReviewRequestedEvent,
   makeReviewStrikeEvent,
   makeReviewVerdictEvent,
+  reviewScope,
   reviewSchemas,
   reviewUpcasters,
+  type MergeSerialized,
+  type ReviewOverride,
   type ReviewRequested,
   type ReviewRequestRecord,
   type ReviewStrike,
@@ -18,10 +24,12 @@ import {
   ensureReviewTables,
   ReviewProjector,
   selectReviewRequest,
+  selectSerializedBranches,
   selectStrikeCount,
   selectVerdict,
   selectVerdictsForTarget,
 } from './review-projector.js';
+import { foldActiveSlot } from './serialize.js';
 
 /**
  * The headless L5 review store over a single project store (the L5 analogue of L3's
@@ -35,10 +43,10 @@ import {
  * safe: `node:sqlite` is synchronous/single-threaded so transactions never interleave in-process, and
  * this store owns a DIFFERENT scope (`review:`) and read-model table (`reviews`) than the others.
  *
- * The facade is shaped so phases B–F slot in additively: `recordStrike` / `recordSerialized` /
- * `recordOverride` become NEW methods folding the events whose schemas are already defined +
- * projected, with no change here. (They are deliberately NOT declared yet — adding a method that
- * threw would be the banned silent stub; the seam is "left room for", not pre-stubbed.)
+ * The facade is shaped so phases B–F slot in additively: `recordStrike` (D) / `recordSerialized` +
+ * `recordOverride` (F) are NEW methods folding the events whose schemas are already defined +
+ * projected, with no change to the table. (They were deliberately NOT declared until their phase —
+ * a method that threw would be the banned silent stub; the seam was "left room for", not pre-stubbed.)
  */
 export interface ReviewStore {
   /**
@@ -68,6 +76,26 @@ export interface ReviewStore {
   recordStrike(s: ReviewStrike): void;
   /** The current consecutive `review.strike` count for `branch` on `target` (0 if none). */
   getStrikeCount(target: string, branch: string): number;
+  /**
+   * Record a merge-serialization grant/release (append `merge.serialized` + fold). The per-target
+   * merge lock ({@link import('./serialize.js').acquireMergeSlot}/`releaseMergeSlot`) drives this:
+   * an odd write claims the slot, the paired even write releases it (AC-L5-7).
+   */
+  recordSerialized(m: MergeSerialized): void;
+  /**
+   * The branch currently HOLDING `target`'s merge slot, or undefined when none. Derived by folding
+   * the target's ordered `merge.serialized` log ({@link import('./serialize.js').foldActiveSlot}) —
+   * the active-reviewer/merge query serialization reads (AC-L5-7).
+   */
+  activeSerialized(target: string): string | undefined;
+  /** Every branch ever serialized into `target` (the `serialized` flag set), in branch order. */
+  serializedBranches(target: string): readonly string[];
+  /**
+   * Record an audited PASS-gate override (append `review.override` + fold). Written by the operator
+   * escape hatch (`co_merge --operator-override --reason`): records `{target, branch, reason,
+   * overriddenBy}` so the bypass is never silent (AC-L5-6, Principle 9).
+   */
+  recordOverride(o: ReviewOverride): void;
   /** Close the underlying project store. */
   close(): void;
 }
@@ -139,6 +167,41 @@ export function openReviewStore(projectId: string): ReviewStore {
 
     getStrikeCount(target: string, branch: string): number {
       return store.transaction((tx) => selectStrikeCount(tx.raw as DatabaseSync, target, branch));
+    },
+
+    recordSerialized(m: MergeSerialized): void {
+      store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureReviewTables(db);
+        const [stored] = tx.append([makeMergeSerializedEvent(projectId, m)]);
+        applyEvent(tx, decode(stored!, reviewUpcasters, reviewSchemas), projectors);
+      });
+    },
+
+    activeSerialized(target: string): string | undefined {
+      // The slot state is derived from the target's ORDERED merge.serialized log (the toggle fold),
+      // not the read-model `serialized` flag (a boolean can't express acquire-then-release). Reading
+      // the stream keeps the lock event-sourced (Principle 14) and replay-deterministic (AC-L5-11).
+      const entries = store
+        .readStream(reviewScope(target))
+        .filter((e) => e.type === EVENT_MERGE_SERIALIZED)
+        .map((e) => ({
+          branch: (decode(e, reviewUpcasters, reviewSchemas).payload as MergeSerialized).branch,
+        }));
+      return foldActiveSlot(entries);
+    },
+
+    serializedBranches(target: string): readonly string[] {
+      return store.transaction((tx) => selectSerializedBranches(tx.raw as DatabaseSync, target));
+    },
+
+    recordOverride(o: ReviewOverride): void {
+      store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureReviewTables(db);
+        const [stored] = tx.append([makeReviewOverrideEvent(projectId, o)]);
+        applyEvent(tx, decode(stored!, reviewUpcasters, reviewSchemas), projectors);
+      });
     },
 
     close(): void {

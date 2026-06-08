@@ -56,6 +56,13 @@ export interface ReviewMergeRequest {
   readonly body?: string;
   readonly projectId: string;
   readonly repoCwd: string;
+  /**
+   * Audited operator override (AC-L5-6): bypass the recorded-PASS gate. Requires a non-empty
+   * {@link reason}; records a `review.override` event and renders `[reviewed: override — <reason>]`.
+   */
+  readonly operatorOverride?: boolean;
+  /** The reason recorded into the `review.override` audit event when {@link operatorOverride} is set. */
+  readonly reason?: string;
 }
 
 /** The structured result of a gated merge — the merge commit's facts + the repo mode it ran in. */
@@ -68,6 +75,16 @@ export interface ReviewMergeResult {
   readonly baselineFailures?: readonly string[];
   /** True when a baseline-failure escalation mail was emitted (requires mail + parentResolver seam). */
   readonly escalated?: boolean;
+  /** True when the PASS gate was bypassed by an audited operator override (AC-L5-6). */
+  readonly overridden?: boolean;
+  /** The recorded override reason, present when {@link overridden}. */
+  readonly overrideReason?: string;
+  /**
+   * Present only when a merge-time teardown trigger was wired (AC-L5-7): true once the merged branch's
+   * sandbox was torn down AFTER the merge was recorded; false when the teardown trigger failed (the
+   * merge still succeeded — a teardown failure never masks it, the review-finalize regression cure).
+   */
+  readonly toreDown?: boolean;
 }
 
 /**

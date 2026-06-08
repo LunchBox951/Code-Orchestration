@@ -392,8 +392,17 @@ export type {
   ReviewPushResult,
   ReviewPrMergeRequest,
   ReviewPrMergeResult,
+  MergeTeardown,
+  ReviewerSpawnGate,
 } from './review/merge.js';
-export { CoReviewGate } from './review/merge.js';
+export {
+  CoReviewGate,
+  ReviewerSpawnGateStub,
+  REVIEWER_PROFILES_CONFIG_KEY,
+  DEFAULT_REVIEWER_PROFILES,
+  resolveReviewerProfiles,
+  reviewerRoleForScope,
+} from './review/merge.js';
 // L5 Phase B honest-verification spine (AC-L5-3): pure, deterministic comparison of a finish run
 // against the branch-off baseline. `honestVerify` classifies tests as regressions (pass→fail / new)
 // or baseline failures (fail→fail); `classifyPass` encodes the gate's allow/refuse/escalate decision.
@@ -442,6 +451,20 @@ export {
   recordHumanVerdict,
   HumanReviewGateStub,
 } from './review/human-review.js';
+// L5 Phase F per-target merge SERIALIZATION + re-review base (AC-L5-7): an event-sourced merge lock
+// over the `merge.serialized` log — one active reviewer/merge per target; a second queues (waits) until
+// the holder releases on landing (`acquireMergeSlot`/`releaseMergeSlot`, the pure toggle `foldActiveSlot`
+// over the ordered log, the `MergeSlotStore` seam). `reReviewBase` resolves the NEXT queued branch's base
+// via refs — the POST-LANDING commit, never the caller's stale checkout. Clock-free + deterministic
+// (AC-L5-11); replay-equal on the `merge.serialized` writes. The store writers (`recordSerialized` /
+// `recordOverride` / `activeSerialized`) live on the ReviewStore.
+export type { MergeSlotEntry, MergeSlotStore, MergeSlotResult } from './review/serialize.js';
+export {
+  foldActiveSlot,
+  acquireMergeSlot,
+  releaseMergeSlot,
+  reReviewBase,
+} from './review/serialize.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
 // seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/

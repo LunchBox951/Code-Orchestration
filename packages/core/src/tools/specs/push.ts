@@ -25,6 +25,20 @@ const pushInput = z.object({
         'pushed to the remote. Defaults to the detected base of your worktree.',
     ),
   remote: z.string().optional().describe('Remote to push to. Defaults to origin.'),
+  operator_override: z
+    .boolean()
+    .optional()
+    .describe(
+      'Audited operator escape hatch (AC-L5-6): bypass the recorded-PASS gate. REQUIRES a non-empty ' +
+        'reason — it records a review.override event. An override without a reason is refused.',
+    ),
+  reason: z
+    .string()
+    .optional()
+    .describe(
+      'The reason for the operator override — REQUIRED (non-empty) when operator_override is set; ' +
+        'recorded in the audit event.',
+    ),
 });
 type PushInput = z.infer<typeof pushInput>;
 
@@ -45,6 +59,14 @@ const pushOutput = z.object({
     .boolean()
     .optional()
     .describe('True when a baseline-failure escalation was emitted to the parent agent.'),
+  overridden: z
+    .boolean()
+    .optional()
+    .describe('True when the PASS gate was bypassed by an audited operator override (AC-L5-6).'),
+  override_reason: z
+    .string()
+    .optional()
+    .describe('The recorded override reason, present when overridden.'),
 });
 type PushOutput = z.infer<typeof pushOutput>;
 
@@ -90,6 +112,8 @@ export const pushTool: ToolSpec<PushInput, PushOutput> = {
       projectId: ctx.projectId,
       repoCwd: ctx.cwd,
       ...(input.remote != null ? { remote: input.remote } : {}),
+      ...(input.operator_override != null ? { operatorOverride: input.operator_override } : {}),
+      ...(input.reason != null ? { reason: input.reason } : {}),
     });
     return {
       pushed: result.pushed,
@@ -99,6 +123,8 @@ export const pushTool: ToolSpec<PushInput, PushOutput> = {
         ? { baseline_failures: [...result.baselineFailures] }
         : {}),
       ...(result.escalated != null ? { escalated: result.escalated } : {}),
+      ...(result.overridden != null ? { overridden: result.overridden } : {}),
+      ...(result.overrideReason != null ? { override_reason: result.overrideReason } : {}),
     };
   },
 };
