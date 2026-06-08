@@ -816,5 +816,16 @@ export { narrowOnly, validateSubRoles } from './roles/narrow-only.js';
 export type { SubRoleViolation } from './roles/sub-role-completeness.js';
 export { checkSubRoleCompleteness } from './roles/sub-role-completeness.js';
 
+// L6a Phase D1 — non-destructive block-list registry + drift check + reactive-nudge catalog.
+// The declared LIST and DATA only (Principle 6 — block only the workarounds, everything else
+// is a nudge). Enforcement hooks (PreToolUse, Claude/Codex variants) and nudge injection are
+// L7 typed stubs here; the production wiring lands in L7 (permissions.md:90-98 / :64-66).
+export type { BlockCategory, BlockRule } from './permissions/block-list.js';
+export { BLOCK_LIST, matchBlock } from './permissions/block-list.js';
+export type { EnforcedConfig, DriftViolation } from './permissions/drift.js';
+export { checkBlockListDrift, readEnforcedConfig } from './permissions/drift.js';
+export type { NudgeRule } from './permissions/nudges.js';
+export { NUDGE_CATALOG, nudgeFor, injectNudge } from './permissions/nudges.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
