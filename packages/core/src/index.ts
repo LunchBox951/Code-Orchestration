@@ -792,5 +792,18 @@ export { openRosterStore } from './roles/roster-store.js';
 export type { SpawnViolation } from './roles/spawn-rules.js';
 export { SPAWN_RULES, canSpawn, checkSpawnPlan, validateSpawnPlan } from './roles/spawn-rules.js';
 
+// L6a Phase B — fixed shipped sub-role set + narrow-only invariant + completeness discipline
+// (AC-L6a-2, AC-L6a-8 partial, AC-L6a-9). Sub-roles specialize a base role's approach (soft) and
+// may narrow but never widen its permission profile (hard). Researcher sub-roles carry the only
+// real permission delta: `researcher:external` retains web-search; `codebase`/`diagnostic`/
+// `decision` narrow it away. Coordinator and Lead have no sub-roles (owner tiers). All checks are
+// pure — no I/O, no clock.
+export type { SubRoleSpec } from './roles/sub-roles.js';
+export { SUB_ROLES, subRolesFor, findSubRole, parseSubRoleId } from './roles/sub-roles.js';
+export type { NarrowViolation } from './roles/narrow-only.js';
+export { narrowOnly, validateSubRoles } from './roles/narrow-only.js';
+export type { SubRoleViolation } from './roles/sub-role-completeness.js';
+export { checkSubRoleCompleteness } from './roles/sub-role-completeness.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
