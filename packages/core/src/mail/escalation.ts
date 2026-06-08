@@ -8,6 +8,7 @@ import {
   type MailType,
 } from './events.js';
 import type { MailStore } from './mail-store.js';
+import type { RosterStore } from '../roles/roster-store.js';
 
 /**
  * The escalation protocol (AC-L1-6, spec §3.2 Q3/Q4, freeze #5/#7; docs/architecture/mail-bus.md
@@ -83,6 +84,39 @@ export function prototypeParentResolver(chain: PrototypeChain): ParentResolver {
         );
       }
       return parent;
+    },
+  };
+}
+
+/**
+ * The PRODUCTION role-based {@link ParentResolver} (L6 PLUG-POINT promised by `escalation.ts:29-38`).
+ * Routes each agent to its parent by ROLE + recorded spawn hierarchy:
+ *   - `@operator` → throws (top of chain; Principle 9 — the caller went one step too far).
+ *   - coordinator → returns `@operator` STRUCTURALLY (freeze #5 — never from the stored parent, so
+ *     a coordinator cannot be misconfigured to a peer).
+ *   - any other known agent → returns the stored `parent` field from its roster record.
+ *   - unknown agent → throws loud (Principle 9 — an unregistered id must never silently route nowhere).
+ */
+export function roleParentResolver(roster: Pick<RosterStore, 'getAgent'>): ParentResolver {
+  return {
+    parentOf(agentId: string): string {
+      if (agentId === OPERATOR) {
+        throw new Error(
+          `role parent-resolver: '${OPERATOR}' is the top of the escalation chain (no parent)`,
+        );
+      }
+      const record = roster.getAgent(agentId);
+      if (record == null) {
+        throw new Error(
+          `role parent-resolver: no agent record for '${agentId}' — unknown agent (Principle 9)`,
+        );
+      }
+      // Structural (freeze #5): a coordinator's escalation parent is ALWAYS @operator, decided here
+      // and never from the stored parent field, so it can never be misconfigured to a peer.
+      if (record.role === 'coordinator') {
+        return OPERATOR;
+      }
+      return record.parent;
     },
   };
 }
