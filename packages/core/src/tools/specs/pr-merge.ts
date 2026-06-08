@@ -104,11 +104,14 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
       );
     }
     const into = input.into ?? detectBaseRef(ctx.cwd);
+    // Production parent-resolver from the worktree-recorded spawning parent (Phase D).
+    const parentAgent = ctx.worktrees.getWorktree(input.branch)?.parent;
     const gate = new CoReviewGate({
       reviews: ctx.reviews,
       worktrees: ctx.worktrees,
       mail: ctx.mail,
       agentId: ctx.agent,
+      ...(parentAgent != null ? { parentResolver: { parentOf: () => parentAgent } } : {}),
     });
     // Map tool's snake_case field to PrIntent's camelCase (the tool schema is the wire API;
     // the internal type is the core contract).

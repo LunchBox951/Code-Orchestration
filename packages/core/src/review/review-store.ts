@@ -4,11 +4,13 @@ import { applyEvent, type Projector } from '../replay/projector.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import {
   makeReviewRequestedEvent,
+  makeReviewStrikeEvent,
   makeReviewVerdictEvent,
   reviewSchemas,
   reviewUpcasters,
   type ReviewRequested,
   type ReviewRequestRecord,
+  type ReviewStrike,
   type ReviewVerdictRecord,
   type ReviewVerdictRecorded,
 } from './events.js';
@@ -16,6 +18,7 @@ import {
   ensureReviewTables,
   ReviewProjector,
   selectReviewRequest,
+  selectStrikeCount,
   selectVerdict,
   selectVerdictsForTarget,
 } from './review-projector.js';
@@ -57,6 +60,14 @@ export interface ReviewStore {
   recordReviewRequested(r: ReviewRequested): ReviewRequestRecord;
   /** The latest review request for `branch` on `target`, or undefined. */
   getReviewRequest(target: string, branch: string): ReviewRequestRecord | undefined;
+  /**
+   * Record a strike against `branch` on `target` (append `review.strike` + fold). Called by
+   * {@link import('./strikes.js').applyStrikePolicy} on each freshly-recorded ISSUES verdict; the
+   * consecutive count is reset to 0 when a PASS verdict is recorded for the same (target, branch).
+   */
+  recordStrike(s: ReviewStrike): void;
+  /** The current consecutive `review.strike` count for `branch` on `target` (0 if none). */
+  getStrikeCount(target: string, branch: string): number;
   /** Close the underlying project store. */
   close(): void;
 }
@@ -115,6 +126,19 @@ export function openReviewStore(projectId: string): ReviewStore {
 
     getReviewRequest(target: string, branch: string): ReviewRequestRecord | undefined {
       return store.transaction((tx) => selectReviewRequest(tx.raw as DatabaseSync, target, branch));
+    },
+
+    recordStrike(s: ReviewStrike): void {
+      store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureReviewTables(db);
+        const [stored] = tx.append([makeReviewStrikeEvent(projectId, s)]);
+        applyEvent(tx, decode(stored!, reviewUpcasters, reviewSchemas), projectors);
+      });
+    },
+
+    getStrikeCount(target: string, branch: string): number {
+      return store.transaction((tx) => selectStrikeCount(tx.raw as DatabaseSync, target, branch));
     },
 
     close(): void {

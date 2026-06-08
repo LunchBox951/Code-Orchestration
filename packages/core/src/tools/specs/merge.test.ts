@@ -225,6 +225,69 @@ describe('co_merge (AC-L5-1, AC-L5-3)', () => {
     ).rejects.toThrow(/ctx\.worktrees absent/);
   });
 
+  it('live co_merge: production resolver routes baseline-failure escalation to the recorded worktree parent (Phase D)', async () => {
+    const repo = makeRepo();
+    const reg = buildCoreRegistry();
+    // Use parent: 'coordinator-1' as the worktree's spawning parent — the production resolver
+    // reads this from getWorktree(branch).parent and escalates there on a fail→fail PASS.
+    const { ctx, reviewStore, worktreeStore } = setup('lead-1', { cwd: repo });
+    worktreeStore!.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        path: '/tmp/fake',
+        parent: 'coordinator-1',
+      },
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        tests: [
+          { name: 'test-a', passed: true },
+          { name: 'test-b', passed: false }, // pre-existing baseline failure
+        ],
+      },
+    );
+    worktreeStore!.recordFinish({
+      branch: 'co/feature',
+      baseSha: FAKE_SHA,
+      commitSha: 'b'.repeat(40),
+      tests: [
+        { name: 'test-a', passed: true },
+        { name: 'test-b', passed: false }, // fail→fail: baseline failure (pre-existing)
+      ],
+    });
+    reviewStore!.recordVerdict({
+      reviewId: 'rev-1',
+      target: 'main',
+      branch: 'co/feature',
+      reviewer: 'rev-7',
+      verdict: 'PASS',
+      blockers: [],
+      suggestions: [],
+      verification: { commands_run: ['pnpm test'], suite_result: 'fail', baseline_compared: true },
+    });
+
+    const out = (await invokeTool(reg, ctx, 'co_merge', {
+      branch: 'co/feature',
+      into: 'main',
+      intent: { summary: 'land the feature' },
+    })) as MergeOut & { escalated?: boolean; baseline_failures?: string[] };
+
+    // Merge proceeds (baseline failures are allowed — just flagged + escalated).
+    expect(out.merged).toBe(true);
+    expect(out.baseline_failures).toEqual(['test-b']);
+    expect(out.escalated).toBe(true);
+
+    // The production resolver (built from worktree.parent = 'coordinator-1') routed the
+    // escalation to coordinator-1 — NOT to an injectable double.
+    const escalations = ctx.mail!.inbox('coordinator-1').filter((m) => m.type === 'escalation');
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0]!.subject).toContain('baseline failure');
+    expect(escalations[0]!.subject).toContain('co/feature');
+  });
+
   it('refuses the merge on a regression (pass→fail finish) even with a PASS verdict', async () => {
     const repo = makeRepo();
     const reg = buildCoreRegistry();

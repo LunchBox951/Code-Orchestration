@@ -304,6 +304,161 @@ describe('AC-L5-11 — review read-model rebuilds byte-identical (all five event
   });
 });
 
+// ── ReviewStore.recordStrike / getStrikeCount (Phase D) ──────────────────────────────────────────
+describe('ReviewStore.recordStrike + getStrikeCount (AC-L5-4 plumbing)', () => {
+  it('getStrikeCount returns 0 for an unknown (target, branch)', () => {
+    const store = openReviewStore('p-strike-zero');
+    try {
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/absent')).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('recordStrike bumps the counter per (target, branch)', () => {
+    const store = openReviewStore('p-strike-bump');
+    try {
+      store.recordStrike({
+        reviewId: 'rev-1',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'failing tests',
+      });
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(1);
+      store.recordStrike({
+        reviewId: 'rev-2',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'still failing',
+      });
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('recording a PASS verdict resets the strike counter to 0', () => {
+    const store = openReviewStore('p-strike-pass-reset');
+    try {
+      store.recordStrike({
+        reviewId: 'rev-1',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'blocker',
+      });
+      store.recordStrike({
+        reviewId: 'rev-2',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'blocker',
+      });
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(2);
+      store.recordVerdict(verdict({ verdict: 'PASS', blockers: [] }));
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('recording an ISSUES verdict does NOT reset the counter', () => {
+    const store = openReviewStore('p-strike-issues-norepo');
+    try {
+      store.recordStrike({
+        reviewId: 'rev-1',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'b',
+      });
+      store.recordVerdict(verdict({ verdict: 'ISSUES', blockers: [{ summary: 'b' }] }));
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('strike counter is scoped per (target, branch) — different branch is independent', () => {
+    const store = openReviewStore('p-strike-scope');
+    try {
+      store.recordStrike({
+        reviewId: 'rev-1',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'b',
+      });
+      store.recordStrike({
+        reviewId: 'rev-2',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'b',
+      });
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(2);
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-b')).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// ── AC-L5-4 strike counter replay: PASS reset is replay-equal ────────────────────────────────────
+describe('AC-L5-4 — strike counter replay: PASS reset is byte-identical on rebuild', () => {
+  function strikeSnapshot(db: DatabaseSync): string {
+    return JSON.stringify(
+      db.prepare('SELECT target, branch, strikes FROM reviews ORDER BY target, branch').all(),
+    );
+  }
+
+  it('strikes→PASS→strikes is replay-equal: live == rebuilt (non-vacuous)', () => {
+    const store = openProjectStore('p-strike-replay');
+    const projectors = [new ReviewProjector()];
+    const t = 'co/l5-review-gate';
+    // Sequence: strike, strike, PASS (resets), strike — final count must be 1.
+    const sequence = [
+      makeReviewStrikeEvent('p-strike-replay', {
+        reviewId: 'r-1',
+        target: t,
+        branch: 'co/a',
+        reason: 'first',
+      }),
+      makeReviewStrikeEvent('p-strike-replay', {
+        reviewId: 'r-2',
+        target: t,
+        branch: 'co/a',
+        reason: 'second',
+      }),
+      makeReviewVerdictEvent(
+        'p-strike-replay',
+        verdict({ reviewId: 'r-pass', branch: 'co/a', verdict: 'PASS' }),
+      ),
+      makeReviewStrikeEvent('p-strike-replay', {
+        reviewId: 'r-3',
+        target: t,
+        branch: 'co/a',
+        reason: 'fresh',
+      }),
+    ];
+    try {
+      for (const e of sequence) {
+        store.transaction((tx) => {
+          const [s] = tx.append([e]);
+          applyEvent(tx, decode(s!, reviewUpcasters, reviewSchemas), projectors);
+        });
+      }
+      const live = store.transaction((tx) => strikeSnapshot(tx.raw as DatabaseSync));
+
+      rebuildAll(store, projectors, (e) => decode(e, reviewUpcasters, reviewSchemas));
+      const replayed = store.transaction((tx) => strikeSnapshot(tx.raw as DatabaseSync));
+
+      expect(replayed).toBe(live);
+      // Guard: PASS reset 2 strikes to 0, then one fresh strike → final count = 1.
+      expect(live).toContain('"strikes":1');
+      expect(live).not.toContain('"strikes":2');
+      expect(live).not.toContain('"strikes":3');
+    } finally {
+      store.close();
+    }
+  });
+});
+
 // ── Principle 12: the review store writes only program-data, never the repo ──────────────────────
 describe('AC-L5-1 — assertRepoPristine holds around the review recorders', () => {
   it('recordVerdict + recordReviewRequested write nothing into the target repo', () => {

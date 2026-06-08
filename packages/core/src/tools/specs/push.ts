@@ -75,11 +75,14 @@ export const pushTool: ToolSpec<PushInput, PushOutput> = {
       throw new Error('co_push: the mount did not inject a worktree store (ctx.worktrees absent).');
     }
     const into = input.into ?? detectBaseRef(ctx.cwd);
+    // Production parent-resolver from the worktree-recorded spawning parent (Phase D).
+    const parentAgent = ctx.worktrees.getWorktree(input.branch)?.parent;
     const gate = new CoReviewGate({
       reviews: ctx.reviews,
       worktrees: ctx.worktrees,
       mail: ctx.mail,
       agentId: ctx.agent,
+      ...(parentAgent != null ? { parentResolver: { parentOf: () => parentAgent } } : {}),
     });
     const result = gate.push({
       branch: input.branch,
