@@ -4,6 +4,7 @@ import {
   openDispatchStore,
   openMailStore,
   openRegistry,
+  openReviewStore,
   openWorktreeStore,
   toolsForRole,
   type Role,
@@ -106,6 +107,9 @@ export function defaultContextFactory(): () => ToolContext {
   // L4: open + inject the dispatch store (usage/cost/placement). PlacementProjector/UsageProjector/
   // CostProjector own distinct tables from WorktreeProjector so sharing the same store.db is safe.
   const dispatch = openDispatchStore(projectId);
+  // L5: open + inject the review store (verdict/request/serialize). ReviewProjector owns a distinct
+  // scope (`review:`) and read-model table from the other stores, so sharing the same store.db is safe.
+  const reviews = openReviewStore(projectId);
   if (explicitProjectId != null && resolvedFromCwd == null) {
     const normalizedCwd = resolve(cwd);
     const isRecordedSandbox = worktrees
@@ -115,6 +119,7 @@ export function defaultContextFactory(): () => ToolContext {
       mail.close();
       worktrees.close();
       dispatch.close();
+      reviews.close();
       registry.close();
       throw new Error(
         `co MCP server: ${CO_PROJECT_ID_ENV} '${projectId}' does not record cwd '${cwd}' as a ` +
@@ -130,6 +135,7 @@ export function defaultContextFactory(): () => ToolContext {
     registry,
     worktrees,
     dispatch,
+    reviews,
     usageSourceFactory: defaultUsageSourceFactory,
   };
   return () => ctx;

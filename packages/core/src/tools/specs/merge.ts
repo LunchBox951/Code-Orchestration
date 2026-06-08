@@ -128,6 +128,13 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
     // Build the production parent-resolver from the worktree-recorded spawning parent
     // (AC-L5-4 / Phase D): baseline-failure escalations go to the branch's recorded parent.
     const parentAgent = worktrees.getWorktree(input.branch)?.parent;
+    // L7 SEAM NOTE (placement recording): CoReviewGate.triggerReview resolves + records a reviewer
+    // placement (placement.decided) via the L4 dispatch store. `dispatch`/`config`/`nowMs` are
+    // intentionally NOT injected here — triggerReview has zero production callers at this surface
+    // (`co_merge` gates on an already-recorded verdict; `co_finish` stops short of triggering a new
+    // review). The live invocation of triggerReview — conducting the reviewer dispatch — is the L7
+    // seam (AC-L5-11 defers: "no L7 work"). Wiring dispatch here would be dead code. L7 injects it
+    // when it wires the live reviewer dispatch.
     const gate = new CoReviewGate({
       reviews: ctx.reviews,
       worktrees,
