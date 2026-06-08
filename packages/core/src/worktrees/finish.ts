@@ -14,8 +14,8 @@ import type { WorktreeStore } from './worktree-store.js';
  * agent's intent (DCO-signed), RECORD the finish (the commit + the finish's test run — the durable
  * input L5 compares against the captured baseline), and EMIT `worker_done` (informational) to the
  * parent the sling recorded. It does NOT dispatch a reviewer and does NOT merge — that gate is L5
- * (the {@link import('./review-trigger.js').FinishReviewGateStub} marks the seam; this layer stops
- * short of it). It does NOT compute the regression diff either (L5 compares; this layer records).
+ * (the {@link import('./review-trigger.js').FinishReviewGate} is its typed seam; `co_finish` still
+ * stops short of it). It does NOT compute the regression diff either (L5 compares; this layer records).
  *
  * The message is rendered by {@link renderCommitMessage} — a pure core function with NO provider /
  * voice parameter — so provider voice can never reach the commit (Principle 3). The git mutation

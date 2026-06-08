@@ -240,17 +240,23 @@ export type {
   FinishResult,
 } from './worktrees/finish.js';
 export { finishWorktree } from './worktrees/finish.js';
-// L3-C L5 plug-point: the typed review-trigger + merge gate `co_finish` stops short of. A loud-failing
-// stub (never a silent no-op) marking the seam — the gated verbs are simply NOT BUILT in L3 (P7).
-export type { FinishReviewGate } from './worktrees/review-trigger.js';
-export { FinishReviewGateStub } from './worktrees/review-trigger.js';
+// L5 review-trigger + merge gate: the typed seam `co_finish` stops short of, now REAL (L5). The
+// interface + its request/result types live here; the real implementation is the review/ CoReviewGate
+// (consumed by `co_merge`). `co_finish` still does NOT call it (it stops short by design).
+export type {
+  FinishReviewGate,
+  ReviewTriggerRequest,
+  ReviewTriggerResult,
+  ReviewMergeRequest,
+  ReviewMergeResult,
+} from './worktrees/review-trigger.js';
 // L3-D repository-relationship modes (AC-L3-4): per-project Owner / Contributor / Offline that reshape
-// the publishing surface. The L3-ownable half — the read-only injectable remote-capability prober, the
-// pure D2 detection order, override-beats-detection resolution (persisted in the config cascade, never
-// the repo), the Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe
-// (PR-template presence + a sign-off signal). The gated verbs that ACT on a mode (co_merge/co_push/
-// co_pr_merge, the fork→PR enactment, "gate in all three") + the rich CONTRIBUTING/PR-template parse are
-// L5/L9 — a loud-failing typed stub (RepoModeGateStub), never built, no MCP tool declared (P4, P7).
+// the publishing surface. The read-only injectable remote-capability prober, the pure D2 detection
+// order, override-beats-detection resolution (persisted in the config cascade, never the repo), the
+// Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe (PR-template
+// presence + a sign-off signal). As of L5, the OWNER + OFFLINE merge enactment is REAL on
+// {@link CoRepoModeGate} (the enactment `co_merge` uses); the Contributor fork→PR + remote push remain
+// Phase C, and the rich CONTRIBUTING/PR-template parse remains L9 — each a loud-failing seam (P7, P9).
 export type {
   RepoMode,
   RemoteSignals,
@@ -259,6 +265,9 @@ export type {
   RepoModeCapabilities,
   HostConventions,
   RepoModeGate,
+  PublishRequest,
+  PublishResult,
+  EnactPublishDeps,
 } from './worktrees/repo-mode.js';
 export {
   REPO_MODE_CONFIG_KEY,
@@ -267,7 +276,7 @@ export {
   resolveRepoMode,
   repoModeCapabilities,
   detectHostConventions,
-  RepoModeGateStub,
+  CoRepoModeGate,
 } from './worktrees/repo-mode.js';
 export type { GitReader } from './worktrees/detect-base.js';
 export { detectBaseRef, defaultGitReader, resolveRefSha } from './worktrees/detect-base.js';
@@ -310,6 +319,61 @@ export {
   provisionWorktree,
   defaultProvisioner,
 } from './worktrees/provision.js';
+
+// L5 review gate (AC-L5-1): the event-sourced review/ module — the PASS|ISSUES verdict model, the
+// five-event log (review.requested/verdict/strike + merge.serialized + review.override, all defined +
+// projected now so B–F add only writers), the per-(target, branch) review store, and the gated merge
+// core (CoReviewGate) the lead-facing co_merge consumes. Nothing reaches a merge without a recorded
+// PASS; the verdict is a structured RECORDED EVENT (Principle 5), never a prose blob or a shell exit
+// code. The honest-verification baseline (B), strictness ladder + push/PR (C), 3-strike (D), human
+// review (E), and serialization/override (F) are later phases.
+export type {
+  Verdict,
+  Blocker,
+  Suggestion,
+  VerificationMarker,
+  ReviewVerdict,
+} from './review/verdict.js';
+export {
+  verdictSchema,
+  blockerSchema,
+  suggestionSchema,
+  verificationMarkerSchema,
+  reviewVerdictSchema,
+  assertValidVerdict,
+} from './review/verdict.js';
+export type {
+  ReviewRequested,
+  ReviewVerdictRecorded,
+  ReviewStrike,
+  MergeSerialized,
+  ReviewOverride,
+  ReviewVerdictRecord,
+  ReviewRequestRecord,
+} from './review/events.js';
+export {
+  REVIEW_EVENT_V,
+  EVENT_REVIEW_REQUESTED,
+  EVENT_REVIEW_VERDICT,
+  EVENT_REVIEW_STRIKE,
+  EVENT_MERGE_SERIALIZED,
+  EVENT_REVIEW_OVERRIDE,
+  REVIEW_SCOPE_PREFIX,
+  reviewScope,
+  reviewTargetForScope,
+  reviewSchemas,
+  reviewUpcasters,
+  makeReviewRequestedEvent,
+  makeReviewVerdictEvent,
+  makeReviewStrikeEvent,
+  makeMergeSerializedEvent,
+  makeReviewOverrideEvent,
+} from './review/events.js';
+export { ReviewProjector } from './review/review-projector.js';
+export type { ReviewStore } from './review/review-store.js';
+export { openReviewStore } from './review/review-store.js';
+export type { ReviewGateDeps } from './review/merge.js';
+export { CoReviewGate } from './review/merge.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
 // seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/

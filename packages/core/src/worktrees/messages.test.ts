@@ -160,12 +160,14 @@ describe('AC-L3-3 — provider-deterministic: identical intent ⇒ byte-identica
   });
 });
 
-describe('AC-L3-3 — gated-by-default holds at the seam (P7): no un-gated merge/push/PR verb', () => {
-  it('the registry exposes no co_merge / co_push / co_pr_merge (those are L5)', () => {
+describe('AC-L3-3 / AC-L5-1 — gated-by-default holds at the seam (P7)', () => {
+  it('the gated co_merge is exposed in L5 (renderMergeMessage now has a consumer); push/PR stay Phase C', () => {
     const names = buildCoreRegistry()
       .list()
       .map((t) => t.name);
-    expect(names).not.toContain('co_merge');
+    // L5 lands the gated co_merge (refuses without a recorded PASS — AC-L5-1), so renderMergeMessage
+    // finally has a consumer. The remote-publishing verbs are still NOT BUILT (Phase C).
+    expect(names).toContain('co_merge');
     expect(names).not.toContain('co_push');
     expect(names).not.toContain('co_pr_merge');
     // co_finish IS exposed (it commits + records + pings) but does NOT review or merge.
