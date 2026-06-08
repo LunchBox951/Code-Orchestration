@@ -45,6 +45,20 @@ const prMergeInput = z.object({
     .refine((s) => !/[\r\n]/u.test(s), 'title must be a single line')
     .describe('The pull request title (one line).'),
   intent: prIntentInput,
+  operator_override: z
+    .boolean()
+    .optional()
+    .describe(
+      'Audited operator escape hatch (AC-L5-6): bypass the recorded-PASS gate. REQUIRES a non-empty ' +
+        'reason — it records a review.override event. An override without a reason is refused.',
+    ),
+  reason: z
+    .string()
+    .optional()
+    .describe(
+      'The reason for the operator override — REQUIRED (non-empty) when operator_override is set; ' +
+        'recorded in the audit event.',
+    ),
 });
 type PrMergeInput = z.infer<typeof prMergeInput>;
 
@@ -69,6 +83,14 @@ const prMergeOutput = z.object({
     .boolean()
     .optional()
     .describe('True when a baseline-failure escalation was emitted to the parent agent.'),
+  overridden: z
+    .boolean()
+    .optional()
+    .describe('True when the PASS gate was bypassed by an audited operator override (AC-L5-6).'),
+  override_reason: z
+    .string()
+    .optional()
+    .describe('The recorded override reason, present when overridden.'),
 });
 type PrMergeOutput = z.infer<typeof prMergeOutput>;
 
@@ -128,6 +150,8 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
       intent,
       projectId: ctx.projectId,
       repoCwd: ctx.cwd,
+      ...(input.operator_override != null ? { operatorOverride: input.operator_override } : {}),
+      ...(input.reason != null ? { reason: input.reason } : {}),
     });
     return {
       pr_url: result.prUrl,
@@ -137,6 +161,8 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
         ? { baseline_failures: [...result.baselineFailures] }
         : {}),
       ...(result.escalated != null ? { escalated: result.escalated } : {}),
+      ...(result.overridden != null ? { overridden: result.overridden } : {}),
+      ...(result.overrideReason != null ? { override_reason: result.overrideReason } : {}),
     };
   },
 };

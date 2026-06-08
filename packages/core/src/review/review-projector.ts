@@ -168,6 +168,15 @@ export function selectVerdictsForTarget(db: DatabaseSync, target: string): Revie
   return rows.map((r) => rowToReviewVerdictRecord(r as Record<string, unknown>));
 }
 
+/** Every branch ever serialized into `target` (the `serialized` flag set), in branch order. */
+export function selectSerializedBranches(db: DatabaseSync, target: string): string[] {
+  ensureReviewTables(db);
+  const rows = db
+    .prepare('SELECT branch FROM reviews WHERE target = ? AND serialized = 1 ORDER BY branch')
+    .all(target);
+  return rows.map((r) => String((r as Record<string, unknown>).branch));
+}
+
 /** The latest review request for `branch` on `target`, or undefined (no request folded yet). */
 export function selectReviewRequest(
   db: DatabaseSync,
