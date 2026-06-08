@@ -161,15 +161,15 @@ describe('AC-L3-3 — provider-deterministic: identical intent ⇒ byte-identica
 });
 
 describe('AC-L3-3 / AC-L5-1 — gated-by-default holds at the seam (P7)', () => {
-  it('the gated co_merge is exposed in L5 (renderMergeMessage now has a consumer); push/PR stay Phase C', () => {
+  it('the gated co_merge / co_push / co_pr_merge are all exposed in L5 Phase C', () => {
     const names = buildCoreRegistry()
       .list()
       .map((t) => t.name);
-    // L5 lands the gated co_merge (refuses without a recorded PASS — AC-L5-1), so renderMergeMessage
-    // finally has a consumer. The remote-publishing verbs are still NOT BUILT (Phase C).
+    // L5 Phase A–C land the gated publish verbs: co_merge (renderMergeMessage consumer),
+    // co_push and co_pr_merge (renderPrMessage consumers). All three are real, no stubs.
     expect(names).toContain('co_merge');
-    expect(names).not.toContain('co_push');
-    expect(names).not.toContain('co_pr_merge');
+    expect(names).toContain('co_push');
+    expect(names).toContain('co_pr_merge');
     // co_finish IS exposed (it commits + records + pings) but does NOT review or merge.
     expect(names).toContain('co_finish');
   });
