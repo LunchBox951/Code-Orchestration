@@ -311,5 +311,288 @@ export {
   defaultProvisioner,
 } from './worktrees/provision.js';
 
+// L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
+// seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/
+// `ProviderUsageSource` are the verbatim contract; `FakeUsageSource` is the production-quality double
+// that drives phases 3–5's headless policy tests; `UsageUnavailableError`/`USAGE_UNAVAILABLE_CODE` are
+// the fail-loud "no usage source succeeded" surface (AC6, Principle 9). AC11: the source contract is a
+// passive/metadata read ONLY — it NEVER runs inference or spends API-billed tokens (the real adapters
+// land in Phase 6). NO new agent MCP tool is added (AC8); usage/cost are internal substrate, and the
+// policy (rollup math, near-budget, staleness) is PURE over injected inputs (AC10, Principle 16).
+export type {
+  Provider,
+  UsageWindow,
+  UsageSnapshot,
+  ProviderUsageSource,
+  FakeUsageSourceInit,
+} from './dispatch/usage-source.js';
+export {
+  FakeUsageSource,
+  UsageUnavailableError,
+  USAGE_UNAVAILABLE_CODE,
+} from './dispatch/usage-source.js';
+export type {
+  UsageObserved,
+  UsageObservedAvailable,
+  UsageObservedUnavailable,
+  CostRecorded,
+  CostNearBudget,
+  UsageBucket,
+  UsageAccountStatus,
+  CostRollup,
+  CostRollupKind,
+  NearBudgetRecord,
+} from './dispatch/events.js';
+export {
+  DISPATCH_EVENT_V,
+  EVENT_USAGE_OBSERVED,
+  EVENT_COST_RECORDED,
+  EVENT_COST_NEAR_BUDGET,
+  USAGE_SCOPE_PREFIX,
+  COST_SCOPE_PREFIX,
+  usageScope,
+  costScope,
+  providerSchema,
+  usageObservedAvailableSchema,
+  usageObservedUnavailableSchema,
+  usageObservedSchema,
+  costRecordedSchema,
+  costNearBudgetSchema,
+  dispatchSchemas,
+  dispatchUpcasters,
+  makeUsageObservedEvent,
+  makeCostRecordedEvent,
+  makeCostNearBudgetEvent,
+} from './dispatch/events.js';
+export {
+  UsageProjector,
+  ensureUsageTables,
+  rowToUsageBucket,
+  rowToUsageAccountStatus,
+  selectUsageBucket,
+  selectAllUsageBuckets,
+  selectUsageAccount,
+  selectAllUsageAccounts,
+} from './dispatch/usage-projector.js';
+export {
+  CostProjector,
+  ensureCostTables,
+  rowToCostRollup,
+  rowToNearBudgetRecord,
+  selectCostRollup,
+  selectAllCostRollups,
+  selectNearBudgetBySeq,
+  selectNearBudgetEvents,
+} from './dispatch/cost-projector.js';
+// L4-1 PURE policy (AC10, Principle 16): headroom as a discriminated value (never a magic number),
+// near-budget edge trigger, and a clock-free staleness predicate (injected `now` — replay-deterministic).
+export type { Headroom, StaleInput, BudgetInput } from './dispatch/policy.js';
+export {
+  NEAR_BUDGET_THRESHOLD_PCT_DEFAULT,
+  USAGE_BUCKET_TTL_MS_DEFAULT,
+  isStale,
+  nearBudget,
+  crossesNearBudget,
+  deriveHeadroom,
+} from './dispatch/policy.js';
+// L4-1 store facade: `openDispatchStore(projectId)` records usage + cost over L0 (program-data only,
+// AC9), with the near-budget observability emit + the fail-loud `observeUsage` read seam, and the
+// config-cascade budget-cap resolution (heir to `cost_budget_cents`).
+export type {
+  DispatchStore,
+  BudgetCap,
+  CostRecordResult,
+  UsageObservedResult,
+  SnapshotIngestResult,
+} from './dispatch/dispatch-store.js';
+export {
+  COST_BUDGET_CENTS_KEY,
+  openDispatchStore,
+  observeUsage,
+  resolveBudgetCapCents,
+  resolveBudgetCap,
+} from './dispatch/dispatch-store.js';
+
+// L4-2 pure tier-matrix policy: (WorkSize × ReasoningBudget) → {model, effort, context} per
+// Provider. Routing vocabulary (WorkSize, ReasoningBudget + zod schemas) + default capability
+// matrix (resolveTier) + legacy difficulty shim (normalizeLegacyDifficulty). AC10/P16: pure
+// deterministic function, no I/O, no clock. AC8: no new MCP tool. AC9/P12: no repo writes.
+export type {
+  WorkSize,
+  ReasoningBudget,
+  Effort,
+  ContextWindow,
+  TierPlacement,
+} from './dispatch/tier.js';
+export {
+  workSizeSchema,
+  reasoningBudgetSchema,
+  resolveTier,
+  normalizeLegacyDifficulty,
+} from './dispatch/tier.js';
+
+// L4-3 rate-limit-aware balancer: the PURE provider resolver `placeAgent` (pins never overridden →
+// AC1; floating → roomiest HEALTHY provider, reset-aware + hysteresis → AC2; exclude unhealthy/unknown,
+// route around a dead provider → AC3) over an injected bucket/headroom snapshot. The first-class
+// `no-candidate` variant surfaces the all-excluded signal for Phase 4 (throttle/WAITING) — never a throw,
+// never a silent degrade (P9), and NO tier degradation here. `headroomScore` is the reset-aware scoring;
+// `bindingProviderHeadroom` reduces an account's windows to the most-constrained one. The non-pure
+// adapter (`candidatesFromStore`/`resolvePinTable`/`placeAgentFromStore`) only READS the DispatchStore +
+// config cascade (`dispatch.pins`) — writes nothing (AC9/P12) and adds no MCP tool (AC8). AC10/P16: pure
+// over injected inputs (incl. `nowMs` + `previous`), identical inputs → identical PlacementDecision.
+export type {
+  Pin,
+  PinTable,
+  ProviderHeadroom,
+  Placement,
+  RankedCandidate,
+  ExcludedCandidate,
+  PlacementDecision,
+  HysteresisConfig,
+  CandidateReadOptions,
+  PlaceAgentInput,
+  ProviderAccount,
+  PlaceFromStoreInput,
+  PlaceFromStoreDeps,
+} from './dispatch/balancer.js';
+export {
+  pinSchema,
+  pinTableSchema,
+  DISPATCH_PINS_CONFIG_KEY,
+  HYSTERESIS_MARGIN_DEFAULT,
+  RESET_HORIZON_MS_DEFAULT,
+  headroomScore,
+  defaultProviderAccounts,
+  placeAgent,
+  bindingProviderHeadroom,
+  candidatesFromStore,
+  resolvePinTable,
+  placeAgentFromStore,
+} from './dispatch/balancer.js';
+
+// L4-4 pure throttle-as-WAITING: PlacementDecision + headrooms → PLACED or WAITING (ETA + loud message); canResume predicate (AC4, P9, P13, P16).
+export type { DispatchDiagnostic, DispatchResolution } from './dispatch/throttle.js';
+export { MAXED_THRESHOLD_PCT_DEFAULT, resolveDispatch, canResume } from './dispatch/throttle.js';
+
+// L4-5 dispatch integration: placement.decided event (the WRITER — completes reader-with-writer),
+// DispatchStore.recordPlacement, and operator-only render/preview fns (CLI only, AC8 — no new
+// agent tool; usage/cost/placement are program-data only, never agent-facing). P3: render-per-audience.
+export type {
+  PlacementDecidedPlaced,
+  PlacementDecidedWaiting,
+  PlacementDecided,
+  PlacementRecord,
+} from './dispatch/events.js';
+export {
+  EVENT_PLACEMENT_DECIDED,
+  PLACEMENT_SCOPE_PREFIX,
+  placementScope,
+  placementDecidedPlacedSchema,
+  placementDecidedWaitingSchema,
+  placementDecidedSchema,
+  makePlacementDecidedEvent,
+} from './dispatch/events.js';
+export {
+  PlacementProjector,
+  ensurePlacementTable,
+  rowToPlacementRecord,
+  selectAllPlacements,
+  selectPlacementBySeq,
+  selectPlacementsByAgent,
+} from './dispatch/placement-projector.js';
+export type {
+  PreviewPlacementInput,
+  UsageSourceFactory,
+  RefreshUsageInput,
+} from './dispatch/cli-render.js';
+export {
+  refreshUsageForAccounts,
+  runDispatchPolicy,
+  renderUsageReport,
+  renderCostReport,
+  previewPlacement,
+  previewPlacementWithUsage,
+  renderDispatchResolution,
+} from './dispatch/cli-render.js';
+
+// L4-6 LIVE provider usage adapters (spec §2.6, §4.3; AC7, AC11): the real per-provider
+// `ProviderUsageSource` implementations that turn the frozen seam into live measurement. Each is
+// layered (passive-first), cached (program-data), and fail-loud, with ALL live I/O behind injected
+// read-only seams (default = the real impl; tests inject fixtures so `pnpm test` stays hermetic).
+//
+//   - `ClaudeUsageSource` (Max): metadata `auth status` preflight → passive `statusLine` parse → a
+//     gated, default-OFF idle usage-endpoint read. NO INFERENCE (AC11) — no `claude -p`, ever.
+//   - `CodexUsageSource` (pro): `codex doctor` preflight → passive read-only `codex.rate_limits` from
+//     `logs_2.sqlite` → optional active app-server read (detect & fall back) → session-jsonl fallback.
+//   - `createProviderUsageSource` / `defaultProviderUsageSource` construct the real adapter with real
+//     seams (AC7 — wired as default); `readProviderUsageCached` adds the §4.3 program-data cache
+//     (reuses `isStale` + `observeUsage`); `isLiveE2EEnabled` gates the local live E2E (default OFF →
+//     it SKIPS in the sandbox/CI). AC8: no new agent tool. AC10/P16: the policy is unchanged.
+export type {
+  ClaudeAccountInfo,
+  ClaudeStatusLineReading,
+  ClaudeUsageSourceDeps,
+  ClaudeUsageSourceOptions,
+  ClaudeCli,
+  ClaudeOAuthFetch,
+  DefaultClaudeDepsOptions,
+} from './dispatch/claude-source.js';
+export {
+  ClaudeUsageSource,
+  CLAUDE_DEFAULT_ACCOUNT,
+  CLAUDE_AUTH_STATUS_ARGS,
+  CLAUDE_USAGE_ENDPOINT,
+  CLAUDE_OAUTH_TOKEN_ENDPOINT,
+  CLAUDE_OAUTH_CLIENT_ID,
+  CLAUDE_STATUSLINE_PATH_ENV,
+  CLAUDE_OAUTH_REFRESH_TOKEN_ENV,
+  CLAUDE_OAUTH_ACCESS_TOKEN_ENV,
+  CLAUDE_OAUTH_TOKEN_ENV,
+  CLAUDE_OAUTH_BACKOFF_MS_ENV,
+  defaultClaudeDeps,
+  parseClaudeAuthStatus,
+  parseClaudeStatusLine,
+} from './dispatch/claude-source.js';
+export type {
+  CodexAccountInfo,
+  CodexRateLimitsReading,
+  CodexUsageSourceDeps,
+  CodexUsageSourceOptions,
+  CodexCli,
+  DefaultCodexDepsOptions,
+} from './dispatch/codex-source.js';
+export {
+  CodexUsageSource,
+  CODEX_DEFAULT_ACCOUNT,
+  CODEX_DOCTOR_ARGS,
+  CODEX_LOGS_DB_ENV,
+  CODEX_SESSIONS_DIR_ENV,
+  defaultCodexDeps,
+  defaultCodexLogsDbPath,
+  defaultCodexSessionsDir,
+  openCodexLogsDb,
+  parseCodexDoctor,
+  parseCodexRateLimits,
+  readLatestCodexRateLimits,
+  readLatestRolloutRateLimits,
+} from './dispatch/codex-source.js';
+export type { UsageSourceAttempt } from './dispatch/usage-adapter-common.js';
+export { buildSnapshot, layeredRead } from './dispatch/usage-adapter-common.js';
+export type {
+  ClaudeSourceConfig,
+  CodexSourceConfig,
+  CachedUsageReadOptions,
+} from './dispatch/provider-source.js';
+export {
+  accountForProvider,
+  createProviderUsageSource,
+  defaultProviderUsageSource,
+  defaultUsageSourceFactory,
+  readProviderUsageCached,
+  isLiveE2EEnabled,
+  CACHE_SOURCE,
+  CO_LIVE_E2E_ENV,
+} from './dispatch/provider-source.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
