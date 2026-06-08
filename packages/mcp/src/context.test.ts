@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildCoreRegistry,
+  invokeTool,
   openRegistry,
   openWorktreeStore,
   slingWorktree,
@@ -233,11 +234,155 @@ describe('defaultContextFactory — production context resolution', () => {
       expect(ctx.cwd).toBe(slung.worktreePath);
       expect(ctx.worktrees?.getWorktree('co/mcp-sandbox')?.path).toBe(slung.worktreePath);
       expect(ctx.dispatch).toBeDefined();
+      expect(ctx.reviews).toBeDefined();
       expect(typeof ctx.usageSourceFactory).toBe('function');
     } finally {
       ctx.mail.close();
       ctx.worktrees?.close();
       ctx.dispatch?.close();
+      ctx.reviews?.close();
+      ctx.registry.close();
+    }
+  });
+});
+
+/**
+ * These tests close the "listed-but-unwired" test gap: they INVOKE the gated verbs through
+ * `defaultContextFactory` (not just name-list them). On the UNFIXED tree (reviews unwired),
+ * every gated verb throws "review store absent". On the FIXED tree, the tools reach the domain
+ * gate — proving the review store is properly injected.
+ *
+ * AC-L5-1 / AC-L5-6 / AC-L5-10: gated verbs must be callable (not throw "review store absent")
+ * when the mount supplies the review store through `defaultContextFactory`.
+ */
+describe('defaultContextFactory — gated verbs reach domain gate (review store wired)', () => {
+  function setupSlungProject(): {
+    projectId: string;
+    repo: string;
+    worktreePath: string;
+  } {
+    useDataDir();
+    const repo = makeMainRepo();
+    const reg = openRegistry();
+    const projectId = reg.register(repo);
+    reg.close();
+    const worktrees = openWorktreeStore(projectId);
+    const slung = slingWorktree(
+      worktrees,
+      { parent: 'lead-gate', branch: 'co/gate-test', repoCwd: repo, projectId },
+      { probe: () => [] },
+    );
+    worktrees.close();
+    process.env[CO_AGENT_ENV] = 'reviewer-1';
+    process.env[CO_PROJECT_ID_ENV] = projectId;
+    chdir(slung.worktreePath);
+    return { projectId, repo, worktreePath: slung.worktreePath };
+  }
+
+  it('co_review_finalize records a PASS verdict through the real mount (reviews injected, not absent)', async () => {
+    setupSlungProject();
+    const registry = buildCoreRegistry();
+    const makeCtx = defaultContextFactory();
+    const ctx = makeCtx();
+    try {
+      // On the UNFIXED tree this throws "co_review_finalize: the mount did not inject a review
+      // store (ctx.reviews absent)". On the FIXED tree it records and returns the verdict.
+      const result = await invokeTool(registry, ctx, 'co_review_finalize', {
+        target: 'main',
+        branch: 'co/gate-test',
+        review_id: 'rev-wiring-1',
+        verdict: 'PASS',
+        blockers: [],
+        suggestions: [],
+        verification: {
+          commands_run: ['pnpm test'],
+          suite_result: 'pass',
+          baseline_compared: true,
+        },
+      });
+      const r = result as Record<string, unknown>;
+      expect(r.verdict).toBe('PASS');
+      expect(r.recorded).toBe(true);
+      expect(r.review_id).toBe('rev-wiring-1');
+    } finally {
+      ctx.mail.close();
+      ctx.worktrees?.close();
+      ctx.dispatch?.close();
+      ctx.reviews?.close();
+      ctx.registry.close();
+    }
+  });
+
+  it('co_merge reaches the domain gate (throws no-verdict, not review-store-absent)', async () => {
+    setupSlungProject();
+    const registry = buildCoreRegistry();
+    const makeCtx = defaultContextFactory();
+    const ctx = makeCtx();
+    try {
+      // On the UNFIXED tree: throws "review store absent".
+      // On the FIXED tree: throws the domain gate error "no review verdict is recorded".
+      await expect(
+        invokeTool(registry, ctx, 'co_merge', {
+          branch: 'co/gate-test',
+          intent: { summary: 'test merge' },
+        }),
+      ).rejects.toThrow(/no review verdict is recorded/i);
+    } finally {
+      ctx.mail.close();
+      ctx.worktrees?.close();
+      ctx.dispatch?.close();
+      ctx.reviews?.close();
+      ctx.registry.close();
+    }
+  });
+
+  it('co_push reaches the domain gate (throws no-verdict, not review-store-absent)', async () => {
+    setupSlungProject();
+    const registry = buildCoreRegistry();
+    const makeCtx = defaultContextFactory();
+    const ctx = makeCtx();
+    try {
+      // On the UNFIXED tree: throws "review store absent".
+      // On the FIXED tree: throws the domain gate error "no review verdict is recorded".
+      await expect(
+        invokeTool(registry, ctx, 'co_push', {
+          branch: 'co/gate-test',
+        }),
+      ).rejects.toThrow(/no review verdict is recorded/i);
+    } finally {
+      ctx.mail.close();
+      ctx.worktrees?.close();
+      ctx.dispatch?.close();
+      ctx.reviews?.close();
+      ctx.registry.close();
+    }
+  });
+
+  it('co_pr_merge reaches the domain gate (throws no-verdict, not review-store-absent)', async () => {
+    setupSlungProject();
+    const registry = buildCoreRegistry();
+    const makeCtx = defaultContextFactory();
+    const ctx = makeCtx();
+    try {
+      // On the UNFIXED tree: throws "review store absent".
+      // On the FIXED tree: throws the domain gate error "no review verdict is recorded".
+      await expect(
+        invokeTool(registry, ctx, 'co_pr_merge', {
+          branch: 'co/gate-test',
+          title: 'test pr',
+          intent: {
+            why: 'testing',
+            what_changed: 'wiring fix',
+            verification: 'pnpm test',
+            conventions: 'follows monorepo patterns',
+          },
+        }),
+      ).rejects.toThrow(/no review verdict is recorded/i);
+    } finally {
+      ctx.mail.close();
+      ctx.worktrees?.close();
+      ctx.dispatch?.close();
+      ctx.reviews?.close();
       ctx.registry.close();
     }
   });

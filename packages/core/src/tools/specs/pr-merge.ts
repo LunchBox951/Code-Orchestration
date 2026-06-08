@@ -128,6 +128,10 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
     const into = input.into ?? detectBaseRef(ctx.cwd);
     // Production parent-resolver from the worktree-recorded spawning parent (Phase D).
     const parentAgent = ctx.worktrees.getWorktree(input.branch)?.parent;
+    // L7 SEAM NOTE (placement recording): `dispatch`/`config`/`nowMs` are intentionally NOT injected
+    // here — `co_pr_merge` gates on an already-recorded verdict and calls gate.prMerge(), never
+    // triggerReview. triggerReview's placement recording is the L7 conductor seam (AC-L5-11 defers).
+    // Wiring dispatch here would be dead code; L7 injects it when wiring the live reviewer dispatch.
     const gate = new CoReviewGate({
       reviews: ctx.reviews,
       worktrees: ctx.worktrees,
