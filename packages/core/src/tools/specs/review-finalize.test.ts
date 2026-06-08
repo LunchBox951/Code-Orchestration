@@ -9,8 +9,9 @@ import { buildCoreRegistry } from '../core-registry.js';
 import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
 
-// AC-L5-1 — co_review_finalize through invokeTool: it records a structured verdict (PASS or ISSUES),
-// rejects the rubber-stamp inverse (ISSUES with no blocker), and loud-fails without a review store.
+// AC-L5-1, AC-L5-3 — co_review_finalize through invokeTool: it records a structured verdict
+// (PASS or ISSUES), rejects the rubber-stamp inverse (ISSUES with no blocker), rejects a PASS
+// without a verification marker (AC-L5-3 defense-in-depth), and loud-fails without a review store.
 
 const ORIGINAL_ENV = process.env;
 let tmpDirs: string[] = [];
@@ -64,8 +65,8 @@ function setup(agent: string, withReviews = true): { ctx: ToolContext; review?: 
   return { ctx, ...(review ? { review } : {}) };
 }
 
-describe('co_review_finalize (AC-L5-1)', () => {
-  it('records a PASS verdict; the reviewer is ctx.agent (never a caller input)', async () => {
+describe('co_review_finalize (AC-L5-1, AC-L5-3)', () => {
+  it('records a PASS verdict with a verification marker; the reviewer is ctx.agent (never a caller input)', async () => {
     const reg = buildCoreRegistry();
     const { ctx, review } = setup('rev-7');
     const out = (await invokeTool(reg, ctx, 'co_review_finalize', {
@@ -75,12 +76,18 @@ describe('co_review_finalize (AC-L5-1)', () => {
       verdict: 'PASS',
       blockers: [],
       suggestions: [{ summary: 'tidy a comment' }],
+      verification: { commands_run: ['pnpm test'], suite_result: 'pass', baseline_compared: true },
     })) as FinalizeOut;
     expect(out).toEqual({ review_id: 'rev-1', verdict: 'PASS', recorded: true });
     const recorded = review!.getVerdict('co/l5-review-gate', 'co/l5-phase-a');
     expect(recorded?.verdict).toBe('PASS');
     expect(recorded?.reviewer).toBe('rev-7');
     expect(recorded?.suggestions).toEqual([{ summary: 'tidy a comment' }]);
+    expect(recorded?.verification).toEqual({
+      commands_run: ['pnpm test'],
+      suite_result: 'pass',
+      baseline_compared: true,
+    });
   });
 
   it('records an ISSUES verdict with a blocker + verification marker', async () => {
@@ -105,6 +112,22 @@ describe('co_review_finalize (AC-L5-1)', () => {
     });
   });
 
+  it('records an ISSUES verdict without a verification marker (marker is optional for ISSUES)', async () => {
+    const reg = buildCoreRegistry();
+    const { ctx, review } = setup('rev-7');
+    const out = (await invokeTool(reg, ctx, 'co_review_finalize', {
+      target: 'co/l5-review-gate',
+      branch: 'co/l5-phase-a',
+      review_id: 'rev-1',
+      verdict: 'ISSUES',
+      blockers: [{ summary: 'a test regressed' }],
+      suggestions: [],
+    })) as FinalizeOut;
+    expect(out.verdict).toBe('ISSUES');
+    const recorded = review!.getVerdict('co/l5-review-gate', 'co/l5-phase-a');
+    expect(recorded?.verification).toBeUndefined();
+  });
+
   it('rejects the rubber-stamp inverse: an ISSUES verdict with no blocker', async () => {
     const reg = buildCoreRegistry();
     const { ctx, review } = setup('rev-7');
@@ -122,6 +145,24 @@ describe('co_review_finalize (AC-L5-1)', () => {
     expect(review!.getVerdict('co/l5-review-gate', 'co/l5-phase-a')).toBeUndefined();
   });
 
+  it('rejects a PASS verdict with no verification marker (AC-L5-3 — PASS-without-marker)', async () => {
+    const reg = buildCoreRegistry();
+    const { ctx, review } = setup('rev-7');
+    await expect(
+      invokeTool(reg, ctx, 'co_review_finalize', {
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        review_id: 'rev-1',
+        verdict: 'PASS',
+        blockers: [],
+        suggestions: [],
+        // no verification field
+      }),
+    ).rejects.toThrow(/PASS.*verification marker/);
+    // Nothing was recorded.
+    expect(review!.getVerdict('co/l5-review-gate', 'co/l5-phase-a')).toBeUndefined();
+  });
+
   it('loud-fails when the mount injected no review store (Principle 9)', async () => {
     const reg = buildCoreRegistry();
     const { ctx } = setup('rev-7', false);
@@ -133,6 +174,11 @@ describe('co_review_finalize (AC-L5-1)', () => {
         verdict: 'PASS',
         blockers: [],
         suggestions: [],
+        verification: {
+          commands_run: ['pnpm test'],
+          suite_result: 'pass',
+          baseline_compared: true,
+        },
       }),
     ).rejects.toThrow(/ctx\.reviews absent/);
   });
