@@ -38,6 +38,10 @@ export const deliveredMailSchema = z.object({
     .enum(['approve', 'decline'])
     .optional()
     .describe('For an approval_response only: the recorded approve/decline decision.'),
+  review_verdict: z
+    .enum(['PASS', 'ISSUES'])
+    .optional()
+    .describe('For a review_response only: the recorded PASS/ISSUES verdict.'),
 });
 
 /** The validated structured shape of a single mail in tool output. */
@@ -63,5 +67,6 @@ export function toWireMail(m: DeliveredMail): WireMail {
     ...(m.resolved != null ? { resolved: m.resolved } : {}),
     ...(m.retracted != null ? { retracted: m.retracted } : {}),
     ...(m.decision != null ? { decision: m.decision } : {}),
+    ...(m.reviewVerdict != null ? { review_verdict: m.reviewVerdict } : {}),
   };
 }

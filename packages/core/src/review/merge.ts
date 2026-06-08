@@ -294,8 +294,8 @@ interface GateOutcome {
  *     `ISSUES` ⇒ refuse, loud — Principle 9), honest-verifies the finish against the baseline
  *     (regression ⇒ refuse; PASS-without-marker ⇒ refuse; baseline-failure ⇒ flag + escalate,
  *     never silent-pass — AC-L5-3), renders the house-style merge message via {@link renderMergeMessage}
- *     (`[reviewed: PASS]`), and enacts owner/offline through the repo-mode gate. Contributor publishing
- *     (fork→PR) is refused here as Phase C.
+ *     (`[reviewed: PASS]`), and enacts owner/offline through the repo-mode gate. Contributor-mode
+ *     local merges are refused here; contributors publish through the gated push/PR path.
  *   - `triggerReview` records a `review.requested` (the request flow's real consumer is Phase E).
  *
  * It writes only program-data + the target repo's own git (the merge commit) — never any orchestration
@@ -314,29 +314,31 @@ export class CoReviewGate implements FinishReviewGate {
    * marker). On a clean or baseline-only PASS, returns the mode + escalation signal so the caller
    * can surface them in its result (AC-L5-3 — baseline failures are never silent).
    *
-   * Note: ReviewScope.pr_merge should be threaded to reviewer dispatch (so reviewers apply the
-   * strictest bar for co_push/co_pr_merge calls). That threading is a Phase D/E concern — Phase D
-   * wires the production parent-resolver; Phase E wires the reviewer dispatch with scope context.
+   * `requiredScope` is used by remote publish / PR gates to require a verdict recorded under the
+   * strictest `pr_merge` bar; local worker/phase merges can keep using the latest unscoped verdict.
    */
   private gateOnPass(
     branch: string,
     into: string,
     projectId: string,
     repoCwd: string,
+    requiredScope?: ReviewScope,
   ): GateOutcome {
     const resolveMode = this.deps.resolveMode ?? resolveRepoMode;
     const mode = resolveMode(projectId, repoCwd);
 
-    const verdict = this.deps.reviews.getVerdict(into, branch);
+    const verdict = this.deps.reviews.getVerdict(into, branch, requiredScope);
     if (!verdict) {
       throw new Error(
         `co: refused — no review verdict is recorded for '${branch}' into '${into}'. ` +
-          'A recorded PASS is required (AC-L5-1); run co_review_finalize first.',
+          `${requiredScope != null ? `A recorded ${requiredScope} ` : 'A recorded '}PASS is ` +
+          'required (AC-L5-1); run co_review_finalize first.',
       );
     }
     if (verdict.verdict !== 'PASS') {
       throw new Error(
-        `co: refused — the recorded verdict for '${branch}' into '${into}' is ` +
+        `co: refused — the recorded${requiredScope != null ? ` ${requiredScope}` : ''} verdict ` +
+          `for '${branch}' into '${into}' is ` +
           `${verdict.verdict} (${verdict.blockers.length} blocker(s)), not PASS. Address the ` +
           'blockers and record a new PASS (AC-L5-1).',
       );
@@ -452,13 +454,38 @@ export class CoReviewGate implements FinishReviewGate {
   }
 
   triggerReview(req: ReviewTriggerRequest): ReviewTriggerResult {
+    const scope = req.scope ?? 'worker_merge';
     // Resolve the spec reference (AC-L5-8): criteria ref when provided, else explicit no-spec marker.
     const specRef = resolveReviewSpecRef(req.specRef);
-    // Record the review request in the store (both paths do this).
+    // Resolve the reviewer kind before mutating the request row. The human path cannot be requested
+    // without mail; failing that precondition must not clear a prior verdict or leave a phantom request.
+    const projectId = req.projectId;
+    let reviewerKind: 'agent' | 'human' = 'agent';
+    if (projectId != null) {
+      const config = this.deps.config ?? openConfigStore();
+      const ownsConfig = this.deps.config === undefined;
+      try {
+        reviewerKind = resolveReviewerKind(config, projectId, scope);
+      } finally {
+        if (ownsConfig) config.close();
+      }
+    }
+    if (reviewerKind === 'human' && !this.deps.mail) {
+      throw new Error(
+        `co review: refused — a human review of '${req.branch}' into '${req.target}' was ` +
+          'requested but no mail store is wired. The human path delivers an actionable ' +
+          'review_request to @operator; without mail it cannot be requested (Principle 9 — ' +
+          'no silent drop).',
+      );
+    }
+
+    // Record the review request in the store after all preconditions that can fail before request
+    // creation have passed.
     const rec = this.deps.reviews.recordReviewRequested({
       reviewId: req.reviewId,
       target: req.target,
       branch: req.branch,
+      scope,
       requestedBy: req.requestedBy,
       specRefKind: specRef.kind,
       specRefRef: specRef.kind === 'criteria' ? specRef.ref : undefined,
@@ -470,38 +497,24 @@ export class CoReviewGate implements FinishReviewGate {
       requestedTs: rec.requestedTs,
     };
 
-    // Resolve the reviewer kind when scope + projectId are provided (AC-L5-5).
-    const scope = req.scope ?? 'worker_merge';
-    const projectId = req.projectId;
     if (projectId != null) {
+      if (reviewerKind === 'human') {
+        const envelope = reviewRequestEnvelope({
+          from: req.requestedBy,
+          subject: `review requested: '${req.branch}' into '${req.target}'`,
+          body:
+            `A human review has been requested for '${req.branch}' into '${req.target}' ` +
+            `(scope: ${scope}, reviewId: ${req.reviewId}). Reply with a review_response ` +
+            `(review_verdict: PASS or ISSUES) to re-enter the gate.`,
+          idempotencyKey: `review-request:${req.reviewId}`,
+        });
+        this.deps.mail!.send(envelope);
+        return result;
+      }
+
       const config = this.deps.config ?? openConfigStore();
       const ownsConfig = this.deps.config === undefined;
       try {
-        const kind = resolveReviewerKind(config, projectId, scope);
-        if (kind === 'human') {
-          // Human path: send a sticky actionable review_request to @operator. The human path is
-          // UNREACHABLE without a mail store — fail LOUD rather than silently dropping the request
-          // (#135 nit / Principle 9). No reviewer placement (placement is agent-only — AC-L5-5/11).
-          if (!this.deps.mail) {
-            throw new Error(
-              `co review: refused — a human review of '${req.branch}' into '${req.target}' was ` +
-                'requested but no mail store is wired. The human path delivers an actionable ' +
-                'review_request to @operator; without mail it cannot be requested (Principle 9 — ' +
-                'no silent drop).',
-            );
-          }
-          const envelope = reviewRequestEnvelope({
-            from: req.requestedBy,
-            subject: `review requested: '${req.branch}' into '${req.target}'`,
-            body:
-              `A human review has been requested for '${req.branch}' into '${req.target}' ` +
-              `(scope: ${scope}, reviewId: ${req.reviewId}). Reply with a review_response ` +
-              `(reviewVerdict: PASS or ISSUES) to re-enter the gate.`,
-            idempotencyKey: `review-request:${req.reviewId}`,
-          });
-          this.deps.mail.send(envelope);
-          return result;
-        }
         // Agent path: RESOLVE + RECORD the reviewer placement via the L4 balancer (AC-L5-11). The live
         // reviewer SPAWN is the one L7 stub (ReviewerSpawnGateStub) — we record the decision, never
         // launch. The decision is pure over injected inputs (config pins + dispatch usage + nowMs):
@@ -549,14 +562,14 @@ export class CoReviewGate implements FinishReviewGate {
   merge(req: ReviewMergeRequest): ReviewMergeResult {
     const repoModeGate = this.deps.repoModeGate ?? new CoRepoModeGate();
 
-    // 1) Resolve the repo mode. Contributor publishing (fork→PR) is Phase C — refuse here, loud. The
-    //    override bypasses the PASS gate, NOT the contributor limitation (it cannot conjure fork→PR).
+    // 1) Resolve the repo mode. Contributor publishing is fork→PR, so local co_merge refuses loud;
+    //    the override bypasses the PASS gate, NOT the mode boundary.
     const resolveMode = this.deps.resolveMode ?? resolveRepoMode;
     const mode = resolveMode(req.projectId, req.repoCwd);
     if (mode === 'contributor') {
       throw new Error(
-        `co_merge: contributor publishing is Phase C (co_push / co_pr_merge) — not available yet. ` +
-          `Cannot merge '${req.branch}' into '${req.into}' in contributor mode.`,
+        `co_merge: contributor mode publishes via the gated co_push / co_pr_merge path. ` +
+          `Cannot locally merge '${req.branch}' into '${req.into}' in contributor mode.`,
       );
     }
 
@@ -714,7 +727,7 @@ export class CoReviewGate implements FinishReviewGate {
     const repoModeGate = this.deps.repoModeGate ?? new CoRepoModeGate();
     const gateResult = req.operatorOverride
       ? this.overrideGate(req.branch, req.into, req.projectId, req.repoCwd, req.reason, 'co_push')
-      : this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd);
+      : this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd, 'pr_merge');
 
     const enactDeps: EnactPushDeps = {
       ...(this.deps.gitExec != null ? { gitExec: this.deps.gitExec } : {}),
@@ -754,7 +767,7 @@ export class CoReviewGate implements FinishReviewGate {
           req.reason,
           'co_pr_merge',
         )
-      : this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd);
+      : this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd, 'pr_merge');
 
     // Render the house-style PR description from the structured intent (Principle 3 — co owns the
     // contract; provider voice cannot reach the artifact by construction).

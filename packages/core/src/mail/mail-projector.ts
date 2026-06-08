@@ -98,6 +98,15 @@ const CREATE_INBOX_TABLE = `
  */
 export function ensureInboxTable(db: DatabaseSync): void {
   db.exec(CREATE_INBOX_TABLE);
+  addMissingInboxColumn(db, 'retracted', 'INTEGER NOT NULL DEFAULT 0');
+  addMissingInboxColumn(db, 'review_verdict', 'TEXT');
+}
+
+function addMissingInboxColumn(db: DatabaseSync, column: string, definition: string): void {
+  const columns = db.prepare('PRAGMA table_info(inbox)').all() as Array<{ readonly name: string }>;
+  if (!columns.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE inbox ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 /** Columns selected for every read, in `inbox` order — mapped by name in {@link rowToDeliveredMail}. */

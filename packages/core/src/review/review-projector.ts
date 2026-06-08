@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { assertNever } from '../assert-never.js';
 import type { Projector } from '../replay/projector.js';
 import type { StoredEvent, StoreTx } from '../store/types.js';
+import type { ReviewScope } from './ladder.js';
 import {
   blockerSchema,
   suggestionSchema,
@@ -31,18 +32,16 @@ import type { ReviewSpecRef } from './spec-ref.js';
  * ts, and the `blockers`/`suggestions`/`verification` arrays are stored as the deterministic JSON of
  * the validated value (stable key order).
  *
- * The projector folds ALL FIVE L5 event types now, even though Phase A only WRITES `review.verdict`
- * (and a minimal `review.requested`). Folding `review.strike` (→ `strikes` counter), `merge.serialized`
- * (→ `serialized` flag), and `review.override` (→ `overridden`/`override_*`) now is read-model PLUMBING
- * — the ENFORCEMENT that consumes these columns (3-strike = D, the merge mutex + override verb = F) is a
- * later phase. Folding them now keeps the projector stable so B–F add only WRITERS, never reshape the
- * table (which would break replay-equality). All five UPSERT on `(target, branch)`, so each event sets
- * only the columns it owns and a replay in seq order reaches the same final row.
+ * The projector folds ALL FIVE L5 event types: `review.requested`, `review.verdict`, `review.strike`,
+ * `merge.serialized`, and `review.override`. Folding every lifecycle event through one read-model keeps
+ * the gate replay-deterministic and lets each event touch only the columns it owns. All five UPSERT on
+ * `(target, branch)`, so a replay in seq order reaches the same final row.
  */
 const CREATE_REVIEW_TABLES = `
   CREATE TABLE IF NOT EXISTS reviews (
     target          TEXT NOT NULL,
     branch          TEXT NOT NULL,
+    scope           TEXT NOT NULL DEFAULT 'worker_merge',
     review_id       TEXT,
     verdict         TEXT,
     blockers        TEXT,
@@ -69,6 +68,18 @@ const CREATE_REVIEW_TABLES = `
  */
 export function ensureReviewTables(db: DatabaseSync): void {
   db.exec(CREATE_REVIEW_TABLES);
+  addMissingReviewColumn(db, 'scope', "TEXT NOT NULL DEFAULT 'worker_merge'");
+  addMissingReviewColumn(db, 'spec_ref_kind', 'TEXT');
+  addMissingReviewColumn(db, 'spec_ref_ref', 'TEXT');
+}
+
+function addMissingReviewColumn(db: DatabaseSync, column: string, definition: string): void {
+  const columns = db.prepare('PRAGMA table_info(reviews)').all() as Array<{
+    readonly name: string;
+  }>;
+  if (!columns.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE reviews ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 // `handles()` guarantees only these five types reach `apply()`; modelling them as a StoredEvent
@@ -111,6 +122,7 @@ export function rowToReviewVerdictRecord(row: Record<string, unknown>): ReviewVe
     reviewId: String(row.review_id),
     target: String(row.target),
     branch: String(row.branch),
+    scope: (row.scope != null ? String(row.scope) : 'worker_merge') as ReviewScope,
     reviewer: String(row.reviewer),
     verdict: verdictSchema.parse(String(row.verdict)),
     blockers: blockerSchema.array().parse(JSON.parse(String(row.blockers))),
@@ -134,6 +146,7 @@ export function rowToReviewRequestRecord(row: Record<string, unknown>): ReviewRe
     reviewId: String(row.review_id),
     target: String(row.target),
     branch: String(row.branch),
+    scope: (row.scope != null ? String(row.scope) : 'worker_merge') as ReviewScope,
     requestedBy: String(row.requested_by),
     requestedTs: Number(row.requested_ts),
     specRef: rowToSpecRef(row),
@@ -141,7 +154,7 @@ export function rowToReviewRequestRecord(row: Record<string, unknown>): ReviewRe
 }
 
 const REVIEW_COLUMNS =
-  'target, branch, review_id, verdict, blockers, suggestions, verification, reviewer, verdict_ts, ' +
+  'target, branch, scope, review_id, verdict, blockers, suggestions, verification, reviewer, verdict_ts, ' +
   'requested_by, requested_ts, strikes, serialized, overridden, override_reason, override_by, ' +
   'spec_ref_kind, spec_ref_ref';
 
@@ -150,13 +163,23 @@ export function selectVerdict(
   db: DatabaseSync,
   target: string,
   branch: string,
+  scope?: ReviewScope,
 ): ReviewVerdictRecord | undefined {
   ensureReviewTables(db);
-  const row = db
-    .prepare(
-      `SELECT ${REVIEW_COLUMNS} FROM reviews WHERE target = ? AND branch = ? AND verdict IS NOT NULL`,
-    )
-    .get(target, branch);
+  const row =
+    scope != null
+      ? db
+          .prepare(
+            `SELECT ${REVIEW_COLUMNS} FROM reviews
+             WHERE target = ? AND branch = ? AND scope = ? AND verdict IS NOT NULL`,
+          )
+          .get(target, branch, scope)
+      : db
+          .prepare(
+            `SELECT ${REVIEW_COLUMNS} FROM reviews
+             WHERE target = ? AND branch = ? AND verdict IS NOT NULL`,
+          )
+          .get(target, branch);
   return row ? rowToReviewVerdictRecord(row as Record<string, unknown>) : undefined;
 }
 
@@ -238,33 +261,43 @@ export class ReviewProjector implements Projector {
       case EVENT_REVIEW_REQUESTED: {
         const { reviewId, target, branch, requestedBy, specRefKind, specRefRef } =
           reviewEvent.payload;
+        const scope = reviewEvent.payload.scope ?? 'worker_merge';
         const kind = specRefKind ?? null;
         const ref = specRefRef ?? null;
         db.prepare(
           `INSERT INTO reviews
-             (target, branch, review_id, requested_by, requested_ts, spec_ref_kind, spec_ref_ref)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+             (target, branch, scope, review_id, requested_by, requested_ts, spec_ref_kind, spec_ref_ref)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(target, branch) DO UPDATE SET
              review_id = excluded.review_id,
+             scope = excluded.scope,
+             verdict = NULL,
+             blockers = NULL,
+             suggestions = NULL,
+             verification = NULL,
+             reviewer = NULL,
+             verdict_ts = NULL,
              requested_by = excluded.requested_by,
              requested_ts = excluded.requested_ts,
              spec_ref_kind = excluded.spec_ref_kind,
              spec_ref_ref = excluded.spec_ref_ref`,
-        ).run(target, branch, reviewId, requestedBy, event.ts, kind, ref);
+        ).run(target, branch, scope, reviewId, requestedBy, event.ts, kind, ref);
         return;
       }
       case EVENT_REVIEW_VERDICT: {
         const { reviewId, target, branch, reviewer, verdict, blockers, suggestions, verification } =
           reviewEvent.payload;
+        const scope = reviewEvent.payload.scope ?? 'worker_merge';
         // Persist the validated arrays' deterministic JSON (stable key order), so a rebuild reproduces
         // the same bytes. UPSERT (last verdict wins): a re-review after an ISSUES→fix re-records, and a
         // replay in seq order reaches the same final row. event.ts is the persisted record time.
         // A PASS resets the consecutive-strike counter to 0 (AC-L5-4: PASS resets the run).
         db.prepare(
           `INSERT INTO reviews
-             (target, branch, review_id, verdict, blockers, suggestions, verification, reviewer, verdict_ts)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (target, branch, scope, review_id, verdict, blockers, suggestions, verification, reviewer, verdict_ts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(target, branch) DO UPDATE SET
+             scope = excluded.scope,
              review_id = excluded.review_id,
              verdict = excluded.verdict,
              blockers = excluded.blockers,
@@ -276,6 +309,7 @@ export class ReviewProjector implements Projector {
         ).run(
           target,
           branch,
+          scope,
           reviewId,
           verdict,
           JSON.stringify(blockers),

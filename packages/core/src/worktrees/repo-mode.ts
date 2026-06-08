@@ -42,11 +42,10 @@ export const defaultGhExec: GhExec = (cwd, args) => {
  * This module builds the detection + capability half (read-only detection prober, the pure detection
  * order, override-beats-detection resolution persisted in the config cascade, the Offline push/PR
  * capability, the minimal Contributor host-convention probe) AND — as of L5 — the **owner + offline
- * merge enactment** the gated `co_merge` uses ({@link CoRepoModeGate.enactPublish}). The verbs/flows
- * that remain DEFERRED are marked loud on {@link CoRepoModeGate}: Contributor fork→PR + the remote
- * push (`co_push` / `co_pr_merge`) are **Phase C**, and the rich `CONTRIBUTING.md`/PR-template parse
- * ({@link CoRepoModeGate.parseHostConventions}) is **L9** — each fails loud rather than no-opping
- * (Principle 7 — gated-by-default; Principle 9 — no silent stub).
+ * merge enactment** the gated `co_merge` uses ({@link CoRepoModeGate.enactPublish}), plus the real
+ * remote push / PR creation enactment the gated `co_push` and `co_pr_merge` use. The rich
+ * `CONTRIBUTING.md`/PR-template parse ({@link CoRepoModeGate.parseHostConventions}) remains L9 and
+ * fails loud rather than no-opping (Principle 7 — gated-by-default; Principle 9 — no silent stub).
  *
  * Pristine (Principle 12): detection and host-convention reads are READ-ONLY over the repo (the
  * prober wraps read-only `git ls-remote` + `gh`, reusing the `--no-optional-locks` discipline; the
@@ -207,10 +206,12 @@ export interface ResolveRepoModeDeps {
  * prober.
  *
  * The override is read from the config cascade (`resolveEffective(projectId)` — global ⊕
- * project-overrides, project wins) and only wins if it names a VALID {@link RepoMode}; a malformed or
- * absent override falls through to `detectRepoMode(probe(cwd))`. The override **persists per project**
- * because it lives in the per-project config layer (program-data) — that is the persistence mechanism,
- * with NO repo write (Principle 12). `config`/`probe` are injectable for headless tests.
+ * project-overrides, project wins) and only wins if it names a VALID {@link RepoMode}. An absent
+ * override falls through to `detectRepoMode(probe(cwd))`; a present-but-malformed override fails loud
+ * so a typo in an intended Offline pin can never silently enable publishing. The override **persists
+ * per project** because it lives in the per-project config layer (program-data) — that is the
+ * persistence mechanism, with NO repo write (Principle 12). `config`/`probe` are injectable for
+ * headless tests.
  */
 export function resolveRepoMode(
   projectId: string,
@@ -221,8 +222,18 @@ export function resolveRepoMode(
   const config = deps.config ?? openConfigStore();
   const ownsConfig = deps.config === undefined;
   try {
-    const override = asRepoMode(config.resolveEffective(projectId)[REPO_MODE_CONFIG_KEY]);
-    if (override !== undefined) return override; // project-override wins over detection.
+    const effective = config.resolveEffective(projectId);
+    const rawOverride = effective[REPO_MODE_CONFIG_KEY];
+    const override = asRepoMode(rawOverride);
+    if (Object.prototype.hasOwnProperty.call(effective, REPO_MODE_CONFIG_KEY)) {
+      if (override === undefined) {
+        throw new Error(
+          `repo.mode override '${String(rawOverride)}' is invalid; expected one of ` +
+            REPO_MODES.join(', '),
+        );
+      }
+      return override;
+    }
     return detectRepoMode(probe(cwd));
   } finally {
     if (ownsConfig) config.close();
@@ -242,9 +253,9 @@ export interface RepoModeCapabilities {
  * The capability a mode grants — **the tested L3-ownable invariant: Offline disables push/PR.** Owner
  * and Contributor both allow push (owner → default branch, contributor → fork) and a PR per the table; only
  * Offline refuses both. This is a pure capability LOOKUP — it does NOT enact anything. The *enactment*
- * is {@link CoRepoModeGate}: the owner + offline local merge ships in L5; the Contributor fork→PR flow
- * and the remote push remain Phase C. Exhaustive over {@link RepoMode} via {@link assertNever} — a new
- * mode forces a decision here (no silent default).
+ * is {@link CoRepoModeGate}: local merge, remote push, and PR creation are all real gated paths.
+ * Exhaustive over {@link RepoMode} via {@link assertNever} — a new mode forces a decision here (no
+ * silent default).
  */
 export function repoModeCapabilities(mode: RepoMode): RepoModeCapabilities {
   switch (mode) {
@@ -506,9 +517,9 @@ export class CoRepoModeGate implements RepoModeGate {
       }
       case 'contributor':
         throw new Error(
-          'RepoModeGate.enactPublish: contributor publishing (fork→PR) is Phase C (co_push / ' +
-            'co_pr_merge), not enacted here. Resolve the repo mode to owner/offline, or use the ' +
-            'Phase C verb once it exists.',
+          'RepoModeGate.enactPublish: contributor mode cannot locally merge; publish through the ' +
+            'gated co_push / co_pr_merge path, or resolve the repo mode to owner/offline for a ' +
+            'local merge.',
         );
       default:
         return assertNever(mode);

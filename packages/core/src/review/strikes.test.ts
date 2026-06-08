@@ -25,6 +25,7 @@ function makeVerdict(verdict: 'PASS' | 'ISSUES', ts = 1): ReviewVerdictRecord {
     reviewId: 'rev-1',
     target: TARGET,
     branch: BRANCH,
+    scope: 'worker_merge',
     reviewer: 'rev-7',
     verdict,
     blockers: verdict === 'ISSUES' ? [{ summary: 'a blocker' }] : [],

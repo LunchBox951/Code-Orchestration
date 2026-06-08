@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { NewEvent } from '../store/types.js';
 import type { SchemaMap } from '../replay/decode.js';
 import type { UpcasterRegistry } from '../replay/upcaster.js';
+import type { ReviewScope } from './ladder.js';
 import type { ReviewSpecRef } from './spec-ref.js';
 import {
   assertValidVerdict,
@@ -49,6 +50,9 @@ export const EVENT_MERGE_SERIALIZED = 'merge.serialized' as const;
 /** A recorded PASS-gate override (the human/lead override is Phase F — writer is F's). */
 export const EVENT_REVIEW_OVERRIDE = 'review.override' as const;
 
+/** Valid review verdict scopes. Optional on old events; readers default absent scope to worker_merge. */
+export const reviewScopeValueSchema = z.enum(['worker_merge', 'phase_merge', 'pr_merge']);
+
 /** Scope prefix shared by every target's review stream; the suffix is the merge target. */
 export const REVIEW_SCOPE_PREFIX = 'review:';
 
@@ -84,6 +88,8 @@ export const reviewRequestedSchema = z.object({
   reviewId: z.string().min(1),
   target: z.string().min(1),
   branch: z.string().min(1),
+  /** The strictness scope this request asks the reviewer to apply. Optional for replay compatibility. */
+  scope: reviewScopeValueSchema.optional(),
   requestedBy: z.string().min(1),
   /** `'criteria'` when a locked spec was provided; `'no-locked-spec'` when absent. Optional for replay compat. */
   specRefKind: z.enum(['criteria', 'no-locked-spec']).optional(),
@@ -102,6 +108,8 @@ export const reviewVerdictRecordedSchema = z.object({
   reviewId: z.string().min(1),
   target: z.string().min(1),
   branch: z.string().min(1),
+  /** The strictness scope the verdict was recorded under. Optional for replay compatibility. */
+  scope: reviewScopeValueSchema.optional(),
   reviewer: z.string().min(1),
   verdict: verdictSchema,
   blockers: z.array(blockerSchema),
@@ -238,6 +246,7 @@ export interface ReviewVerdictRecord {
   readonly reviewId: string;
   readonly target: string;
   readonly branch: string;
+  readonly scope: ReviewScope;
   readonly reviewer: string;
   readonly verdict: Verdict;
   readonly blockers: readonly Blocker[];
@@ -256,6 +265,7 @@ export interface ReviewRequestRecord {
   readonly reviewId: string;
   readonly target: string;
   readonly branch: string;
+  readonly scope: ReviewScope;
   readonly requestedBy: string;
   readonly requestedTs: number;
   /** The resolved spec reference — criteria ref or explicit `no-locked-spec` marker (AC-L5-8). */

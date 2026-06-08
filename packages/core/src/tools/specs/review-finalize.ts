@@ -31,6 +31,13 @@ const reviewFinalizeInput = z.object({
     .min(1)
     .describe('The merge target the review is for (the branch the reviewed work merges into).'),
   branch: z.string().min(1).describe('The reviewed source branch this verdict is about.'),
+  scope: z
+    .enum(['worker_merge', 'phase_merge', 'pr_merge'])
+    .optional()
+    .describe(
+      'The review strictness scope this verdict was judged under; defaults to worker_merge. ' +
+        'Use pr_merge for PR/remote publish reviews.',
+    ),
   review_id: z
     .string()
     .min(1)
@@ -115,6 +122,7 @@ export const reviewFinalizeTool: ToolSpec<ReviewFinalizeInput, ReviewFinalizeOut
       reviewId: input.review_id,
       target: input.target,
       branch: input.branch,
+      ...(input.scope != null ? { scope: input.scope } : {}),
       reviewer: ctx.agent,
       verdict: input.verdict,
       blockers: input.blockers,

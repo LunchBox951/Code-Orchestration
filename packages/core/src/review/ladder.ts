@@ -2,9 +2,8 @@ import { assertNever } from '../assert-never.js';
 
 /**
  * The three review scopes — FROZEN by the Lead (serialization/config keys them off these exact
- * strings). Later phases expand the producer side (reviewer tools record a scope) and the config
- * side (per-project overrides per scope); Phase C delivers only the pure classification fn +
- * the data table.
+ * strings). Reviewer tools and human re-entry record a scope, while project config can tune reviewer
+ * routing per scope. The table below is the shared strictness source.
  *
  *   - `worker_merge`  — a worker's phase branch merges into the lead's integration branch.
  *   - `phase_merge`   — a lead's integration branch merges into main/master (sits between).

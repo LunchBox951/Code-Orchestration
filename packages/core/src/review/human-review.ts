@@ -132,6 +132,7 @@ export interface HumanVerdictParams {
   readonly reviewId: string;
   readonly target: string;
   readonly branch: string;
+  readonly scope?: ReviewScope;
   readonly verdict: Verdict;
   /** The prose blockers the human provided (used as a single blocker summary on ISSUES). */
   readonly body?: string;
@@ -151,10 +152,16 @@ export interface HumanVerdictParams {
  * drive the gate; the human's full prose is in the mail body which the operator can read).
  */
 export function recordHumanVerdict(reviews: ReviewStore, params: HumanVerdictParams): void {
+  const request = reviews.getReviewRequest(params.target, params.branch);
+  const scope =
+    params.scope ??
+    (request?.reviewId === params.reviewId ? request.scope : undefined) ??
+    'worker_merge';
   reviews.recordVerdict({
     reviewId: params.reviewId,
     target: params.target,
     branch: params.branch,
+    scope,
     reviewer: OPERATOR,
     verdict: params.verdict,
     blockers:

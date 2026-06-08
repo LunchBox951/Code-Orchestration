@@ -3,16 +3,16 @@ import { CoReviewGate } from '../../review/merge.js';
 import { detectBaseRef } from '../../worktrees/detect-base.js';
 import type { ToolSpec } from '../registry.js';
 
-// Every input field carries a .describe() (Principle 5). The push is GATED on a recorded PASS for
-// the reviewed branch (no un-gated push path — AC-L5-6). The caller never supplies identity, project,
-// or repo — those come from the mount-assembled ToolContext.
+// Every input field carries a .describe() (Principle 5). The push is GATED on a recorded pr_merge
+// PASS for the reviewed branch (no un-gated push path — AC-L5-6). The caller never supplies identity,
+// project, or repo — those come from the mount-assembled ToolContext.
 
 const pushInput = z.object({
   branch: z
     .string()
     .min(1)
     .describe(
-      'The reviewed source branch to push. Must have a recorded PASS verdict. In owner mode the ' +
+      'The reviewed source branch to push. Must have a recorded pr_merge PASS verdict. In owner mode the ' +
         'integration branch (into) is pushed to origin; in contributor mode this branch is pushed ' +
         'to the fork remote.',
     ),
@@ -72,9 +72,10 @@ type PushOutput = z.infer<typeof pushOutput>;
 
 /**
  * `co_push` (AC-L5-6): the lead-facing verb that publishes reviewed work to the remote — GATED on
- * a recorded PASS. It refuses unless `ctx.reviews.getVerdict(into, branch)` is a recorded `PASS`
- * (there is NO un-gated push path). Enacts per repo mode: owner pushes the integration branch to
- * origin; contributor pushes the feature branch to the fork; offline refuses loud (Principle 9).
+ * a recorded `pr_merge` PASS. It refuses unless `ctx.reviews.getVerdict(into, branch, 'pr_merge')`
+ * is a recorded `PASS` (there is NO un-gated push path). Enacts per repo mode: owner pushes the
+ * integration branch to origin; contributor pushes the feature branch to the fork; offline refuses
+ * loud (Principle 9).
  *
  * All git I/O is behind injected seams — `pnpm test` performs NO real network or push operations.
  * The handler loud-fails if the mount did not inject the review or worktree store (Principle 9).
@@ -83,9 +84,9 @@ export const pushTool: ToolSpec<PushInput, PushOutput> = {
   name: 'co_push',
   title: 'Push reviewed work to the remote',
   description:
-    'Push the reviewed branch to the remote — only if a PASS verdict is recorded for it. ' +
+    'Push the reviewed branch to the remote — only if a pr_merge PASS verdict is recorded for it. ' +
     'Owner mode pushes the integration branch to origin; contributor mode pushes the feature ' +
-    'branch to your fork. Offline mode refuses. co gates on a recorded PASS; there is no ' +
+    'branch to your fork. Offline mode refuses. co gates on a recorded pr_merge PASS; there is no ' +
     'un-gated push path.',
   inputSchema: pushInput,
   outputSchema: pushOutput,
