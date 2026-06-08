@@ -147,6 +147,15 @@ export function selectVerdict(
   return row ? rowToReviewVerdictRecord(row as Record<string, unknown>) : undefined;
 }
 
+/** The consecutive `review.strike` count for `branch` on `target`, or 0 if not yet recorded. */
+export function selectStrikeCount(db: DatabaseSync, target: string, branch: string): number {
+  ensureReviewTables(db);
+  const row = db
+    .prepare('SELECT strikes FROM reviews WHERE target = ? AND branch = ?')
+    .get(target, branch) as Record<string, unknown> | undefined;
+  return row != null ? Number(row.strikes) : 0;
+}
+
 /** Every recorded verdict on `target`, oldest-recorded first (then branch for a stable tie-break). */
 export function selectVerdictsForTarget(db: DatabaseSync, target: string): ReviewVerdictRecord[] {
   ensureReviewTables(db);
@@ -222,6 +231,7 @@ export class ReviewProjector implements Projector {
         // Persist the validated arrays' deterministic JSON (stable key order), so a rebuild reproduces
         // the same bytes. UPSERT (last verdict wins): a re-review after an ISSUES→fix re-records, and a
         // replay in seq order reaches the same final row. event.ts is the persisted record time.
+        // A PASS resets the consecutive-strike counter to 0 (AC-L5-4: PASS resets the run).
         db.prepare(
           `INSERT INTO reviews
              (target, branch, review_id, verdict, blockers, suggestions, verification, reviewer, verdict_ts)
@@ -233,7 +243,8 @@ export class ReviewProjector implements Projector {
              suggestions = excluded.suggestions,
              verification = excluded.verification,
              reviewer = excluded.reviewer,
-             verdict_ts = excluded.verdict_ts`,
+             verdict_ts = excluded.verdict_ts,
+             strikes = CASE WHEN excluded.verdict = 'PASS' THEN 0 ELSE strikes END`,
         ).run(
           target,
           branch,
