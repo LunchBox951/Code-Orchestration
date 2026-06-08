@@ -465,6 +465,17 @@ export {
   releaseMergeSlot,
   reReviewBase,
 } from './review/serialize.js';
+// L5 Phase G spec-ref seam (AC-L5-8, RG-4): a review must be judged against the SOURCE's
+// acceptance criteria, never a template stub. `resolveReviewSpecRef` is a PURE fn that turns an
+// optional injected spec-ref into a discriminated `ReviewSpecRef` — `{ kind: 'criteria', ref }` when
+// present or `{ kind: 'no-locked-spec' }` (the explicit marker, never `<TODO>`) when absent.
+// `renderReviewSpecRef` surfaces the human-readable marker text. Both are headless-testable (no I/O).
+export type { ReviewSpecRef } from './review/spec-ref.js';
+export {
+  NO_LOCKED_SPEC_MARKER,
+  resolveReviewSpecRef,
+  renderReviewSpecRef,
+} from './review/spec-ref.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
 // seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/
