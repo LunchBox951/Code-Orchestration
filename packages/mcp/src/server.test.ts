@@ -33,6 +33,8 @@ const EXPECTED_TOOLS = [
   'co_finish',
   'co_merge',
   'co_review_finalize',
+  'co_push',
+  'co_pr_merge',
 ];
 
 // ── Per-test program-data dir + live stores (mirrors the CO_DATA_DIR idiom in mail.test.ts) ──
