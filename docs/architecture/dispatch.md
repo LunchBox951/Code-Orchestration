@@ -12,8 +12,9 @@ concern. Provider selection is **two-tier**:
   The balancer **never overrides a pin** — these are the quality-critical, predictable seats.
 - **Floating roles** — everything else is placed by a **rate-limit-aware balancer**: among
   providers offering the required tier, it biases toward the one with the most **live headroom**
-  (lowest session usage, accounting for reset timing), to **even out burn across subscriptions.**
-  ("Claude 50% used / Codex 10% used → lean on Codex.")
+  (lowest session usage, accounting for reset timing), to **even out burn across the default
+  Claude/Codex provider accounts.** ("Claude 50% used / Codex 10% used → lean on Codex.")
+  Same-provider multi-subscription routing is later work, not part of this L4 policy.
 
 All customizable in settings; the **max-children caps** ([PHASES](phases-and-plans.md)) bound total concurrent fan-out.
 

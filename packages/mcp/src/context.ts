@@ -1,5 +1,7 @@
 import {
   BASE_ROLES,
+  defaultUsageSourceFactory,
+  openDispatchStore,
   openMailStore,
   openRegistry,
   openWorktreeStore,
@@ -101,6 +103,9 @@ export function defaultContextFactory(): () => ToolContext {
   // store.db is safe — node:sqlite is synchronous and the two own different scopes/tables). A tool
   // never opens its own store; the mount resolves and injects it.
   const worktrees = openWorktreeStore(projectId);
+  // L4: open + inject the dispatch store (usage/cost/placement). PlacementProjector/UsageProjector/
+  // CostProjector own distinct tables from WorktreeProjector so sharing the same store.db is safe.
+  const dispatch = openDispatchStore(projectId);
   if (explicitProjectId != null && resolvedFromCwd == null) {
     const normalizedCwd = resolve(cwd);
     const isRecordedSandbox = worktrees
@@ -109,6 +114,7 @@ export function defaultContextFactory(): () => ToolContext {
     if (!isRecordedSandbox) {
       mail.close();
       worktrees.close();
+      dispatch.close();
       registry.close();
       throw new Error(
         `co MCP server: ${CO_PROJECT_ID_ENV} '${projectId}' does not record cwd '${cwd}' as a ` +
@@ -116,6 +122,15 @@ export function defaultContextFactory(): () => ToolContext {
       );
     }
   }
-  const ctx: ToolContext = { agent, projectId, cwd, mail, registry, worktrees };
+  const ctx: ToolContext = {
+    agent,
+    projectId,
+    cwd,
+    mail,
+    registry,
+    worktrees,
+    dispatch,
+    usageSourceFactory: defaultUsageSourceFactory,
+  };
   return () => ctx;
 }
