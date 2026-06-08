@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { NewEvent } from '../store/types.js';
 import type { SchemaMap } from '../replay/decode.js';
 import type { UpcasterRegistry } from '../replay/upcaster.js';
+import type { ReviewSpecRef } from './spec-ref.js';
 import {
   assertValidVerdict,
   blockerSchema,
@@ -74,14 +75,20 @@ export function reviewTargetForScope(scope: string): string {
 
 /**
  * The `review.requested` payload: who asked for a review of `branch` into `target`, tagged with the
- * `reviewId` the request/verdict cycle shares. Phase E owns the real request lifecycle; this is the
- * minimal recorder kept now so the schema + fold are stable.
+ * `reviewId` the request/verdict cycle shares, and the resolved spec-ref (AC-L5-8 — criteria
+ * reference or the explicit `no-locked-spec` marker, never a `<TODO>` placeholder). Phase E owns
+ * the real request lifecycle; this is the minimal recorder kept now so the schema + fold are stable.
+ * `specRefKind`/`specRefRef` are optional for backward-compat replay of pre-Phase-G events.
  */
 export const reviewRequestedSchema = z.object({
   reviewId: z.string().min(1),
   target: z.string().min(1),
   branch: z.string().min(1),
   requestedBy: z.string().min(1),
+  /** `'criteria'` when a locked spec was provided; `'no-locked-spec'` when absent. Optional for replay compat. */
+  specRefKind: z.enum(['criteria', 'no-locked-spec']).optional(),
+  /** The acceptance-criteria reference string; present only when `specRefKind === 'criteria'`. */
+  specRefRef: z.string().min(1).optional(),
 });
 export type ReviewRequested = z.infer<typeof reviewRequestedSchema>;
 
@@ -241,7 +248,9 @@ export interface ReviewVerdictRecord {
 
 /**
  * A persisted, read-back review request — the read-model shape `getReviewRequest` returns.
- * `requestedTs` is the PERSISTED event ts. Minimal now; Phase E grows the request lifecycle.
+ * `requestedTs` is the PERSISTED event ts. `specRef` carries the resolved spec-reference or the
+ * explicit `no-locked-spec` marker (AC-L5-8 — never `<TODO>`). Minimal now; Phase E grows the
+ * request lifecycle.
  */
 export interface ReviewRequestRecord {
   readonly reviewId: string;
@@ -249,4 +258,6 @@ export interface ReviewRequestRecord {
   readonly branch: string;
   readonly requestedBy: string;
   readonly requestedTs: number;
+  /** The resolved spec reference — criteria ref or explicit `no-locked-spec` marker (AC-L5-8). */
+  readonly specRef: ReviewSpecRef;
 }

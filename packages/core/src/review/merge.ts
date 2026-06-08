@@ -36,6 +36,7 @@ import { resolveReviewerKind, reviewRequestEnvelope } from './human-review.js';
 import type { ReviewScope } from './ladder.js';
 import type { ReviewStore } from './review-store.js';
 import { acquireMergeSlot, releaseMergeSlot } from './serialize.js';
+import { resolveReviewSpecRef } from './spec-ref.js';
 
 /**
  * Injectable seams for {@link CoReviewGate}. `reviews` + `worktrees` are REQUIRED (the gate uses
@@ -451,12 +452,16 @@ export class CoReviewGate implements FinishReviewGate {
   }
 
   triggerReview(req: ReviewTriggerRequest): ReviewTriggerResult {
+    // Resolve the spec reference (AC-L5-8): criteria ref when provided, else explicit no-spec marker.
+    const specRef = resolveReviewSpecRef(req.specRef);
     // Record the review request in the store (both paths do this).
     const rec = this.deps.reviews.recordReviewRequested({
       reviewId: req.reviewId,
       target: req.target,
       branch: req.branch,
       requestedBy: req.requestedBy,
+      specRefKind: specRef.kind,
+      specRefRef: specRef.kind === 'criteria' ? specRef.ref : undefined,
     });
     const result: ReviewTriggerResult = {
       reviewId: rec.reviewId,

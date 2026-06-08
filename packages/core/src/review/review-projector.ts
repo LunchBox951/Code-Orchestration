@@ -22,6 +22,7 @@ import {
   type ReviewVerdictRecorded,
   type ReviewRequestRecord,
 } from './events.js';
+import type { ReviewSpecRef } from './spec-ref.js';
 
 /**
  * The L5 read-model: one `reviews` row per `(target, branch)` review, accumulating the lifecycle of a
@@ -56,6 +57,8 @@ const CREATE_REVIEW_TABLES = `
     overridden      INTEGER NOT NULL DEFAULT 0,
     override_reason TEXT,
     override_by     TEXT,
+    spec_ref_kind   TEXT,
+    spec_ref_ref    TEXT,
     PRIMARY KEY (target, branch)
   );
 `;
@@ -117,6 +120,14 @@ export function rowToReviewVerdictRecord(row: Record<string, unknown>): ReviewVe
   };
 }
 
+/** Rebuild the `ReviewSpecRef` from `spec_ref_kind`/`spec_ref_ref` columns (default: `no-locked-spec`). */
+function rowToSpecRef(row: Record<string, unknown>): ReviewSpecRef {
+  if (row.spec_ref_kind === 'criteria' && typeof row.spec_ref_ref === 'string') {
+    return { kind: 'criteria', ref: row.spec_ref_ref };
+  }
+  return { kind: 'no-locked-spec' };
+}
+
 /** Map a raw `reviews` row to a {@link ReviewRequestRecord}. */
 export function rowToReviewRequestRecord(row: Record<string, unknown>): ReviewRequestRecord {
   return {
@@ -125,12 +136,14 @@ export function rowToReviewRequestRecord(row: Record<string, unknown>): ReviewRe
     branch: String(row.branch),
     requestedBy: String(row.requested_by),
     requestedTs: Number(row.requested_ts),
+    specRef: rowToSpecRef(row),
   };
 }
 
 const REVIEW_COLUMNS =
   'target, branch, review_id, verdict, blockers, suggestions, verification, reviewer, verdict_ts, ' +
-  'requested_by, requested_ts, strikes, serialized, overridden, override_reason, override_by';
+  'requested_by, requested_ts, strikes, serialized, overridden, override_reason, override_by, ' +
+  'spec_ref_kind, spec_ref_ref';
 
 /** The latest recorded verdict for `branch` on `target`, or undefined (no verdict folded yet). */
 export function selectVerdict(
@@ -223,15 +236,21 @@ export class ReviewProjector implements Projector {
     const reviewEvent = event as ReviewEvent;
     switch (reviewEvent.type) {
       case EVENT_REVIEW_REQUESTED: {
-        const { reviewId, target, branch, requestedBy } = reviewEvent.payload;
+        const { reviewId, target, branch, requestedBy, specRefKind, specRefRef } =
+          reviewEvent.payload;
+        const kind = specRefKind ?? null;
+        const ref = specRefRef ?? null;
         db.prepare(
-          `INSERT INTO reviews (target, branch, review_id, requested_by, requested_ts)
-           VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO reviews
+             (target, branch, review_id, requested_by, requested_ts, spec_ref_kind, spec_ref_ref)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(target, branch) DO UPDATE SET
              review_id = excluded.review_id,
              requested_by = excluded.requested_by,
-             requested_ts = excluded.requested_ts`,
-        ).run(target, branch, reviewId, requestedBy, event.ts);
+             requested_ts = excluded.requested_ts,
+             spec_ref_kind = excluded.spec_ref_kind,
+             spec_ref_ref = excluded.spec_ref_ref`,
+        ).run(target, branch, reviewId, requestedBy, event.ts, kind, ref);
         return;
       }
       case EVENT_REVIEW_VERDICT: {
