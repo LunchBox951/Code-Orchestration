@@ -50,6 +50,8 @@ export type {
   CompletionPredicate,
   ApprovalDecision,
   ApprovalResponse,
+  ReviewResponse,
+  ReviewVerdictValue,
   MailPayload,
 } from './mail/events.js';
 export {
@@ -63,6 +65,8 @@ export {
   MAIL_APPROVAL_RESPONSE,
   MAIL_ESCALATION,
   MAIL_WORKER_DONE,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
@@ -70,6 +74,7 @@ export {
   MAIL_EVENT_V,
   mailMessageSchema,
   approvalResponseSchema,
+  reviewResponseSchema,
   mailReadSchema,
   mailForwardSchema,
   mailRetractSchema,
@@ -240,17 +245,24 @@ export type {
   FinishResult,
 } from './worktrees/finish.js';
 export { finishWorktree } from './worktrees/finish.js';
-// L3-C L5 plug-point: the typed review-trigger + merge gate `co_finish` stops short of. A loud-failing
-// stub (never a silent no-op) marking the seam — the gated verbs are simply NOT BUILT in L3 (P7).
-export type { FinishReviewGate } from './worktrees/review-trigger.js';
-export { FinishReviewGateStub } from './worktrees/review-trigger.js';
+// L5 review-trigger + merge gate: the typed seam `co_finish` stops short of, now REAL (L5). The
+// interface + its request/result types live here; the real implementation is the review/ CoReviewGate
+// (consumed by `co_merge`). `co_finish` still does NOT call it (it stops short by design).
+export type {
+  FinishReviewGate,
+  ReviewTriggerRequest,
+  ReviewTriggerResult,
+  ReviewMergeRequest,
+  ReviewMergeResult,
+} from './worktrees/review-trigger.js';
 // L3-D repository-relationship modes (AC-L3-4): per-project Owner / Contributor / Offline that reshape
-// the publishing surface. The L3-ownable half — the read-only injectable remote-capability prober, the
-// pure D2 detection order, override-beats-detection resolution (persisted in the config cascade, never
-// the repo), the Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe
-// (PR-template presence + a sign-off signal). The gated verbs that ACT on a mode (co_merge/co_push/
-// co_pr_merge, the fork→PR enactment, "gate in all three") + the rich CONTRIBUTING/PR-template parse are
-// L5/L9 — a loud-failing typed stub (RepoModeGateStub), never built, no MCP tool declared (P4, P7).
+// the publishing surface. The read-only injectable remote-capability prober, the pure D2 detection
+// order, override-beats-detection resolution (persisted in the config cascade, never the repo), the
+// Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe (PR-template
+// presence + a sign-off signal). As of L5 Phase C, the owner/offline merge enactment, the remote
+// PUSH enactment (`co_push`), and the PR creation enactment (`co_pr_merge`) are all REAL. The
+// Contributor fork→PR host-convention probe uses the minimal Phase C `detectHostConventions`; the rich
+// CONTRIBUTING/PR-template parse remains L9 — `parseHostConventions` stays the loud-failing seam (P7, P9).
 export type {
   RepoMode,
   RemoteSignals,
@@ -259,15 +271,26 @@ export type {
   RepoModeCapabilities,
   HostConventions,
   RepoModeGate,
+  PublishRequest,
+  PublishResult,
+  EnactPublishDeps,
+  GhExec,
+  EnactPushRequest,
+  EnactPushResult,
+  EnactPushDeps,
+  EnactPrMergeRequest,
+  EnactPrMergeResult,
+  EnactPrMergeDeps,
 } from './worktrees/repo-mode.js';
 export {
   REPO_MODE_CONFIG_KEY,
   defaultRemoteProbe,
+  defaultGhExec,
   detectRepoMode,
   resolveRepoMode,
   repoModeCapabilities,
   detectHostConventions,
-  RepoModeGateStub,
+  CoRepoModeGate,
 } from './worktrees/repo-mode.js';
 export type { GitReader } from './worktrees/detect-base.js';
 export { detectBaseRef, defaultGitReader, resolveRefSha } from './worktrees/detect-base.js';
@@ -310,6 +333,149 @@ export {
   provisionWorktree,
   defaultProvisioner,
 } from './worktrees/provision.js';
+
+// L5 review gate (AC-L5-1): the event-sourced review/ module — the PASS|ISSUES verdict model, the
+// five-event log (review.requested/verdict/strike + merge.serialized + review.override, all defined +
+// projected now so B–F add only writers), the per-(target, branch) review store, and the gated merge
+// core (CoReviewGate) the lead-facing co_merge consumes. Nothing reaches a merge without a recorded
+// PASS; the verdict is a structured RECORDED EVENT (Principle 5), never a prose blob or a shell exit
+// code. The honest-verification baseline (B), strictness ladder + push/PR (C), 3-strike (D), human
+// review (E), and serialization/override (F) are later phases.
+export type {
+  Verdict,
+  Blocker,
+  Suggestion,
+  VerificationMarker,
+  ReviewVerdict,
+} from './review/verdict.js';
+export {
+  verdictSchema,
+  blockerSchema,
+  suggestionSchema,
+  verificationMarkerSchema,
+  reviewVerdictSchema,
+  assertValidVerdict,
+} from './review/verdict.js';
+export type {
+  ReviewRequested,
+  ReviewVerdictRecorded,
+  ReviewStrike,
+  MergeSerialized,
+  ReviewOverride,
+  ReviewVerdictRecord,
+  ReviewRequestRecord,
+} from './review/events.js';
+export {
+  REVIEW_EVENT_V,
+  EVENT_REVIEW_REQUESTED,
+  EVENT_REVIEW_VERDICT,
+  EVENT_REVIEW_STRIKE,
+  EVENT_MERGE_SERIALIZED,
+  EVENT_REVIEW_OVERRIDE,
+  REVIEW_SCOPE_PREFIX,
+  reviewScope,
+  reviewTargetForScope,
+  reviewSchemas,
+  reviewUpcasters,
+  makeReviewRequestedEvent,
+  makeReviewVerdictEvent,
+  makeReviewStrikeEvent,
+  makeMergeSerializedEvent,
+  makeReviewOverrideEvent,
+} from './review/events.js';
+export { ReviewProjector } from './review/review-projector.js';
+export type { ReviewStore } from './review/review-store.js';
+export { openReviewStore } from './review/review-store.js';
+export type {
+  ReviewGateDeps,
+  ReviewPushRequest,
+  ReviewPushResult,
+  ReviewPrMergeRequest,
+  ReviewPrMergeResult,
+  MergeTeardown,
+  ReviewerSpawnGate,
+} from './review/merge.js';
+export {
+  CoReviewGate,
+  ReviewerSpawnGateStub,
+  REVIEWER_PROFILES_CONFIG_KEY,
+  DEFAULT_REVIEWER_PROFILES,
+  resolveReviewerProfiles,
+  reviewerRoleForScope,
+} from './review/merge.js';
+// L5 Phase B honest-verification spine (AC-L5-3): pure, deterministic comparison of a finish run
+// against the branch-off baseline. `honestVerify` classifies tests as regressions (pass→fail / new)
+// or baseline failures (fail→fail); `classifyPass` encodes the gate's allow/refuse/escalate decision.
+// Identical inputs always produce identical output — replay-deterministic, no I/O, no clock.
+export type { HonestVerifyOutcome, ClassifyPassResult } from './review/honest-verify.js';
+export { honestVerify, classifyPass } from './review/honest-verify.js';
+// L5 Phase C strictness ladder (AC-L5-2): a pure, deterministic fn classifying findings by (category,
+// scope). The same cosmetic nit is a suggestion at worker_merge but a blocker at pr_merge — the bar
+// tightens toward production (monotone, never loosens). `applyLadder` re-partitions a finding list
+// into blockers/suggestions at a given scope. No I/O, no clock — replay-deterministic.
+export type { ReviewScope, FindingCategory, LadderFinding, LadderResult } from './review/ladder.js';
+export { classifyFinding, applyLadder } from './review/ladder.js';
+// L5 Phase D 3-strike escalation (AC-L5-4): config key + default, the pure consecutive-strike
+// counter (`consecutiveStrikes` over verdict history), the pure decision fn (`nextReviewAction`),
+// and the cohesive enforcement path (`applyStrikePolicy` — records the strike, computes the action,
+// fires exactly one escalation at the budget threshold via the spawning-parent resolver). The
+// production resolver is wired into co_merge / co_push / co_pr_merge via the worktree-recorded
+// `parent` field. A PASS resets the run (projector: PASS verdict → strikes = 0). Headless-testable
+// over injectable seams (StrikeEnforcementDeps / StrikeEnforcementContext).
+export type { StrikeEnforcementDeps, StrikeEnforcementContext } from './review/strikes.js';
+export {
+  REVIEW_ROUND_BUDGET_KEY,
+  REVIEW_ROUND_BUDGET_DEFAULT,
+  consecutiveStrikes,
+  nextReviewAction,
+  applyStrikePolicy,
+} from './review/strikes.js';
+// L5 Phase E human-review path (AC-L5-5): the `review_request` / `review_response` mail pair, the
+// log-derived `reviewRequestOutcome` (the `approvalOutcome` twin), the `reviewRequestEnvelope`
+// builder (operator-terminal by construction), `recordHumanVerdict` (re-enters the gate identically
+// to an agent verdict), `resolveReviewerKind` (reads `review.<scope>.reviewer` from the config
+// cascade; defaults to `'agent'`), and the L9 `HumanReviewGateStub` (loud-failing typed seam for
+// the operator diff-viewer / verdict-accept UI — never a silent no-op, Principle 9).
+export type {
+  ReviewRequestOutcome,
+  ReviewRequestEnvelopeParams,
+  HumanVerdictParams,
+  HumanReviewGate,
+} from './review/human-review.js';
+export {
+  reviewReviewerKey,
+  resolveReviewerKind,
+  resolveReviewerKindFromConfig,
+  reviewRequestOutcome,
+  reviewRequestEnvelope,
+  recordHumanVerdict,
+  HumanReviewGateStub,
+} from './review/human-review.js';
+// L5 Phase F per-target merge SERIALIZATION + re-review base (AC-L5-7): an event-sourced merge lock
+// over the `merge.serialized` log — one active reviewer/merge per target; a second queues (waits) until
+// the holder releases on landing (`acquireMergeSlot`/`releaseMergeSlot`, the pure toggle `foldActiveSlot`
+// over the ordered log, the `MergeSlotStore` seam). `reReviewBase` resolves the NEXT queued branch's base
+// via refs — the POST-LANDING commit, never the caller's stale checkout. Clock-free + deterministic
+// (AC-L5-11); replay-equal on the `merge.serialized` writes. The store writers (`recordSerialized` /
+// `recordOverride` / `activeSerialized`) live on the ReviewStore.
+export type { MergeSlotEntry, MergeSlotStore, MergeSlotResult } from './review/serialize.js';
+export {
+  foldActiveSlot,
+  acquireMergeSlot,
+  releaseMergeSlot,
+  reReviewBase,
+} from './review/serialize.js';
+// L5 Phase G spec-ref seam (AC-L5-8, RG-4): a review must be judged against the SOURCE's
+// acceptance criteria, never a template stub. `resolveReviewSpecRef` is a PURE fn that turns an
+// optional injected spec-ref into a discriminated `ReviewSpecRef` — `{ kind: 'criteria', ref }` when
+// present or `{ kind: 'no-locked-spec' }` (the explicit marker, never `<TODO>`) when absent.
+// `renderReviewSpecRef` surfaces the human-readable marker text. Both are headless-testable (no I/O).
+export type { ReviewSpecRef } from './review/spec-ref.js';
+export {
+  NO_LOCKED_SPEC_MARKER,
+  resolveReviewSpecRef,
+  renderReviewSpecRef,
+} from './review/spec-ref.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
 // seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/

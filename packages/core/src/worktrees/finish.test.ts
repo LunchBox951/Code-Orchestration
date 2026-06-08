@@ -7,7 +7,6 @@ import { MAIL_WORKER_DONE, mailKind } from '../mail/events.js';
 import { openWorktreeStore, type WorktreeStore } from './worktree-store.js';
 import { finishWorktree, type WorktreeGitFacts } from './finish.js';
 import { renderCommitMessage, type CommitIntent } from './messages.js';
-import { FinishReviewGateStub } from './review-trigger.js';
 import { worktreePathFor } from './sling.js';
 
 // AC-L3-6 — the co_finish CORE, headless (no real git): finishWorktree commits via the injectable
@@ -261,12 +260,6 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
   });
 });
 
-describe('FinishReviewGateStub — the L5 review-trigger + merge plug-point (never a silent no-op)', () => {
-  it('triggerReview + merge fail loud with the documented L5 plug-point contract', () => {
-    const gate = new FinishReviewGateStub();
-    expect(() => gate.triggerReview()).toThrow(/L5 plug-point/);
-    expect(() => gate.triggerReview()).toThrow(/not implemented at L3/);
-    expect(() => gate.merge()).toThrow(/L5 plug-point/);
-    expect(() => gate.merge()).toThrow(/not implemented at L3/);
-  });
-});
+// The L5 review-trigger + merge gate (FinishReviewGate) is now REAL — its implementation (CoReviewGate)
+// and the gated-merge behaviour are exercised in review/merge.test.ts, not here. co_finish still stops
+// short of it (it never dispatches a reviewer or merges), as the tests above assert.
