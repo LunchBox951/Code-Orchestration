@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { resolvePersona } from '../permissions/identity-guard.js';
 import { projectDataDir } from '../store/paths.js';
 import { detectBaseRef, defaultGitReader, resolveRefSha, type GitReader } from './detect-base.js';
 import type { TestOutcome } from './events.js';
@@ -155,7 +156,16 @@ export function slingWorktree(
   mkdirSync(dirname(worktreePath), { recursive: true });
   gitExec(repoCwd, ['worktree', 'add', '-b', branch, worktreePath, baseRef]);
 
-  // 2b) Provision the gitignored working essentials into the sandbox (phase B): reads from the main
+  // 2b) Pin the operator persona git identity in the new sandbox (AC-L6a-7): prevents `git commit -s`
+  //     from falling through to the global config and leaking personal email in Signed-off-by.
+  //     No-op when identity.persona is unconfigured (non-breaking).
+  const persona = resolvePersona(projectId);
+  if (persona !== undefined) {
+    gitExec(worktreePath, ['config', 'user.email', persona.email]);
+    gitExec(worktreePath, ['config', 'user.name', persona.name]);
+  }
+
+  // 2c) Provision the gitignored working essentials into the sandbox (phase B): reads from the main
   //     repo, writes only the sandbox, so it is runnable before the baseline is captured.
   const provisionResult = provisioner({ repoCwd, worktreePath, projectId });
 
