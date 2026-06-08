@@ -34,6 +34,17 @@ const pushOutput = z.object({
   mode: z
     .enum(['owner', 'contributor', 'offline'])
     .describe('The repository-relationship mode the push ran in.'),
+  baseline_failures: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Pre-existing baseline failures the PASS carried — present when honest-verification found ' +
+        'fail→fail tests. The push proceeded but these failures require attention (AC-L5-3).',
+    ),
+  escalated: z
+    .boolean()
+    .optional()
+    .describe('True when a baseline-failure escalation was emitted to the parent agent.'),
 });
 type PushOutput = z.infer<typeof pushOutput>;
 
@@ -77,6 +88,14 @@ export const pushTool: ToolSpec<PushInput, PushOutput> = {
       repoCwd: ctx.cwd,
       ...(input.remote != null ? { remote: input.remote } : {}),
     });
-    return { pushed: result.pushed, remote: result.remote, mode: result.mode };
+    return {
+      pushed: result.pushed,
+      remote: result.remote,
+      mode: result.mode,
+      ...(result.baselineFailures != null
+        ? { baseline_failures: [...result.baselineFailures] }
+        : {}),
+      ...(result.escalated != null ? { escalated: result.escalated } : {}),
+    };
   },
 };
