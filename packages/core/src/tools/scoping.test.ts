@@ -21,6 +21,8 @@ const ALL_TOOLS = [
   'co_orient',
   'co_sling',
   'co_finish',
+  'co_merge',
+  'co_review_finalize',
 ];
 
 describe('AC-L2-5 — the seed map covers every base role', () => {
