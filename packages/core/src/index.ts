@@ -374,6 +374,12 @@ export type { ReviewStore } from './review/review-store.js';
 export { openReviewStore } from './review/review-store.js';
 export type { ReviewGateDeps } from './review/merge.js';
 export { CoReviewGate } from './review/merge.js';
+// L5 Phase B honest-verification spine (AC-L5-3): pure, deterministic comparison of a finish run
+// against the branch-off baseline. `honestVerify` classifies tests as regressions (pass→fail / new)
+// or baseline failures (fail→fail); `classifyPass` encodes the gate's allow/refuse/escalate decision.
+// Identical inputs always produce identical output — replay-deterministic, no I/O, no clock.
+export type { HonestVerifyOutcome, ClassifyPassResult } from './review/honest-verify.js';
+export { honestVerify, classifyPass } from './review/honest-verify.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
 // seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/
