@@ -90,13 +90,15 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
     // Default the target to the detected base of the lead's worktree (its integration branch), the
     // same auto-detection co_sling uses — never a hard-coded master (AC-L3-1).
     const into = input.into ?? detectBaseRef(ctx.cwd);
-    // ctx.worktrees is guaranteed non-null by the guard above; the gate uses it to honest-verify the
-    // finish run against the branch-off baseline (AC-L5-3 — the parentResolver seam is Phase D).
+    // Build the production parent-resolver from the worktree-recorded spawning parent
+    // (AC-L5-4 / Phase D): baseline-failure escalations go to the branch's recorded parent.
+    const parentAgent = ctx.worktrees.getWorktree(input.branch)?.parent;
     const gate = new CoReviewGate({
       reviews: ctx.reviews,
       worktrees: ctx.worktrees,
       mail: ctx.mail,
       agentId: ctx.agent,
+      ...(parentAgent != null ? { parentResolver: { parentOf: () => parentAgent } } : {}),
     });
     const result = gate.merge({
       branch: input.branch,
