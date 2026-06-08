@@ -401,6 +401,21 @@ export { honestVerify, classifyPass } from './review/honest-verify.js';
 // into blockers/suggestions at a given scope. No I/O, no clock — replay-deterministic.
 export type { ReviewScope, FindingCategory, LadderFinding, LadderResult } from './review/ladder.js';
 export { classifyFinding, applyLadder } from './review/ladder.js';
+// L5 Phase D 3-strike escalation (AC-L5-4): config key + default, the pure consecutive-strike
+// counter (`consecutiveStrikes` over verdict history), the pure decision fn (`nextReviewAction`),
+// and the cohesive enforcement path (`applyStrikePolicy` — records the strike, computes the action,
+// fires exactly one escalation at the budget threshold via the spawning-parent resolver). The
+// production resolver is wired into co_merge / co_push / co_pr_merge via the worktree-recorded
+// `parent` field. A PASS resets the run (projector: PASS verdict → strikes = 0). Headless-testable
+// over injectable seams (StrikeEnforcementDeps / StrikeEnforcementContext).
+export type { StrikeEnforcementDeps, StrikeEnforcementContext } from './review/strikes.js';
+export {
+  REVIEW_ROUND_BUDGET_KEY,
+  REVIEW_ROUND_BUDGET_DEFAULT,
+  consecutiveStrikes,
+  nextReviewAction,
+  applyStrikePolicy,
+} from './review/strikes.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
 // seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/
