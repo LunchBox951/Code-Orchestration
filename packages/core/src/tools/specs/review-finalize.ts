@@ -50,8 +50,8 @@ const reviewFinalizeInput = z.object({
   verification: verificationInput
     .optional()
     .describe(
-      'Optional honest-verification marker (its shape is frozen now; Phase B makes it meaningful + ' +
-        'enforced). Omit it in Phase A.',
+      'The honest-verification marker — REQUIRED for a PASS verdict (AC-L5-3), optional for ISSUES. ' +
+        'A PASS recorded without a marker is rejected.',
     ),
 });
 type ReviewFinalizeInput = z.infer<typeof reviewFinalizeInput>;
@@ -100,6 +100,15 @@ export const reviewFinalizeTool: ToolSpec<ReviewFinalizeInput, ReviewFinalizeOut
     };
     // Reject the rubber-stamp inverse (and the PASS-with-blocker contradiction) before recording.
     assertValidVerdict(verdict);
+    // AC-L5-3 defense-in-depth: a PASS recorded without a verification marker is rejected here so a
+    // marker-less PASS can never reach the store. The gate re-derives the truth mechanically from
+    // baseline/finish events, so a marker that lies cannot smuggle a regression past the gate.
+    if (input.verdict === 'PASS' && input.verification == null) {
+      throw new Error(
+        'co_review_finalize: a PASS verdict requires a verification marker (AC-L5-3 — ' +
+          'PASS-without-marker rejected; the gate re-derives the truth from baseline/finish events).',
+      );
+    }
     // Record from the (mutable) zod-parsed input — `verdict` above is the readonly view used only for
     // the cross-field validation; the event payload schema re-validates on append.
     const record = ctx.reviews.recordVerdict({
