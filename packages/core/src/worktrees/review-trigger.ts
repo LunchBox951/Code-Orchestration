@@ -52,6 +52,10 @@ export interface ReviewMergeResult {
   readonly commitSha: string;
   readonly commitMessage: string;
   readonly mode: RepoMode;
+  /** Present when the PASS carried pre-existing baseline failures (flag — never silent, AC-L5-3). */
+  readonly baselineFailures?: readonly string[];
+  /** True when a baseline-failure escalation mail was emitted (requires mail + parentResolver seam). */
+  readonly escalated?: boolean;
 }
 
 /**

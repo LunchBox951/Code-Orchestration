@@ -43,6 +43,17 @@ const mergeOutput = z.object({
   mode: z
     .enum(['owner', 'contributor', 'offline'])
     .describe('The repository-relationship mode the merge ran in.'),
+  baseline_failures: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Pre-existing baseline failures the PASS carried — present when honest-verification found ' +
+        'fail→fail tests. The merge proceeded but these failures require attention (AC-L5-3).',
+    ),
+  escalated: z
+    .boolean()
+    .optional()
+    .describe('True when a baseline-failure escalation was emitted to the parent agent.'),
 });
 type MergeOutput = z.infer<typeof mergeOutput>;
 
@@ -79,7 +90,14 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
     // Default the target to the detected base of the lead's worktree (its integration branch), the
     // same auto-detection co_sling uses — never a hard-coded master (AC-L3-1).
     const into = input.into ?? detectBaseRef(ctx.cwd);
-    const gate = new CoReviewGate({ reviews: ctx.reviews });
+    // ctx.worktrees is guaranteed non-null by the guard above; the gate uses it to honest-verify the
+    // finish run against the branch-off baseline (AC-L5-3 — the parentResolver seam is Phase D).
+    const gate = new CoReviewGate({
+      reviews: ctx.reviews,
+      worktrees: ctx.worktrees,
+      mail: ctx.mail,
+      agentId: ctx.agent,
+    });
     const result = gate.merge({
       branch: input.branch,
       into,
@@ -93,6 +111,10 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
       commit_sha: result.commitSha,
       commit_message: result.commitMessage,
       mode: result.mode,
+      ...(result.baselineFailures != null
+        ? { baseline_failures: [...result.baselineFailures] }
+        : {}),
+      ...(result.escalated != null ? { escalated: result.escalated } : {}),
     };
   },
 };
