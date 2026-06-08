@@ -8,6 +8,7 @@ import {
   MAIL_APPROVAL_RESPONSE,
   MAIL_CLARIFY_REQUEST,
   MAIL_ESCALATION,
+  MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   completionPredicate,
   mailKind,
@@ -20,7 +21,9 @@ import {
   type MailRead,
   type MailRetract,
   type MailType,
+  type ReviewResponse,
 } from './events.js';
+import type { Verdict } from '../review/verdict.js';
 
 /**
  * The `inbox` read-model. Identity of a mail = its store `seq` (PK). `recipient`
@@ -69,7 +72,8 @@ const CREATE_INBOX_TABLE = `
     resolved        INTEGER NOT NULL DEFAULT 0,
     thread_id       TEXT NOT NULL,
     decision        TEXT,
-    retracted       INTEGER NOT NULL DEFAULT 0
+    retracted       INTEGER NOT NULL DEFAULT 0,
+    review_verdict  TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_inbox_recipient_seq ON inbox (recipient, seq);
   CREATE INDEX IF NOT EXISTS idx_inbox_idempotency_scope
@@ -98,7 +102,7 @@ export function ensureInboxTable(db: DatabaseSync): void {
 
 /** Columns selected for every read, in `inbox` order — mapped by name in {@link rowToDeliveredMail}. */
 const INBOX_COLUMNS =
-  'seq, recipient, sender, type, subject, body, correlation_id, causation_id, idempotency_key, ts, kind, read, resolved, decision, retracted';
+  'seq, recipient, sender, type, subject, body, correlation_id, causation_id, idempotency_key, ts, kind, read, resolved, decision, retracted, review_verdict';
 
 /** Map a raw `inbox` row (loosely typed at the SQLite boundary) to a {@link DeliveredMail}. */
 export function rowToDeliveredMail(row: Record<string, unknown>): DeliveredMail {
@@ -118,6 +122,7 @@ export function rowToDeliveredMail(row: Record<string, unknown>): DeliveredMail 
     resolved: Number(row.resolved) === 1,
     retracted: Number(row.retracted) === 1,
     ...(row.decision != null ? { decision: String(row.decision) as ApprovalDecision } : {}),
+    ...(row.review_verdict != null ? { reviewVerdict: String(row.review_verdict) as Verdict } : {}),
   };
 }
 
@@ -309,11 +314,15 @@ export class MailProjector implements Projector {
     // the outward-action gate reads it replay-safely. NULL for every other type.
     const decision: ApprovalDecision | null =
       type === MAIL_APPROVAL_RESPONSE ? (event.payload as ApprovalResponse).decision : null;
+    // Only `review_response` carries a structured reviewVerdict; persist it log-derived so
+    // the human-review gate reads it replay-safely (AC-L5-5). NULL for every other type.
+    const reviewVerdict: Verdict | null =
+      type === MAIL_REVIEW_RESPONSE ? (event.payload as ReviewResponse).reviewVerdict : null;
     db.prepare(
       `INSERT INTO inbox
          (seq, recipient, sender, type, subject, body, correlation_id, causation_id,
-          idempotency_key, ts, kind, read, resolved, thread_id, decision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+          idempotency_key, ts, kind, read, resolved, thread_id, decision, review_verdict)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
     ).run(
       event.seq,
       recipient,
@@ -328,6 +337,7 @@ export class MailProjector implements Projector {
       mailKind(type),
       threadId,
       decision,
+      reviewVerdict,
     );
 
     // Generic resolution: this freshly-folded mail is a potential closer. For each

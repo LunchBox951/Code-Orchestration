@@ -7,6 +7,7 @@ import {
   type DeliveredMail,
   type MailEnvelope,
   type MailType,
+  type ReviewVerdictValue,
 } from './events.js';
 import { InProcessDelivery, type Delivery } from './delivery.js';
 import {
@@ -32,6 +33,7 @@ export interface ReplyDraft {
   readonly from?: string;
   readonly idempotencyKey?: string;
   readonly decision?: ApprovalDecision; // ONLY an `approval_response` reply carries it (W4)
+  readonly reviewVerdict?: ReviewVerdictValue; // ONLY a `review_response` reply carries it (L5-E)
 }
 
 /**
@@ -127,6 +129,7 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
         causationId: String(current.seq),
         ...(draft.idempotencyKey != null ? { idempotencyKey: draft.idempotencyKey } : {}),
         ...(draft.decision != null ? { decision: draft.decision } : {}),
+        ...(draft.reviewVerdict != null ? { reviewVerdict: draft.reviewVerdict } : {}),
       };
       return doSend(envelope);
     },
