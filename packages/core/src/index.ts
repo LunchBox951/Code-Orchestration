@@ -254,9 +254,10 @@ export type {
 // the publishing surface. The read-only injectable remote-capability prober, the pure D2 detection
 // order, override-beats-detection resolution (persisted in the config cascade, never the repo), the
 // Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe (PR-template
-// presence + a sign-off signal). As of L5, the OWNER + OFFLINE merge enactment is REAL on
-// {@link CoRepoModeGate} (the enactment `co_merge` uses); the Contributor fork→PR + remote push remain
-// Phase C, and the rich CONTRIBUTING/PR-template parse remains L9 — each a loud-failing seam (P7, P9).
+// presence + a sign-off signal). As of L5 Phase C, the owner/offline merge enactment, the remote
+// PUSH enactment (`co_push`), and the PR creation enactment (`co_pr_merge`) are all REAL. The
+// Contributor fork→PR host-convention probe uses the minimal Phase C `detectHostConventions`; the rich
+// CONTRIBUTING/PR-template parse remains L9 — `parseHostConventions` stays the loud-failing seam (P7, P9).
 export type {
   RepoMode,
   RemoteSignals,
@@ -268,10 +269,18 @@ export type {
   PublishRequest,
   PublishResult,
   EnactPublishDeps,
+  GhExec,
+  EnactPushRequest,
+  EnactPushResult,
+  EnactPushDeps,
+  EnactPrMergeRequest,
+  EnactPrMergeResult,
+  EnactPrMergeDeps,
 } from './worktrees/repo-mode.js';
 export {
   REPO_MODE_CONFIG_KEY,
   defaultRemoteProbe,
+  defaultGhExec,
   detectRepoMode,
   resolveRepoMode,
   repoModeCapabilities,
@@ -372,7 +381,13 @@ export {
 export { ReviewProjector } from './review/review-projector.js';
 export type { ReviewStore } from './review/review-store.js';
 export { openReviewStore } from './review/review-store.js';
-export type { ReviewGateDeps } from './review/merge.js';
+export type {
+  ReviewGateDeps,
+  ReviewPushRequest,
+  ReviewPushResult,
+  ReviewPrMergeRequest,
+  ReviewPrMergeResult,
+} from './review/merge.js';
 export { CoReviewGate } from './review/merge.js';
 // L5 Phase B honest-verification spine (AC-L5-3): pure, deterministic comparison of a finish run
 // against the branch-off baseline. `honestVerify` classifies tests as regressions (pass→fail / new)
@@ -380,6 +395,12 @@ export { CoReviewGate } from './review/merge.js';
 // Identical inputs always produce identical output — replay-deterministic, no I/O, no clock.
 export type { HonestVerifyOutcome, ClassifyPassResult } from './review/honest-verify.js';
 export { honestVerify, classifyPass } from './review/honest-verify.js';
+// L5 Phase C strictness ladder (AC-L5-2): a pure, deterministic fn classifying findings by (category,
+// scope). The same cosmetic nit is a suggestion at worker_merge but a blocker at pr_merge — the bar
+// tightens toward production (monotone, never loosens). `applyLadder` re-partitions a finding list
+// into blockers/suggestions at a given scope. No I/O, no clock — replay-deterministic.
+export type { ReviewScope, FindingCategory, LadderFinding, LadderResult } from './review/ladder.js';
+export { classifyFinding, applyLadder } from './review/ladder.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
 // seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/

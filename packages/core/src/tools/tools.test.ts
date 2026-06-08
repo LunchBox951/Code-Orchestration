@@ -101,6 +101,8 @@ const ALL_TOOLS = [
   'co_finish',
   'co_merge',
   'co_review_finalize',
+  'co_push',
+  'co_pr_merge',
 ];
 
 describe('buildCoreRegistry — the canonical single source of truth', () => {
