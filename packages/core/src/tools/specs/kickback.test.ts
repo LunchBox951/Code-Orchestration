@@ -267,6 +267,20 @@ describe('co_kickback — absent stores → loud-fail (Principle 9)', () => {
       }),
     ).rejects.toThrow(/ctx.roster absent/);
   });
+
+  it('missing ctx.mail → throws', async () => {
+    const stores = openStores('p-kb-nomail');
+    buildRoster(stores.roster);
+    const ctx = { ...makeCtx('lead-1', stores), mail: undefined };
+    await expect(
+      invokeTool(registry, ctx as ToolContext, 'co_kickback', {
+        branch: BRANCH,
+        worker: 'impl-1',
+        blockers: ['x'],
+        into: TARGET,
+      }),
+    ).rejects.toThrow(/ctx.mail is absent/);
+  });
 });
 
 // ── completeness gate (AC-L6a-8) ─────────────────────────────────────────────────────────────────
