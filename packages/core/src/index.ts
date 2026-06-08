@@ -449,6 +449,7 @@ export type {
   ExcludedCandidate,
   PlacementDecision,
   HysteresisConfig,
+  CandidateReadOptions,
   PlaceAgentInput,
   ProviderAccount,
   PlaceFromStoreInput,
@@ -461,6 +462,7 @@ export {
   HYSTERESIS_MARGIN_DEFAULT,
   RESET_HORIZON_MS_DEFAULT,
   headroomScore,
+  defaultProviderAccounts,
   placeAgent,
   bindingProviderHeadroom,
   candidatesFromStore,
@@ -469,7 +471,7 @@ export {
 } from './dispatch/balancer.js';
 
 // L4-4 pure throttle-as-WAITING: PlacementDecision + headrooms → PLACED or WAITING (ETA + loud message); canResume predicate (AC4, P9, P13, P16).
-export type { DispatchResolution } from './dispatch/throttle.js';
+export type { DispatchDiagnostic, DispatchResolution } from './dispatch/throttle.js';
 export { MAXED_THRESHOLD_PCT_DEFAULT, resolveDispatch, canResume } from './dispatch/throttle.js';
 
 // L4-5 dispatch integration: placement.decided event (the WRITER — completes reader-with-writer),
@@ -498,12 +500,18 @@ export {
   selectPlacementBySeq,
   selectPlacementsByAgent,
 } from './dispatch/placement-projector.js';
-export type { PreviewPlacementInput } from './dispatch/cli-render.js';
+export type {
+  PreviewPlacementInput,
+  UsageSourceFactory,
+  RefreshUsageInput,
+} from './dispatch/cli-render.js';
 export {
+  refreshUsageForAccounts,
   runDispatchPolicy,
   renderUsageReport,
   renderCostReport,
   previewPlacement,
+  previewPlacementWithUsage,
   renderDispatchResolution,
 } from './dispatch/cli-render.js';
 
@@ -579,6 +587,7 @@ export {
   accountForProvider,
   createProviderUsageSource,
   defaultProviderUsageSource,
+  defaultUsageSourceFactory,
   readProviderUsageCached,
   isLiveE2EEnabled,
   CACHE_SOURCE,

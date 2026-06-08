@@ -15,6 +15,8 @@ import { ClaudeUsageSource } from './claude-source.js';
 import { CodexUsageSource } from './codex-source.js';
 import { openDispatchStore } from './dispatch-store.js';
 import { USAGE_BUCKET_TTL_MS_DEFAULT } from './policy.js';
+import type { DispatchStore } from './dispatch-store.js';
+import type { UsageAccountStatus, UsageObserved } from './events.js';
 import {
   UsageUnavailableError,
   type ProviderUsageSource,
@@ -45,6 +47,13 @@ class SpySource implements ProviderUsageSource {
   read(): Promise<UsageSnapshot> {
     this.reads += 1;
     return Promise.resolve(this.snapshot);
+  }
+}
+
+class ThrowSource implements ProviderUsageSource {
+  constructor(private readonly error: Error) {}
+  read(): Promise<UsageSnapshot> {
+    return Promise.reject(this.error);
   }
 }
 
@@ -83,6 +92,7 @@ describe('createProviderUsageSource — the real adapter, wired as default', () 
       cli: () => Promise.resolve(JSON.stringify({ plan: 'pro' })),
       readRateLimits: () =>
         Promise.resolve({
+          account: 'codex:pro',
           plan: 'pro',
           allowed: true,
           primary: { used_percent: 4, reset_at: '2026-06-03T05:00:00.000Z' },
@@ -176,6 +186,230 @@ describe('readProviderUsageCached — program-data cache (fresh reused / stale r
         readProviderUsageCached(spy, 'claude', store, { nowMs: T0 + 1000 }),
       ).rejects.toBeInstanceOf(UsageUnavailableError);
       expect(spy.reads).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('marks the requested account unavailable when a stale live refresh fails', async () => {
+    const store = openDispatchStore('p-cache-fail');
+    try {
+      store.recordSnapshot(snapshot);
+      await expect(
+        readProviderUsageCached(
+          new ThrowSource(new UsageUnavailableError('claude', 'statusLine missing')),
+          'claude',
+          store,
+          { account: 'claude:max', nowMs: T0 + USAGE_BUCKET_TTL_MS_DEFAULT + 60_000 },
+        ),
+      ).rejects.toBeInstanceOf(UsageUnavailableError);
+
+      expect(store.getAccountStatus('claude', 'claude:max')?.available).toBe(false);
+      const headroom = store.getHeadroom('claude', 'claude:max', 'five_hour');
+      expect(headroom.kind).toBe('unknown');
+      if (headroom.kind === 'unknown') expect(headroom.reason).toMatch(/statusLine missing/);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('does not overwrite source provenance after observeUsage records an unavailable snapshot', async () => {
+    const unavailable: UsageSnapshot = {
+      provider: 'claude',
+      account: 'claude:max',
+      windows: [],
+      available: false,
+      source: 'auth-status',
+      sampled_at: '2026-06-03T00:00:00.000Z',
+    };
+    let status: UsageAccountStatus | undefined;
+    const wrapperWrites: UsageObserved[] = [];
+    const store = {
+      getAccountStatus: () => status,
+      readBuckets: () => [],
+      recordSnapshot: (snap: UsageSnapshot) => {
+        status = {
+          provider: snap.provider,
+          account: snap.account,
+          available: false,
+          reason: 'auth preflight reported unavailable',
+          source: snap.source,
+          sampledAt: snap.sampled_at,
+          observedTs: 1,
+        };
+        return { account: status, buckets: [] };
+      },
+      recordUsageObserved: (obs: UsageObserved) => {
+        wrapperWrites.push(obs);
+        status = {
+          provider: obs.provider,
+          account: obs.account,
+          available: obs.available,
+          ...('reason' in obs && obs.reason !== undefined ? { reason: obs.reason } : {}),
+          source: obs.source,
+          sampledAt: obs.sampled_at,
+          observedTs: 2,
+        };
+        return { account: status };
+      },
+    } as unknown as DispatchStore;
+
+    await expect(
+      readProviderUsageCached(new SpySource(unavailable), 'claude', store, { nowMs: T0 }),
+    ).rejects.toBeInstanceOf(UsageUnavailableError);
+
+    expect(wrapperWrites).toEqual([]);
+    expect(status?.source).toBe('auth-status');
+  });
+
+  it('fails loud and marks the requested account unavailable when a source returns a different account', async () => {
+    const store = openDispatchStore('p-cache-mismatch');
+    try {
+      await expect(
+        readProviderUsageCached(new SpySource(snapshot), 'claude', store, {
+          account: 'claude:team',
+          nowMs: T0,
+        }),
+      ).rejects.toBeInstanceOf(UsageUnavailableError);
+
+      expect(store.getAccountStatus('claude', 'claude:team')?.available).toBe(false);
+      expect(store.getAccountStatus('claude', 'claude:max')).toBeUndefined();
+      const headroom = store.getHeadroom('claude', 'claude:team', 'five_hour');
+      expect(headroom.kind).toBe('unknown');
+      if (headroom.kind === 'unknown') {
+        expect(headroom.reason).toMatch(/claude:max/);
+        expect(headroom.reason).toMatch(/claude:team/);
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it('fails loud when a Claude adapter observes a different account than the requested label', async () => {
+    const store = openDispatchStore('p-cache-claude-adapter-mismatch');
+    const source = createProviderUsageSource('claude', {
+      account: 'claude:team',
+      cli: () => Promise.resolve(JSON.stringify({ logged_in: true, account: { plan: 'max' } })),
+      readStatusLine: () =>
+        Promise.resolve({
+          account: 'claude:max',
+          rate_limits: {
+            five_hour: { used_percentage: 7, resets_at: '2026-06-03T05:00:00.000Z' },
+          },
+        }),
+      now: () => T0,
+    });
+    try {
+      await expect(
+        readProviderUsageCached(source, 'claude', store, { account: 'claude:team', nowMs: T0 }),
+      ).rejects.toBeInstanceOf(UsageUnavailableError);
+
+      expect(store.getAccountStatus('claude', 'claude:team')?.available).toBe(false);
+      expect(store.getAccountStatus('claude', 'claude:max')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('fails loud when a requested custom Claude account is not observed by any source', async () => {
+    const store = openDispatchStore('p-cache-claude-custom-unobserved');
+    const source = createProviderUsageSource('claude', {
+      account: 'claude:team',
+      cli: () => Promise.resolve(JSON.stringify({ logged_in: true, account: { plan: 'Max' } })),
+      readStatusLine: () =>
+        Promise.resolve({
+          rate_limits: {
+            five_hour: { used_percentage: 7, resets_at: '2026-06-03T05:00:00.000Z' },
+          },
+        }),
+      now: () => T0,
+    });
+    try {
+      await expect(
+        readProviderUsageCached(source, 'claude', store, { account: 'claude:team', nowMs: T0 }),
+      ).rejects.toBeInstanceOf(UsageUnavailableError);
+
+      expect(store.getAccountStatus('claude', 'claude:team')?.available).toBe(false);
+      expect(store.getAccountStatus('claude', 'claude:max')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('fails loud when Claude auth status root account_id conflicts with the requested label', async () => {
+    const store = openDispatchStore('p-cache-claude-auth-account-id-mismatch');
+    const source = createProviderUsageSource('claude', {
+      account: 'claude:other',
+      cli: () =>
+        Promise.resolve(
+          JSON.stringify({ logged_in: true, account: { plan: 'Max' }, account_id: 'team' }),
+        ),
+      readStatusLine: () =>
+        Promise.resolve({
+          rate_limits: {
+            five_hour: { used_percentage: 7, resets_at: '2026-06-03T05:00:00.000Z' },
+          },
+        }),
+      now: () => T0,
+    });
+    try {
+      await expect(
+        readProviderUsageCached(source, 'claude', store, { account: 'claude:other', nowMs: T0 }),
+      ).rejects.toBeInstanceOf(UsageUnavailableError);
+
+      expect(store.getAccountStatus('claude', 'claude:other')?.available).toBe(false);
+      expect(store.getAccountStatus('claude', 'claude:team')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('fails loud when a Codex adapter observes a different account than the requested label', async () => {
+    const store = openDispatchStore('p-cache-codex-adapter-mismatch');
+    const source = createProviderUsageSource('codex', {
+      account: 'codex:team',
+      cli: () => Promise.resolve(JSON.stringify({ plan: 'pro' })),
+      readRateLimits: () =>
+        Promise.resolve({
+          account: 'codex:pro',
+          plan: 'pro',
+          allowed: true,
+          primary: { used_percent: 4, reset_at: '2026-06-03T05:00:00.000Z' },
+        }),
+      now: () => T0,
+    });
+    try {
+      await expect(
+        readProviderUsageCached(source, 'codex', store, { account: 'codex:team', nowMs: T0 }),
+      ).rejects.toBeInstanceOf(UsageUnavailableError);
+
+      expect(store.getAccountStatus('codex', 'codex:team')?.available).toBe(false);
+      expect(store.getAccountStatus('codex', 'codex:pro')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('fails loud when a requested custom Codex account is not observed by any source', async () => {
+    const store = openDispatchStore('p-cache-codex-custom-unobserved');
+    const source = createProviderUsageSource('codex', {
+      account: 'codex:team',
+      cli: () => Promise.resolve(JSON.stringify({ plan: 'pro' })),
+      readRateLimits: () =>
+        Promise.resolve({
+          plan: 'pro',
+          allowed: true,
+          primary: { used_percent: 4, reset_at: '2026-06-03T05:00:00.000Z' },
+        }),
+      now: () => T0,
+    });
+    try {
+      await expect(
+        readProviderUsageCached(source, 'codex', store, { account: 'codex:team', nowMs: T0 }),
+      ).rejects.toBeInstanceOf(UsageUnavailableError);
+
+      expect(store.getAccountStatus('codex', 'codex:team')?.available).toBe(false);
+      expect(store.getAccountStatus('codex', 'codex:pro')).toBeUndefined();
     } finally {
       store.close();
     }

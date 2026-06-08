@@ -86,6 +86,8 @@ const CLAUDE_OAUTH_TOKEN_EXPIRY_SKEW_MS = 60_000;
 export interface ClaudeAccountInfo {
   readonly loggedIn: boolean;
   readonly account: string;
+  /** True when metadata named an explicit account identity; false for plan/default fallback. */
+  readonly accountObserved?: boolean;
 }
 
 /** What a status-line parse yields: the windows it found + an optional account label the payload named. */
@@ -112,7 +114,7 @@ export interface ClaudeUsageSourceDeps {
 
 /** Static config for {@link ClaudeUsageSource} (the operator gate + the account label). */
 export interface ClaudeUsageSourceOptions {
-  /** Account label; default {@link CLAUDE_DEFAULT_ACCOUNT}. The preflight refines it when it names one. */
+  /** Account label fallback when metadata/passive payloads do not name the observed account. */
   readonly account?: string;
   /** Operator gate for the idle/cold usage-endpoint read; default OFF — statusLine only (AC11 default). */
   readonly enableIdleUsageRead?: boolean;
@@ -127,14 +129,20 @@ export interface ClaudeUsageSourceOptions {
  */
 export function parseClaudeAuthStatus(payload: unknown): ClaudeAccountInfo {
   const root = asRecord(payload) ?? {};
-  const account = asRecord(pick(root, 'account', 'user')) ?? root;
-  const plan = stringish(pick(account, 'plan', 'subscription', 'tier'));
-  const label = plan ? `claude:${plan.toLowerCase()}` : CLAUDE_DEFAULT_ACCOUNT;
+  const accountRecord = asRecord(pick(root, 'account', 'user'));
+  const explicit = firstScopedClaudeAccountLabel(root);
+  const planRecord = accountRecord ?? root;
+  const plan = stringish(pick(planRecord, 'plan', 'subscription', 'tier'));
+  const label = explicit ?? (plan ? `claude:${plan.toLowerCase()}` : CLAUDE_DEFAULT_ACCOUNT);
 
   const loggedInFlag =
     boolish(pick(root, 'logged_in', 'loggedIn', 'authenticated', 'isAuthenticated')) ??
     (pick(root, 'error') !== undefined ? false : undefined);
-  return { loggedIn: loggedInFlag ?? true, account: label };
+  return {
+    loggedIn: loggedInFlag ?? true,
+    account: label,
+    accountObserved: explicit !== undefined,
+  };
 }
 
 /**
@@ -155,18 +163,52 @@ export function parseClaudeStatusLine(payload: unknown): ClaudeStatusLineReading
   for (const [key, raw] of Object.entries(rateLimits)) {
     const window = asRecord(raw);
     if (!window) continue;
-    const used = numberish(
-      pick(window, 'used_percentage', 'used_percent', 'used_pct', 'utilization'),
-    );
+    const used = claudeUsedPct(window);
     const reset = stringish(pick(window, 'resets_at', 'reset_at', 'resetsAt'));
     if (used === undefined || reset === undefined) continue;
     windows.push({ kind: canonicalWindowKind(key), used_pct: used, reset_at: reset });
   }
 
-  const account =
-    stringish(pick(root, 'account', 'organization', 'org')) ??
-    stringish(pick(body, 'account', 'organization', 'org'));
+  const account = canonicalClaudeAccount(
+    stringish(pick(root, 'account')) ??
+      stringish(pick(body, 'account')) ??
+      stringish(pick(root, 'organization', 'org')) ??
+      stringish(pick(body, 'organization', 'org')),
+  );
   return account !== undefined ? { account, windows } : { windows };
+}
+
+function canonicalClaudeAccount(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.startsWith('claude:') && trimmed.length > 'claude:'.length ? trimmed : undefined;
+}
+
+function providerAccountLabel(value: string | undefined, provider: 'claude'): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed.length === 0) return undefined;
+  if (trimmed.startsWith(`${provider}:`) && trimmed.length > provider.length + 1) return trimmed;
+  return /^[a-z0-9._-]+$/u.test(trimmed) ? `${provider}:${trimmed}` : undefined;
+}
+
+function firstScopedClaudeAccountLabel(root: Record<string, unknown>): string | undefined {
+  const directId = providerAccountLabel(stringish(pick(root, 'account_id', 'accountId')), 'claude');
+  if (directId !== undefined) return directId;
+
+  const direct = providerAccountLabel(stringish(pick(root, 'account')), 'claude');
+  if (direct !== undefined) return direct;
+
+  for (const key of ['account', 'user'] as const) {
+    const scoped = asRecord(pick(root, key));
+    if (!scoped) continue;
+    const label = providerAccountLabel(
+      stringish(pick(scoped, 'account', 'account_id', 'accountId', 'id', 'label')),
+      'claude',
+    );
+    if (label !== undefined) return label;
+  }
+  return undefined;
 }
 
 /** Find a shallow rate-limits envelope, e.g. `{ data: { rate_limits: ... } }`, without over-fitting. */
@@ -190,12 +232,19 @@ function hasClaudeUsageWindowEntries(value: Record<string, unknown>): boolean {
   return Object.values(value).some((raw) => {
     const window = asRecord(raw);
     if (!window) return false;
-    const used = numberish(
-      pick(window, 'used_percentage', 'used_percent', 'used_pct', 'utilization'),
-    );
+    const used = claudeUsedPct(window);
     const reset = stringish(pick(window, 'resets_at', 'reset_at', 'resetsAt'));
     return used !== undefined && reset !== undefined;
   });
+}
+
+/** Claude statusLine uses percent fields; OAuth `utilization` may be a 0..1 fraction or 0..100 percent. */
+function claudeUsedPct(window: Record<string, unknown>): number | undefined {
+  const percent = numberish(pick(window, 'used_percentage', 'used_percent', 'used_pct'));
+  if (percent !== undefined) return percent;
+  const utilization = numberish(pick(window, 'utilization'));
+  if (utilization === undefined) return undefined;
+  return utilization >= 0 && utilization <= 1 ? utilization * 100 : utilization;
 }
 
 /** Canonicalize a statusLine window key to the frozen labels where known; otherwise keep it verbatim. */
@@ -235,10 +284,14 @@ export class ClaudeUsageSource implements ProviderUsageSource {
     // 1. Preflight (metadata only). Best-effort: a thrown preflight does not abort — statusLine may still
     //    work; a not-logged-in preflight wins immediately as an unavailable snapshot.
     let account = this.account;
+    let accountObserved = this.account === CLAUDE_DEFAULT_ACCOUNT;
     let preflight: UsageSnapshot | null = null;
     try {
       const info = await this.deps.authStatus();
-      account = info.account || account;
+      if (info.accountObserved !== false || this.account === CLAUDE_DEFAULT_ACCOUNT) {
+        account = info.account || account;
+      }
+      if (info.accountObserved !== false) accountObserved = true;
       if (!info.loggedIn) {
         preflight = buildSnapshot({
           provider: 'claude',
@@ -259,13 +312,20 @@ export class ClaudeUsageSource implements ProviderUsageSource {
     }
     attempts.push({
       label: 'statusLine (passive)',
-      run: () => this.readFromPayload(this.deps.statusLine(), account, sampledAt, 'statusLine'),
+      run: () =>
+        this.readFromPayload(
+          this.deps.statusLine(),
+          account,
+          accountObserved,
+          sampledAt,
+          'statusLine',
+        ),
     });
     if (this.enableIdle && this.deps.idleUsageRead) {
       const idle = this.deps.idleUsageRead;
       attempts.push({
         label: 'idle usage endpoint (gated)',
-        run: () => this.readFromPayload(idle(), account, sampledAt, 'oauth-usage'),
+        run: () => this.readFromPayload(idle(), account, accountObserved, sampledAt, 'oauth-usage'),
       });
     }
     return layeredRead('claude', account, attempts);
@@ -275,14 +335,24 @@ export class ClaudeUsageSource implements ProviderUsageSource {
   private async readFromPayload(
     payloadPromise: Promise<unknown>,
     account: string,
+    accountObserved: boolean,
     sampledAt: string,
     source: string,
   ): Promise<UsageSnapshot | null> {
     const reading = parseClaudeStatusLine(await payloadPromise);
     if (reading.windows.length === 0) return null;
+    const resolvedAccount = reading.account ?? account;
+    const observed = accountObserved || reading.account !== undefined;
+    if (this.account !== CLAUDE_DEFAULT_ACCOUNT && !observed) {
+      throw new UsageUnavailableError(
+        'claude',
+        `requested Claude account '${this.account}' was not observed by ${source}`,
+        { account: this.account },
+      );
+    }
     return buildSnapshot({
       provider: 'claude',
-      account: reading.account ?? account,
+      account: resolvedAccount,
       windows: reading.windows,
       available: true,
       source,

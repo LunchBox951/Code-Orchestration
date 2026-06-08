@@ -31,8 +31,10 @@ artifact's shape is `co`'s decision, not the provider's. Mixed-mode work therefo
 commits and PRs regardless of which provider authored it (see [WORKTREES](worktrees.md) on the commit/PR style).
 
 **Usage and rate limits are tracked per account, not per provider** — Claude subscription, Codex
-ChatGPT app-server, and Codex API-key billing are distinct buckets ([COST](cost-and-usage.md)). The balancer spreads load
-across whatever subscriptions are live and *paces rather than degrades* when both are tapped
+ChatGPT app-server, and Codex API-key billing are distinct buckets ([COST](cost-and-usage.md)). The L4
+dispatch path records provider-account buckets and routes across the default Claude/Codex accounts; same-provider
+multi-subscription routing remains later work, and the CLI still rejects duplicate same-provider account inputs until
+that placement policy exists. When the available provider accounts are tapped, `co` *paces rather than degrades*
 (Principle 13 — provider-neutral).
 
 **What still waits on the runtime research:** the *transport* — how `co` actually hosts and drives

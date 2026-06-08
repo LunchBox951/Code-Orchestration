@@ -38,6 +38,7 @@ import {
 import {
   UsageProjector,
   ensureUsageTables,
+  selectAllUsageAccounts,
   selectAllUsageBuckets,
   selectUsageAccount,
   selectUsageBucket,
@@ -91,10 +92,10 @@ export interface SnapshotIngestResult {
 /**
  * The headless L4 dispatch store over a single project store (the L4 analogue of L3's
  * {@link import('../worktrees/worktree-store.js').WorktreeStore}). It records the orchestration facts
- * of usage + cost — per-account usage buckets and per-agent/per-task cost rollups — entirely in
- * program-data, never the repo (AC9, Principle 12). A recording event-sources its read-model row in the
- * same transaction as the append (so the log and projection commit atomically), then reads it straight
- * back; plain reads are projections.
+ * of usage + cost — per-provider-account usage buckets and per-agent/per-task cost rollups — entirely
+ * in program-data, never the repo (AC9, Principle 12). A recording event-sources its read-model row in
+ * the same transaction as the append (so the log and projection commit atomically), then reads it
+ * straight back; plain reads are projections.
  *
  * Opening this alongside the mail / worktree stores on the SAME per-project `store.db` is safe:
  * `node:sqlite` is synchronous/single-threaded so transactions never interleave in-process, and this
@@ -110,16 +111,24 @@ export interface DispatchStore {
    * writes a fake 0%. Returns the account status + the touched window buckets.
    */
   recordSnapshot(snapshot: UsageSnapshot): SnapshotIngestResult;
-  /** Every known window bucket, in (account, window_kind) order. */
+  /** Every known window bucket, in (provider, account, window_kind) order. */
   readBuckets(): readonly UsageBucket[];
-  /** The latest known window bucket for `(account, window_kind)`, or undefined. */
+  /** Every known provider-account availability status. */
+  readAccountStatuses(): readonly UsageAccountStatus[];
+  /** The latest known window bucket for `(provider, account, window_kind)`, or undefined. */
+  getBucket(provider: Provider, account: string, windowKind: string): UsageBucket | undefined;
+  /** Back-compat account-only lookup; ambiguous account labels should use the provider-aware overload. */
   getBucket(account: string, windowKind: string): UsageBucket | undefined;
   /** The latest availability status for `account`, or undefined (no sample yet). */
+  getAccountStatus(provider: Provider, account: string): UsageAccountStatus | undefined;
+  /** Back-compat account-only lookup; ambiguous account labels should use the provider-aware overload. */
   getAccountStatus(account: string): UsageAccountStatus | undefined;
   /**
    * The {@link Headroom} for a window as a DISCRIMINATED value (AC6) — `known` with the live reading, or
    * `unknown` with a reason when the account is unavailable / never observed. Never a magic number.
    */
+  getHeadroom(provider: Provider, account: string, windowKind: string): Headroom;
+  /** Back-compat account-only lookup; ambiguous account labels should use the provider-aware overload. */
   getHeadroom(account: string, windowKind: string): Headroom;
   /**
    * Record a per-turn cost (append `cost.recorded` + fold into the agent AND task rollups). When a
@@ -167,7 +176,7 @@ export function openDispatchStore(projectId: string): DispatchStore {
         ensureTables(db);
         const [stored] = tx.append([makeUsageObservedEvent(projectId, obs)]);
         applyEvent(tx, decode(stored!, dispatchUpcasters, dispatchSchemas), projectors);
-        const account = selectUsageAccount(db, obs.account);
+        const account = selectUsageAccount(db, obs.provider, obs.account);
         if (!account) {
           throw new Error(
             `openDispatchStore.recordUsageObserved: account row missing after projection ` +
@@ -176,7 +185,7 @@ export function openDispatchStore(projectId: string): DispatchStore {
         }
         const bucket =
           obs.available && obs.window_kind !== undefined
-            ? selectUsageBucket(db, obs.account, obs.window_kind)
+            ? selectUsageBucket(db, obs.provider, obs.account, obs.window_kind)
             : undefined;
         return bucket ? { account, bucket } : { account };
       });
@@ -191,14 +200,23 @@ export function openDispatchStore(projectId: string): DispatchStore {
         for (const event of stored) {
           applyEvent(tx, decode(event, dispatchUpcasters, dispatchSchemas), projectors);
         }
-        const account = selectUsageAccount(db, snapshot.account);
+        const account = selectUsageAccount(db, snapshot.provider, snapshot.account);
         if (!account) {
           throw new Error(
             `openDispatchStore.recordSnapshot: account row missing after projection ` +
               `(account='${snapshot.account}')`,
           );
         }
-        const buckets = selectAllUsageBuckets(db).filter((b) => b.account === snapshot.account);
+        const touchedWindowKinds = new Set(snapshot.windows.map((w) => w.kind));
+        const buckets =
+          touchedWindowKinds.size > 0
+            ? selectAllUsageBuckets(db).filter(
+                (b) =>
+                  b.provider === snapshot.provider &&
+                  b.account === snapshot.account &&
+                  touchedWindowKinds.has(b.windowKind),
+              )
+            : [];
         return { account, buckets };
       });
     },
@@ -207,23 +225,98 @@ export function openDispatchStore(projectId: string): DispatchStore {
       return store.transaction((tx) => selectAllUsageBuckets(tx.raw as DatabaseSync));
     },
 
-    getBucket(account: string, windowKind: string): UsageBucket | undefined {
-      return store.transaction((tx) =>
-        selectUsageBucket(tx.raw as DatabaseSync, account, windowKind),
-      );
+    readAccountStatuses(): readonly UsageAccountStatus[] {
+      return store.transaction((tx) => selectAllUsageAccounts(tx.raw as DatabaseSync));
     },
 
-    getAccountStatus(account: string): UsageAccountStatus | undefined {
-      return store.transaction((tx) => selectUsageAccount(tx.raw as DatabaseSync, account));
-    },
-
-    getHeadroom(account: string, windowKind: string): Headroom {
+    getBucket(
+      providerOrAccount: Provider | string,
+      accountOrWindowKind: string,
+      maybeWindowKind?: string,
+    ): UsageBucket | undefined {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
-        return deriveHeadroom(
-          selectUsageAccount(db, account),
-          selectUsageBucket(db, account, windowKind),
+        if (maybeWindowKind !== undefined) {
+          return selectUsageBucket(
+            db,
+            providerOrAccount as Provider,
+            accountOrWindowKind,
+            maybeWindowKind,
+          );
+        }
+        const account = String(providerOrAccount);
+        assertAccountOnlyUnambiguous(
+          'bucket',
+          account,
+          selectAllUsageBuckets(db)
+            .filter((b) => b.account === account)
+            .map((b) => ({ provider: b.provider })),
         );
+        return singleAccountOnlyMatch(
+          'bucket',
+          account,
+          selectAllUsageBuckets(db).filter(
+            (b) => b.account === providerOrAccount && b.windowKind === accountOrWindowKind,
+          ),
+        );
+      });
+    },
+
+    getAccountStatus(
+      providerOrAccount: Provider | string,
+      maybeAccount?: string,
+    ): UsageAccountStatus | undefined {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        if (maybeAccount !== undefined) {
+          return selectUsageAccount(db, providerOrAccount as Provider, maybeAccount);
+        }
+        return singleAccountOnlyMatch(
+          'account status',
+          String(providerOrAccount),
+          selectAllUsageAccounts(db).filter((a) => a.account === providerOrAccount),
+        );
+      });
+    },
+
+    getHeadroom(
+      providerOrAccount: Provider | string,
+      accountOrWindowKind: string,
+      maybeWindowKind?: string,
+    ): Headroom {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        if (maybeWindowKind !== undefined) {
+          const provider = providerOrAccount as Provider;
+          const account = accountOrWindowKind;
+          return deriveHeadroom(
+            selectUsageAccount(db, provider, account),
+            selectUsageBucket(db, provider, account, maybeWindowKind),
+          );
+        }
+        const account = providerOrAccount;
+        const windowKind = accountOrWindowKind;
+        assertAccountOnlyUnambiguous(
+          'headroom',
+          String(account),
+          [
+            ...selectAllUsageAccounts(db).filter((a) => a.account === account),
+            ...selectAllUsageBuckets(db).filter((b) => b.account === account),
+          ].map((row) => ({ provider: row.provider })),
+        );
+        const accountStatus = singleAccountOnlyMatch(
+          'account status',
+          String(account),
+          selectAllUsageAccounts(db).filter((a) => a.account === account),
+        );
+        const bucket = singleAccountOnlyMatch(
+          'bucket',
+          String(account),
+          selectAllUsageBuckets(db).filter(
+            (b) => b.account === account && b.windowKind === windowKind,
+          ),
+        );
+        return deriveHeadroom(accountStatus, bucket);
       });
     },
 
@@ -312,6 +405,27 @@ export function openDispatchStore(projectId: string): DispatchStore {
   };
 }
 
+function singleAccountOnlyMatch<T extends { readonly provider: Provider }>(
+  kind: string,
+  account: string,
+  matches: readonly T[],
+): T | undefined {
+  assertAccountOnlyUnambiguous(kind, account, matches);
+  return matches[0];
+}
+
+function assertAccountOnlyUnambiguous<T extends { readonly provider: Provider }>(
+  kind: string,
+  account: string,
+  matches: readonly T[],
+): void {
+  if (new Set(matches.map((m) => m.provider)).size <= 1) return;
+  const providers = [...new Set(matches.map((m) => m.provider))].sort().join(', ');
+  throw new Error(
+    `openDispatchStore: ambiguous account-only ${kind} lookup for account '${account}' matched providers: ${providers}; use the provider-aware overload`,
+  );
+}
+
 /**
  * Lower an injected {@link UsageSnapshot} into the `usage.observed` events that ingest it: one AVAILABLE
  * event per window (or a single windowless available marker when a reachable account reports no
@@ -321,7 +435,7 @@ export function openDispatchStore(projectId: string): DispatchStore {
 function snapshotToObservedEvents(projectId: string, snapshot: UsageSnapshot) {
   const { provider, account, source, sampled_at } = snapshot;
   if (!snapshot.available) {
-    const obs: UsageObserved = {
+    const unavailable: UsageObserved = {
       available: false,
       provider,
       account,
@@ -329,39 +443,68 @@ function snapshotToObservedEvents(projectId: string, snapshot: UsageSnapshot) {
       source,
       sampled_at,
     };
-    return [makeUsageObservedEvent(projectId, obs)];
+    if (snapshot.windows.length === 0) {
+      return [makeUsageObservedEvent(projectId, unavailable)];
+    }
+    const clear: UsageObserved = { available: true, provider, account, source, sampled_at };
+    return [
+      makeUsageObservedEvent(projectId, clear),
+      ...snapshot.windows.map((w) =>
+        makeUsageObservedEvent(projectId, {
+          available: true,
+          provider,
+          account,
+          window_kind: w.kind,
+          used_pct: w.used_pct,
+          reset_at: w.reset_at,
+          source,
+          sampled_at,
+        }),
+      ),
+      makeUsageObservedEvent(projectId, unavailable),
+    ];
   }
   if (snapshot.windows.length === 0) {
     const obs: UsageObserved = { available: true, provider, account, source, sampled_at };
     return [makeUsageObservedEvent(projectId, obs)];
   }
-  return snapshot.windows.map((w) =>
-    makeUsageObservedEvent(projectId, {
-      available: true,
-      provider,
-      account,
-      window_kind: w.kind,
-      used_pct: w.used_pct,
-      reset_at: w.reset_at,
-      source,
-      sampled_at,
-    }),
-  );
+  const clear: UsageObserved = { available: true, provider, account, source, sampled_at };
+  return [
+    makeUsageObservedEvent(projectId, clear),
+    ...snapshot.windows.map((w) =>
+      makeUsageObservedEvent(projectId, {
+        available: true,
+        provider,
+        account,
+        window_kind: w.kind,
+        used_pct: w.used_pct,
+        reset_at: w.reset_at,
+        source,
+        sampled_at,
+      }),
+    ),
+  ];
 }
 
 /**
  * Read the budget cap (in cents) from the L0 config cascade for `projectId` — the resolved
- * `cost_budget_cents` (global ⊕ project-override, project wins), or undefined when none is configured /
- * the value is not a non-negative finite number. Reads program-data ONLY (never the repo). `config` is
- * injectable for headless tests; the default opens + closes a config store internally (mirrors
- * `resolveRepoMode`).
+ * `cost_budget_cents` (global ⊕ project-override, project wins), or undefined when none is configured.
+ * A configured-but-malformed value throws fail-loud (P9) instead of silently disabling budget
+ * observability. Reads program-data ONLY (never the repo). `config` is injectable for headless tests; the
+ * default opens + closes a config store internally (mirrors `resolveRepoMode`).
  */
 export function resolveBudgetCapCents(projectId: string, config?: ConfigStore): number | undefined {
   const cfg = config ?? openConfigStore();
   const ownsConfig = config === undefined;
   try {
     const raw = cfg.resolveEffective(projectId)[COST_BUDGET_CENTS_KEY];
-    return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) {
+      throw new Error(
+        `co dispatch: malformed '${COST_BUDGET_CENTS_KEY}' config: expected a non-negative finite number`,
+      );
+    }
+    return raw;
   } finally {
     if (ownsConfig) cfg.close();
   }
@@ -378,6 +521,14 @@ export function resolveBudgetCap(
 ): BudgetCap | undefined {
   const capCents = resolveBudgetCapCents(projectId, opts?.config);
   if (capCents === undefined) return undefined;
+  if (
+    opts?.thresholdPct !== undefined &&
+    (!Number.isFinite(opts.thresholdPct) || opts.thresholdPct < 0 || opts.thresholdPct > 100)
+  ) {
+    throw new Error(
+      `co dispatch: malformed near-budget threshold: expected a finite percentage between 0 and 100`,
+    );
+  }
   return opts?.thresholdPct !== undefined
     ? { capCents, thresholdPct: opts.thresholdPct }
     : { capCents };
@@ -398,15 +549,35 @@ export async function observeUsage(
   source: ProviderUsageSource,
   provider: Provider,
   store: DispatchStore,
+  options: { readonly expectedAccount?: string; readonly nowMs?: number } = {},
 ): Promise<UsageSnapshot> {
   let snapshot: UsageSnapshot;
   try {
     snapshot = await source.read(provider);
   } catch (cause) {
-    if (cause instanceof UsageUnavailableError) throw cause;
-    throw new UsageUnavailableError(provider, `usage source read failed: ${errorMessage(cause)}`, {
-      cause,
-    });
+    if (cause instanceof UsageUnavailableError) {
+      const account = cause.account ?? options.expectedAccount;
+      if (account !== undefined) {
+        markAccountUnavailable(store, provider, account, cause.message, options.nowMs);
+      }
+      throw cause;
+    }
+    const err = new UsageUnavailableError(
+      provider,
+      `usage source read failed: ${errorMessage(cause)}`,
+      {
+        cause,
+      },
+    );
+    if (options.expectedAccount !== undefined) {
+      markAccountUnavailable(store, provider, options.expectedAccount, err.message, options.nowMs);
+    }
+    throw err;
+  }
+  if (options.expectedAccount !== undefined && snapshot.account !== options.expectedAccount) {
+    const reason = `usage source returned account '${snapshot.account}' while '${options.expectedAccount}' was requested`;
+    markAccountUnavailable(store, provider, options.expectedAccount, reason, options.nowMs);
+    throw new UsageUnavailableError(provider, reason, { account: options.expectedAccount });
   }
   // Record first so headroom is marked unknown for an unavailable snapshot BEFORE we surface the error.
   store.recordSnapshot(snapshot);
@@ -418,6 +589,23 @@ export async function observeUsage(
     );
   }
   return snapshot;
+}
+
+function markAccountUnavailable(
+  store: DispatchStore,
+  provider: Provider,
+  account: string,
+  reason: string,
+  nowMs: number | undefined,
+): void {
+  store.recordUsageObserved({
+    available: false,
+    provider,
+    account,
+    reason,
+    source: 'usage-source',
+    sampled_at: new Date(nowMs ?? Date.now()).toISOString(),
+  });
 }
 
 /** Best-effort message extraction from an unknown thrown value (no `String(err)` `[object Object]`). */

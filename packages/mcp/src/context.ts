@@ -1,5 +1,6 @@
 import {
   BASE_ROLES,
+  defaultUsageSourceFactory,
   openDispatchStore,
   openMailStore,
   openRegistry,
@@ -121,6 +122,15 @@ export function defaultContextFactory(): () => ToolContext {
       );
     }
   }
-  const ctx: ToolContext = { agent, projectId, cwd, mail, registry, worktrees, dispatch };
+  const ctx: ToolContext = {
+    agent,
+    projectId,
+    cwd,
+    mail,
+    registry,
+    worktrees,
+    dispatch,
+    usageSourceFactory: defaultUsageSourceFactory,
+  };
   return () => ctx;
 }

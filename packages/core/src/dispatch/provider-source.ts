@@ -22,6 +22,7 @@ import { assertNever } from '../assert-never.js';
 import type { Provider, ProviderUsageSource, UsageSnapshot, UsageWindow } from './usage-source.js';
 import { isStale, USAGE_BUCKET_TTL_MS_DEFAULT } from './policy.js';
 import { observeUsage, type DispatchStore } from './dispatch-store.js';
+import type { ProviderAccount } from './balancer.js';
 import {
   ClaudeUsageSource,
   CLAUDE_DEFAULT_ACCOUNT,
@@ -91,6 +92,13 @@ export function createProviderUsageSource(
 /** Alias for {@link createProviderUsageSource} — the "default ProviderUsageSource" production wires in. */
 export const defaultProviderUsageSource = createProviderUsageSource;
 
+/** Union-friendly default factory for mounts/adapters that receive provider as a `Provider` union. */
+export function defaultUsageSourceFactory(account: ProviderAccount): ProviderUsageSource {
+  return account.provider === 'claude'
+    ? createProviderUsageSource('claude', { account: account.account })
+    : createProviderUsageSource('codex', { account: account.account });
+}
+
 /** The `source` tag a snapshot served from the program-data cache carries. */
 export const CACHE_SOURCE = 'cache' as const;
 
@@ -125,7 +133,10 @@ export async function readProviderUsageCached(
 
   const cached = readFreshCache(store, provider, account, nowMs, ttlMs);
   if (cached) return cached;
-  return observeUsage(source, provider, store);
+  return observeUsage(source, provider, store, {
+    expectedAccount: account,
+    nowMs,
+  });
 }
 
 /**
@@ -141,10 +152,12 @@ function readFreshCache(
   nowMs: number,
   ttlMs: number,
 ): UsageSnapshot | undefined {
-  const status = store.getAccountStatus(account);
+  const status = store.getAccountStatus(provider, account);
   if (!status || !status.available || status.provider !== provider) return undefined;
 
-  const buckets = store.readBuckets().filter((b) => b.account === account);
+  const buckets = store
+    .readBuckets()
+    .filter((b) => b.provider === provider && b.account === account);
   if (buckets.length === 0) return undefined;
   for (const bucket of buckets) {
     if (isStale(bucket, nowMs, ttlMs)) return undefined;
