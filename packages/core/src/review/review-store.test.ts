@@ -20,6 +20,7 @@ import {
 } from './events.js';
 import { ReviewProjector } from './review-projector.js';
 import { openReviewStore } from './review-store.js';
+import { renderReviewSpecRef } from './spec-ref.js';
 
 // ── Program-data dir per test (mirrors worktree-store.test.ts) ───────────────────────────────────
 const ORIGINAL_ENV = process.env;
@@ -577,6 +578,103 @@ describe('AC-L5-1 — assertRepoPristine holds around the review recorders', () 
       });
       expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a')).toBeDefined();
       expect(existsSync(join(repo, '.co'))).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// ── AC-L5-8 — spec-ref seam: criteria ref + no-locked-spec marker ─────────────────────────────────
+describe('AC-L5-8 — specRef is recorded on review.requested + read back on getReviewRequest', () => {
+  it('no specRef supplied ⇒ getReviewRequest returns { kind: no-locked-spec }', () => {
+    const store = openReviewStore('p-specref-absent');
+    try {
+      const saved = store.recordReviewRequested(request());
+      expect(saved.specRef).toEqual({ kind: 'no-locked-spec' });
+      const read = store.getReviewRequest('co/l5-review-gate', 'co/l5-phase-a');
+      expect(read?.specRef).toEqual({ kind: 'no-locked-spec' });
+      // The literal "<TODO>" must never appear in the rendered marker.
+      expect(renderReviewSpecRef(saved.specRef)).not.toContain('<TODO>');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('criteria specRef ⇒ getReviewRequest returns { kind: criteria, ref }', () => {
+    const store = openReviewStore('p-specref-criteria');
+    try {
+      const ref = 'docs/specs/2026-06-07-stage-5-7fa7.locked.md#AC-L5-8';
+      const saved = store.recordReviewRequested(
+        request({ specRefKind: 'criteria', specRefRef: ref }),
+      );
+      expect(saved.specRef).toEqual({ kind: 'criteria', ref });
+      const read = store.getReviewRequest('co/l5-review-gate', 'co/l5-phase-a');
+      expect(read?.specRef).toEqual({ kind: 'criteria', ref });
+      expect(renderReviewSpecRef(saved.specRef)).toBe(ref);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('specRef is independent of verdict — a criteria request alone is not a PASS', () => {
+    const store = openReviewStore('p-specref-no-verdict');
+    try {
+      store.recordReviewRequested(
+        request({ specRefKind: 'criteria', specRefRef: 'some/spec.md#AC-1' }),
+      );
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// ── AC-L5-8 / AC-L5-11 — specRef replay: review.requested with specRef replays byte-identical ─────
+describe('AC-L5-8 + AC-L5-11 — specRef on review.requested replays byte-identical', () => {
+  function specRefSnapshot(db: DatabaseSync): string {
+    return JSON.stringify(
+      db
+        .prepare(
+          'SELECT target, branch, spec_ref_kind, spec_ref_ref FROM reviews ORDER BY target, branch',
+        )
+        .all(),
+    );
+  }
+
+  it('criteria + no-spec mix: live == rebuilt (non-vacuous, both kinds exercised)', () => {
+    const store = openProjectStore('p-specref-replay');
+    const projectors = [new ReviewProjector()];
+    const sequence = [
+      // Branch co/a: request with a criteria ref.
+      makeReviewRequestedEvent('p-specref-replay', {
+        ...request({ reviewId: 'r-a', branch: 'co/a' }),
+        specRefKind: 'criteria',
+        specRefRef: 'docs/specs/task.locked.md#AC-L5-8',
+      }),
+      // Branch co/b: request with no specRef ⇒ no-locked-spec.
+      makeReviewRequestedEvent('p-specref-replay', request({ reviewId: 'r-b', branch: 'co/b' })),
+      // Add a verdict for co/a so the replay has a multi-event row.
+      makeReviewVerdictEvent('p-specref-replay', verdict({ reviewId: 'r-a', branch: 'co/a' })),
+    ];
+    try {
+      for (const e of sequence) {
+        store.transaction((tx) => {
+          const [s] = tx.append([e]);
+          applyEvent(tx, decode(s!, reviewUpcasters, reviewSchemas), projectors);
+        });
+      }
+      const live = store.transaction((tx) => specRefSnapshot(tx.raw as DatabaseSync));
+
+      rebuildAll(store, projectors, (e) => decode(e, reviewUpcasters, reviewSchemas));
+      const replayed = store.transaction((tx) => specRefSnapshot(tx.raw as DatabaseSync));
+
+      expect(replayed).toBe(live);
+      // Guard against a vacuous pass.
+      expect(live).toContain('"spec_ref_kind":"criteria"');
+      expect(live).toContain('"spec_ref_ref":"docs/specs/task.locked.md#AC-L5-8"');
+      expect(live).toContain('"branch":"co/b"');
+      // Branch co/b has null spec_ref_kind (no specRef provided).
+      expect(live).not.toContain('<TODO>');
     } finally {
       store.close();
     }
