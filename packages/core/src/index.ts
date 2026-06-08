@@ -761,5 +761,36 @@ export {
   CO_LIVE_E2E_ENV,
 } from './dispatch/provider-source.js';
 
+// L6a Phase A — authoritative role profiles + durable agent→role→parent projection + spawn rules
+// (AC-L6a-1, AC-L6a-3, AC-L6a-8, AC-L6a-9, AC-L6a-10). Five base roles promoted from a seed
+// toolset list to full permission profiles (mandate + writeScope + toolset + capabilities);
+// `roleToolsets` in scoping.ts is now DERIVED from these authoritative profiles. A durable,
+// event-sourced agent→role→parent projection (`roster` table) is replay-equal over L0. Structural
+// spawn rules are a pure static check (no spawn runtime — that is L7).
+export type { RoleProfile, WriteScope, Capability, RoleProfileViolation } from './roles/profile.js';
+export { ROLE_PROFILES, profileFor, checkRoleProfileCompleteness } from './roles/profile.js';
+// L6a roles events: `agent.registered` — the durable, validated record of which role an agent was
+// dispatched under and who spawned it. Event-sourced over L0 (program-data only, Principle 12).
+export type { AgentRegistered, AgentRecord } from './roles/events.js';
+export {
+  ROLES_EVENT_V,
+  EVENT_AGENT_REGISTERED,
+  AGENT_SCOPE_PREFIX,
+  agentScope,
+  agentRegisteredSchema,
+  rolesSchemas,
+  rolesUpcasters,
+  makeAgentRegisteredEvent,
+} from './roles/events.js';
+// L6a roster projection: the `RosterProjector` folds `agent.registered` into a `roster` read-model
+// table; `openRosterStore` is the typed facade (record + read-back + replay-equal).
+export { RosterProjector } from './roles/roster-projector.js';
+export type { RosterStore } from './roles/roster-store.js';
+export { openRosterStore } from './roles/roster-store.js';
+// L6a spawn rules: structural parent→child constraints from agent-roles.md. Pure static check —
+// the runtime enforcement gate at spawn time is L7.
+export type { SpawnViolation } from './roles/spawn-rules.js';
+export { SPAWN_RULES, canSpawn, checkSpawnPlan, validateSpawnPlan } from './roles/spawn-rules.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
