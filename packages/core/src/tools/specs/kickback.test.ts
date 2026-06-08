@@ -273,7 +273,7 @@ describe('co_kickback — absent stores → loud-fail (Principle 9)', () => {
     buildRoster(stores.roster);
     const ctx = { ...makeCtx('lead-1', stores), mail: undefined };
     await expect(
-      invokeTool(registry, ctx as ToolContext, 'co_kickback', {
+      invokeTool(registry, ctx as unknown as ToolContext, 'co_kickback', {
         branch: BRANCH,
         worker: 'impl-1',
         blockers: ['x'],
