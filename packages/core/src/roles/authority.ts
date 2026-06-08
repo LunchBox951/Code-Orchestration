@@ -49,13 +49,31 @@ export function escalationDisposition(role: Role, topic: EscalationTopic): 'reso
         case 'approach':
         case 'worker-rescope':
           return 'resolve';
-        default:
+        case 'phase-scope':
+        case 'spec-interpretation':
+        case 'known-issue-ack':
+        case 'spec-intent':
           return 'forward';
+        default:
+          return assertNever(topic);
       }
 
     case 'coordinator':
       // A coordinator resolves everything EXCEPT spec-intent (true authorial intent — only @operator).
-      return topic === 'spec-intent' ? 'forward' : 'resolve';
+      switch (topic) {
+        case 'how-to':
+        case 'integration':
+        case 'approach':
+        case 'worker-rescope':
+        case 'phase-scope':
+        case 'spec-interpretation':
+        case 'known-issue-ack':
+          return 'resolve';
+        case 'spec-intent':
+          return 'forward';
+        default:
+          return assertNever(topic);
+      }
 
     case 'reviewer':
     case 'researcher':
