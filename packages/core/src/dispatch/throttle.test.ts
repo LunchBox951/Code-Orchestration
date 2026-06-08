@@ -19,6 +19,7 @@ function stubPlacement(provider: Provider): Placement {
   return {
     role: 'implementer',
     provider,
+    account: provider === 'claude' ? 'claude:max' : 'codex:pro',
     model: provider === 'claude' ? 'claude-sonnet-4-6' : 'gpt-5.4',
     effort: 'high',
     context: 'standard',
@@ -33,14 +34,38 @@ function floatingDecision(
   if (!chosen) throw new Error('At least one ranked candidate required');
   const rankedItems: readonly RankedCandidate[] = ranked.map((r) => ({
     provider: r.provider,
+    account: r.provider === 'claude' ? 'claude:max' : 'codex:pro',
     score: 100 - r.usedPct,
     usedPct: r.usedPct,
     resetAt: r.resetAt,
+    placement: stubPlacement(r.provider),
   }));
   return {
     kind: 'floating',
     placement: stubPlacement(chosen.provider),
     reason: `floating to '${chosen.provider}'`,
+    ranked: rankedItems,
+  };
+}
+
+function floatingDecisionWithAccounts(
+  ranked: { provider: Provider; account: string; usedPct: number; resetAt: string }[],
+  placementAccount: string,
+): PlacementDecision {
+  const chosen = ranked.find((r) => r.account === placementAccount);
+  if (!chosen) throw new Error('placement account must be ranked');
+  const rankedItems: readonly RankedCandidate[] = ranked.map((r) => ({
+    provider: r.provider,
+    account: r.account,
+    score: 100 - r.usedPct,
+    usedPct: r.usedPct,
+    resetAt: r.resetAt,
+    placement: { ...stubPlacement(r.provider), account: r.account },
+  }));
+  return {
+    kind: 'floating',
+    placement: { ...stubPlacement(chosen.provider), account: chosen.account },
+    reason: `floating to '${chosen.account}'`,
     ranked: rankedItems,
   };
 }
@@ -69,9 +94,11 @@ function healthy(
   provider: Provider,
   usedPct: number,
   resetAt: string = RESET_LATER,
+  account: string = provider === 'claude' ? 'claude:max' : 'codex:pro',
 ): ProviderHeadroom {
   return {
     provider,
+    account,
     available: true,
     headroom: { kind: 'known', used_pct: usedPct, reset_at: resetAt },
     resetAt,
@@ -83,9 +110,11 @@ function maxed(
   provider: Provider,
   usedPct: number = MAXED_THRESHOLD_PCT_DEFAULT,
   resetAt: string = RESET_SOON,
+  account: string = provider === 'claude' ? 'claude:max' : 'codex:pro',
 ): ProviderHeadroom {
   return {
     provider,
+    account,
     available: true,
     headroom: { kind: 'known', used_pct: usedPct, reset_at: resetAt },
     resetAt,
@@ -93,9 +122,14 @@ function maxed(
 }
 
 /** An unavailable ProviderHeadroom (account down / not-logged-in). */
-function unavail(provider: Provider, resetAt?: string): ProviderHeadroom {
+function unavail(
+  provider: Provider,
+  resetAt?: string,
+  account: string = provider === 'claude' ? 'claude:max' : 'codex:pro',
+): ProviderHeadroom {
   const base: ProviderHeadroom = {
     provider,
+    account,
     available: false,
     headroom: { kind: 'unknown', reason: 'account unavailable' },
   };
@@ -149,6 +183,105 @@ describe('resolveDispatch — floating', () => {
     expect(result.etaResetAt).toBe(RESET_SOON); // soonest of the two
   });
 
+  it('waiting includes unavailable providers when healthy ranked providers are maxed', () => {
+    const decision = floatingDecision([{ provider: 'claude', usedPct: 99, resetAt: RESET_LATER }]);
+    const result = resolveDispatch(decision, [maxed('claude', 99, RESET_LATER), unavail('codex')], {
+      nowMs: NOW,
+    });
+
+    expect(result.kind).toBe('waiting');
+    if (result.kind !== 'waiting') throw new Error('unreachable');
+    expect(result.maxedProviders).toEqual(['claude']);
+    expect(result.unavailableProviders).toEqual(['codex']);
+    expect(result.diagnostics).toEqual([
+      {
+        provider: 'codex',
+        account: 'codex:pro',
+        code: 'usage_source_unavailable',
+        reason: 'account unavailable',
+      },
+    ]);
+  });
+
+  it('places on the first non-maxed ranked provider instead of waiting on a maxed top candidate', () => {
+    const decision = floatingDecision([
+      { provider: 'claude', usedPct: 99, resetAt: RESET_SOON },
+      { provider: 'codex', usedPct: 20, resetAt: RESET_LATER },
+    ]);
+    const result = resolveDispatch(decision, [], { nowMs: NOW });
+    expect(result.kind).toBe('placed');
+    if (result.kind !== 'placed') throw new Error('unreachable');
+    expect(result.placement.provider).toBe('codex');
+  });
+
+  it('names the skipped selected provider when hysteresis held an incumbent that is now maxed', () => {
+    const rankedItems: readonly RankedCandidate[] = [
+      {
+        provider: 'codex',
+        account: 'codex:pro',
+        score: 80,
+        usedPct: 20,
+        resetAt: RESET_LATER,
+        placement: stubPlacement('codex'),
+      },
+      {
+        provider: 'claude',
+        account: 'claude:max',
+        score: 1,
+        usedPct: 99,
+        resetAt: RESET_SOON,
+        placement: stubPlacement('claude'),
+      },
+    ];
+    const decision: PlacementDecision = {
+      kind: 'floating',
+      placement: stubPlacement('claude'),
+      reason: "floating role 'implementer' → 'claude'; held on previous 'claude' by hysteresis",
+      ranked: rankedItems,
+    };
+
+    const result = resolveDispatch(decision, [], { nowMs: NOW });
+
+    expect(result.kind).toBe('placed');
+    if (result.kind !== 'placed') throw new Error('unreachable');
+    expect(result.placement.provider).toBe('codex');
+    expect(result.reason).toMatch(/selected account 'claude:max' was maxed/i);
+    expect(result.reason).not.toMatch(/top-ranked provider was maxed/i);
+  });
+
+  it('keeps the balancer-selected hysteresis placement when the top challenger is still below threshold', () => {
+    const rankedItems: readonly RankedCandidate[] = [
+      {
+        provider: 'claude',
+        account: 'claude:max',
+        score: 90,
+        usedPct: 10,
+        resetAt: RESET_LATER,
+        placement: stubPlacement('claude'),
+      },
+      {
+        provider: 'codex',
+        account: 'codex:pro',
+        score: 88,
+        usedPct: 12,
+        resetAt: RESET_LATER,
+        placement: stubPlacement('codex'),
+      },
+    ];
+    const decision: PlacementDecision = {
+      kind: 'floating',
+      placement: stubPlacement('codex'),
+      reason: "floating role 'implementer' → 'codex'; held on previous 'codex' by hysteresis",
+      ranked: rankedItems,
+    };
+
+    const result = resolveDispatch(decision, [], { nowMs: NOW });
+
+    expect(result.kind).toBe('placed');
+    if (result.kind !== 'placed') throw new Error('unreachable');
+    expect(result.placement.provider).toBe('codex');
+  });
+
   it('waiting message is LOUD — contains ETA and provider names (P9, spec §3)', () => {
     const decision = floatingDecision([{ provider: 'claude', usedPct: 100, resetAt: RESET_SOON }]);
     const result = resolveDispatch(decision, [], { nowMs: NOW });
@@ -178,6 +311,38 @@ describe('resolveDispatch — floating', () => {
     const result = resolveDispatch(decision, [], { nowMs: NOW, maxedThresholdPct: 90 });
     expect(result.kind).toBe('waiting');
   });
+
+  it('fails loud when floating resolution sees multiple same-provider accounts', () => {
+    const decision = floatingDecisionWithAccounts(
+      [
+        { provider: 'claude', account: 'claude:max', usedPct: 99, resetAt: RESET_SOON },
+        { provider: 'claude', account: 'claude:team', usedPct: 50, resetAt: RESET_LATER },
+      ],
+      'claude:max',
+    );
+
+    expect(() => resolveDispatch(decision, [], { nowMs: NOW })).toThrow(
+      /same-provider multi-subscription routing/i,
+    );
+  });
+
+  it('does not drop unavailable diagnostics for another provider account', () => {
+    const decision = floatingDecisionWithAccounts(
+      [{ provider: 'claude', account: 'claude:max', usedPct: 100, resetAt: RESET_SOON }],
+      'claude:max',
+    );
+
+    const result = resolveDispatch(
+      decision,
+      [maxed('claude', 100, RESET_SOON, 'claude:max'), unavail('codex', RESET_SOON, 'codex:pro')],
+      { nowMs: NOW },
+    );
+
+    expect(result.kind).toBe('waiting');
+    if (result.kind !== 'waiting') throw new Error('unreachable');
+    expect(result.unavailableAccounts).toEqual(['codex:pro']);
+    expect(result.diagnostics?.[0]?.account).toBe('codex:pro');
+  });
 });
 
 describe('resolveDispatch — pinned', () => {
@@ -199,6 +364,7 @@ describe('resolveDispatch — pinned', () => {
     expect(result.kind).toBe('waiting');
     if (result.kind !== 'waiting') throw new Error('unreachable');
     expect(result.maxedProviders).toEqual(['claude']);
+    expect(result.unavailableProviders).toEqual([]);
     expect(result.etaResetAt).toBe(RESET_SOON);
   });
 
@@ -211,6 +377,7 @@ describe('resolveDispatch — pinned', () => {
     expect(result.kind).toBe('waiting');
     if (result.kind !== 'waiting') throw new Error('unreachable');
     expect(result.maxedProviders).toEqual(['claude']); // only the pinned provider
+    expect(result.unavailableProviders).toEqual([]);
   });
 
   it('waiting when pinned provider is unavailable — ETA from its resetAt', () => {
@@ -218,7 +385,8 @@ describe('resolveDispatch — pinned', () => {
     const result = resolveDispatch(decision, [unavail('claude', RESET_SOON)], { nowMs: NOW });
     expect(result.kind).toBe('waiting');
     if (result.kind !== 'waiting') throw new Error('unreachable');
-    expect(result.maxedProviders).toEqual(['claude']);
+    expect(result.maxedProviders).toEqual([]);
+    expect(result.unavailableProviders).toEqual(['claude']);
     expect(result.etaResetAt).toBe(RESET_SOON);
   });
 
@@ -227,7 +395,8 @@ describe('resolveDispatch — pinned', () => {
     const result = resolveDispatch(decision, [], { nowMs: NOW });
     expect(result.kind).toBe('waiting');
     if (result.kind !== 'waiting') throw new Error('unreachable');
-    expect(result.maxedProviders).toEqual(['claude']);
+    expect(result.maxedProviders).toEqual([]);
+    expect(result.unavailableProviders).toEqual(['claude']);
     expect(result.etaResetAt).toBeUndefined();
   });
 
@@ -238,6 +407,21 @@ describe('resolveDispatch — pinned', () => {
     });
     expect(result.kind).toBe('placed');
   });
+
+  it('fails loud when pinned resolution sees multiple same-provider accounts', () => {
+    const decision = pinnedDecision('claude');
+
+    expect(() =>
+      resolveDispatch(
+        decision,
+        [
+          maxed('claude', 99, RESET_SOON, 'claude:max'),
+          healthy('claude', 50, RESET_LATER, 'claude:team'),
+        ],
+        { nowMs: NOW },
+      ),
+    ).toThrow(/same-provider multi-subscription routing/i);
+  });
 });
 
 describe('resolveDispatch — no-candidate', () => {
@@ -247,7 +431,8 @@ describe('resolveDispatch — no-candidate', () => {
     expect(result.kind).toBe('waiting');
     if (result.kind !== 'waiting') throw new Error('unreachable');
     expect(result.etaResetAt).toBe(RESET_SOON);
-    expect(result.maxedProviders).toEqual(['claude', 'codex']);
+    expect(result.maxedProviders).toEqual([]);
+    expect(result.unavailableProviders).toEqual(['claude', 'codex']);
   });
 
   it('waiting without ETA when soonestResetAt is absent — still loud and not silent (P9)', () => {
@@ -260,20 +445,55 @@ describe('resolveDispatch — no-candidate', () => {
     expect(result.message).toContain('delayed');
   });
 
+  it('unavailable candidates surface usage-source diagnostics instead of capacity wording', () => {
+    const decision = noCandidateDecision(['claude']);
+    const result = resolveDispatch(decision, [], { nowMs: NOW });
+    expect(result.kind).toBe('waiting');
+    if (result.kind !== 'waiting') throw new Error('unreachable');
+    expect(result.message).toMatch(/usage source unavailable/i);
+    expect(result.message).not.toMatch(/all providers at capacity/i);
+    expect(result.maxedProviders).toEqual([]);
+    expect(result.unavailableProviders).toEqual(['claude']);
+    expect(result.diagnostics).toEqual([
+      {
+        provider: 'claude',
+        code: 'usage_source_unavailable',
+        reason: 'unavailable',
+      },
+    ]);
+  });
+
   it('waiting even with empty excluded list — never silent (P9)', () => {
     const decision = noCandidateDecision([]);
     const result = resolveDispatch(decision, [], { nowMs: NOW });
     expect(result.kind).toBe('waiting');
     if (result.kind !== 'waiting') throw new Error('unreachable');
     expect(result.message.length).toBeGreaterThan(0);
+    expect(result.message).toMatch(/no provider candidates available/i);
+    expect(result.message).not.toMatch(/all providers at capacity/i);
   });
 
-  it('propagates all excluded providers into maxedProviders', () => {
+  it('propagates all excluded providers into unavailableProviders, not maxedProviders', () => {
     const decision = noCandidateDecision(['claude', 'codex'], RESET_SOON);
     const result = resolveDispatch(decision, [], { nowMs: NOW });
     if (result.kind !== 'waiting') throw new Error('unreachable');
-    expect(result.maxedProviders).toContain('claude');
-    expect(result.maxedProviders).toContain('codex');
+    expect(result.maxedProviders).toEqual([]);
+    expect(result.unavailableProviders).toEqual(['claude', 'codex']);
+  });
+
+  it('fails loud when no-candidate resolution sees multiple same-provider accounts', () => {
+    const decision: PlacementDecision = {
+      kind: 'no-candidate',
+      reason: 'all provider accounts excluded',
+      excluded: [
+        { provider: 'claude', account: 'claude:max', why: 'maxed' },
+        { provider: 'claude', account: 'claude:team', why: 'unavailable' },
+      ],
+    };
+
+    expect(() => resolveDispatch(decision, [], { nowMs: NOW })).toThrow(
+      /same-provider multi-subscription routing/i,
+    );
   });
 });
 
@@ -299,6 +519,7 @@ describe('canResume', () => {
   it('false when candidate has unknown headroom (never treated as healthy — P9, AC3)', () => {
     const candidate: ProviderHeadroom = {
       provider: 'claude',
+      account: 'claude:max',
       available: true,
       headroom: { kind: 'unknown', reason: 'not yet sampled' },
     };
@@ -308,6 +529,49 @@ describe('canResume', () => {
   it('true when at least one candidate is healthy and below threshold', () => {
     const candidates = [maxed('claude'), healthy('codex', 50)];
     expect(canResume(candidates, { nowMs: NOW })).toBe(true);
+  });
+
+  it('honors a provider filter for pinned WAITING seats', () => {
+    const candidates = [maxed('claude'), healthy('codex', 50)];
+    expect(canResume(candidates, { nowMs: NOW, providers: ['claude'] })).toBe(false);
+    expect(
+      canResume([healthy('claude', 50), healthy('codex', 50)], {
+        nowMs: NOW,
+        providers: ['claude'],
+      }),
+    ).toBe(true);
+  });
+
+  it('honors an account filter for pinned/custom account WAITING seats', () => {
+    const candidates = [healthy('claude', 50, RESET_LATER, 'claude:max'), maxed('codex')];
+
+    expect(
+      canResume(candidates, { nowMs: NOW, providers: ['codex'], accounts: ['codex:pro'] }),
+    ).toBe(false);
+    expect(
+      canResume(candidates, { nowMs: NOW, providers: ['claude'], accounts: ['claude:max'] }),
+    ).toBe(true);
+  });
+
+  it('fails loud when resume filters describe multiple same-provider accounts', () => {
+    expect(() =>
+      canResume([maxed('claude', 99, RESET_SOON, 'claude:max')], {
+        nowMs: NOW,
+        providers: ['claude'],
+        accounts: ['claude:max', 'claude:team'],
+      }),
+    ).toThrow(/same-provider multi-subscription routing/i);
+  });
+
+  it('fails loud when resume sees multiple same-provider accounts', () => {
+    const candidates = [
+      maxed('claude', 99, RESET_SOON, 'claude:max'),
+      healthy('claude', 50, RESET_LATER, 'claude:team'),
+    ];
+
+    expect(() => canResume(candidates, { nowMs: NOW })).toThrow(
+      /same-provider multi-subscription routing/i,
+    );
   });
 
   it('true when candidate is just below threshold (boundary)', () => {

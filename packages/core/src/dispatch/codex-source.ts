@@ -55,11 +55,14 @@ export const CODEX_SESSIONS_DIR_ENV = 'CO_CODEX_SESSIONS_DIR';
 export interface CodexAccountInfo {
   readonly healthy: boolean;
   readonly account: string;
+  /** True when metadata named an explicit account identity; false for plan/default fallback. */
+  readonly accountObserved?: boolean;
 }
 
 /** What a rate-limits parse yields: the account (if named), availability, and the parsed windows. */
 export interface CodexRateLimitsReading {
   readonly account?: string;
+  readonly accountObserved?: boolean;
   readonly available: boolean;
   readonly windows: readonly UsageWindow[];
 }
@@ -83,7 +86,7 @@ export interface CodexUsageSourceDeps {
 
 /** Static config for {@link CodexUsageSource} (the account label). */
 export interface CodexUsageSourceOptions {
-  /** Account label; default {@link CODEX_DEFAULT_ACCOUNT}. The preflight refines it when it names a plan. */
+  /** Account label fallback when metadata/passive payloads do not name the observed account. */
   readonly account?: string;
 }
 
@@ -94,13 +97,19 @@ export interface CodexUsageSourceOptions {
  */
 export function parseCodexDoctor(payload: unknown): CodexAccountInfo {
   const root = asRecord(payload) ?? {};
-  const plan = stringish(pick(root, 'plan', 'subscription', 'tier'));
-  const account = plan ? `codex:${plan.toLowerCase()}` : CODEX_DEFAULT_ACCOUNT;
+  const accountRecord = asRecord(pick(root, 'account', 'user')) ?? root;
+  const explicit = firstScopedAccountLabel([root]);
+  const plan = stringish(pick(accountRecord, 'plan', 'subscription', 'tier'));
+  const account = explicit ?? (plan ? `codex:${plan.toLowerCase()}` : CODEX_DEFAULT_ACCOUNT);
 
   const authed = boolish(pick(root, 'authenticated', 'logged_in', 'loggedIn', 'signed_in'));
   const status = stringish(pick(root, 'status', 'health', 'state'));
   const statusBad = status ? /fail|error|unhealthy|down|logged.?out|expired/i.test(status) : false;
-  return { healthy: !(authed === false || statusBad), account };
+  return {
+    healthy: !(authed === false || statusBad),
+    account,
+    accountObserved: explicit !== undefined,
+  };
 }
 
 /**
@@ -118,12 +127,15 @@ export function parseCodexRateLimits(
 ): CodexRateLimitsReading {
   const root = asRecord(payload);
   if (!root) return { available: true, windows: [] };
-  const body = findRateLimitsBody(root) ?? root;
+  const found = findRateLimitsBodyWithParents(root);
+  const body = found?.body ?? root;
+  const metadataRecords = uniqueRecords([body, ...(found?.parents ?? []), root]);
 
-  const plan =
-    stringish(pick(body, 'plan', 'plan_type')) ?? stringish(pick(root, 'plan', 'plan_type'));
-  const account = plan ? `codex:${plan.toLowerCase()}` : undefined;
-  const allowed = boolish(pick(body, 'allowed', 'is_allowed')) ?? boolish(pick(root, 'allowed'));
+  const explicitAccount = firstScopedAccountLabel(metadataRecords);
+  const plan = firstStringish(metadataRecords, 'plan', 'plan_type');
+  const account = explicitAccount ?? (plan ? `codex:${plan.toLowerCase()}` : undefined);
+  const allowedValues = boolishValues(metadataRecords, 'allowed', 'is_allowed');
+  const limitReachedValues = boolishValues(metadataRecords, 'limit_reached', 'limitReached');
 
   const sampledMs = Date.parse(sampledAtIso);
   const windows: UsageWindow[] = [];
@@ -137,8 +149,13 @@ export function parseCodexRateLimits(
     windows.push({ kind: key, used_pct: used, reset_at: reset });
   }
 
-  const reading: CodexRateLimitsReading = { available: allowed !== false, windows };
-  return account !== undefined ? { ...reading, account } : reading;
+  const reading: CodexRateLimitsReading = {
+    ...(account !== undefined ? { account } : {}),
+    accountObserved: explicitAccount !== undefined,
+    available: !allowedValues.includes(false) && !limitReachedValues.includes(true),
+    windows,
+  };
+  return reading;
 }
 
 /**
@@ -185,18 +202,87 @@ function resolveExplicitResetAt(value: unknown): string | undefined {
  * `rate_limits` child, or one found by a shallow DFS (so a `token_count` wrapper or a logged event row
  * still resolves). Undefined when no such object exists.
  */
+interface RateLimitsBodyMatch {
+  readonly body: Record<string, unknown>;
+  readonly parents: readonly Record<string, unknown>[];
+}
+
 function findRateLimitsBody(value: unknown, depth = 0): Record<string, unknown> | undefined {
+  return findRateLimitsBodyWithParents(value, depth)?.body;
+}
+
+function findRateLimitsBodyWithParents(
+  value: unknown,
+  depth = 0,
+  parents: readonly Record<string, unknown>[] = [],
+): RateLimitsBodyMatch | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
-  if (asRecord(record.primary) || asRecord(record.secondary)) return record;
   const nested = asRecord(pick(record, 'rate_limits', 'rateLimits'));
-  if (nested && (asRecord(nested.primary) || asRecord(nested.secondary))) return nested;
+  if (nested && (asRecord(nested.primary) || asRecord(nested.secondary))) {
+    return { body: nested, parents: [record, ...parents] };
+  }
+  if (asRecord(record.primary) || asRecord(record.secondary)) return { body: record, parents };
   if (depth >= 4) return undefined;
   for (const child of Object.values(record)) {
-    const found = findRateLimitsBody(child, depth + 1);
+    const found = findRateLimitsBodyWithParents(child, depth + 1, [record, ...parents]);
     if (found) return found;
   }
   return undefined;
+}
+
+function uniqueRecords(
+  records: readonly Record<string, unknown>[],
+): readonly Record<string, unknown>[] {
+  return [...new Set(records)];
+}
+
+function firstStringish(
+  records: readonly Record<string, unknown>[],
+  ...keys: readonly string[]
+): string | undefined {
+  for (const record of records) {
+    const value = stringish(pick(record, ...keys));
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function firstScopedAccountLabel(records: readonly Record<string, unknown>[]): string | undefined {
+  for (const record of records) {
+    const direct = providerAccountLabel(
+      stringish(pick(record, 'account_id', 'accountId')),
+      'codex',
+    );
+    if (direct !== undefined) return direct;
+
+    const account = stringish(pick(record, 'account'));
+    const directAccount = providerAccountLabel(account, 'codex');
+    if (directAccount !== undefined) return directAccount;
+
+    for (const key of ['account', 'user'] as const) {
+      const scoped = asRecord(pick(record, key));
+      if (!scoped) continue;
+      const label = providerAccountLabel(
+        stringish(pick(scoped, 'account', 'account_id', 'accountId', 'id', 'label')),
+        'codex',
+      );
+      if (label !== undefined) return label;
+    }
+  }
+  return undefined;
+}
+
+function boolishValues(
+  records: readonly Record<string, unknown>[],
+  ...keys: readonly string[]
+): boolean[] {
+  const values: boolean[] = [];
+  for (const record of records) {
+    const value = boolish(pick(record, ...keys));
+    if (value !== undefined) values.push(value);
+  }
+  return values;
 }
 
 /**
@@ -224,10 +310,14 @@ export class CodexUsageSource implements ProviderUsageSource {
 
     // 1. Preflight (metadata only). Best-effort: a thrown preflight does not abort.
     let account = this.account;
+    let accountObserved = this.account === CODEX_DEFAULT_ACCOUNT;
     let preflight: UsageSnapshot | null = null;
     try {
       const info = await this.deps.doctor();
-      account = info.account || account;
+      if (info.accountObserved !== false || this.account === CODEX_DEFAULT_ACCOUNT) {
+        account = info.account || account;
+      }
+      if (info.accountObserved !== false) accountObserved = true;
       if (!info.healthy) {
         preflight = buildSnapshot({
           provider: 'codex',
@@ -248,20 +338,23 @@ export class CodexUsageSource implements ProviderUsageSource {
     }
     attempts.push({
       label: 'logs_2.sqlite codex.rate_limits (passive)',
-      run: () => this.readReadout(this.deps.readRateLimits(), account, sampledAt, 'sqlite'),
+      run: () =>
+        this.readReadout(this.deps.readRateLimits(), account, accountObserved, sampledAt, 'sqlite'),
     });
     if (this.deps.appServerRead) {
       const appServerRead = this.deps.appServerRead;
       attempts.push({
         label: 'app-server account/rateLimits/read (active)',
-        run: () => this.readReadout(appServerRead(), account, sampledAt, 'app-server'),
+        run: () =>
+          this.readReadout(appServerRead(), account, accountObserved, sampledAt, 'app-server'),
       });
     }
     if (this.deps.sessionRollout) {
       const sessionRollout = this.deps.sessionRollout;
       attempts.push({
         label: 'session rollout jsonl (fallback)',
-        run: () => this.readReadout(sessionRollout(), account, sampledAt, 'session-jsonl'),
+        run: () =>
+          this.readReadout(sessionRollout(), account, accountObserved, sampledAt, 'session-jsonl'),
       });
     }
     return layeredRead('codex', account, attempts);
@@ -271,16 +364,29 @@ export class CodexUsageSource implements ProviderUsageSource {
   private async readReadout(
     payloadPromise: Promise<unknown>,
     account: string,
+    accountObserved: boolean,
     sampledAt: string,
     source: string,
   ): Promise<UsageSnapshot | null> {
     const reading = parseCodexRateLimits(await payloadPromise, sampledAt);
-    const resolvedAccount = reading.account ?? account;
+    const resolvedAccount =
+      reading.account !== undefined &&
+      (reading.accountObserved !== false || this.account === CODEX_DEFAULT_ACCOUNT)
+        ? reading.account
+        : account;
+    const observed = accountObserved || reading.accountObserved !== false;
+    if (this.account !== CODEX_DEFAULT_ACCOUNT && !observed) {
+      throw new UsageUnavailableError(
+        'codex',
+        `requested Codex account '${this.account}' was not observed by ${source}`,
+        { account: this.account },
+      );
+    }
     if (!reading.available) {
       return buildSnapshot({
         provider: 'codex',
         account: resolvedAccount,
-        windows: [],
+        windows: reading.windows,
         available: false,
         source,
         sampledAt,
@@ -390,8 +496,8 @@ const RATE_LIMITS_SIGNATURE = 'websocket event: {"type":"codex.rate_limits"';
  *   1. A targeted SQL `LIKE` on the {@link RATE_LIMITS_SIGNATURE} pins the newest GENUINE websocket event,
  *      even when the logs are polluted with assistant-message prose that merely mentions
  *      `codex.rate_limits` / `used_percent` and could otherwise fall outside (or outrank) a fixed window.
- *   2. A defensive blind newest-`scanLimit`-row text scan per column, so a host whose schema lacks the
- *      exact `feedback_log_body` shape still resolves.
+ *   2. A defensive newest-`scanLimit`-row text scan per column that only trusts candidates with an event-type
+ *      column or signature provenance, so arbitrary assistant-message JSON is ignored.
  *
  * Both passes EXTRACT the embedded JSON (real bodies are not pure JSON — see {@link extractEmbeddedJson})
  * before parsing, then return the first value that resolves into a rate-limits structure (a `primary` /
@@ -404,95 +510,235 @@ export function readLatestCodexRateLimits(
   const scanLimit = opts.scanLimit ?? 500;
   const columns = collectTextColumns(db);
 
-  // 1. PRIORITIZED — the latest row carrying the real codex.rate_limits websocket-event signature.
-  for (const { table, column } of columns) {
-    const hit = readSignatureRateLimits(db, table, column);
-    if (hit !== undefined) return hit;
-  }
-
-  // 2. DEFENSIVE FALLBACK — a blind newest-N-per-column scan for other / unknown schemas.
-  for (const { table, column } of columns) {
-    const hit = scanColumnRateLimits(db, table, column, scanLimit);
-    if (hit !== undefined) return hit;
-  }
-  return undefined;
+  const candidates = [
+    ...columns.flatMap((column, columnIndex) => readSignatureRateLimits(db, column, columnIndex)),
+    ...columns.flatMap((column, columnIndex) =>
+      scanColumnRateLimits(db, column, columnIndex, scanLimit),
+    ),
+  ];
+  return latestRateLimitsCandidate(candidates)?.payload;
 }
 
 /** Collect every (table, text-ish column) pair in a Codex log DB — the search space for both scan passes. */
-function collectTextColumns(db: DatabaseSync): Array<{ table: string; column: string }> {
+interface TextColumn {
+  readonly table: string;
+  readonly column: string;
+  readonly timeColumn?: string;
+  readonly eventTypeColumn?: string;
+}
+
+function collectTextColumns(db: DatabaseSync): TextColumn[] {
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<
     Record<string, unknown>
   >;
-  const pairs: Array<{ table: string; column: string }> = [];
+  const pairs: TextColumn[] = [];
   for (const table of tables) {
     const tableName = stringish(table.name);
     if (!tableName) continue;
     const columns = db.prepare(`PRAGMA table_info(${quoteIdent(tableName)})`).all() as Array<
       Record<string, unknown>
     >;
+    const timeColumn = chooseTimestampColumn(columns);
+    const eventTypeColumn = chooseEventTypeColumn(columns);
     for (const c of columns) {
       const name = stringish(c.name);
       if (name && /text|char|clob|json|blob|^$/i.test(String(c.type ?? ''))) {
-        pairs.push({ table: tableName, column: name });
+        pairs.push({
+          table: tableName,
+          column: name,
+          ...(timeColumn ? { timeColumn } : {}),
+          ...(eventTypeColumn ? { eventTypeColumn } : {}),
+        });
       }
     }
   }
   return pairs;
 }
 
+function chooseTimestampColumn(columns: readonly Record<string, unknown>[]): string | undefined {
+  const names = columns.map((c) => stringish(c.name)).filter((n) => n !== undefined);
+  const preferred = [
+    'timestamp',
+    'created_at',
+    'createdAt',
+    'event_time',
+    'time',
+    'ts',
+    'created',
+    'updated_at',
+  ];
+  return preferred.find((candidate) => names.includes(candidate));
+}
+
+function chooseEventTypeColumn(columns: readonly Record<string, unknown>[]): string | undefined {
+  const names = columns.map((c) => stringish(c.name)).filter((n) => n !== undefined);
+  const preferred = ['type', 'event_type', 'eventType', 'event_name', 'name'];
+  return preferred.find((candidate) => names.includes(candidate));
+}
+
 /** Query the single LATEST row whose column carries the real `codex.rate_limits` websocket-event signature. */
+interface RateLimitsCandidate {
+  readonly table: string;
+  readonly rowid: number;
+  readonly columnIndex: number;
+  readonly timestampMs?: number;
+  readonly provenance: 'signature' | 'event-column' | 'blind-type';
+  readonly trusted: boolean;
+  readonly payload: unknown;
+}
+
 function readSignatureRateLimits(
   db: DatabaseSync,
-  table: string,
-  column: string,
-): unknown | undefined {
+  textColumn: TextColumn,
+  columnIndex: number,
+): RateLimitsCandidate[] {
+  const { table, column, timeColumn, eventTypeColumn } = textColumn;
+  const observedAt = timeColumn ? `, ${quoteIdent(timeColumn)} AS observed_at` : '';
+  const eventType =
+    eventTypeColumn !== undefined && eventTypeColumn !== column
+      ? `, ${quoteIdent(eventTypeColumn)} AS event_type_hint`
+      : '';
   let rows: Array<Record<string, unknown>>;
   try {
     rows = db
       .prepare(
-        `SELECT ${quoteIdent(column)} AS value FROM ${quoteIdent(table)} ` +
-          `WHERE ${quoteIdent(column)} LIKE ? ESCAPE '\\' ORDER BY rowid DESC LIMIT 1`,
+        `SELECT rowid AS rowid, ${quoteIdent(column)} AS value${observedAt}${eventType} FROM ${quoteIdent(table)} ` +
+          `WHERE ${quoteIdent(column)} LIKE ? ESCAPE '\\' ORDER BY rowid DESC LIMIT 50`,
       )
       .all(`%${escapeLikeLiteral(RATE_LIMITS_SIGNATURE)}%`) as Array<Record<string, unknown>>;
   } catch {
-    return undefined; // a column a text LIKE cannot bind against is skipped.
+    return []; // a column a text LIKE cannot bind against is skipped.
   }
-  return firstRateLimitsPayload(rows);
+  return rateLimitsCandidatesFromRows(
+    rows,
+    table,
+    columnIndex,
+    isTrustedSignatureColumn(textColumn),
+  );
 }
 
-/** Blind newest-`scanLimit` scan of one column for any row that resolves into a rate-limits payload. */
+/** Scan newest rows, but return only candidates with trusted event-type/signature provenance. */
 function scanColumnRateLimits(
   db: DatabaseSync,
-  table: string,
-  column: string,
+  textColumn: TextColumn,
+  columnIndex: number,
   scanLimit: number,
-): unknown | undefined {
+): RateLimitsCandidate[] {
+  const { table, column, timeColumn, eventTypeColumn } = textColumn;
+  const observedAt = timeColumn ? `, ${quoteIdent(timeColumn)} AS observed_at` : '';
+  const eventType =
+    eventTypeColumn !== undefined && eventTypeColumn !== column
+      ? `, ${quoteIdent(eventTypeColumn)} AS event_type_hint`
+      : '';
   let rows: Array<Record<string, unknown>>;
   try {
     rows = db
       .prepare(
-        `SELECT ${quoteIdent(column)} AS value FROM ${quoteIdent(table)} ` +
+        `SELECT rowid AS rowid, ${quoteIdent(column)} AS value${observedAt}${eventType} FROM ${quoteIdent(table)} ` +
           `ORDER BY rowid DESC LIMIT ${scanLimit}`,
       )
       .all() as Array<Record<string, unknown>>;
   } catch {
-    return undefined; // a column that cannot be ordered/selected is skipped.
+    return []; // a column that cannot be ordered/selected is skipped.
   }
   const hinted = rows.filter(
     (row) => typeof row.value === 'string' && /rate_limit|used_percent/i.test(row.value),
   );
-  return firstRateLimitsPayload(hinted);
+  return rateLimitsCandidatesFromRows(hinted, table, columnIndex, false);
 }
 
-/** Extract + parse the first row whose (possibly prefixed) text body resolves into a rate-limits payload. */
-function firstRateLimitsPayload(rows: Array<Record<string, unknown>>): unknown | undefined {
+/** Extract + parse rows whose (possibly prefixed) text body resolves into a rate-limits payload. */
+function rateLimitsCandidatesFromRows(
+  rows: Array<Record<string, unknown>>,
+  table: string,
+  columnIndex: number,
+  trusted: boolean,
+): RateLimitsCandidate[] {
+  const candidates: RateLimitsCandidate[] = [];
   for (const row of rows) {
     const text = row.value;
     if (typeof text !== 'string') continue;
     const parsed = tryParseJson(extractEmbeddedJson(text));
-    if (parsed !== undefined && findRateLimitsBody(parsed)) return parsed;
+    const rowid = numberish(row.rowid);
+    const eventColumnTrusted = isTrustedEventType(row.event_type_hint);
+    const strong = trusted || eventColumnTrusted;
+    if (parsed !== undefined && findRateLimitsBody(parsed) && rowid !== undefined && strong) {
+      const timestampMs = timestampMsFromUnknown(row.observed_at) ?? timestampMsFromPayload(parsed);
+      candidates.push({
+        table,
+        rowid,
+        columnIndex,
+        ...(timestampMs !== undefined ? { timestampMs } : {}),
+        provenance: trusted ? 'signature' : eventColumnTrusted ? 'event-column' : 'blind-type',
+        trusted: strong,
+        payload: parsed,
+      });
+    }
   }
-  return undefined;
+  return candidates;
+}
+
+/** Choose the newest matching row; timestamps compare across tables, rowid only within one table. */
+function latestRateLimitsCandidate(
+  candidates: readonly RateLimitsCandidate[],
+): RateLimitsCandidate | undefined {
+  if (candidates.every((c) => c.timestampMs === undefined)) {
+    const tables = new Set(candidates.map((c) => c.table));
+    if (tables.size > 1) return undefined;
+  }
+  return [...candidates].sort(compareRateLimitsCandidate)[0];
+}
+
+function isTrustedSignatureColumn(column: TextColumn): boolean {
+  return column.column === 'feedback_log_body' || column.column.startsWith('feedback_log_body_');
+}
+
+function isTrustedEventType(value: unknown): boolean {
+  const type = stringish(value);
+  return type === 'codex.rate_limits' || type === 'token_count';
+}
+
+function providerAccountLabel(value: string | undefined, provider: 'codex'): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed.length === 0) return undefined;
+  if (trimmed.startsWith(`${provider}:`) && trimmed.length > provider.length + 1) return trimmed;
+  return /^[a-z0-9._-]+$/u.test(trimmed) ? `${provider}:${trimmed}` : undefined;
+}
+
+function compareRateLimitsCandidate(a: RateLimitsCandidate, b: RateLimitsCandidate): number {
+  if (
+    a.timestampMs !== undefined &&
+    b.timestampMs !== undefined &&
+    a.timestampMs !== b.timestampMs
+  ) {
+    return b.timestampMs - a.timestampMs;
+  }
+  if (a.timestampMs !== undefined && b.timestampMs === undefined) return -1;
+  if (a.timestampMs === undefined && b.timestampMs !== undefined) return 1;
+  if (a.table === b.table && a.rowid !== b.rowid) return b.rowid - a.rowid;
+  if (a.trusted !== b.trusted) return a.trusted ? -1 : 1;
+  return a.table.localeCompare(b.table) || b.columnIndex - a.columnIndex;
+}
+
+function timestampMsFromPayload(payload: unknown): number | undefined {
+  const root = asRecord(payload);
+  if (!root) return undefined;
+  return timestampMsFromUnknown(pick(root, 'timestamp', 'created_at', 'createdAt', 'time', 'ts'));
+}
+
+function timestampMsFromUnknown(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return undefined;
+    return value > 1_000_000_000_000 ? value : value * 1000;
+  }
+  const text = stringish(value);
+  if (text === undefined) return undefined;
+  const parsed = Date.parse(text);
+  if (!Number.isNaN(parsed)) return parsed;
+  const numeric = numberish(text);
+  if (numeric === undefined) return undefined;
+  return numeric > 1_000_000_000_000 ? numeric : numeric * 1000;
 }
 
 /** Escape a literal for a SQLite `LIKE … ESCAPE '\'` clause — `%`, `_`, and `\` are special there. */
@@ -579,10 +825,18 @@ export async function readLatestRolloutRateLimits(
       const line = lines[i];
       if (!line || !/rate_limit|used_percent/i.test(line)) continue;
       const parsed = tryParseJson(extractEmbeddedJson(line));
-      if (parsed !== undefined && findRateLimitsBody(parsed)) return parsed;
+      if (parsed !== undefined && isTrustedRolloutRateLimits(parsed)) return parsed;
     }
   }
   return undefined;
+}
+
+function isTrustedRolloutRateLimits(payload: unknown): boolean {
+  const root = asRecord(payload);
+  if (!root) return false;
+  const type = stringish(root.type);
+  if (type !== 'token_count' && type !== 'codex.rate_limits') return false;
+  return findRateLimitsBody(root) !== undefined;
 }
 
 /** Recursively collect `rollout-*.jsonl` files under `dir`, newest mtime first. Tolerates a missing dir. */

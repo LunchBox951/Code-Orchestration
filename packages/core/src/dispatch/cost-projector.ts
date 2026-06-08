@@ -5,6 +5,8 @@ import type { StoredEvent, StoreTx } from '../store/types.js';
 import {
   EVENT_COST_NEAR_BUDGET,
   EVENT_COST_RECORDED,
+  costRecordedSchema,
+  costScope,
   type CostNearBudget,
   type CostRecorded,
   type CostRollup,
@@ -14,9 +16,11 @@ import {
 import type { Provider } from './usage-source.js';
 
 /**
- * The L4 cost read-model — two tables, every column log-derived so a `rebuildAll` reproduces them
+ * The L4 cost read-model — three tables, every column log-derived so a `rebuildAll` reproduces them
  * byte-identical (AC5, freeze #6):
  *
+ *   - `cost_observations` — one row per `(provider, agent, task, turn)` observation identity; duplicate
+ *                           `cost.recorded` events are ignored here before they can double-count rollups.
  *   - `cost_rollup`      — one row per `(kind, id)`: the per-AGENT total AND the per-TASK total, both
  *                          folded from the SAME `cost.recorded` events (the event is filed once; the
  *                          projector increments both rows from the payload). Dollars sum only where
@@ -27,14 +31,29 @@ import type { Provider } from './usage-source.js';
  * `ts` persists the event ts (freeze #6 — never wall-clock on read).
  */
 const CREATE_COST_TABLES = `
+  CREATE TABLE IF NOT EXISTS cost_observations (
+    provider       TEXT NOT NULL,
+    agent          TEXT NOT NULL,
+    task           TEXT NOT NULL,
+    turn           INTEGER NOT NULL,
+    cost_usd       REAL,
+    input_tokens   INTEGER,
+    output_tokens  INTEGER,
+    total_tokens   INTEGER,
+    used_pct       REAL,
+    PRIMARY KEY (provider, agent, task, turn)
+  );
   CREATE TABLE IF NOT EXISTS cost_rollup (
     kind           TEXT NOT NULL,
     id             TEXT NOT NULL,
     total_cost_usd REAL NOT NULL DEFAULT 0,
+    cost_usd_observations INTEGER NOT NULL DEFAULT 0,
     input_tokens   INTEGER NOT NULL DEFAULT 0,
     output_tokens  INTEGER NOT NULL DEFAULT 0,
     total_tokens   INTEGER NOT NULL DEFAULT 0,
+    token_observations INTEGER NOT NULL DEFAULT 0,
     used_pct       REAL NOT NULL DEFAULT 0,
+    used_pct_observations INTEGER NOT NULL DEFAULT 0,
     observations   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (kind, id)
   );
@@ -56,6 +75,106 @@ const CREATE_COST_TABLES = `
  */
 export function ensureCostTables(db: DatabaseSync): void {
   db.exec(CREATE_COST_TABLES);
+  ensureColumn(db, 'cost_rollup', 'cost_usd_observations', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'cost_rollup', 'token_observations', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'cost_rollup', 'used_pct_observations', 'INTEGER NOT NULL DEFAULT 0');
+  backfillCostObservationState(db);
+}
+
+function ensureColumn(db: DatabaseSync, table: string, column: string, definition: string): void {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ readonly name: string }>;
+  if (rows.some((row) => row.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+function tableExists(db: DatabaseSync, table: string): boolean {
+  return (
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !==
+    undefined
+  );
+}
+
+function countRows(db: DatabaseSync, table: string): number {
+  const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as
+    | { readonly count?: unknown }
+    | undefined;
+  return Number(row?.count ?? 0);
+}
+
+function backfillCostObservationState(db: DatabaseSync): void {
+  if (!tableExists(db, 'events')) return;
+  const observationCount = countRows(db, 'cost_observations');
+  const rollupCount = countRows(db, 'cost_rollup');
+  if (observationCount === 0 && rollupCount > 0) {
+    const rows = db
+      .prepare('SELECT payload FROM events WHERE type = ? ORDER BY seq')
+      .all(EVENT_COST_RECORDED) as Array<{ readonly payload: unknown }>;
+    for (const row of rows) {
+      const raw = JSON.parse(String(row.payload));
+      recordCostObservation(db, costRecordedSchema.parse(raw));
+    }
+    recomputeCostRollupsFromObservations(db);
+    return;
+  }
+  db.exec(`
+    UPDATE cost_rollup
+       SET cost_usd_observations = (
+         SELECT COUNT(*)
+           FROM cost_observations AS o
+          WHERE o.cost_usd IS NOT NULL
+            AND (
+              (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
+              OR
+              (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
+            )
+       ),
+       token_observations = (
+         SELECT COUNT(*)
+           FROM cost_observations AS o
+          WHERE o.total_tokens IS NOT NULL
+            AND (
+              (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
+              OR
+              (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
+            )
+       ),
+       used_pct_observations = (
+         SELECT COUNT(*)
+           FROM cost_observations AS o
+          WHERE o.used_pct IS NOT NULL
+            AND (
+              (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
+              OR
+              (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
+            )
+       )
+  `);
+}
+
+function recomputeCostRollupsFromObservations(db: DatabaseSync): void {
+  db.exec('DELETE FROM cost_rollup');
+  for (const kind of ['agent', 'task'] as const) {
+    const idColumn = kind === 'agent' ? 'agent' : 'task';
+    db.exec(`
+      INSERT INTO cost_rollup
+        (kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens,
+         token_observations, used_pct, used_pct_observations, observations)
+      SELECT
+        '${kind}',
+        ${idColumn},
+        SUM(COALESCE(cost_usd, 0)),
+        SUM(CASE WHEN cost_usd IS NOT NULL THEN 1 ELSE 0 END),
+        SUM(COALESCE(input_tokens, 0)),
+        SUM(COALESCE(output_tokens, 0)),
+        SUM(COALESCE(total_tokens, 0)),
+        SUM(CASE WHEN total_tokens IS NOT NULL THEN 1 ELSE 0 END),
+        SUM(COALESCE(used_pct, 0)),
+        SUM(CASE WHEN used_pct IS NOT NULL THEN 1 ELSE 0 END),
+        COUNT(*)
+      FROM cost_observations
+      GROUP BY ${idColumn}
+    `);
+  }
 }
 
 /** Map a raw `cost_rollup` row (loosely typed at the SQLite boundary) to a {@link CostRollup}. */
@@ -64,10 +183,13 @@ export function rowToCostRollup(row: Record<string, unknown>): CostRollup {
     kind: String(row.kind) as CostRollupKind,
     id: String(row.id),
     totalCostUsd: Number(row.total_cost_usd),
+    costUsdObservations: Number(row.cost_usd_observations ?? 0),
     inputTokens: Number(row.input_tokens),
     outputTokens: Number(row.output_tokens),
     totalTokens: Number(row.total_tokens),
+    tokenObservations: Number(row.token_observations ?? 0),
     usedPct: Number(row.used_pct),
+    usedPctObservations: Number(row.used_pct_observations ?? 0),
     observations: Number(row.observations),
   };
 }
@@ -87,7 +209,7 @@ export function rowToNearBudgetRecord(row: Record<string, unknown>): NearBudgetR
 }
 
 const ROLLUP_COLUMNS =
-  'kind, id, total_cost_usd, input_tokens, output_tokens, total_tokens, used_pct, observations';
+  'kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens, token_observations, used_pct, used_pct_observations, observations';
 const NEAR_BUDGET_COLUMNS =
   'seq, task, agent, provider, total_cost_usd, cap_cents, threshold_pct, ts';
 
@@ -162,6 +284,7 @@ export class CostProjector implements Projector {
   reset(tx: StoreTx): void {
     const db = tx.raw as DatabaseSync;
     ensureCostTables(db);
+    db.exec('DELETE FROM cost_observations');
     db.exec('DELETE FROM cost_rollup');
     db.exec('DELETE FROM cost_near_budget');
   }
@@ -173,12 +296,15 @@ export class CostProjector implements Projector {
     switch (costEvent.type) {
       case EVENT_COST_RECORDED: {
         const p = costEvent.payload;
+        validateCostRecordedEnvelope(event, p);
+        if (!recordCostObservation(db, p)) return;
         addToRollup(db, 'agent', p.agent, p);
         addToRollup(db, 'task', p.task, p);
         return;
       }
       case EVENT_COST_NEAR_BUDGET: {
         const p = costEvent.payload;
+        validateCostNearBudgetEnvelope(event, p);
         // INSERT OR REPLACE keyed by seq ⇒ idempotent + replay-safe (re-folding reaches the same row).
         db.prepare(
           `INSERT OR REPLACE INTO cost_near_budget
@@ -202,26 +328,162 @@ export class CostProjector implements Projector {
   }
 }
 
+function validateCostRecordedEnvelope(event: StoredEvent, payload: CostRecorded): void {
+  const expected = costScope(payload.agent);
+  if (event.scope !== expected) {
+    throw new Error(
+      `cost-projector: cost scope '${event.scope}' does not match cost.recorded agent '${payload.agent}'`,
+    );
+  }
+  if (event.actor !== undefined && event.actor !== payload.agent) {
+    throw new Error(
+      `cost-projector: actor '${event.actor}' does not match cost.recorded agent '${payload.agent}'`,
+    );
+  }
+}
+
+function validateCostNearBudgetEnvelope(event: StoredEvent, payload: CostNearBudget): void {
+  const expected = costScope(payload.task);
+  if (event.scope !== expected) {
+    throw new Error(
+      `cost-projector: cost scope '${event.scope}' does not match cost.near_budget task '${payload.task}'`,
+    );
+  }
+  if (event.actor !== undefined && event.actor !== payload.agent) {
+    throw new Error(
+      `cost-projector: actor '${event.actor}' does not match cost.near_budget agent '${payload.agent}'`,
+    );
+  }
+}
+
+interface NormalizedCostObservation {
+  readonly provider: Provider;
+  readonly agent: string;
+  readonly task: string;
+  readonly turn: number;
+  readonly costUsd: number | null;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly totalTokens: number | null;
+  readonly usedPct: number | null;
+}
+
+/** Insert the observation identity once; exact duplicates no-op, conflicting duplicates fail loud. */
+function recordCostObservation(db: DatabaseSync, p: CostRecorded): boolean {
+  const n = normalizeCostObservation(p);
+  const result = db
+    .prepare(
+      `INSERT OR IGNORE INTO cost_observations
+         (provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens, used_pct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      n.provider,
+      n.agent,
+      n.task,
+      n.turn,
+      n.costUsd,
+      n.inputTokens,
+      n.outputTokens,
+      n.totalTokens,
+      n.usedPct,
+    ) as { readonly changes?: number };
+  if ((result.changes ?? 0) > 0) return true;
+
+  const existing = db
+    .prepare(
+      `SELECT provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens, used_pct
+         FROM cost_observations
+        WHERE provider = ? AND agent = ? AND task = ? AND turn = ?`,
+    )
+    .get(n.provider, n.agent, n.task, n.turn) as Record<string, unknown> | undefined;
+  if (existing !== undefined && observationsMatch(rowToObservation(existing), n)) return false;
+  throw new Error(
+    `cost-projector: conflicting duplicate cost observation for ` +
+      `${n.provider}/${n.agent}/${n.task}/turn-${n.turn}`,
+  );
+}
+
+function normalizeCostObservation(p: CostRecorded): NormalizedCostObservation {
+  return {
+    provider: p.provider,
+    agent: p.agent,
+    task: p.task,
+    turn: p.turn,
+    costUsd: p.cost_usd ?? null,
+    inputTokens: p.input_tokens ?? null,
+    outputTokens: p.output_tokens ?? null,
+    totalTokens: normalizedTotalTokens(p),
+    usedPct: p.used_pct ?? null,
+  };
+}
+
+function normalizedTotalTokens(p: CostRecorded): number | null {
+  if (p.total_tokens !== undefined) return p.total_tokens;
+  if (p.input_tokens !== undefined && p.output_tokens !== undefined) {
+    return p.input_tokens + p.output_tokens;
+  }
+  return null;
+}
+
+function rowToObservation(row: Record<string, unknown>): NormalizedCostObservation {
+  return {
+    provider: String(row.provider) as Provider,
+    agent: String(row.agent),
+    task: String(row.task),
+    turn: Number(row.turn),
+    costUsd: nullableNumber(row.cost_usd),
+    inputTokens: nullableNumber(row.input_tokens),
+    outputTokens: nullableNumber(row.output_tokens),
+    totalTokens: nullableNumber(row.total_tokens),
+    usedPct: nullableNumber(row.used_pct),
+  };
+}
+
+function nullableNumber(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
+}
+
+function observationsMatch(a: NormalizedCostObservation, b: NormalizedCostObservation): boolean {
+  return (
+    a.provider === b.provider &&
+    a.agent === b.agent &&
+    a.task === b.task &&
+    a.turn === b.turn &&
+    a.costUsd === b.costUsd &&
+    a.inputTokens === b.inputTokens &&
+    a.outputTokens === b.outputTokens &&
+    a.totalTokens === b.totalTokens &&
+    a.usedPct === b.usedPct
+  );
+}
+
 /** Accumulate one cost observation into the `(kind, id)` rollup row (missing fields contribute 0). */
 function addToRollup(db: DatabaseSync, kind: CostRollupKind, id: string, p: CostRecorded): void {
   db.prepare(
     `INSERT INTO cost_rollup
-       (kind, id, total_cost_usd, input_tokens, output_tokens, total_tokens, used_pct, observations)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+       (kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens, token_observations, used_pct, used_pct_observations, observations)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
      ON CONFLICT(kind, id) DO UPDATE SET
        total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+       cost_usd_observations = cost_usd_observations + excluded.cost_usd_observations,
        input_tokens = input_tokens + excluded.input_tokens,
        output_tokens = output_tokens + excluded.output_tokens,
        total_tokens = total_tokens + excluded.total_tokens,
+       token_observations = token_observations + excluded.token_observations,
        used_pct = used_pct + excluded.used_pct,
+       used_pct_observations = used_pct_observations + excluded.used_pct_observations,
        observations = observations + excluded.observations`,
   ).run(
     kind,
     id,
     p.cost_usd ?? 0,
+    p.cost_usd !== undefined ? 1 : 0,
     p.input_tokens ?? 0,
     p.output_tokens ?? 0,
-    p.total_tokens ?? 0,
+    normalizedTotalTokens(p) ?? 0,
+    normalizedTotalTokens(p) !== null ? 1 : 0,
     p.used_pct ?? 0,
+    p.used_pct !== undefined ? 1 : 0,
   );
 }

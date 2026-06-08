@@ -54,11 +54,17 @@ export const reasoningBudgetSchema = z
  */
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
+/** Runtime guard for {@link Effort}. */
+export const effortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+
 /**
  * Context-window preference. 'extended' is selected when the reasoning budget is 'deep' OR when
  * the work size is 'technical' — either signals a task that benefits from a longer context window.
  */
 export type ContextWindow = 'standard' | 'extended';
+
+/** Runtime guard for {@link ContextWindow}. */
+export const contextWindowSchema = z.enum(['standard', 'extended']);
 
 /** The resolved concrete dispatch target for one (workSize, reasoningBudget, provider) triple. */
 export interface TierPlacement {

@@ -1,12 +1,14 @@
-import { z } from 'zod';
 import { assertNever } from '../assert-never.js';
 import { openConfigStore } from '../config/config-store.js';
+import { z } from 'zod';
 import type { ConfigStore } from '../config/config-store.js';
+import { accountForProvider } from './provider-source.js';
 import { deriveHeadroom } from './policy.js';
 import type { Headroom } from './policy.js';
+import { isStale } from './policy.js';
 import { providerSchema } from './events.js';
 import type { UsageAccountStatus, UsageBucket } from './events.js';
-import { resolveTier } from './tier.js';
+import { effortSchema, resolveTier } from './tier.js';
 import type { ContextWindow, Effort, ReasoningBudget, WorkSize } from './tier.js';
 import type { Provider } from './usage-source.js';
 import type { DispatchStore } from './dispatch-store.js';
@@ -34,9 +36,6 @@ import type { DispatchStore } from './dispatch-store.js';
 
 // ─── Pins (the operator's quality-critical seats) ─────────────────────────────
 
-/** zod effort enum — the runtime guard for a pin's optional effort override (mirrors {@link Effort}). */
-const effortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
-
 /**
  * One resolved pin: a role/sub-role nailed to a specific provider, optionally overriding the model and
  * effort (Coordinator → Opus, `reviewer:pr` → Opus). Any field the pin leaves unset falls back to the
@@ -60,18 +59,20 @@ export type PinTable = z.infer<typeof pinTableSchema>;
 /** The config-cascade key the per-project pin table lives under (`dispatch.pins`). */
 export const DISPATCH_PINS_CONFIG_KEY = 'dispatch.pins';
 
-// ─── The live signal (one injected candidate per tier-capable provider) ───────
+// ─── The live signal (one injected provider-account candidate per tier-capable provider) ───────
 
 /**
  * A provider's effective headroom + availability — the live signal {@link placeAgent} ranks over. The
- * non-pure adapter derives one of these per **tier-capable** provider (the pure core treats every
- * candidate as tier-capable; tier filtering is the adapter's job). A provider is **HEALTHY** iff its
- * account is `available` AND its binding-window {@link Headroom} is `known`. An unavailable account
+ * non-pure adapter derives one of these per **tier-capable** provider account; v1 accepts at most one
+ * account per provider until same-provider multi-subscription routing is specified. The pure core treats
+ * every candidate as tier-capable; tier filtering is the adapter's job. A provider account is **HEALTHY**
+ * iff it is `available` AND its binding-window {@link Headroom} is `known`. An unavailable account
  * (not-logged-in / offline / over-limit) OR an `unknown` headroom ⇒ NOT healthy ⇒ EXCLUDED from floating
  * placement (AC3, P9 — never silently treated as healthy / 0% used).
  */
 export interface ProviderHeadroom {
   readonly provider: Provider;
+  readonly account: string;
   /** Account availability. `false` (not-logged-in / offline / over-limit) ⇒ never healthy (AC3, P9). */
   readonly available: boolean;
   /** The binding-window headroom (most-constrained window). `unknown` ⇒ never healthy (AC3, P9). */
@@ -94,6 +95,7 @@ export interface ProviderHeadroom {
 export interface Placement {
   readonly role: string;
   readonly provider: Provider;
+  readonly account: string;
   readonly model: string;
   readonly effort: Effort;
   readonly context: ContextWindow;
@@ -102,17 +104,21 @@ export interface Placement {
 /** One scored, eligible (healthy) provider in a floating decision's ranking — roomiest first. */
 export interface RankedCandidate {
   readonly provider: Provider;
+  readonly account: string;
   /** Effective free-headroom score (higher = roomier); see {@link headroomScore}. */
   readonly score: number;
   /** The binding window's nominal usage percent (0..100). */
   readonly usedPct: number;
   /** The binding window's reset timestamp (ISO-8601). */
   readonly resetAt: string;
+  /** Concrete placement for this ranked provider, so throttle can skip maxed leaders without guessing. */
+  readonly placement: Placement;
 }
 
 /** One excluded (unhealthy) provider in a {@link PlacementDecision} of kind `no-candidate`. */
 export interface ExcludedCandidate {
   readonly provider: Provider;
+  readonly account?: string;
   /** Why this provider was excluded (unavailable / unknown headroom) — legible, never silent (P9). */
   readonly why: string;
 }
@@ -206,7 +212,7 @@ export interface PlaceAgentInput {
   readonly reasoningBudget: ReasoningBudget;
   /** Resolved pin table (injected; from {@link resolvePinTable}). */
   readonly pins: PinTable;
-  /** One candidate per tier-capable provider (injected; from {@link candidatesFromStore}). */
+  /** Provider-account candidates (injected; from {@link candidatesFromStore}); v1 allows one per provider. */
   readonly candidates: readonly ProviderHeadroom[];
   /** Injected, replay-safe clock (epoch ms) for reset-aware scoring — never the wall clock (AC10). */
   readonly nowMs: number;
@@ -230,13 +236,15 @@ export interface PlaceAgentInput {
  */
 export function placeAgent(input: PlaceAgentInput): PlacementDecision {
   const { role, workSize, reasoningBudget, pins, candidates, nowMs, previous, hysteresis } = input;
+  assertSingleAccountPerProvider(candidates);
 
   // 1) Pinned seats are never overridden (AC1).
   const pin = lookupPin(pins, role);
   if (pin !== undefined) {
+    const account = accountForPinnedProvider(pin.provider, candidates);
     return {
       kind: 'pinned',
-      placement: placementFromPin(role, pin, workSize, reasoningBudget),
+      placement: placementFromPin(role, pin, workSize, reasoningBudget, account),
       reason: `role '${role}' is pinned to provider '${pin.provider}' (pins are never overridden — AC1)`,
     };
   }
@@ -247,6 +255,7 @@ export function placeAgent(input: PlaceAgentInput): PlacementDecision {
     if (candidate.available && candidate.headroom.kind === 'known') {
       scored.push({
         provider: candidate.provider,
+        account: candidate.account,
         score: headroomScore(candidate.headroom.used_pct, candidate.headroom.reset_at, nowMs),
         usedPct: candidate.headroom.used_pct,
         resetAt: candidate.headroom.reset_at,
@@ -262,25 +271,44 @@ export function placeAgent(input: PlaceAgentInput): PlacementDecision {
         candidates.length === 0
           ? `no tier-capable candidate offered for role '${role}'`
           : `all ${candidates.length} tier-capable provider(s) excluded as unhealthy for role '${role}'`,
-      excluded: candidates.map((c) => ({ provider: c.provider, why: exclusionReason(c) })),
+      excluded: candidates.map((c) => ({
+        provider: c.provider,
+        account: c.account,
+        why: exclusionReason(c),
+      })),
       ...withSoonestReset(candidates),
     };
   }
 
   // Total, deterministic order: roomiest score first, ties broken by provider name (no Map nondeterminism).
-  scored.sort((a, b) => b.score - a.score || compareProvider(a.provider, b.provider));
+  scored.sort(
+    (a, b) =>
+      b.score - a.score ||
+      compareProvider(a.provider, b.provider) ||
+      a.account.localeCompare(b.account),
+  );
 
   const chosen = applyHysteresis(scored, previous, hysteresis);
-  const placement: Placement = { role, ...resolveTier(workSize, reasoningBudget, chosen.provider) };
+  const placement: Placement = {
+    role,
+    account: chosen.account,
+    ...resolveTier(workSize, reasoningBudget, chosen.provider),
+  };
   return {
     kind: 'floating',
     placement,
     reason: floatingReason(role, chosen, scored, previous),
     ranked: scored.map((s) => ({
       provider: s.provider,
+      account: s.account,
       score: s.score,
       usedPct: s.usedPct,
       resetAt: s.resetAt,
+      placement: {
+        role,
+        account: s.account,
+        ...resolveTier(workSize, reasoningBudget, s.provider),
+      },
     })),
   };
 }
@@ -288,6 +316,7 @@ export function placeAgent(input: PlaceAgentInput): PlacementDecision {
 /** A healthy candidate with its computed score (internal to ranking). */
 interface ScoredCandidate {
   readonly provider: Provider;
+  readonly account: string;
   readonly score: number;
   readonly usedPct: number;
   readonly resetAt: string;
@@ -306,8 +335,15 @@ function applyHysteresis(
 ): ScoredCandidate {
   const top = scored[0]!; // non-empty by contract.
   if (previous === undefined) return top;
-  const incumbent = scored.find((s) => s.provider === previous.provider);
-  if (incumbent === undefined || incumbent.provider === top.provider) return top;
+  const incumbent = scored.find(
+    (s) => s.provider === previous.provider && s.account === previous.account,
+  );
+  if (
+    incumbent === undefined ||
+    (incumbent.provider === top.provider && incumbent.account === top.account)
+  ) {
+    return top;
+  }
   const margin = hysteresis?.marginPct ?? HYSTERESIS_MARGIN_DEFAULT;
   // Hold the incumbent unless the challenger's lead EXCEEDS the margin (a lead within margin doesn't flip).
   return top.score - incumbent.score > margin ? top : incumbent;
@@ -331,15 +367,52 @@ function placementFromPin(
   pin: Pin,
   workSize: WorkSize,
   reasoningBudget: ReasoningBudget,
+  account: string,
 ): Placement {
   const tier = resolveTier(workSize, reasoningBudget, pin.provider);
   return {
     role,
     provider: pin.provider,
+    account,
     model: pin.model ?? tier.model,
     effort: pin.effort ?? tier.effort,
     context: tier.context, // context is never pinned — always the default tier's.
   };
+}
+
+function accountForPinnedProvider(
+  provider: Provider,
+  candidates: readonly ProviderHeadroom[],
+): string {
+  const accounts = [
+    ...new Set(
+      candidates
+        .filter((candidate) => candidate.provider === provider)
+        .map((candidate) => candidate.account),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
+  if (accounts.length > 1) {
+    throw new Error(
+      `same-provider multi-subscription routing is unsupported for pinned provider '${provider}'; candidates offered multiple accounts: ${accounts.join(', ')}`,
+    );
+  }
+  return accounts[0] ?? accountForProvider(provider);
+}
+
+function assertSingleAccountPerProvider(candidates: readonly ProviderHeadroom[]): void {
+  const byProvider = new Map<Provider, Set<string>>();
+  for (const candidate of candidates) {
+    const accounts = byProvider.get(candidate.provider) ?? new Set<string>();
+    accounts.add(candidate.account);
+    byProvider.set(candidate.provider, accounts);
+  }
+  for (const [provider, accounts] of byProvider) {
+    if (accounts.size <= 1) continue;
+    const list = [...accounts].sort((a, b) => a.localeCompare(b)).join(', ');
+    throw new Error(
+      `same-provider multi-subscription routing is unsupported for provider '${provider}'; candidates offered multiple accounts: ${list}`,
+    );
+  }
 }
 
 /**
@@ -387,8 +460,11 @@ function floatingReason(
 ): string {
   const top = scored[0]!;
   const base = `floating role '${role}' → '${chosen.provider}' (roomiest healthy provider; score ${chosen.score})`;
-  if (previous !== undefined && chosen.provider !== top.provider) {
-    return `${base}; held on previous '${previous.provider}' by hysteresis over '${top.provider}'`;
+  if (
+    previous !== undefined &&
+    (chosen.provider !== top.provider || chosen.account !== top.account)
+  ) {
+    return `${base}; held on previous '${previous.provider}/${previous.account}' by hysteresis over '${top.provider}/${top.account}'`;
   }
   return base;
 }
@@ -410,6 +486,20 @@ export interface ProviderAccount {
   readonly account: string;
 }
 
+/** Default provider-account candidates for floating dispatch: both first-class providers. */
+export function defaultProviderAccounts(): readonly ProviderAccount[] {
+  return [
+    { provider: 'claude', account: accountForProvider('claude') },
+    { provider: 'codex', account: accountForProvider('codex') },
+  ];
+}
+
+/** Freshness options for turning stored usage buckets into routing candidates. */
+export interface CandidateReadOptions {
+  readonly nowMs?: number;
+  readonly ttlMs?: number;
+}
+
 /**
  * Reduce one account's observed windows to a single {@link ProviderHeadroom}. PURE (exposed for testing).
  * The **binding window** is the MOST-CONSTRAINED one — the highest `used_pct` (ties broken by window
@@ -421,6 +511,7 @@ export function bindingProviderHeadroom(
   provider: Provider,
   accountStatus: UsageAccountStatus | undefined,
   buckets: readonly UsageBucket[],
+  account: string = accountStatus?.account ?? buckets[0]?.account ?? accountForProvider(provider),
 ): ProviderHeadroom {
   let binding: UsageBucket | undefined;
   for (const bucket of buckets) {
@@ -435,6 +526,7 @@ export function bindingProviderHeadroom(
   const headroom = deriveHeadroom(accountStatus, binding);
   const base: ProviderHeadroom = {
     provider,
+    account,
     available: accountStatus?.available ?? false,
     headroom,
   };
@@ -449,15 +541,49 @@ export function bindingProviderHeadroom(
 export function candidatesFromStore(
   store: DispatchStore,
   accounts: readonly ProviderAccount[],
+  options: CandidateReadOptions = {},
 ): ProviderHeadroom[] {
   const allBuckets = store.readBuckets();
-  return accounts.map(({ provider, account }) =>
-    bindingProviderHeadroom(
+  return accounts.map(({ provider, account }) => {
+    const nowMs = options.nowMs;
+    const accountBuckets = allBuckets.filter(
+      (b) => b.provider === provider && b.account === account,
+    );
+    const staleBuckets =
+      nowMs === undefined ? [] : accountBuckets.filter((b) => isStale(b, nowMs, options.ttlMs));
+    if (nowMs !== undefined && staleBuckets.length > 0) {
+      const candidate = bindingProviderHeadroom(
+        provider,
+        store.getAccountStatus(provider, account),
+        [],
+        account,
+      );
+      const resetAt = soonestFutureReset(accountBuckets, nowMs);
+      return resetAt === undefined ? candidate : { ...candidate, resetAt };
+    }
+    const freshBuckets = accountBuckets.filter((b) =>
+      nowMs === undefined ? true : !isStale(b, nowMs, options.ttlMs),
+    );
+    const candidate = bindingProviderHeadroom(
       provider,
-      store.getAccountStatus(account),
-      allBuckets.filter((b) => b.account === account),
-    ),
-  );
+      store.getAccountStatus(provider, account),
+      freshBuckets,
+      account,
+    );
+    if (candidate.resetAt !== undefined || nowMs === undefined) return candidate;
+    const resetAt = soonestFutureReset(accountBuckets, nowMs);
+    return resetAt === undefined ? candidate : { ...candidate, resetAt };
+  });
+}
+
+function soonestFutureReset(buckets: readonly UsageBucket[], nowMs: number): string | undefined {
+  return buckets
+    .map((b) => b.resetAt)
+    .filter((resetAt) => {
+      const resetMs = Date.parse(resetAt);
+      return !Number.isNaN(resetMs) && resetMs > nowMs;
+    })
+    .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
 }
 
 /**
@@ -516,7 +642,7 @@ export function placeAgentFromStore(
   deps: PlaceFromStoreDeps,
 ): PlacementDecision {
   const pins = resolvePinTable(input.projectId, deps.config);
-  const candidates = candidatesFromStore(deps.store, input.accounts);
+  const candidates = candidatesFromStore(deps.store, input.accounts, { nowMs: input.nowMs });
   return placeAgent({
     role: input.role,
     workSize: input.workSize,

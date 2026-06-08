@@ -8,6 +8,8 @@ import { MAIL_WORKER_DONE } from '../../mail/events.js';
 import { openConfigStore, type ConfigStore } from '../../config/config-store.js';
 import { openRegistry, type ProjectRegistry } from '../../registry/registry.js';
 import { openWorktreeStore, type WorktreeStore } from '../../worktrees/worktree-store.js';
+import { openDispatchStore, type DispatchStore } from '../../dispatch/dispatch-store.js';
+import { accountForProvider } from '../../dispatch/provider-source.js';
 import { WORKTREE_PROVISION_CONFIG_KEY } from '../../worktrees/provision.js';
 import { worktreePathFor } from '../../worktrees/sling.js';
 import { buildCoreRegistry } from '../core-registry.js';
@@ -22,6 +24,7 @@ const ORIGINAL_ENV = process.env;
 let tmpDirs: string[] = [];
 let mails: MailStore[] = [];
 let worktreeStores: WorktreeStore[] = [];
+let dispatchStores: DispatchStore[] = [];
 let regs: ProjectRegistry[] = [];
 let configs: ConfigStore[] = [];
 
@@ -30,6 +33,7 @@ beforeEach(() => {
   tmpDirs = [];
   mails = [];
   worktreeStores = [];
+  dispatchStores = [];
   regs = [];
   configs = [];
   const data = mkdtempSync(join(tmpdir(), 'co-finish-tool-data-'));
@@ -40,6 +44,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const m of mails) m.close();
   for (const w of worktreeStores) w.close();
+  for (const d of dispatchStores) d.close();
   for (const r of regs) r.close();
   for (const c of configs) c.close();
   process.env = ORIGINAL_ENV;
@@ -47,6 +52,7 @@ afterEach(() => {
   tmpDirs = [];
   mails = [];
   worktreeStores = [];
+  dispatchStores = [];
   regs = [];
   configs = [];
 });
@@ -86,7 +92,23 @@ function makeContext(
   }
   const worktrees = openWorktreeStore(projectId);
   worktreeStores.push(worktrees);
-  return { agent, projectId, cwd, mail, registry, worktrees };
+  const dispatch = openDispatchStore(projectId);
+  dispatchStores.push(dispatch);
+  dispatch.recordSnapshot({
+    provider: 'claude',
+    account: accountForProvider('claude'),
+    available: true,
+    source: 'fake',
+    sampled_at: new Date().toISOString(),
+    windows: [
+      {
+        kind: 'five_hour',
+        used_pct: 20,
+        reset_at: new Date(Date.now() + 5 * 3600_000).toISOString(),
+      },
+    ],
+  });
+  return { agent, projectId, cwd, mail, registry, worktrees, dispatch };
 }
 
 function openConfig(): ConfigStore {

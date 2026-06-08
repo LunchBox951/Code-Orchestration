@@ -13,7 +13,7 @@ import { workSizeSchema, reasoningBudgetSchema } from './tier.js';
  * infrastructure events, mirroring `worktree.created` / `config.set`.
  *
  * Three streams, each keyed by the L0 `${entity}:${id}` scope pattern:
- *   - `usage:<account>` — passive samples of a provider account's live rate-limit usage.
+ *   - `usage:<provider>:<account>` — passive samples of a provider account's live rate-limit usage.
  *   - `cost:<agent>`    — a per-turn cost observation, filed under the acting agent's stream.
  *   - `cost:<task>`     — the near-budget observability signal, filed under the task's stream.
  *
@@ -32,14 +32,20 @@ export const EVENT_COST_RECORDED = 'cost.recorded' as const;
 /** Observability ONLY (never a gate): a task's accumulated cost crossed into the near-budget band. */
 export const EVENT_COST_NEAR_BUDGET = 'cost.near_budget' as const;
 
-/** Scope prefix for the per-account usage-sample stream; the suffix is the account. */
+/** Scope prefix for the per-provider-account usage-sample stream; the suffix is provider + account. */
 export const USAGE_SCOPE_PREFIX = 'usage:';
 /** Scope prefix shared by the cost streams (`cost:<agent>` records, `cost:<task>` near-budget). */
 export const COST_SCOPE_PREFIX = 'cost:';
 
-/** A provider account's usage-sample stream scope: `usage:<account>`. */
-export function usageScope(account: string): string {
-  return USAGE_SCOPE_PREFIX + account;
+/** A provider account's usage-sample stream scope: `usage:<provider>:<account>`. */
+export function usageScope(provider: Provider, account: string): string;
+/** Back-compat account-only scope helper retained for older callers. */
+export function usageScope(account: string): string;
+export function usageScope(providerOrAccount: Provider | string, account?: string): string {
+  return (
+    USAGE_SCOPE_PREFIX +
+    (account === undefined ? providerOrAccount : `${providerOrAccount}:${account}`)
+  );
 }
 
 /**
@@ -101,17 +107,27 @@ export type UsageObserved = z.infer<typeof usageObservedSchema>;
  * only where present. `turn` identifies which turn the cost is for; `agent` + `task` drive the dual
  * rollup.
  */
-export const costRecordedSchema = z.object({
-  provider: providerSchema,
-  agent: z.string().min(1),
-  task: z.string().min(1),
-  turn: z.number().int().nonnegative(),
-  cost_usd: z.number().nonnegative().optional(), // Claude dollar cost; absent for Codex (no price table).
-  input_tokens: z.number().int().nonnegative().optional(),
-  output_tokens: z.number().int().nonnegative().optional(),
-  total_tokens: z.number().int().nonnegative().optional(),
-  used_pct: z.number().min(0).optional(), // Codex usage-% readout (the dollar-cost-free expression).
-});
+export const costRecordedSchema = z
+  .object({
+    provider: providerSchema,
+    agent: z.string().min(1),
+    task: z.string().min(1),
+    turn: z.number().int().nonnegative(),
+    cost_usd: z.number().nonnegative().optional(), // Claude dollar cost; absent for Codex (no price table).
+    input_tokens: z.number().int().nonnegative().optional(),
+    output_tokens: z.number().int().nonnegative().optional(),
+    total_tokens: z.number().int().nonnegative().optional(),
+    used_pct: z.number().min(0).optional(), // Codex usage-% readout (the dollar-cost-free expression).
+  })
+  .refine(
+    (p) =>
+      p.cost_usd !== undefined ||
+      p.input_tokens !== undefined ||
+      p.output_tokens !== undefined ||
+      p.total_tokens !== undefined ||
+      p.used_pct !== undefined,
+    { message: 'cost.recorded requires at least one measured field' },
+  );
 export type CostRecorded = z.infer<typeof costRecordedSchema>;
 
 // ── cost.near_budget ─────────────────────────────────────────────────────────────────────────────
@@ -135,7 +151,7 @@ export type CostNearBudget = z.infer<typeof costNearBudgetSchema>;
 // ── placement.decided ────────────────────────────────────────────────────────────────────────────
 /**
  * `placement.decided` records the final dispatch resolution for one seat — either PLACED on a
- * concrete provider or WAITING (all providers at capacity). This is the WRITER that completes the
+ * concrete provider or WAITING (providers at capacity or unavailable). This is the WRITER that completes the
  * reader-with-writer loop: Phase 5 records a decision so Phase 6+ (and the operator CLI) can read
  * back placement history and throttle signals. Filed under `placement:<agent>` (one stream per
  * requesting agent), mirroring how `cost.recorded` is filed under `cost:<agent>`.
@@ -165,6 +181,7 @@ export const placementDecidedPlacedSchema = z.object({
   work_size: workSizeSchema,
   reasoning_budget: reasoningBudgetSchema,
   provider: providerSchema,
+  account: z.string().min(1).optional(),
   model: z.string().min(1),
   effort: effortEnumSchema,
   context: contextWindowEnumSchema,
@@ -178,6 +195,9 @@ export const placementDecidedWaitingSchema = z.object({
   eta_reset_at: z.string().optional(),
   reason: z.string().min(1),
   maxed_providers: z.array(providerSchema),
+  maxed_accounts: z.array(z.string().min(1)).default([]),
+  unavailable_providers: z.array(providerSchema).default([]),
+  unavailable_accounts: z.array(z.string().min(1)).default([]),
 });
 
 export const placementDecidedSchema = z.discriminatedUnion('kind', [
@@ -202,6 +222,7 @@ export interface PlacementRecord {
   readonly kind: 'placed' | 'waiting';
   /** placed only */
   readonly provider?: string;
+  readonly account?: string;
   readonly model?: string;
   readonly effort?: string;
   readonly context?: string;
@@ -209,6 +230,9 @@ export interface PlacementRecord {
   readonly etaResetAt?: string;
   readonly reason?: string;
   readonly maxedProviders?: readonly string[];
+  readonly maxedAccounts?: readonly string[];
+  readonly unavailableProviders?: readonly string[];
+  readonly unavailableAccounts?: readonly string[];
   readonly recordedTs: number;
 }
 
@@ -224,10 +248,10 @@ export const dispatchSchemas: SchemaMap = new Map<string, z.ZodType>([
 export const dispatchUpcasters: UpcasterRegistry = new Map();
 
 /**
- * Build + validate a `usage.observed` `NewEvent`, keyed on the account's usage stream. Self-validating
- * like the other `make*Event`s; the acting source is NOT an agent, so no `actor` is set. Enforces the
- * available variant's all-or-none window invariant fail-loud (Principle 9) — a partial window (e.g.
- * `window_kind` without `used_pct`) is a programming error, never a silently dropped field.
+ * Build + validate a `usage.observed` `NewEvent`, keyed on the provider-account usage stream.
+ * Self-validating like the other `make*Event`s; the acting source is NOT an agent, so no `actor` is set.
+ * Enforces the available variant's all-or-none window invariant fail-loud (Principle 9) — a partial
+ * window (e.g. `window_kind` without `used_pct`) is a programming error, never a silently dropped field.
  */
 export function makeUsageObservedEvent(projectId: string, obs: UsageObserved): NewEvent {
   const payload = usageObservedSchema.parse(obs);
@@ -244,7 +268,7 @@ export function makeUsageObservedEvent(projectId: string, obs: UsageObserved): N
   }
   return {
     projectId,
-    scope: usageScope(payload.account),
+    scope: usageScope(payload.provider, payload.account),
     type: EVENT_USAGE_OBSERVED,
     v: DISPATCH_EVENT_V,
     payload,
@@ -283,10 +307,11 @@ export function makeCostNearBudgetEvent(projectId: string, nb: CostNearBudget): 
 
 // ── Read-model record shapes (what the store facade returns) ───────────────────────────────────────
 /**
- * The latest KNOWN per-window usage observation — one row per `(account, window_kind)`. `sampledAt` /
- * `resetAt` are the persisted ISO strings from the event payload (not wall-clock — freeze #6); the
- * staleness predicate reads them. An account whose latest sample was UNAVAILABLE keeps any prior bucket
- * row, but it is shadowed by {@link UsageAccountStatus}`.available = false` — see `deriveHeadroom`.
+ * The latest KNOWN per-window usage observation — one row per `(provider, account, window_kind)`.
+ * `sampledAt` / `resetAt` are the persisted ISO strings from the event payload (not wall-clock —
+ * freeze #6); the staleness predicate reads them. An account whose latest sample was UNAVAILABLE keeps
+ * any prior bucket row, but it is shadowed by {@link UsageAccountStatus}`.available = false` — see
+ * `deriveHeadroom`.
  */
 export interface UsageBucket {
   readonly provider: Provider;
@@ -299,9 +324,9 @@ export interface UsageBucket {
 }
 
 /**
- * The latest availability status of a provider account — one row per account. `available: false`
- * (with its `reason`) is what makes a whole account's headroom read `unknown` regardless of any stale
- * per-window bucket (AC6). `observedTs` is the persisted event ts (freeze #6).
+ * The latest availability status of a provider account — one row per `(provider, account)`.
+ * `available: false` (with its `reason`) is what makes a whole account's headroom read `unknown`
+ * regardless of any stale per-window bucket (AC6). `observedTs` is the persisted event ts (freeze #6).
  */
 export interface UsageAccountStatus {
   readonly provider: Provider;
@@ -321,16 +346,20 @@ export type CostRollupKind = 'agent' | 'task';
  * A cost rollup total — one row per `(kind, id)`: the per-agent view (`kind: 'agent'`) AND the per-task
  * view (`kind: 'task'`), both folded from the same `cost.recorded` events. Dollars are summed only
  * where reported (Claude); tokens are summed across all observations; `usedPct` is summed for the Codex
- * usage-% expression. `observations` is the count of folded events.
+ * usage-% expression. `usedPctObservations` preserves whether a zero usage-% was actually observed.
+ * `observations` is the count of folded events.
  */
 export interface CostRollup {
   readonly kind: CostRollupKind;
   readonly id: string;
   readonly totalCostUsd: number;
+  readonly costUsdObservations: number;
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly totalTokens: number;
+  readonly tokenObservations: number;
   readonly usedPct: number;
+  readonly usedPctObservations: number;
   readonly observations: number;
 }
 
@@ -356,6 +385,11 @@ export function makePlacementDecidedEvent(
   payload: PlacementDecided,
 ): NewEvent {
   const validated = placementDecidedSchema.parse(payload);
+  if (validated.kind === 'placed' && validated.account === undefined) {
+    throw new Error(
+      'makePlacementDecidedEvent: placed placement.decided events must carry account',
+    );
+  }
   return {
     projectId,
     scope: placementScope(agent),

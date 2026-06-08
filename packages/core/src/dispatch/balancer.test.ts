@@ -31,9 +31,15 @@ const FAR_RESET = '2026-06-10T00:00:00.000Z'; // ≫ the 5h horizon ⇒ no reset
 const SOON_RESET = '2026-06-03T00:06:00.000Z'; // 6 min away ⇒ nearly-fully credited back.
 
 /** A healthy candidate: account available + a known binding-window headroom. */
-function known(provider: Provider, usedPct: number, resetAt: string = FAR_RESET): ProviderHeadroom {
+function known(
+  provider: Provider,
+  usedPct: number,
+  resetAt: string = FAR_RESET,
+  account: string = provider === 'claude' ? 'claude:max' : 'codex:pro',
+): ProviderHeadroom {
   return {
     provider,
+    account,
     available: true,
     headroom: { kind: 'known', used_pct: usedPct, reset_at: resetAt },
     resetAt,
@@ -44,6 +50,7 @@ function known(provider: Provider, usedPct: number, resetAt: string = FAR_RESET)
 function unavailable(provider: Provider, reason: string, resetAt?: string): ProviderHeadroom {
   const base: ProviderHeadroom = {
     provider,
+    account: provider === 'claude' ? 'claude:max' : 'codex:pro',
     available: false,
     headroom: { kind: 'unknown', reason },
   };
@@ -52,7 +59,12 @@ function unavailable(provider: Provider, reason: string, resetAt?: string): Prov
 
 /** An available account whose binding-window headroom is UNKNOWN (nothing observed) — excluded (AC3). */
 function unknownHeadroom(provider: Provider, reason: string): ProviderHeadroom {
-  return { provider, available: true, headroom: { kind: 'unknown', reason } };
+  return {
+    provider,
+    account: provider === 'claude' ? 'claude:max' : 'codex:pro',
+    available: true,
+    headroom: { kind: 'unknown', reason },
+  };
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -75,6 +87,7 @@ describe('AC1 — pinned seats are returned unchanged (never re-routed)', () => 
     expect(decision.kind).toBe('pinned');
     if (decision.kind !== 'pinned') throw new Error('unreachable');
     expect(decision.placement.provider).toBe('claude');
+    expect(decision.placement.account).toBe('claude:max');
     expect(decision.placement.model).toBe('claude-opus-4-8');
     expect(decision.placement.effort).toBe('max');
     // Context is never pinned — it comes from the default tier for the pinned provider.
@@ -128,6 +141,51 @@ describe('AC1 — pinned seats are returned unchanged (never re-routed)', () => 
     expect(decision.kind).toBe('pinned');
     if (decision.kind !== 'pinned') throw new Error('unreachable');
     expect(decision.placement.provider).toBe('codex');
+  });
+
+  it('pinned seats use the offered account for the pinned provider', () => {
+    const decision = placeAgent({
+      role: 'implementer',
+      workSize: 'average',
+      reasoningBudget: 'standard',
+      pins: { implementer: { provider: 'claude' } },
+      candidates: [
+        {
+          provider: 'claude',
+          account: 'claude:team',
+          available: true,
+          headroom: { kind: 'known', used_pct: 5, reset_at: FAR_RESET },
+          resetAt: FAR_RESET,
+        },
+      ],
+      nowMs: NOW,
+    });
+
+    expect(decision.kind).toBe('pinned');
+    if (decision.kind !== 'pinned') throw new Error('expected pinned');
+    expect(decision.placement.account).toBe('claude:team');
+  });
+
+  it('fails loud when a provider pin sees multiple same-provider accounts', () => {
+    expect(() =>
+      placeAgent({
+        role: 'implementer',
+        workSize: 'average',
+        reasoningBudget: 'standard',
+        pins: { implementer: { provider: 'claude' } },
+        candidates: [
+          {
+            provider: 'claude',
+            account: 'claude:max',
+            available: false,
+            headroom: { kind: 'unknown', reason: 'account unavailable' },
+            resetAt: FAR_RESET,
+          },
+          known('claude', 5, FAR_RESET, 'claude:team'),
+        ],
+        nowMs: NOW,
+      }),
+    ).toThrow(/same-provider multi-subscription routing/i);
   });
 
   it('an exact sub-role pin wins over a base-role pin for the same seat', () => {
@@ -187,6 +245,7 @@ describe('AC2 — floating routes to the roomiest healthy provider', () => {
   it('hysteresis: a TINY delta does NOT flip away from previous', () => {
     const previous: Placement = {
       role: 'implementer',
+      account: 'claude:max',
       ...resolveTier('average', 'standard', 'claude'),
     };
     const decision = placeAgent({
@@ -204,9 +263,33 @@ describe('AC2 — floating routes to the roomiest healthy provider', () => {
     expect(decision.reason).toMatch(/hysteresis/);
   });
 
+  it('fails loud when floating placement sees multiple same-provider accounts', () => {
+    const previous: Placement = {
+      role: 'implementer',
+      account: 'claude:max',
+      ...resolveTier('average', 'standard', 'claude'),
+    };
+
+    expect(() =>
+      placeAgent({
+        role: 'implementer',
+        workSize: 'average',
+        reasoningBudget: 'standard',
+        pins: {},
+        candidates: [
+          known('claude', 35, FAR_RESET, 'claude:max'),
+          known('claude', 30, FAR_RESET, 'claude:team'),
+        ],
+        nowMs: NOW,
+        previous,
+      }),
+    ).toThrow(/same-provider multi-subscription routing/i);
+  });
+
   it('hysteresis: a LARGE delta DOES flip away from previous', () => {
     const previous: Placement = {
       role: 'implementer',
+      account: 'claude:max',
       ...resolveTier('average', 'standard', 'claude'),
     };
     const decision = placeAgent({
@@ -226,6 +309,7 @@ describe('AC2 — floating routes to the roomiest healthy provider', () => {
   it('a custom hysteresis margin tightens/loosens the flip threshold', () => {
     const previous: Placement = {
       role: 'implementer',
+      account: 'claude:max',
       ...resolveTier('average', 'standard', 'claude'),
     };
     // claude 50 vs codex 45 — lead 5. With margin 2, the lead (5 > 2) now flips.
@@ -246,6 +330,7 @@ describe('AC2 — floating routes to the roomiest healthy provider', () => {
   it('does NOT hold a previous provider that has gone unhealthy — moves to the healthy one', () => {
     const previous: Placement = {
       role: 'implementer',
+      account: 'claude:max',
       ...resolveTier('average', 'standard', 'claude'),
     };
     const decision = placeAgent({
@@ -467,6 +552,7 @@ describe('bindingProviderHeadroom — picks the most-constrained window', () => 
       bucket('claude:max', 'claude', 'weekly', 77, '2026-06-10T00:00:00.000Z'),
     ]);
     expect(c.available).toBe(true);
+    expect(c.account).toBe('claude:max');
     expect(c.headroom).toEqual({
       kind: 'known',
       used_pct: 77,
@@ -489,13 +575,15 @@ describe('bindingProviderHeadroom — picks the most-constrained window', () => 
       bucket('codex:pro', 'codex', 'primary', 100, '2026-06-03T02:00:00.000Z'),
     ]);
     expect(c.available).toBe(false);
+    expect(c.account).toBe('codex:pro');
     expect(c.headroom.kind).toBe('unknown');
     expect(c.resetAt).toBe('2026-06-03T02:00:00.000Z'); // shadowed bucket reset survives for ETA.
   });
 
   it('no account status ⇒ unavailable + unknown headroom (never a fabricated 0%)', () => {
-    const c = bindingProviderHeadroom('codex', undefined, []);
+    const c = bindingProviderHeadroom('codex', undefined, [], 'codex:pro');
     expect(c.available).toBe(false);
+    expect(c.account).toBe('codex:pro');
     expect(c.headroom.kind).toBe('unknown');
     expect(c.resetAt).toBeUndefined();
   });
@@ -574,6 +662,171 @@ describe('candidatesFromStore + placeAgentFromStore — reads live state, routes
       });
       expect(codex?.available).toBe(false);
       expect(codex?.headroom.kind).toBe('unknown');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('candidatesFromStore treats stale buckets as unknown headroom instead of routable capacity', () => {
+    const store = openDispatchStore('p-stale-balancer');
+    try {
+      store.recordSnapshot({
+        provider: 'codex',
+        account: 'codex:pro',
+        available: true,
+        source: 'fake',
+        sampled_at: '2026-06-03T00:00:00.000Z',
+        windows: [
+          {
+            kind: 'primary',
+            used_pct: 1,
+            reset_at: '2026-06-03T00:05:00.000Z',
+          },
+        ],
+      });
+
+      const candidates = candidatesFromStore(store, [{ provider: 'codex', account: 'codex:pro' }], {
+        nowMs: Date.parse('2026-06-03T00:06:00.000Z'),
+      });
+
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]!.provider).toBe('codex');
+      expect(candidates[0]!.headroom.kind).toBe('unknown');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('preserves a stale-but-future reset ETA for unavailable accounts', () => {
+    const store = openDispatchStore('p-stale-reset-balancer');
+    try {
+      store.recordSnapshot({
+        provider: 'codex',
+        account: 'codex:pro',
+        available: true,
+        source: 'fake',
+        sampled_at: '2026-06-03T00:00:00.000Z',
+        windows: [
+          {
+            kind: 'primary',
+            used_pct: 100,
+            reset_at: '2026-06-03T05:00:00.000Z',
+          },
+        ],
+      });
+      store.recordSnapshot({
+        provider: 'codex',
+        account: 'codex:pro',
+        available: false,
+        source: 'fake',
+        sampled_at: '2026-06-03T00:10:00.000Z',
+        windows: [],
+      });
+
+      const candidates = candidatesFromStore(store, [{ provider: 'codex', account: 'codex:pro' }], {
+        nowMs: Date.parse('2026-06-03T00:10:00.000Z'),
+      });
+
+      expect(candidates[0]!.available).toBe(false);
+      expect(candidates[0]!.headroom.kind).toBe('unknown');
+      expect(candidates[0]!.resetAt).toBe('2026-06-03T05:00:00.000Z');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('treats an account with any stale still-relevant bucket as unknown, not partially routable', () => {
+    const store = openDispatchStore('p-partial-stale-balancer');
+    try {
+      store.recordUsageObserved({
+        available: true,
+        provider: 'claude',
+        account: 'claude:max',
+        window_kind: 'five_hour',
+        used_pct: 99,
+        reset_at: '2026-06-03T05:00:00.000Z',
+        source: 'fake',
+        sampled_at: '2026-06-03T00:00:00.000Z',
+      });
+      store.recordUsageObserved({
+        available: true,
+        provider: 'claude',
+        account: 'claude:max',
+        window_kind: 'weekly',
+        used_pct: 10,
+        reset_at: '2026-06-10T00:00:00.000Z',
+        source: 'fake',
+        sampled_at: '2026-06-03T00:09:00.000Z',
+      });
+
+      const candidates = candidatesFromStore(
+        store,
+        [{ provider: 'claude', account: 'claude:max' }],
+        {
+          nowMs: Date.parse('2026-06-03T00:10:00.000Z'),
+        },
+      );
+
+      expect(candidates[0]!.account).toBe('claude:max');
+      expect(candidates[0]!.headroom.kind).toBe('unknown');
+      expect(candidates[0]!.resetAt).toBe('2026-06-03T05:00:00.000Z');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('treats any stale account bucket as unknown even when its reset is malformed or past', () => {
+    const store = openDispatchStore('p-any-stale-balancer');
+    try {
+      store.recordUsageObserved({
+        available: true,
+        provider: 'claude',
+        account: 'claude:max',
+        window_kind: 'five_hour',
+        used_pct: 99,
+        reset_at: 'not-a-date',
+        source: 'fake',
+        sampled_at: '2026-06-03T00:00:00.000Z',
+      });
+      store.recordUsageObserved({
+        available: true,
+        provider: 'claude',
+        account: 'claude:max',
+        window_kind: 'weekly',
+        used_pct: 10,
+        reset_at: '2026-06-10T00:00:00.000Z',
+        source: 'fake',
+        sampled_at: '2026-06-03T00:09:00.000Z',
+      });
+
+      const malformed = candidatesFromStore(
+        store,
+        [{ provider: 'claude', account: 'claude:max' }],
+        {
+          nowMs: Date.parse('2026-06-03T00:10:00.000Z'),
+        },
+      );
+      expect(malformed[0]!.headroom.kind).toBe('unknown');
+
+      store.recordUsageObserved({
+        available: true,
+        provider: 'claude',
+        account: 'claude:max',
+        window_kind: 'five_hour',
+        used_pct: 99,
+        reset_at: '2026-06-03T00:05:00.000Z',
+        source: 'fake',
+        sampled_at: '2026-06-03T00:00:00.000Z',
+      });
+
+      const pastReset = candidatesFromStore(
+        store,
+        [{ provider: 'claude', account: 'claude:max' }],
+        {
+          nowMs: Date.parse('2026-06-03T00:10:00.000Z'),
+        },
+      );
+      expect(pastReset[0]!.headroom.kind).toBe('unknown');
     } finally {
       store.close();
     }

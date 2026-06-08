@@ -74,8 +74,12 @@ These are the top-level conditions that, all met, *are* v1.
 - `RL-2` ☐ Sub-roles specialize approach and may only **narrow** permissions (Principle 11).
 - `RL-3` ◐ Escalation works: repeated failure / stuck worker / intent ambiguity climbs the spawn
   chain (parent → Coordinator → operator), resolved at the lowest competent level (Principle 8). L1 delivers the escalation protocol — resolve-or-forward (never-drop; send throws on failed persist), ask-on-intent-ambiguity, parent<->child threaded brainstorm, the upward chain, and clarify-timeout=forward-up policy. Remaining: the 3-strike trigger (L5) + roster/authority (L6).
-- `RL-4` ☐ A **rate-limit-aware balancer** spreads load across subscriptions; when tapped, it
-  **paces** rather than degrading quality (Principle 13, `DISPATCH`, `COST-and-USAGE`).
+- `RL-4` ◐ A **rate-limit-aware balancer** spreads load across the default provider accounts; when tapped, it
+  **paces** rather than degrading quality (Principle 13, `DISPATCH`, `COST-and-USAGE`). L4 ships
+  provider/account usage buckets, passive live usage adapters, provider-neutral tier placement across
+  the default Claude/Codex accounts, throttle-as-WAITING with reset ETA, CLI dry-run diagnostics, and
+  `co_sling` placement recording. Remaining: same-provider multi-subscription placement/output,
+  L7 live session hosting/re-wake, and full self-host proof under real worker load.
 
 ## D. Review gate & integration (P6, P7, P10)
 
@@ -110,7 +114,12 @@ These are the top-level conditions that, all met, *are* v1.
 ## F. State, recovery & observability (P9, P14)
 
 - `ST-1` ◐ **Everything is an event** — agents, turns, mail, reviews, phases — durable, inspectable,
-  replayable (Principle 14). L0 landed the append-only event log + projections/replay (config & registry are events; replay byte-equality tested); L1 is fully event-sourced over the L0 log (mail send/read + actionable state are events). Remaining: agents/turns/reviews/phases as events in later layers. Evidence: L0 on `main` (PR #11); L1 on `dev`.
+  replayable (Principle 14). L0 landed the append-only event log + projections/replay (config &
+  registry are events; replay byte-equality tested); L1 is fully event-sourced over the L0 log (mail
+  send/read + actionable state are events). L4 adds usage/cost/near-budget/placement events with
+  projector replay coverage and scope/payload identity guards. Remaining: agents/turns/reviews/phases
+  as events in later layers. Evidence: L0 on `main` (PR #11); L1 on `dev`; L4 dispatch/cost in
+  `co/l4-dispatch-cost`.
 - `ST-2` ☐ The system can be **reconstructed and recovered** from its record after a crash/restart;
   stuck/zombie agents are reconciled back to WAITING (Principle 14, `STATE-and-RECOVERY`).
 - `ST-3` ☐ **No silent failures** — pre-flight (the doctor), in-flight (live stream monitoring),
@@ -135,8 +144,11 @@ These are the top-level conditions that, all met, *are* v1.
 
 ## H. Providers (P13)
 
-- `PV-1` ☐ **Claude and Codex are interchangeable** behind one routing/gating/mail abstraction;
-  chosen per role / per dispatch (Principle 13, `PROVIDERS`).
+- `PV-1` ◐ **Claude and Codex are interchangeable** behind one routing/gating/mail abstraction;
+  chosen per role / per dispatch (Principle 13, `PROVIDERS`). L4 ships provider-neutral dispatch
+  policy, default Claude+Codex account candidates, passive usage sources, and shared CLI/MCP core
+  routing. Remaining: full live-session execution/monitoring behind the same abstraction and the
+  self-host proof that both providers can run real worker turns.
 - `PV-2` ⏸ Interactive (non-headless) **subscription auth** works for both providers. *Couples to
   the substrate research (spawn/transport).*
 

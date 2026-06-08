@@ -3,6 +3,7 @@ import type { Projector } from '../replay/projector.js';
 import type { StoredEvent, StoreTx } from '../store/types.js';
 import {
   EVENT_USAGE_OBSERVED,
+  usageScope,
   type UsageAccountStatus,
   type UsageBucket,
   type UsageObserved,
@@ -10,14 +11,14 @@ import {
 import type { Provider } from './usage-source.js';
 
 /**
- * The L4 usage read-model — two tables, both keyed by account, every column log-derived so a
+ * The L4 usage read-model — two tables, both keyed by provider account, every column log-derived so a
  * `rebuildAll` reproduces them byte-identical (AC5, freeze #6):
  *
- *   - `usage_buckets`  — one row per `(account, window_kind)`: the LATEST known window observation
+ *   - `usage_buckets`  — one row per `(provider, account, window_kind)`: the LATEST known window observation
  *                        (used_pct + reset_at + source + sampled_at). Last fold wins (passive samples
  *                        supersede); replay folds the log in seq order, so it reaches the same row.
- *   - `usage_accounts` — one row per account: the LATEST availability status. `available = 0` (with a
- *                        reason) is what makes the whole account's headroom read `unknown` (AC6),
+ *   - `usage_accounts` — one row per `(provider, account)`: the LATEST availability status.
+ *                        `available = 0` (with a reason) is what makes the whole account's headroom read `unknown` (AC6),
  *                        shadowing any stale bucket row. An available sample marks it `available = 1`.
  *
  * `ts` columns persist the event ts (freeze #6 — never wall-clock on read). The two tables are folded
@@ -26,24 +27,25 @@ import type { Provider } from './usage-source.js';
  */
 const CREATE_USAGE_TABLES = `
   CREATE TABLE IF NOT EXISTS usage_buckets (
+    provider    TEXT NOT NULL,
     account     TEXT NOT NULL,
     window_kind TEXT NOT NULL,
-    provider    TEXT NOT NULL,
     used_pct    REAL NOT NULL,
     reset_at    TEXT NOT NULL,
     source      TEXT NOT NULL,
     sampled_at  TEXT NOT NULL,
     ts          INTEGER NOT NULL,
-    PRIMARY KEY (account, window_kind)
+    PRIMARY KEY (provider, account, window_kind)
   );
   CREATE TABLE IF NOT EXISTS usage_accounts (
-    account    TEXT PRIMARY KEY,
     provider   TEXT NOT NULL,
+    account    TEXT NOT NULL,
     available  INTEGER NOT NULL,
     reason     TEXT,
     source     TEXT NOT NULL,
     sampled_at TEXT NOT NULL,
-    ts         INTEGER NOT NULL
+    ts         INTEGER NOT NULL,
+    PRIMARY KEY (provider, account)
   );
 `;
 
@@ -52,7 +54,126 @@ const CREATE_USAGE_TABLES = `
  * read path, so a freshly opened store can be queried before any write has happened.
  */
 export function ensureUsageTables(db: DatabaseSync): void {
+  repairDerivedUsageSchema(db);
   db.exec(CREATE_USAGE_TABLES);
+}
+
+function resetUsageTables(db: DatabaseSync): void {
+  db.exec(`
+    DROP TABLE IF EXISTS usage_buckets;
+    DROP TABLE IF EXISTS usage_accounts;
+    DROP TABLE IF EXISTS usage_buckets_legacy;
+    DROP TABLE IF EXISTS usage_accounts_legacy;
+  `);
+  db.exec(CREATE_USAGE_TABLES);
+}
+
+function repairDerivedUsageSchema(db: DatabaseSync): void {
+  if (
+    tableExists(db, 'usage_buckets') &&
+    !hasPrimaryKey(db, 'usage_buckets', ['provider', 'account', 'window_kind'])
+  ) {
+    migrateLegacyUsageBuckets(db);
+  }
+  if (
+    tableExists(db, 'usage_accounts') &&
+    !hasPrimaryKey(db, 'usage_accounts', ['provider', 'account'])
+  ) {
+    migrateLegacyUsageAccounts(db);
+  }
+}
+
+function tableExists(db: DatabaseSync, table: string): boolean {
+  const row = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table);
+  return row !== undefined;
+}
+
+function hasPrimaryKey(db: DatabaseSync, table: string, expected: readonly string[]): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+    readonly name: string;
+    readonly pk: number;
+  }>;
+  const actual = rows
+    .filter((row) => row.pk > 0)
+    .sort((a, b) => a.pk - b.pk)
+    .map((row) => row.name);
+  return actual.length === expected.length && actual.every((name, i) => name === expected[i]);
+}
+
+function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ readonly name: string }>;
+  return rows.some((row) => row.name === column);
+}
+
+function migrateLegacyUsageBuckets(db: DatabaseSync): void {
+  const canCopy = hasColumn(db, 'usage_buckets', 'provider');
+  if (!canCopy) assertProviderlessLegacyAccountsAreInferable(db, 'usage_buckets');
+  db.exec('ALTER TABLE usage_buckets RENAME TO usage_buckets_legacy');
+  db.exec(CREATE_USAGE_TABLES);
+  if (canCopy) {
+    db.exec(`
+      INSERT OR REPLACE INTO usage_buckets
+        (provider, account, window_kind, used_pct, reset_at, source, sampled_at, ts)
+      SELECT provider, account, window_kind, used_pct, reset_at, source, sampled_at, ts
+      FROM usage_buckets_legacy
+    `);
+  } else {
+    db.exec(`
+      INSERT OR REPLACE INTO usage_buckets
+        (provider, account, window_kind, used_pct, reset_at, source, sampled_at, ts)
+      SELECT ${inferredProviderSql('account')}, account, window_kind, used_pct, reset_at, source, sampled_at, ts
+      FROM usage_buckets_legacy
+    `);
+  }
+  db.exec('DROP TABLE usage_buckets_legacy');
+}
+
+function migrateLegacyUsageAccounts(db: DatabaseSync): void {
+  const canCopy = hasColumn(db, 'usage_accounts', 'provider');
+  if (!canCopy) assertProviderlessLegacyAccountsAreInferable(db, 'usage_accounts');
+  db.exec('ALTER TABLE usage_accounts RENAME TO usage_accounts_legacy');
+  db.exec(CREATE_USAGE_TABLES);
+  if (canCopy) {
+    db.exec(`
+      INSERT OR REPLACE INTO usage_accounts
+        (provider, account, available, reason, source, sampled_at, ts)
+      SELECT provider, account, available, reason, source, sampled_at, ts
+      FROM usage_accounts_legacy
+    `);
+  } else {
+    db.exec(`
+      INSERT OR REPLACE INTO usage_accounts
+        (provider, account, available, reason, source, sampled_at, ts)
+      SELECT ${inferredProviderSql('account')}, account, available, reason, source, sampled_at, ts
+      FROM usage_accounts_legacy
+    `);
+  }
+  db.exec('DROP TABLE usage_accounts_legacy');
+}
+
+function assertProviderlessLegacyAccountsAreInferable(db: DatabaseSync, table: string): void {
+  const rows = db.prepare(`SELECT DISTINCT account FROM ${table}`).all() as Array<{
+    readonly account: unknown;
+  }>;
+  const bad = rows
+    .map((row) => String(row.account))
+    .find((account) => inferredProvider(account) === undefined);
+  if (bad !== undefined) {
+    throw new Error(
+      `usage-projector: legacy ${table} row for account '${bad}' has no provider column and cannot be safely migrated; run rebuildAll from the event log`,
+    );
+  }
+}
+
+function inferredProvider(account: string): Provider | undefined {
+  const provider = account.slice(0, account.indexOf(':'));
+  return provider === 'claude' || provider === 'codex' ? provider : undefined;
+}
+
+function inferredProviderSql(column: string): string {
+  return `CASE substr(${column}, 1, instr(${column}, ':') - 1) WHEN 'claude' THEN 'claude' WHEN 'codex' THEN 'codex' END`;
 }
 
 /** Map a raw `usage_buckets` row (loosely typed at the SQLite boundary) to a {@link UsageBucket}. */
@@ -82,27 +203,30 @@ export function rowToUsageAccountStatus(row: Record<string, unknown>): UsageAcco
   };
 }
 
-const BUCKET_COLUMNS = 'account, window_kind, provider, used_pct, reset_at, source, sampled_at, ts';
-const ACCOUNT_COLUMNS = 'account, provider, available, reason, source, sampled_at, ts';
+const BUCKET_COLUMNS = 'provider, account, window_kind, used_pct, reset_at, source, sampled_at, ts';
+const ACCOUNT_COLUMNS = 'provider, account, available, reason, source, sampled_at, ts';
 
-/** The latest known window bucket for `(account, window_kind)`, or undefined. */
+/** The latest known window bucket for `(provider, account, window_kind)`, or undefined. */
 export function selectUsageBucket(
   db: DatabaseSync,
+  provider: Provider,
   account: string,
   windowKind: string,
 ): UsageBucket | undefined {
   ensureUsageTables(db);
   const row = db
-    .prepare(`SELECT ${BUCKET_COLUMNS} FROM usage_buckets WHERE account = ? AND window_kind = ?`)
-    .get(account, windowKind);
+    .prepare(
+      `SELECT ${BUCKET_COLUMNS} FROM usage_buckets WHERE provider = ? AND account = ? AND window_kind = ?`,
+    )
+    .get(provider, account, windowKind);
   return row ? rowToUsageBucket(row as Record<string, unknown>) : undefined;
 }
 
-/** Every known window bucket, in a deterministic order (account, then window_kind). */
+/** Every known window bucket, in `(provider, account, window_kind)` order. */
 export function selectAllUsageBuckets(db: DatabaseSync): UsageBucket[] {
   ensureUsageTables(db);
   const rows = db
-    .prepare(`SELECT ${BUCKET_COLUMNS} FROM usage_buckets ORDER BY account, window_kind`)
+    .prepare(`SELECT ${BUCKET_COLUMNS} FROM usage_buckets ORDER BY provider, account, window_kind`)
     .all();
   return rows.map((r) => rowToUsageBucket(r as Record<string, unknown>));
 }
@@ -110,19 +234,22 @@ export function selectAllUsageBuckets(db: DatabaseSync): UsageBucket[] {
 /** The latest availability status for `account`, or undefined (no sample yet). */
 export function selectUsageAccount(
   db: DatabaseSync,
+  provider: Provider,
   account: string,
 ): UsageAccountStatus | undefined {
   ensureUsageTables(db);
   const row = db
-    .prepare(`SELECT ${ACCOUNT_COLUMNS} FROM usage_accounts WHERE account = ?`)
-    .get(account);
+    .prepare(`SELECT ${ACCOUNT_COLUMNS} FROM usage_accounts WHERE provider = ? AND account = ?`)
+    .get(provider, account);
   return row ? rowToUsageAccountStatus(row as Record<string, unknown>) : undefined;
 }
 
-/** Every account status, in account order (deterministic). */
+/** Every provider-account status, in `(provider, account)` order. */
 export function selectAllUsageAccounts(db: DatabaseSync): UsageAccountStatus[] {
   ensureUsageTables(db);
-  const rows = db.prepare(`SELECT ${ACCOUNT_COLUMNS} FROM usage_accounts ORDER BY account`).all();
+  const rows = db
+    .prepare(`SELECT ${ACCOUNT_COLUMNS} FROM usage_accounts ORDER BY provider, account`)
+    .all();
   return rows.map((r) => rowToUsageAccountStatus(r as Record<string, unknown>));
 }
 
@@ -142,15 +269,14 @@ export class UsageProjector implements Projector {
 
   reset(tx: StoreTx): void {
     const db = tx.raw as DatabaseSync;
-    ensureUsageTables(db);
-    db.exec('DELETE FROM usage_buckets');
-    db.exec('DELETE FROM usage_accounts');
+    resetUsageTables(db);
   }
 
   apply(tx: StoreTx, event: StoredEvent): void {
     const db = tx.raw as DatabaseSync;
     ensureUsageTables(db);
     const payload = event.payload as UsageObserved;
+    validateUsageEnvelope(event, payload);
 
     if (payload.available) {
       // A reachable account always marks itself available; the window bucket is upserted only when the
@@ -164,24 +290,28 @@ export class UsageProjector implements Projector {
       ) {
         db.prepare(
           `INSERT INTO usage_buckets
-             (account, window_kind, provider, used_pct, reset_at, source, sampled_at, ts)
+             (provider, account, window_kind, used_pct, reset_at, source, sampled_at, ts)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(account, window_kind) DO UPDATE SET
-             provider = excluded.provider,
+           ON CONFLICT(provider, account, window_kind) DO UPDATE SET
              used_pct = excluded.used_pct,
              reset_at = excluded.reset_at,
              source = excluded.source,
              sampled_at = excluded.sampled_at,
              ts = excluded.ts`,
         ).run(
+          payload.provider,
           payload.account,
           payload.window_kind,
-          payload.provider,
           payload.used_pct,
           payload.reset_at,
           payload.source,
           payload.sampled_at,
           event.ts,
+        );
+      } else {
+        db.prepare('DELETE FROM usage_buckets WHERE provider = ? AND account = ?').run(
+          payload.provider,
+          payload.account,
         );
       }
       upsertAccount(
@@ -211,6 +341,26 @@ export class UsageProjector implements Projector {
   }
 }
 
+function validateUsageEnvelope(event: StoredEvent, payload: UsageObserved): void {
+  const expected = usageScope(payload.provider, payload.account);
+  const legacy = usageScope(payload.account);
+  if (event.scope === expected) return;
+  if (event.scope === legacy) {
+    const provider = inferredProvider(payload.account);
+    if (provider !== undefined && provider !== payload.provider) {
+      throw new Error(
+        `usage-projector: legacy usage scope '${event.scope}' conflicts with payload provider '${payload.provider}'`,
+      );
+    }
+    return;
+  }
+  if (event.scope !== expected) {
+    throw new Error(
+      `usage-projector: usage scope '${event.scope}' does not match payload identity '${expected}'`,
+    );
+  }
+}
+
 /** Upsert one `usage_accounts` row (latest status wins). Shared by the available / unavailable paths. */
 function upsertAccount(
   db: DatabaseSync,
@@ -223,14 +373,13 @@ function upsertAccount(
   ts: number,
 ): void {
   db.prepare(
-    `INSERT INTO usage_accounts (account, provider, available, reason, source, sampled_at, ts)
+    `INSERT INTO usage_accounts (provider, account, available, reason, source, sampled_at, ts)
      VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(account) DO UPDATE SET
-       provider = excluded.provider,
+     ON CONFLICT(provider, account) DO UPDATE SET
        available = excluded.available,
        reason = excluded.reason,
        source = excluded.source,
        sampled_at = excluded.sampled_at,
        ts = excluded.ts`,
-  ).run(account, provider, available, reason, source, sampledAt, ts);
+  ).run(provider, account, available, reason, source, sampledAt, ts);
 }

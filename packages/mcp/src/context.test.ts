@@ -233,6 +233,7 @@ describe('defaultContextFactory — production context resolution', () => {
       expect(ctx.cwd).toBe(slung.worktreePath);
       expect(ctx.worktrees?.getWorktree('co/mcp-sandbox')?.path).toBe(slung.worktreePath);
       expect(ctx.dispatch).toBeDefined();
+      expect(typeof ctx.usageSourceFactory).toBe('function');
     } finally {
       ctx.mail.close();
       ctx.worktrees?.close();

@@ -6,6 +6,7 @@ import '../store/suppress-sqlite-warning.js';
 import { DatabaseSync } from 'node:sqlite';
 import {
   CodexUsageSource,
+  CODEX_DOCTOR_ARGS,
   CODEX_DEFAULT_ACCOUNT,
   defaultCodexDeps,
   openCodexLogsDb,
@@ -13,6 +14,7 @@ import {
   parseCodexRateLimits,
   readLatestCodexRateLimits,
   readLatestRolloutRateLimits,
+  type CodexCli,
   type CodexUsageSourceDeps,
 } from './codex-source.js';
 import { UsageUnavailableError, type UsageSnapshot } from './usage-source.js';
@@ -87,9 +89,127 @@ describe('parseCodexRateLimits — passive codex.rate_limits parse (verified fie
     ]);
   });
 
+  it('prefers an explicit canonical account label over plan fallback', () => {
+    const reading = parseCodexRateLimits(
+      {
+        account: 'codex:team',
+        plan: 'pro',
+        primary: { used_percent: 5, reset_at: '2026-06-03T05:00:00.000Z' },
+      },
+      SAMPLED_AT,
+    );
+
+    expect(reading.account).toBe('codex:team');
+  });
+
+  it('ignores generic envelope ids when deriving account metadata', () => {
+    const reading = parseCodexRateLimits(
+      {
+        id: 'evt_123',
+        result: {
+          plan_type: 'pro',
+          rate_limits: {
+            primary: { used_percent: 5, reset_at: '2026-06-03T05:00:00.000Z' },
+          },
+        },
+      },
+      SAMPLED_AT,
+    );
+
+    expect(reading.account).toBe('codex:pro');
+    expect(reading.accountObserved).toBe(false);
+  });
+
+  it('accepts raw ids only inside scoped account metadata', () => {
+    const reading = parseCodexRateLimits(
+      {
+        result: {
+          account: { id: 'team', plan: 'pro' },
+          rate_limits: {
+            primary: { used_percent: 5, reset_at: '2026-06-03T05:00:00.000Z' },
+          },
+        },
+      },
+      SAMPLED_AT,
+    );
+
+    expect(reading.account).toBe('codex:team');
+    expect(reading.accountObserved).toBe(true);
+  });
+
   it('marks unavailable when allowed is false (over-limit)', () => {
     const reading = parseCodexRateLimits({ ...rateLimitsPayload, allowed: false }, SAMPLED_AT);
     expect(reading.available).toBe(false);
+  });
+
+  it('marks unavailable when allowed is false on the parent envelope', () => {
+    const reading = parseCodexRateLimits(
+      {
+        data: {
+          plan: 'pro',
+          allowed: false,
+          rate_limits: {
+            primary: { used_percent: 44, reset_at: '2026-06-03T05:00:00.000Z' },
+          },
+        },
+      },
+      SAMPLED_AT,
+    );
+
+    expect(reading.account).toBe('codex:pro');
+    expect(reading.available).toBe(false);
+    expect(reading.windows).toEqual([
+      { kind: 'primary', used_pct: 44, reset_at: '2026-06-03T05:00:00.000Z' },
+    ]);
+  });
+
+  it('uses deny-wins availability across parent and nested envelopes', () => {
+    const allowedConflict = parseCodexRateLimits(
+      {
+        data: {
+          allowed: false,
+          rate_limits: {
+            allowed: true,
+            primary: { used_percent: 44, reset_at: '2026-06-03T05:00:00.000Z' },
+          },
+        },
+      },
+      SAMPLED_AT,
+    );
+    const limitConflict = parseCodexRateLimits(
+      {
+        data: {
+          limit_reached: true,
+          rate_limits: {
+            limit_reached: false,
+            primary: { used_percent: 44, reset_at: '2026-06-03T05:00:00.000Z' },
+          },
+        },
+      },
+      SAMPLED_AT,
+    );
+
+    expect(allowedConflict.available).toBe(false);
+    expect(limitConflict.available).toBe(false);
+  });
+
+  it('marks unavailable when limit_reached is true even if allowed remains true', () => {
+    const reading = parseCodexRateLimits(
+      {
+        ...rateLimitsPayload,
+        rate_limits: {
+          allowed: true,
+          limit_reached: true,
+          primary: { used_percent: 100, reset_at: '2026-06-03T05:00:00.000Z' },
+        },
+      },
+      SAMPLED_AT,
+    );
+
+    expect(reading.available).toBe(false);
+    expect(reading.windows).toEqual([
+      { kind: 'primary', used_pct: 100, reset_at: '2026-06-03T05:00:00.000Z' },
+    ]);
   });
 
   it('derives reset_at from a relative resets_in_seconds against the sample time', () => {
@@ -151,8 +271,45 @@ describe('parseCodexRateLimits — REAL live payload (Phase 6b: numeric epoch-se
 
 describe('parseCodexDoctor — metadata preflight (defensive)', () => {
   it('reads a plan into an account label and treats the toolchain as healthy by default', () => {
-    expect(parseCodexDoctor({ plan: 'Pro' })).toEqual({ healthy: true, account: 'codex:pro' });
-    expect(parseCodexDoctor({})).toEqual({ healthy: true, account: CODEX_DEFAULT_ACCOUNT });
+    expect(parseCodexDoctor({ plan: 'Pro' })).toEqual({
+      healthy: true,
+      account: 'codex:pro',
+      accountObserved: false,
+    });
+    expect(parseCodexDoctor({})).toEqual({
+      healthy: true,
+      account: CODEX_DEFAULT_ACCOUNT,
+      accountObserved: false,
+    });
+  });
+
+  it('prefers an explicit canonical account label over plan fallback', () => {
+    expect(parseCodexDoctor({ account: 'codex:team', plan: 'Pro' })).toEqual({
+      healthy: true,
+      account: 'codex:team',
+      accountObserved: true,
+    });
+  });
+
+  it('reads nested account metadata and namespaces explicit raw account ids', () => {
+    expect(parseCodexDoctor({ account: { plan: 'Pro' } })).toEqual({
+      healthy: true,
+      account: 'codex:pro',
+      accountObserved: false,
+    });
+    expect(parseCodexDoctor({ account: { id: 'team', plan: 'Pro' } })).toEqual({
+      healthy: true,
+      account: 'codex:team',
+      accountObserved: true,
+    });
+  });
+
+  it('ignores generic root labels when scoped account metadata is present', () => {
+    expect(parseCodexDoctor({ label: 'doctor', account: { id: 'team', plan: 'Pro' } })).toEqual({
+      healthy: true,
+      account: 'codex:team',
+      accountObserved: true,
+    });
   });
 
   it('marks unhealthy on an explicit failing signal', () => {
@@ -189,6 +346,26 @@ describe('CodexUsageSource.read — layered passive-first, fail-loud', () => {
     expect(snap.source).toBe('doctor');
   });
 
+  it('preserves reset windows from an over-limit rate-limit readout while marking unavailable', async () => {
+    const snap = await new CodexUsageSource(
+      depsWith({
+        readRateLimits: () =>
+          Promise.resolve({
+            plan: 'pro',
+            allowed: false,
+            primary: { used_percent: 100, reset_at: '2026-06-03T05:00:00.000Z' },
+            secondary: { used_percent: 80, reset_at: '2026-06-10T00:00:00.000Z' },
+          }),
+      }),
+    ).read('codex');
+
+    expect(snap.available).toBe(false);
+    expect(snap.windows).toEqual([
+      { kind: 'primary', used_pct: 100, reset_at: '2026-06-03T05:00:00.000Z' },
+      { kind: 'secondary', used_pct: 80, reset_at: '2026-06-10T00:00:00.000Z' },
+    ]);
+  });
+
   it('falls back sqlite → app-server → session jsonl in order', async () => {
     const snap = await new CodexUsageSource(
       depsWith({
@@ -199,6 +376,94 @@ describe('CodexUsageSource.read — layered passive-first, fail-loud', () => {
     ).read('codex');
     expect(snap.source).toBe('session-jsonl');
     expect(snap.windows).toHaveLength(2);
+  });
+
+  it('returns the observed account even when an explicit account option was provided', async () => {
+    const snap = await new CodexUsageSource(
+      depsWith({
+        doctor: () => Promise.resolve({ healthy: true, account: 'codex:pro' }),
+        readRateLimits: () =>
+          Promise.resolve({
+            plan: 'pro',
+            allowed: true,
+            primary: { used_percent: 4, reset_at: '2026-06-03T05:00:00.000Z' },
+          }),
+      }),
+      { account: 'codex:team' },
+    ).read('codex');
+
+    expect(snap.account).toBe('codex:pro');
+    expect(snap.source).toBe('sqlite');
+  });
+
+  it('fails loud when a requested account is not observed by defensive preflight or passive payload', async () => {
+    const source = new CodexUsageSource(
+      depsWith({
+        doctor: () => Promise.resolve(parseCodexDoctor({})),
+        readRateLimits: () =>
+          Promise.resolve({
+            allowed: true,
+            primary: { used_percent: 4, reset_at: '2026-06-03T05:00:00.000Z' },
+          }),
+      }),
+      { account: 'codex:team' },
+    );
+
+    await expect(source.read('codex')).rejects.toThrow(/not observed/i);
+  });
+
+  it('fails loud when requested account preflight has only a generic root label', async () => {
+    const source = new CodexUsageSource(
+      depsWith({
+        doctor: () => Promise.resolve(parseCodexDoctor({ label: 'doctor' })),
+        readRateLimits: () =>
+          Promise.resolve({
+            allowed: true,
+            primary: { used_percent: 4, reset_at: '2026-06-03T05:00:00.000Z' },
+          }),
+      }),
+      { account: 'codex:team' },
+    );
+
+    await expect(source.read('codex')).rejects.toThrow(/not observed/i);
+  });
+
+  it('fails loud when requested account preflight and passive payload only report plan labels', async () => {
+    const source = new CodexUsageSource(
+      depsWith({
+        doctor: () => Promise.resolve(parseCodexDoctor({ account: { plan: 'Pro' } })),
+        readRateLimits: () =>
+          Promise.resolve({
+            plan: 'pro',
+            allowed: true,
+            primary: { used_percent: 4, reset_at: '2026-06-03T05:00:00.000Z' },
+          }),
+      }),
+      { account: 'codex:team' },
+    );
+
+    await expect(source.read('codex')).rejects.toThrow(/not observed/i);
+  });
+
+  it('fails loud when requested account passive payload has envelope ids plus plan metadata', async () => {
+    const source = new CodexUsageSource(
+      depsWith({
+        doctor: () => Promise.resolve(parseCodexDoctor({})),
+        readRateLimits: () =>
+          Promise.resolve({
+            id: 'evt_123',
+            result: {
+              plan_type: 'pro',
+              rate_limits: {
+                primary: { used_percent: 4, reset_at: '2026-06-03T05:00:00.000Z' },
+              },
+            },
+          }),
+      }),
+      { account: 'codex:team' },
+    );
+
+    await expect(source.read('codex')).rejects.toThrow(/not observed/i);
   });
 
   it('throws UsageUnavailableError when every source yields nothing (fail-loud)', async () => {
@@ -291,6 +556,244 @@ describe('readLatestCodexRateLimits — read-only sqlite scan over a representat
     }
   });
 
+  it('chooses the newest real event across all text columns, not the first matching column', () => {
+    const dbPath = join(dir, 'multi-column.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(
+      'CREATE TABLE telemetry (id INTEGER PRIMARY KEY, feedback_log_body TEXT, feedback_log_body_2 TEXT)',
+    );
+    const insert = seed.prepare(
+      'INSERT INTO telemetry (feedback_log_body, feedback_log_body_2) VALUES (?, ?)',
+    );
+    insert.run(
+      prefixedRealBody({
+        ...realRateLimitsEvent,
+        rate_limits: {
+          ...realRateLimitsEvent.rate_limits,
+          primary: { ...realRateLimitsEvent.rate_limits.primary, used_percent: 99 },
+        },
+      }),
+      null,
+    );
+    insert.run(null, prefixedRealBody(realRateLimitsEvent));
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      const payload = readLatestCodexRateLimits(db);
+      const reading = parseCodexRateLimits(payload, SAMPLED_AT);
+      expect(reading.windows[0]).toEqual({
+        kind: 'primary',
+        used_pct: 11,
+        reset_at: PRIMARY_RESET_ISO,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('uses table timestamps across tables and can choose newer event-column fallback over older signature rows', () => {
+    const dbPath = join(dir, 'cross-table.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      CREATE TABLE stale_signature (id INTEGER PRIMARY KEY, ts INTEGER, feedback_log_body TEXT);
+      CREATE TABLE newer_fallback (id INTEGER PRIMARY KEY, ts INTEGER, type TEXT, body TEXT);
+    `);
+    const stale = seed.prepare(
+      'INSERT INTO stale_signature (id, ts, feedback_log_body) VALUES (?, ?, ?)',
+    );
+    stale.run(
+      50,
+      Date.parse('2026-06-03T00:00:00.000Z'),
+      prefixedRealBody({
+        ...realRateLimitsEvent,
+        rate_limits: {
+          ...realRateLimitsEvent.rate_limits,
+          primary: { ...realRateLimitsEvent.rate_limits.primary, used_percent: 99 },
+        },
+      }),
+    );
+    const newer = seed.prepare(
+      'INSERT INTO newer_fallback (id, ts, type, body) VALUES (?, ?, ?, ?)',
+    );
+    newer.run(
+      1,
+      Date.parse('2026-06-03T00:01:00.000Z'),
+      'codex.rate_limits',
+      JSON.stringify({ type: 'codex.rate_limits', ...rateLimitsPayload }),
+    );
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      const payload = readLatestCodexRateLimits(db);
+      const reading = parseCodexRateLimits(payload, SAMPLED_AT);
+      expect(reading.windows[0]).toEqual({
+        kind: 'primary',
+        used_pct: 55,
+        reset_at: '2026-06-03T05:00:00.000Z',
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not let untrusted blind-scan fallback beat a genuine signature event', () => {
+    const dbPath = join(dir, 'untrusted-fallback.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      CREATE TABLE telemetry (id INTEGER PRIMARY KEY, ts INTEGER, feedback_log_body TEXT);
+      CREATE TABLE messages (id INTEGER PRIMARY KEY, ts INTEGER, body TEXT);
+    `);
+    seed
+      .prepare('INSERT INTO telemetry (ts, feedback_log_body) VALUES (?, ?)')
+      .run(Date.parse('2026-06-03T00:00:00.000Z'), prefixedRealBody(realRateLimitsEvent));
+    seed.prepare('INSERT INTO messages (ts, body) VALUES (?, ?)').run(
+      Date.parse('2026-06-03T00:01:00.000Z'),
+      JSON.stringify({
+        type: 'message',
+        rate_limits: {
+          primary: { used_percent: 99, reset_at: '2026-06-03T05:00:00.000Z' },
+        },
+      }),
+    );
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      const payload = readLatestCodexRateLimits(db);
+      const reading = parseCodexRateLimits(payload, SAMPLED_AT);
+      expect(reading.windows[0]).toEqual({
+        kind: 'primary',
+        used_pct: 11,
+        reset_at: PRIMARY_RESET_ISO,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not let spoofed typed blind-scan JSON beat a genuine signature event', () => {
+    const dbPath = join(dir, 'spoofed-typed-fallback.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      CREATE TABLE telemetry (id INTEGER PRIMARY KEY, ts INTEGER, feedback_log_body TEXT);
+      CREATE TABLE messages (id INTEGER PRIMARY KEY, ts INTEGER, body TEXT);
+    `);
+    seed
+      .prepare('INSERT INTO telemetry (ts, feedback_log_body) VALUES (?, ?)')
+      .run(Date.parse('2026-06-03T00:00:00.000Z'), prefixedRealBody(realRateLimitsEvent));
+    seed.prepare('INSERT INTO messages (ts, body) VALUES (?, ?)').run(
+      Date.parse('2026-06-03T00:01:00.000Z'),
+      JSON.stringify({
+        type: 'codex.rate_limits',
+        role: 'assistant',
+        rate_limits: {
+          primary: { used_percent: 99, reset_at: '2026-06-03T05:00:00.000Z' },
+        },
+      }),
+    );
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      const payload = readLatestCodexRateLimits(db);
+      const reading = parseCodexRateLimits(payload, SAMPLED_AT);
+      expect(reading.windows[0]).toEqual({
+        kind: 'primary',
+        used_pct: 11,
+        reset_at: PRIMARY_RESET_ISO,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not let spoofed signature text outside telemetry beat a genuine signature event', () => {
+    const dbPath = join(dir, 'spoofed-signature-fallback.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      CREATE TABLE telemetry (id INTEGER PRIMARY KEY, ts INTEGER, feedback_log_body TEXT);
+      CREATE TABLE messages (id INTEGER PRIMARY KEY, ts INTEGER, body TEXT);
+    `);
+    seed
+      .prepare('INSERT INTO telemetry (ts, feedback_log_body) VALUES (?, ?)')
+      .run(Date.parse('2026-06-03T00:00:00.000Z'), prefixedRealBody(realRateLimitsEvent));
+    seed.prepare('INSERT INTO messages (ts, body) VALUES (?, ?)').run(
+      Date.parse('2026-06-03T00:01:00.000Z'),
+      prefixedRealBody({
+        ...realRateLimitsEvent,
+        rate_limits: {
+          ...realRateLimitsEvent.rate_limits,
+          primary: { ...realRateLimitsEvent.rate_limits.primary, used_percent: 99 },
+        },
+      }),
+    );
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      const payload = readLatestCodexRateLimits(db);
+      const reading = parseCodexRateLimits(payload, SAMPLED_AT);
+      expect(reading.windows[0]).toEqual({
+        kind: 'primary',
+        used_pct: 11,
+        reset_at: PRIMARY_RESET_ISO,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('ignores typed blind fallback without DB provenance', () => {
+    const dbPath = join(dir, 'nested-blind-fallback.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)');
+    seed
+      .prepare('INSERT INTO messages (body) VALUES (?)')
+      .run(
+        JSON.stringify({ event: { type: 'codex.rate_limits', rate_limits: rateLimitsPayload } }),
+      );
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      const payload = readLatestCodexRateLimits(db);
+      expect(payload).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('returns undefined for ambiguous timestamp-less events spread across multiple tables', () => {
+    const dbPath = join(dir, 'ambiguous-tables.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      CREATE TABLE a_events (id INTEGER PRIMARY KEY, feedback_log_body TEXT);
+      CREATE TABLE b_events (id INTEGER PRIMARY KEY, feedback_log_body TEXT);
+    `);
+    seed
+      .prepare('INSERT INTO a_events (feedback_log_body) VALUES (?)')
+      .run(prefixedRealBody(realRateLimitsEvent));
+    seed.prepare('INSERT INTO b_events (feedback_log_body) VALUES (?)').run(
+      prefixedRealBody({
+        ...realRateLimitsEvent,
+        rate_limits: {
+          ...realRateLimitsEvent.rate_limits,
+          primary: { ...realRateLimitsEvent.rate_limits.primary, used_percent: 99 },
+        },
+      }),
+    );
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      expect(readLatestCodexRateLimits(db)).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
   it('returns undefined when no rate_limits row exists', () => {
     const dbPath = join(dir, 'empty.sqlite');
     const seed = new DatabaseSync(dbPath);
@@ -336,6 +839,33 @@ describe('readLatestRolloutRateLimits — session jsonl fallback over a represen
     ]);
   });
 
+  it('ignores prose/message JSON snippets that merely contain rate-limit-shaped data', async () => {
+    const sub = join(dir, '2026', '06', '03');
+    mkdirSync(sub, { recursive: true });
+    const lines = [
+      JSON.stringify({
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Example: {"rate_limits":{"primary":{"used_percent":1,"reset_at":"2026-06-03T05:00:00.000Z"}}}',
+          },
+        ],
+      }),
+      JSON.stringify({
+        type: 'message',
+        role: 'assistant',
+        rate_limits: {
+          primary: { used_percent: 2, reset_at: '2026-06-03T05:00:00.000Z' },
+        },
+      }),
+    ];
+    writeFileSync(join(sub, 'rollout-2026-06-03.jsonl'), lines.join('\n') + '\n');
+
+    expect(await readLatestRolloutRateLimits(dir)).toBeUndefined();
+  });
+
   it('returns undefined for a missing sessions dir (tolerant)', async () => {
     expect(await readLatestRolloutRateLimits(join(dir, 'does-not-exist'))).toBeUndefined();
   });
@@ -346,5 +876,34 @@ describe('defaultCodexDeps — wired with real seams, app-server absent (detect 
     const deps = defaultCodexDeps({ now });
     expect(Object.keys(deps).sort()).toEqual(['doctor', 'now', 'readRateLimits', 'sessionRollout']);
     expect(deps.appServerRead).toBeUndefined();
+  });
+
+  it('only spawns metadata `doctor --json`, never codex exec/completion paths, and leaves app-server absent', async () => {
+    const cliCalls: string[][] = [];
+    const cli: CodexCli = (args) => {
+      cliCalls.push([...args]);
+      return Promise.resolve(JSON.stringify({ plan: 'pro' }));
+    };
+    const deps = defaultCodexDeps({
+      cli,
+      readRateLimits: () => Promise.resolve(rateLimitsPayload),
+      sessionRollout: () => Promise.resolve(undefined),
+      now,
+    });
+
+    const snap = await new CodexUsageSource(deps).read('codex');
+
+    expect(snap.available).toBe(true);
+    expect(cliCalls.length).toBeGreaterThan(0);
+    for (const call of cliCalls) {
+      expect(call).toEqual([...CODEX_DOCTOR_ARGS]);
+      expect(call.some((a) => /exec|prompt|complete|completion|--message|query/i.test(a))).toBe(
+        false,
+      );
+    }
+    expect(deps.appServerRead).toBeUndefined();
+    for (const key of Object.keys(deps)) {
+      expect(key).not.toMatch(/exec|query|complete|prompt|infer|spawn|stream|message/i);
+    }
   });
 });

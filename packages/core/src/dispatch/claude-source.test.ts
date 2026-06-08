@@ -120,6 +120,20 @@ describe('parseClaudeStatusLine — passive statusLine parse (verified field nam
     ]);
   });
 
+  it('normalizes fractional utilization to a percentage without changing percent-shaped values', () => {
+    const reading = parseClaudeStatusLine({
+      rate_limits: {
+        five_hour: { utilization: 0.67, resets_at: '2026-06-03T05:00:00.000Z' },
+        weekly: { utilization: 82, resets_at: '2026-06-10T00:00:00.000Z' },
+      },
+    });
+
+    expect(reading.windows).toEqual([
+      { kind: 'five_hour', used_pct: 67, reset_at: '2026-06-03T05:00:00.000Z' },
+      { kind: 'weekly', used_pct: 82, reset_at: '2026-06-10T00:00:00.000Z' },
+    ]);
+  });
+
   it('skips a window missing its usage% or reset, and yields nothing for an absent rate_limits', () => {
     expect(
       parseClaudeStatusLine({ rate_limits: { five_hour: { used_percentage: 5 } } }).windows,
@@ -134,6 +148,52 @@ describe('parseClaudeAuthStatus — metadata preflight (account only, no inferen
     expect(parseClaudeAuthStatus({ logged_in: true, account: { plan: 'Max' } })).toEqual({
       loggedIn: true,
       account: 'claude:max',
+      accountObserved: false,
+    });
+  });
+
+  it('prefers an explicit canonical account label over plan fallback', () => {
+    expect(parseClaudeAuthStatus({ logged_in: true, account: 'claude:team', plan: 'Max' })).toEqual(
+      {
+        loggedIn: true,
+        account: 'claude:team',
+        accountObserved: true,
+      },
+    );
+  });
+
+  it('namespaces explicit raw account ids', () => {
+    expect(parseClaudeAuthStatus({ logged_in: true, account: { id: 'team' } })).toEqual({
+      loggedIn: true,
+      account: 'claude:team',
+      accountObserved: true,
+    });
+  });
+
+  it('ignores generic root ids and labels when deriving account metadata', () => {
+    expect(parseClaudeAuthStatus({ logged_in: true, id: 'evt_123', plan: 'Max' })).toEqual({
+      loggedIn: true,
+      account: 'claude:max',
+      accountObserved: false,
+    });
+    expect(parseClaudeAuthStatus({ logged_in: true, label: 'auth-status' })).toEqual({
+      loggedIn: true,
+      account: CLAUDE_DEFAULT_ACCOUNT,
+      accountObserved: false,
+    });
+  });
+
+  it('prefers explicit root account_id over object-shaped account metadata', () => {
+    expect(
+      parseClaudeAuthStatus({
+        logged_in: true,
+        account: { plan: 'Max' },
+        account_id: 'team',
+      }),
+    ).toEqual({
+      loggedIn: true,
+      account: 'claude:team',
+      accountObserved: true,
     });
   });
 
@@ -143,10 +203,15 @@ describe('parseClaudeAuthStatus — metadata preflight (account only, no inferen
   });
 
   it('defaults to logged-in + default account on an empty/odd payload (defensive, never down-on-noise)', () => {
-    expect(parseClaudeAuthStatus({})).toEqual({ loggedIn: true, account: CLAUDE_DEFAULT_ACCOUNT });
+    expect(parseClaudeAuthStatus({})).toEqual({
+      loggedIn: true,
+      account: CLAUDE_DEFAULT_ACCOUNT,
+      accountObserved: false,
+    });
     expect(parseClaudeAuthStatus('garbage')).toEqual({
       loggedIn: true,
       account: CLAUDE_DEFAULT_ACCOUNT,
+      accountObserved: false,
     });
   });
 });
@@ -189,6 +254,99 @@ describe('ClaudeUsageSource.read — layered passive-first, fail-loud', () => {
     const snap = await source.read('claude');
     expect(snap.available).toBe(true);
     expect(snap.source).toBe('statusLine');
+  });
+
+  it('returns the observed account even when an explicit account option was provided', async () => {
+    const source = new ClaudeUsageSource(
+      depsWith({
+        authStatus: () => Promise.resolve({ loggedIn: true, account: 'claude:max' }),
+        statusLine: () =>
+          Promise.resolve({
+            account: 'claude:max',
+            rate_limits: {
+              five_hour: { used_percentage: 7, resets_at: '2026-06-03T05:00:00.000Z' },
+            },
+          }),
+      }),
+      { account: 'claude:team' },
+    );
+
+    const snap = await source.read('claude');
+
+    expect(snap.account).toBe('claude:max');
+    expect(snap.source).toBe('statusLine');
+  });
+
+  it('fails loud when a requested account is not observed by defensive preflight or statusLine', async () => {
+    const source = new ClaudeUsageSource(
+      depsWith({
+        authStatus: () => Promise.resolve(parseClaudeAuthStatus({})),
+        statusLine: () =>
+          Promise.resolve({
+            rate_limits: {
+              five_hour: { used_percentage: 7, resets_at: '2026-06-03T05:00:00.000Z' },
+            },
+          }),
+      }),
+      { account: 'claude:team' },
+    );
+
+    await expect(source.read('claude')).rejects.toThrow(/not observed/i);
+  });
+
+  it('fails loud when requested account preflight has only generic root ids', async () => {
+    const source = new ClaudeUsageSource(
+      depsWith({
+        authStatus: () =>
+          Promise.resolve(parseClaudeAuthStatus({ logged_in: true, id: 'evt_123', plan: 'Max' })),
+        statusLine: () =>
+          Promise.resolve({
+            rate_limits: {
+              five_hour: { used_percentage: 7, resets_at: '2026-06-03T05:00:00.000Z' },
+            },
+          }),
+      }),
+      { account: 'claude:team' },
+    );
+
+    await expect(source.read('claude')).rejects.toThrow(/not observed/i);
+  });
+
+  it('fails loud when requested account preflight reports only a plan label', async () => {
+    const source = new ClaudeUsageSource(
+      depsWith({
+        authStatus: () =>
+          Promise.resolve(parseClaudeAuthStatus({ logged_in: true, account: { plan: 'Max' } })),
+        statusLine: () =>
+          Promise.resolve({
+            rate_limits: {
+              five_hour: { used_percentage: 7, resets_at: '2026-06-03T05:00:00.000Z' },
+            },
+          }),
+      }),
+      { account: 'claude:team' },
+    );
+
+    await expect(source.read('claude')).rejects.toThrow(/not observed/i);
+  });
+
+  it('ignores non-canonical statusLine organization strings as account labels', async () => {
+    const source = new ClaudeUsageSource(
+      depsWith({
+        authStatus: () => Promise.resolve({ loggedIn: true, account: 'claude:max' }),
+        statusLine: () =>
+          Promise.resolve({
+            organization: 'Acme',
+            rate_limits: {
+              five_hour: { used_percentage: 7, resets_at: '2026-06-03T05:00:00.000Z' },
+            },
+          }),
+      }),
+    );
+
+    const snap = await source.read('claude');
+
+    expect(snap.account).toBe('claude:max');
   });
 
   it('throws UsageUnavailableError when statusLine yields nothing and idle is disabled (fail-loud)', async () => {

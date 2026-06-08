@@ -129,6 +129,38 @@ describe('createCoMcpServer — tool-list parity', () => {
 
     expect(typeSchema?.enum).toEqual([...MAIL_TYPES]);
   });
+
+  it('publishes co_sling without agent-supplied account/cost controls or capacity-only WAITING wording', async () => {
+    const ctx = makeTestContext('impl-sling-schema');
+    const client = await connect({ contextFactory: () => ctx });
+
+    const { tools } = await client.listTools();
+    const sling = tools.find((t) => t.name === 'co_sling');
+    expect(sling).toBeDefined();
+    expect(sling?.description).toMatch(/dispatch policy/i);
+    expect(sling?.description).not.toMatch(/when routing inputs .* supplied/i);
+    expect(sling?.description).not.toMatch(/all providers are at capacity/i);
+
+    const props = (sling?.inputSchema as { properties?: Record<string, unknown> } | undefined)
+      ?.properties;
+    expect(props).toBeDefined();
+    expect(props).not.toHaveProperty('accounts');
+    expect(props).not.toHaveProperty('cost');
+    expect(props).not.toHaveProperty('budget');
+
+    const outputProps = (
+      sling?.outputSchema as { properties?: Record<string, unknown> } | undefined
+    )?.properties;
+    const placementProps = (
+      outputProps?.placement as { properties?: Record<string, unknown> } | undefined
+    )?.properties;
+    const waitingProps = (
+      outputProps?.waiting as { properties?: Record<string, unknown> } | undefined
+    )?.properties;
+    expect(placementProps).not.toHaveProperty('account');
+    expect(waitingProps).not.toHaveProperty('maxed_accounts');
+    expect(waitingProps).not.toHaveProperty('unavailable_accounts');
+  });
 });
 
 describe('createCoMcpServer — protocol round-trip (in-memory)', () => {

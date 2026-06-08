@@ -7,10 +7,16 @@ import { openMailStore, type MailStore } from '../../mail/mail-store.js';
 import { openRegistry, type ProjectRegistry } from '../../registry/registry.js';
 import { openWorktreeStore, type WorktreeStore } from '../../worktrees/worktree-store.js';
 import { openDispatchStore, type DispatchStore } from '../../dispatch/dispatch-store.js';
-import type { UsageSnapshot } from '../../dispatch/usage-source.js';
+import { accountForProvider } from '../../dispatch/provider-source.js';
+import {
+  FakeUsageSource,
+  UsageUnavailableError,
+  type UsageSnapshot,
+} from '../../dispatch/usage-source.js';
 import { buildCoreRegistry } from '../core-registry.js';
 import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
+import { slingTool } from './sling.js';
 
 // AC-L3-1, headless through invokeTool (no MCP server, no Conductor): co_sling slings from the
 // auto-detected base, records the sandbox + a readable baseline, requires an explicit parent and a
@@ -95,9 +101,22 @@ function makeContext(
 }
 
 describe('co_sling — via invokeTool', () => {
-  it('slings from auto-detected main, returns the structured facts, records branch + baseline', async () => {
+  it('slings from auto-detected main, returns worktree facts, and records placement with default routing', async () => {
     const repo = makeMainRepo();
-    const ctx = makeContext('lead-7', repo);
+    const ctx = makeContextWithDispatch('lead-7', repo, {
+      provider: 'claude',
+      account: accountForProvider('claude'),
+      available: true,
+      source: 'fake',
+      sampled_at: new Date().toISOString(),
+      windows: [
+        {
+          kind: 'five_hour',
+          used_pct: 20,
+          reset_at: new Date(Date.now() + 5 * 3600_000).toISOString(),
+        },
+      ],
+    });
     const reg = buildCoreRegistry();
     const headSha = git(repo, 'rev-parse', 'HEAD');
 
@@ -105,23 +124,28 @@ describe('co_sling — via invokeTool', () => {
       parent: 'lead-7',
       branch: 'co/feature',
     })) as {
+      status: 'placed';
       branch: string;
       base_ref: string;
       base_sha: string;
       worktree_path: string;
       baseline_captured: boolean;
+      placement: { provider: string };
     };
 
+    expect(out.status).toBe('placed');
     expect(out.branch).toBe('co/feature');
     expect(out.base_ref).toBe('main'); // auto-detected — NOT master
     expect(out.base_sha).toBe(headSha);
     expect(out.baseline_captured).toBe(true);
     expect(out.worktree_path).toContain(ctx.projectId);
     expect(out.worktree_path).toContain('co/feature');
+    expect(out.placement.provider).toBe('claude');
 
     // Recorded per project + branch, with the explicit parent (no @operator default).
     expect(ctx.worktrees?.getWorktree('co/feature')?.parent).toBe('lead-7');
     expect(ctx.worktrees?.getBaseline('co/feature')).toBeDefined();
+    expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(1);
   });
 
   it('rejects a branch that does not start with co/ (input schema)', async () => {
@@ -153,7 +177,7 @@ describe('co_sling — via invokeTool', () => {
 
 const healthySnapshot: UsageSnapshot = {
   provider: 'claude',
-  account: 'default',
+  account: accountForProvider('claude'),
   available: true,
   source: 'fake',
   sampled_at: new Date().toISOString(),
@@ -168,7 +192,7 @@ const healthySnapshot: UsageSnapshot = {
 
 const maxedSnapshot: UsageSnapshot = {
   provider: 'claude',
-  account: 'default',
+  account: accountForProvider('claude'),
   available: true,
   source: 'fake',
   sampled_at: new Date().toISOString(),
@@ -184,7 +208,7 @@ const maxedSnapshot: UsageSnapshot = {
 function makeContextWithDispatch(
   agent: string,
   repo: string,
-  snapshot: UsageSnapshot,
+  snapshots: UsageSnapshot | readonly UsageSnapshot[],
 ): ToolContext {
   const registry = openRegistry();
   regs.push(registry);
@@ -195,7 +219,9 @@ function makeContextWithDispatch(
   worktreeStores.push(worktrees);
   const dispatch = openDispatchStore(projectId);
   dispatchStores.push(dispatch);
-  dispatch.recordSnapshot(snapshot);
+  for (const snapshot of Array.isArray(snapshots) ? snapshots : [snapshots]) {
+    dispatch.recordSnapshot(snapshot);
+  }
   return { agent, projectId, cwd: repo, mail, registry, worktrees, dispatch };
 }
 
@@ -211,10 +237,10 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
       role: 'implementer',
       work_size: 'average',
       reasoning_budget: 'standard',
-      accounts: [{ provider: 'claude', account: 'default' }],
     })) as Record<string, unknown>;
 
     // Worktree was created
+    expect(out['status']).toBe('placed');
     expect(out['branch']).toBe('co/routed-placed');
     expect(out['worktree_path']).toBeTruthy();
 
@@ -222,6 +248,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     expect(out['placement']).toBeDefined();
     const pl = out['placement'] as Record<string, unknown>;
     expect(pl['provider']).toBe('claude');
+    expect(pl['account']).toBeUndefined();
     expect(typeof pl['model']).toBe('string');
     expect(typeof pl['effort']).toBe('string');
 
@@ -246,14 +273,15 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
       role: 'implementer',
       work_size: 'average',
       reasoning_budget: 'standard',
-      accounts: [{ provider: 'claude', account: 'default' }],
     })) as Record<string, unknown>;
 
     // WAITING result
+    expect(out['status']).toBe('waiting');
     expect(out['waiting']).toBeDefined();
     const w = out['waiting'] as Record<string, unknown>;
     expect(typeof w['message']).toBe('string');
     expect((w['message'] as string).length).toBeGreaterThan(0);
+    expect(w['maxed_accounts']).toBeUndefined();
 
     // No sandbox created (branch/worktree_path absent)
     expect(out['branch']).toBeUndefined();
@@ -264,11 +292,12 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     const placements = ctx.dispatch!.readPlacements('lead-7');
     expect(placements).toHaveLength(1);
     expect(placements[0]!.kind).toBe('waiting');
+    expect(placements[0]!.maxedAccounts).toEqual([accountForProvider('claude')]);
   });
 
-  it('routing inputs absent: behaves exactly as L3 (no dispatch store needed)', async () => {
+  it('routing inputs absent: uses default provider accounts and records placement', async () => {
     const repo = makeMainRepo();
-    const ctx = makeContext('lead-7', repo);
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
     const reg = buildCoreRegistry();
     const headSha = git(repo, 'rev-parse', 'HEAD');
 
@@ -277,10 +306,134 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
       branch: 'co/no-routing',
     })) as Record<string, unknown>;
 
+    expect(out['status']).toBe('placed');
     expect(out['branch']).toBe('co/no-routing');
     expect(out['base_sha']).toBe(headSha);
-    expect(out['placement']).toBeUndefined();
+    expect(out['placement']).toBeDefined();
     expect(out['waiting']).toBeUndefined();
+    const placements = ctx.dispatch!.readPlacements('lead-7');
+    expect(placements).toHaveLength(1);
+    expect(placements[0]!.kind).toBe('placed');
+  });
+
+  it('rejects caller-supplied accounts; provider accounts are host policy, not agent-facing input', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        branch: 'co/accounts-only',
+        accounts: [{ provider: 'codex', account: accountForProvider('codex') }],
+      }),
+    ).rejects.toThrow(/input failed schema validation/i);
+
+    expect(ctx.dispatch!.readPlacements('lead-7')).toHaveLength(0);
+  });
+
+  it('placed output omits non-blocking usage-source diagnostics from the agent-facing response', async () => {
+    const repo = makeMainRepo();
+    const ctx = {
+      ...makeContextWithDispatch('lead-7', repo, healthySnapshot),
+      usageSourceFactory: () =>
+        new FakeUsageSource({
+          errors: {
+            codex: new UsageUnavailableError('codex', 'codex logs missing', {
+              account: accountForProvider('codex'),
+            }),
+          },
+        }),
+    };
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/diagnostic-placed',
+    })) as Record<string, unknown>;
+
+    expect(out['status']).toBe('placed');
+    expect(out['diagnostics']).toBeUndefined();
+  });
+
+  it('waiting output carries sanitized usage-source diagnostics without account labels', async () => {
+    const repo = makeMainRepo();
+    const ctx = {
+      ...makeContextWithDispatch('lead-7', repo, []),
+      usageSourceFactory: () =>
+        new FakeUsageSource({
+          errors: {
+            claude: new UsageUnavailableError(
+              'claude',
+              'statusLine missing at /home/operator/.config/claude/status.json',
+              {
+                account: accountForProvider('claude'),
+              },
+            ),
+            codex: new UsageUnavailableError(
+              'codex',
+              'codex logs missing /home/operator/.codex/logs_2.sqlite Bearer sk-secret-123',
+              {
+                account: accountForProvider('codex'),
+              },
+            ),
+          },
+        }),
+    };
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/diagnostic-waiting',
+    })) as Record<string, unknown>;
+
+    expect(out['status']).toBe('waiting');
+    const waiting = out['waiting'] as Record<string, unknown>;
+    expect(waiting['message']).toMatch(/usage source unavailable/i);
+    expect(waiting['message']).not.toContain(accountForProvider('claude'));
+    expect(waiting['message']).not.toContain(accountForProvider('codex'));
+    expect(waiting['message']).not.toMatch(/\/home\/operator|sk-secret|Bearer/i);
+    expect(waiting['reason']).not.toContain(accountForProvider('claude'));
+    expect(waiting['reason']).not.toContain(accountForProvider('codex'));
+    expect(waiting['reason']).not.toMatch(/\/home\/operator|sk-secret|Bearer/i);
+    expect(waiting['maxed_providers']).toEqual([]);
+    expect(waiting['unavailable_providers']).toEqual(['claude', 'codex']);
+    expect(waiting['unavailable_accounts']).toBeUndefined();
+    const diagnostics = out['diagnostics'] as Array<Record<string, unknown>>;
+    expect(diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          provider: 'claude',
+          code: 'usage_source_unavailable',
+        }),
+      ]),
+    );
+    for (const diagnostic of diagnostics) {
+      expect(diagnostic['account']).toBeUndefined();
+      expect(diagnostic['reason']).not.toContain(accountForProvider('claude'));
+      expect(diagnostic['reason']).not.toContain(accountForProvider('codex'));
+      expect(diagnostic['reason']).not.toMatch(/\/home\/operator|sk-secret|Bearer/i);
+    }
+    const placement = ctx.dispatch!.readPlacements('lead-7')[0];
+    expect(placement?.kind).toBe('waiting');
+    expect(placement?.maxedProviders).toEqual([]);
+    expect(placement?.unavailableProviders).toEqual(['claude', 'codex']);
+    expect(placement?.unavailableAccounts).toEqual([
+      accountForProvider('claude'),
+      accountForProvider('codex'),
+    ]);
+  });
+
+  it('does not record a placed decision when worktree creation fails', async () => {
+    const repo = makeMainRepo();
+    git(repo, 'branch', 'co/existing');
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        branch: 'co/existing',
+      }),
+    ).rejects.toThrow(/git worktree add/i);
+
+    expect(ctx.dispatch!.readPlacements('lead-7')).toHaveLength(0);
   });
 
   it('routing inputs present but ctx.dispatch absent: loud-fail (Principle 9)', async () => {
@@ -295,5 +448,136 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
         reasoning_budget: 'standard',
       }),
     ).rejects.toThrow(/dispatch/i);
+  });
+});
+
+describe('co_sling — output schema shape', () => {
+  it('rejects empty and mixed outputs', () => {
+    expect(() => slingTool.outputSchema.parse({})).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        status: 'waiting',
+        branch: 'co/mixed',
+        waiting: {
+          message: 'delayed',
+          reason: 'all providers maxed',
+          maxed_providers: ['claude'],
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects invalid provider, effort, context, and waiting provider values', () => {
+    const placed = {
+      status: 'placed',
+      branch: 'co/x',
+      base_ref: 'main',
+      base_sha: 'abc123',
+      worktree_path: '/tmp/worktree',
+      baseline_captured: true,
+      placement: {
+        provider: 'claude',
+        model: 'claude-sonnet-4-6',
+        effort: 'high',
+        context: 'standard',
+      },
+    };
+
+    expect(() =>
+      slingTool.outputSchema.parse({
+        ...placed,
+        placement: { ...placed.placement, provider: 'gemini' },
+      }),
+    ).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        ...placed,
+        placement: { ...placed.placement, effort: 'reckless' },
+      }),
+    ).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        ...placed,
+        placement: { ...placed.placement, context: 'infinite' },
+      }),
+    ).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        status: 'waiting',
+        waiting: {
+          message: 'delayed',
+          reason: 'usage source unavailable',
+          maxed_providers: ['gemini'],
+          unavailable_providers: [],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        status: 'waiting',
+        waiting: {
+          message: 'delayed',
+          reason: 'usage source unavailable',
+          maxed_providers: ['claude'],
+          unavailable_providers: [],
+        },
+        diagnostics: [
+          {
+            provider: 'claude',
+            account: accountForProvider('claude'),
+            code: 'usage_source_unavailable',
+            reason: 'statusLine missing',
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        ...placed,
+        unexpected: true,
+      }),
+    ).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        ...placed,
+        placement: { ...placed.placement, account: accountForProvider('claude') },
+      }),
+    ).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        status: 'waiting',
+        waiting: {
+          message: 'delayed',
+          reason: 'usage source unavailable',
+          maxed_providers: ['claude'],
+          maxed_accounts: [accountForProvider('claude')],
+          unavailable_providers: [],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        status: 'waiting',
+        waiting: {
+          message: 'delayed',
+          reason: 'usage source unavailable',
+          maxed_providers: ['claude'],
+          unavailable_providers: [],
+          unavailable_accounts: [accountForProvider('claude')],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      slingTool.outputSchema.parse({
+        ...placed,
+        diagnostics: [
+          {
+            provider: 'claude',
+            code: 'usage_source_unavailable',
+            reason: 'statusLine missing',
+          },
+        ],
+      }),
+    ).toThrow();
   });
 });
