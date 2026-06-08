@@ -50,6 +50,8 @@ export type {
   CompletionPredicate,
   ApprovalDecision,
   ApprovalResponse,
+  ReviewResponse,
+  ReviewVerdictValue,
   MailPayload,
 } from './mail/events.js';
 export {
@@ -63,6 +65,8 @@ export {
   MAIL_APPROVAL_RESPONSE,
   MAIL_ESCALATION,
   MAIL_WORKER_DONE,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
@@ -70,6 +74,7 @@ export {
   MAIL_EVENT_V,
   mailMessageSchema,
   approvalResponseSchema,
+  reviewResponseSchema,
   mailReadSchema,
   mailForwardSchema,
   mailRetractSchema,
@@ -240,17 +245,24 @@ export type {
   FinishResult,
 } from './worktrees/finish.js';
 export { finishWorktree } from './worktrees/finish.js';
-// L3-C L5 plug-point: the typed review-trigger + merge gate `co_finish` stops short of. A loud-failing
-// stub (never a silent no-op) marking the seam — the gated verbs are simply NOT BUILT in L3 (P7).
-export type { FinishReviewGate } from './worktrees/review-trigger.js';
-export { FinishReviewGateStub } from './worktrees/review-trigger.js';
+// L5 review-trigger + merge gate: the typed seam `co_finish` stops short of, now REAL (L5). The
+// interface + its request/result types live here; the real implementation is the review/ CoReviewGate
+// (consumed by `co_merge`). `co_finish` still does NOT call it (it stops short by design).
+export type {
+  FinishReviewGate,
+  ReviewTriggerRequest,
+  ReviewTriggerResult,
+  ReviewMergeRequest,
+  ReviewMergeResult,
+} from './worktrees/review-trigger.js';
 // L3-D repository-relationship modes (AC-L3-4): per-project Owner / Contributor / Offline that reshape
-// the publishing surface. The L3-ownable half — the read-only injectable remote-capability prober, the
-// pure D2 detection order, override-beats-detection resolution (persisted in the config cascade, never
-// the repo), the Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe
-// (PR-template presence + a sign-off signal). The gated verbs that ACT on a mode (co_merge/co_push/
-// co_pr_merge, the fork→PR enactment, "gate in all three") + the rich CONTRIBUTING/PR-template parse are
-// L5/L9 — a loud-failing typed stub (RepoModeGateStub), never built, no MCP tool declared (P4, P7).
+// the publishing surface. The read-only injectable remote-capability prober, the pure D2 detection
+// order, override-beats-detection resolution (persisted in the config cascade, never the repo), the
+// Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe (PR-template
+// presence + a sign-off signal). As of L5 Phase C, the owner/offline merge enactment, the remote
+// PUSH enactment (`co_push`), and the PR creation enactment (`co_pr_merge`) are all REAL. The
+// Contributor fork→PR host-convention probe uses the minimal Phase C `detectHostConventions`; the rich
+// CONTRIBUTING/PR-template parse remains L9 — `parseHostConventions` stays the loud-failing seam (P7, P9).
 export type {
   RepoMode,
   RemoteSignals,
@@ -259,15 +271,26 @@ export type {
   RepoModeCapabilities,
   HostConventions,
   RepoModeGate,
+  PublishRequest,
+  PublishResult,
+  EnactPublishDeps,
+  GhExec,
+  EnactPushRequest,
+  EnactPushResult,
+  EnactPushDeps,
+  EnactPrMergeRequest,
+  EnactPrMergeResult,
+  EnactPrMergeDeps,
 } from './worktrees/repo-mode.js';
 export {
   REPO_MODE_CONFIG_KEY,
   defaultRemoteProbe,
+  defaultGhExec,
   detectRepoMode,
   resolveRepoMode,
   repoModeCapabilities,
   detectHostConventions,
-  RepoModeGateStub,
+  CoRepoModeGate,
 } from './worktrees/repo-mode.js';
 export type { GitReader } from './worktrees/detect-base.js';
 export { detectBaseRef, defaultGitReader, resolveRefSha } from './worktrees/detect-base.js';
@@ -310,6 +333,433 @@ export {
   provisionWorktree,
   defaultProvisioner,
 } from './worktrees/provision.js';
+
+// L5 review gate (AC-L5-1): the event-sourced review/ module — the PASS|ISSUES verdict model, the
+// five-event log (review.requested/verdict/strike + merge.serialized + review.override, all defined +
+// projected now so B–F add only writers), the per-(target, branch) review store, and the gated merge
+// core (CoReviewGate) the lead-facing co_merge consumes. Nothing reaches a merge without a recorded
+// PASS; the verdict is a structured RECORDED EVENT (Principle 5), never a prose blob or a shell exit
+// code. The honest-verification baseline, strictness ladder + push/PR, strike policy, human-review
+// routing, and serialization/override records are now folded into the L5 gate; rich live reviewer
+// dispatch and operator UI seams remain delegated to later layers.
+export type {
+  Verdict,
+  Blocker,
+  Suggestion,
+  VerificationMarker,
+  ReviewVerdict,
+} from './review/verdict.js';
+export {
+  verdictSchema,
+  blockerSchema,
+  suggestionSchema,
+  verificationMarkerSchema,
+  reviewVerdictSchema,
+  assertValidVerdict,
+} from './review/verdict.js';
+export type {
+  ReviewRequested,
+  ReviewVerdictRecorded,
+  ReviewStrike,
+  MergeSerialized,
+  ReviewOverride,
+  ReviewVerdictRecord,
+  ReviewRequestRecord,
+} from './review/events.js';
+export {
+  REVIEW_EVENT_V,
+  EVENT_REVIEW_REQUESTED,
+  EVENT_REVIEW_VERDICT,
+  EVENT_REVIEW_STRIKE,
+  EVENT_MERGE_SERIALIZED,
+  EVENT_REVIEW_OVERRIDE,
+  REVIEW_SCOPE_PREFIX,
+  reviewScope,
+  reviewTargetForScope,
+  reviewSchemas,
+  reviewUpcasters,
+  makeReviewRequestedEvent,
+  makeReviewVerdictEvent,
+  makeReviewStrikeEvent,
+  makeMergeSerializedEvent,
+  makeReviewOverrideEvent,
+} from './review/events.js';
+export { ReviewProjector } from './review/review-projector.js';
+export type { ReviewStore } from './review/review-store.js';
+export { openReviewStore } from './review/review-store.js';
+export type {
+  ReviewGateDeps,
+  ReviewPushRequest,
+  ReviewPushResult,
+  ReviewPrMergeRequest,
+  ReviewPrMergeResult,
+  MergeTeardown,
+  ReviewerSpawnGate,
+} from './review/merge.js';
+export {
+  CoReviewGate,
+  ReviewerSpawnGateStub,
+  REVIEWER_PROFILES_CONFIG_KEY,
+  DEFAULT_REVIEWER_PROFILES,
+  resolveReviewerProfiles,
+  reviewerRoleForScope,
+} from './review/merge.js';
+// L5 Phase B honest-verification spine (AC-L5-3): pure, deterministic comparison of a finish run
+// against the branch-off baseline. `honestVerify` classifies tests as regressions (pass→fail / new)
+// or baseline failures (fail→fail); `classifyPass` encodes the gate's allow/refuse/escalate decision.
+// Identical inputs always produce identical output — replay-deterministic, no I/O, no clock.
+export type { HonestVerifyOutcome, ClassifyPassResult } from './review/honest-verify.js';
+export { honestVerify, classifyPass } from './review/honest-verify.js';
+// L5 Phase C strictness ladder (AC-L5-2): a pure, deterministic fn classifying findings by (category,
+// scope). The same cosmetic nit is a suggestion at worker_merge but a blocker at pr_merge — the bar
+// tightens toward production (monotone, never loosens). `applyLadder` re-partitions a finding list
+// into blockers/suggestions at a given scope. No I/O, no clock — replay-deterministic.
+export type { ReviewScope, FindingCategory, LadderFinding, LadderResult } from './review/ladder.js';
+export { classifyFinding, applyLadder } from './review/ladder.js';
+// L5 Phase D 3-strike escalation (AC-L5-4): config key + default, the pure consecutive-strike
+// counter (`consecutiveStrikes` over verdict history), the pure decision fn (`nextReviewAction`),
+// and the cohesive enforcement path (`applyStrikePolicy` — records the strike, computes the action,
+// fires exactly one escalation at the budget threshold via the spawning-parent resolver). The
+// production resolver is wired into co_merge / co_push / co_pr_merge via the worktree-recorded
+// `parent` field. A PASS resets the run (projector: PASS verdict → strikes = 0). Headless-testable
+// over injectable seams (StrikeEnforcementDeps / StrikeEnforcementContext).
+export type { StrikeEnforcementDeps, StrikeEnforcementContext } from './review/strikes.js';
+export {
+  REVIEW_ROUND_BUDGET_KEY,
+  REVIEW_ROUND_BUDGET_DEFAULT,
+  consecutiveStrikes,
+  nextReviewAction,
+  applyStrikePolicy,
+} from './review/strikes.js';
+// L5 Phase E human-review path (AC-L5-5): the `review_request` / `review_response` mail pair, the
+// log-derived `reviewRequestOutcome` (the `approvalOutcome` twin), the `reviewRequestEnvelope`
+// builder (operator-terminal by construction), `recordHumanVerdict` (re-enters the gate identically
+// to an agent verdict), `resolveReviewerKind` (reads `review.<scope>.reviewer` from the config
+// cascade; defaults to `'agent'`), and the L9 `HumanReviewGateStub` (loud-failing typed seam for
+// the operator diff-viewer / verdict-accept UI — never a silent no-op, Principle 9).
+export type {
+  ReviewRequestOutcome,
+  ReviewRequestEnvelopeParams,
+  HumanVerdictParams,
+  HumanReviewGate,
+} from './review/human-review.js';
+export {
+  reviewReviewerKey,
+  resolveReviewerKind,
+  resolveReviewerKindFromConfig,
+  reviewRequestOutcome,
+  reviewRequestEnvelope,
+  recordHumanVerdict,
+  HumanReviewGateStub,
+} from './review/human-review.js';
+// L5 Phase F per-target merge SERIALIZATION + re-review base (AC-L5-7): an event-sourced merge lock
+// over the `merge.serialized` log — one active reviewer/merge per target; a second queues (waits) until
+// the holder releases on landing (`acquireMergeSlot`/`releaseMergeSlot`, the pure toggle `foldActiveSlot`
+// over the ordered log, the `MergeSlotStore` seam). `reReviewBase` resolves the NEXT queued branch's base
+// via refs — the POST-LANDING commit, never the caller's stale checkout. Clock-free + deterministic
+// (AC-L5-11); replay-equal on the `merge.serialized` writes. The store writers (`recordSerialized` /
+// `recordOverride` / `activeSerialized`) live on the ReviewStore.
+export type { MergeSlotEntry, MergeSlotStore, MergeSlotResult } from './review/serialize.js';
+export {
+  foldActiveSlot,
+  acquireMergeSlot,
+  releaseMergeSlot,
+  reReviewBase,
+} from './review/serialize.js';
+// L5 Phase G spec-ref seam (AC-L5-8, RG-4): a review must be judged against the SOURCE's
+// acceptance criteria, never a template stub. `resolveReviewSpecRef` is a PURE fn that turns an
+// optional injected spec-ref into a discriminated `ReviewSpecRef` — `{ kind: 'criteria', ref }` when
+// present or `{ kind: 'no-locked-spec' }` (the explicit marker, never `<TODO>`) when absent.
+// `renderReviewSpecRef` surfaces the human-readable marker text. Both are headless-testable (no I/O).
+export type { ReviewSpecRef } from './review/spec-ref.js';
+export {
+  NO_LOCKED_SPEC_MARKER,
+  resolveReviewSpecRef,
+  renderReviewSpecRef,
+} from './review/spec-ref.js';
+
+// L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
+// seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/
+// `ProviderUsageSource` are the verbatim contract; `FakeUsageSource` is the production-quality double
+// that drives phases 3–5's headless policy tests; `UsageUnavailableError`/`USAGE_UNAVAILABLE_CODE` are
+// the fail-loud "no usage source succeeded" surface (AC6, Principle 9). AC11: the source contract is a
+// passive/metadata read ONLY — it NEVER runs inference or spends API-billed tokens (the real adapters
+// land in Phase 6). NO new agent MCP tool is added (AC8); usage/cost are internal substrate, and the
+// policy (rollup math, near-budget, staleness) is PURE over injected inputs (AC10, Principle 16).
+export type {
+  Provider,
+  UsageWindow,
+  UsageSnapshot,
+  ProviderUsageSource,
+  FakeUsageSourceInit,
+} from './dispatch/usage-source.js';
+export {
+  FakeUsageSource,
+  UsageUnavailableError,
+  USAGE_UNAVAILABLE_CODE,
+} from './dispatch/usage-source.js';
+export type {
+  UsageObserved,
+  UsageObservedAvailable,
+  UsageObservedUnavailable,
+  CostRecorded,
+  CostNearBudget,
+  UsageBucket,
+  UsageAccountStatus,
+  CostRollup,
+  CostRollupKind,
+  NearBudgetRecord,
+} from './dispatch/events.js';
+export {
+  DISPATCH_EVENT_V,
+  EVENT_USAGE_OBSERVED,
+  EVENT_COST_RECORDED,
+  EVENT_COST_NEAR_BUDGET,
+  USAGE_SCOPE_PREFIX,
+  COST_SCOPE_PREFIX,
+  usageScope,
+  costScope,
+  providerSchema,
+  usageObservedAvailableSchema,
+  usageObservedUnavailableSchema,
+  usageObservedSchema,
+  costRecordedSchema,
+  costNearBudgetSchema,
+  dispatchSchemas,
+  dispatchUpcasters,
+  makeUsageObservedEvent,
+  makeCostRecordedEvent,
+  makeCostNearBudgetEvent,
+} from './dispatch/events.js';
+export {
+  UsageProjector,
+  ensureUsageTables,
+  rowToUsageBucket,
+  rowToUsageAccountStatus,
+  selectUsageBucket,
+  selectAllUsageBuckets,
+  selectUsageAccount,
+  selectAllUsageAccounts,
+} from './dispatch/usage-projector.js';
+export {
+  CostProjector,
+  ensureCostTables,
+  rowToCostRollup,
+  rowToNearBudgetRecord,
+  selectCostRollup,
+  selectAllCostRollups,
+  selectNearBudgetBySeq,
+  selectNearBudgetEvents,
+} from './dispatch/cost-projector.js';
+// L4-1 PURE policy (AC10, Principle 16): headroom as a discriminated value (never a magic number),
+// near-budget edge trigger, and a clock-free staleness predicate (injected `now` — replay-deterministic).
+export type { Headroom, StaleInput, BudgetInput } from './dispatch/policy.js';
+export {
+  NEAR_BUDGET_THRESHOLD_PCT_DEFAULT,
+  USAGE_BUCKET_TTL_MS_DEFAULT,
+  isStale,
+  nearBudget,
+  crossesNearBudget,
+  deriveHeadroom,
+} from './dispatch/policy.js';
+// L4-1 store facade: `openDispatchStore(projectId)` records usage + cost over L0 (program-data only,
+// AC9), with the near-budget observability emit + the fail-loud `observeUsage` read seam, and the
+// config-cascade budget-cap resolution (heir to `cost_budget_cents`).
+export type {
+  DispatchStore,
+  BudgetCap,
+  CostRecordResult,
+  UsageObservedResult,
+  SnapshotIngestResult,
+} from './dispatch/dispatch-store.js';
+export {
+  COST_BUDGET_CENTS_KEY,
+  openDispatchStore,
+  observeUsage,
+  resolveBudgetCapCents,
+  resolveBudgetCap,
+} from './dispatch/dispatch-store.js';
+
+// L4-2 pure tier-matrix policy: (WorkSize × ReasoningBudget) → {model, effort, context} per
+// Provider. Routing vocabulary (WorkSize, ReasoningBudget + zod schemas) + default capability
+// matrix (resolveTier) + legacy difficulty shim (normalizeLegacyDifficulty). AC10/P16: pure
+// deterministic function, no I/O, no clock. AC8: no new MCP tool. AC9/P12: no repo writes.
+export type {
+  WorkSize,
+  ReasoningBudget,
+  Effort,
+  ContextWindow,
+  TierPlacement,
+} from './dispatch/tier.js';
+export {
+  workSizeSchema,
+  reasoningBudgetSchema,
+  resolveTier,
+  normalizeLegacyDifficulty,
+} from './dispatch/tier.js';
+
+// L4-3 rate-limit-aware balancer: the PURE provider resolver `placeAgent` (pins never overridden →
+// AC1; floating → roomiest HEALTHY provider, reset-aware + hysteresis → AC2; exclude unhealthy/unknown,
+// route around a dead provider → AC3) over an injected bucket/headroom snapshot. The first-class
+// `no-candidate` variant surfaces the all-excluded signal for Phase 4 (throttle/WAITING) — never a throw,
+// never a silent degrade (P9), and NO tier degradation here. `headroomScore` is the reset-aware scoring;
+// `bindingProviderHeadroom` reduces an account's windows to the most-constrained one. The non-pure
+// adapter (`candidatesFromStore`/`resolvePinTable`/`placeAgentFromStore`) only READS the DispatchStore +
+// config cascade (`dispatch.pins`) — writes nothing (AC9/P12) and adds no MCP tool (AC8). AC10/P16: pure
+// over injected inputs (incl. `nowMs` + `previous`), identical inputs → identical PlacementDecision.
+export type {
+  Pin,
+  PinTable,
+  ProviderHeadroom,
+  Placement,
+  RankedCandidate,
+  ExcludedCandidate,
+  PlacementDecision,
+  HysteresisConfig,
+  CandidateReadOptions,
+  PlaceAgentInput,
+  ProviderAccount,
+  PlaceFromStoreInput,
+  PlaceFromStoreDeps,
+} from './dispatch/balancer.js';
+export {
+  pinSchema,
+  pinTableSchema,
+  DISPATCH_PINS_CONFIG_KEY,
+  HYSTERESIS_MARGIN_DEFAULT,
+  RESET_HORIZON_MS_DEFAULT,
+  headroomScore,
+  defaultProviderAccounts,
+  placeAgent,
+  bindingProviderHeadroom,
+  candidatesFromStore,
+  resolvePinTable,
+  placeAgentFromStore,
+} from './dispatch/balancer.js';
+
+// L4-4 pure throttle-as-WAITING: PlacementDecision + headrooms → PLACED or WAITING (ETA + loud message); canResume predicate (AC4, P9, P13, P16).
+export type { DispatchDiagnostic, DispatchResolution } from './dispatch/throttle.js';
+export { MAXED_THRESHOLD_PCT_DEFAULT, resolveDispatch, canResume } from './dispatch/throttle.js';
+
+// L4-5 dispatch integration: placement.decided event (the WRITER — completes reader-with-writer),
+// DispatchStore.recordPlacement, and operator-only render/preview fns (CLI only, AC8 — no new
+// agent tool; usage/cost/placement are program-data only, never agent-facing). P3: render-per-audience.
+export type {
+  PlacementDecidedPlaced,
+  PlacementDecidedWaiting,
+  PlacementDecided,
+  PlacementRecord,
+} from './dispatch/events.js';
+export {
+  EVENT_PLACEMENT_DECIDED,
+  PLACEMENT_SCOPE_PREFIX,
+  placementScope,
+  placementDecidedPlacedSchema,
+  placementDecidedWaitingSchema,
+  placementDecidedSchema,
+  makePlacementDecidedEvent,
+} from './dispatch/events.js';
+export {
+  PlacementProjector,
+  ensurePlacementTable,
+  rowToPlacementRecord,
+  selectAllPlacements,
+  selectPlacementBySeq,
+  selectPlacementsByAgent,
+} from './dispatch/placement-projector.js';
+export type {
+  PreviewPlacementInput,
+  UsageSourceFactory,
+  RefreshUsageInput,
+} from './dispatch/cli-render.js';
+export {
+  refreshUsageForAccounts,
+  runDispatchPolicy,
+  renderUsageReport,
+  renderCostReport,
+  previewPlacement,
+  previewPlacementWithUsage,
+  renderDispatchResolution,
+} from './dispatch/cli-render.js';
+
+// L4-6 LIVE provider usage adapters (spec §2.6, §4.3; AC7, AC11): the real per-provider
+// `ProviderUsageSource` implementations that turn the frozen seam into live measurement. Each is
+// layered (passive-first), cached (program-data), and fail-loud, with ALL live I/O behind injected
+// read-only seams (default = the real impl; tests inject fixtures so `pnpm test` stays hermetic).
+//
+//   - `ClaudeUsageSource` (Max): metadata `auth status` preflight → passive `statusLine` parse → a
+//     gated, default-OFF idle usage-endpoint read. NO INFERENCE (AC11) — no `claude -p`, ever.
+//   - `CodexUsageSource` (pro): `codex doctor` preflight → passive read-only `codex.rate_limits` from
+//     `logs_2.sqlite` → optional active app-server read (detect & fall back) → session-jsonl fallback.
+//   - `createProviderUsageSource` / `defaultProviderUsageSource` construct the real adapter with real
+//     seams (AC7 — wired as default); `readProviderUsageCached` adds the §4.3 program-data cache
+//     (reuses `isStale` + `observeUsage`); `isLiveE2EEnabled` gates the local live E2E (default OFF →
+//     it SKIPS in the sandbox/CI). AC8: no new agent tool. AC10/P16: the policy is unchanged.
+export type {
+  ClaudeAccountInfo,
+  ClaudeStatusLineReading,
+  ClaudeUsageSourceDeps,
+  ClaudeUsageSourceOptions,
+  ClaudeCli,
+  ClaudeOAuthFetch,
+  DefaultClaudeDepsOptions,
+} from './dispatch/claude-source.js';
+export {
+  ClaudeUsageSource,
+  CLAUDE_DEFAULT_ACCOUNT,
+  CLAUDE_AUTH_STATUS_ARGS,
+  CLAUDE_USAGE_ENDPOINT,
+  CLAUDE_OAUTH_TOKEN_ENDPOINT,
+  CLAUDE_OAUTH_CLIENT_ID,
+  CLAUDE_STATUSLINE_PATH_ENV,
+  CLAUDE_OAUTH_REFRESH_TOKEN_ENV,
+  CLAUDE_OAUTH_ACCESS_TOKEN_ENV,
+  CLAUDE_OAUTH_TOKEN_ENV,
+  CLAUDE_OAUTH_BACKOFF_MS_ENV,
+  defaultClaudeDeps,
+  parseClaudeAuthStatus,
+  parseClaudeStatusLine,
+} from './dispatch/claude-source.js';
+export type {
+  CodexAccountInfo,
+  CodexRateLimitsReading,
+  CodexUsageSourceDeps,
+  CodexUsageSourceOptions,
+  CodexCli,
+  DefaultCodexDepsOptions,
+} from './dispatch/codex-source.js';
+export {
+  CodexUsageSource,
+  CODEX_DEFAULT_ACCOUNT,
+  CODEX_DOCTOR_ARGS,
+  CODEX_LOGS_DB_ENV,
+  CODEX_SESSIONS_DIR_ENV,
+  defaultCodexDeps,
+  defaultCodexLogsDbPath,
+  defaultCodexSessionsDir,
+  openCodexLogsDb,
+  parseCodexDoctor,
+  parseCodexRateLimits,
+  readLatestCodexRateLimits,
+  readLatestRolloutRateLimits,
+} from './dispatch/codex-source.js';
+export type { UsageSourceAttempt } from './dispatch/usage-adapter-common.js';
+export { buildSnapshot, layeredRead } from './dispatch/usage-adapter-common.js';
+export type {
+  ClaudeSourceConfig,
+  CodexSourceConfig,
+  CachedUsageReadOptions,
+} from './dispatch/provider-source.js';
+export {
+  accountForProvider,
+  createProviderUsageSource,
+  defaultProviderUsageSource,
+  defaultUsageSourceFactory,
+  readProviderUsageCached,
+  isLiveE2EEnabled,
+  CACHE_SOURCE,
+  CO_LIVE_E2E_ENV,
+} from './dispatch/provider-source.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

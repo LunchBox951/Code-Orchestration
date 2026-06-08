@@ -56,7 +56,17 @@ describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas
   it('is not vacuous — the registry yields the known distinctive input identifiers', () => {
     expect(distinctive.length).toBeGreaterThan(0);
     expect([...distinctive].sort()).toEqual(
-      ['idempotency_key', 'in_reply_to', 'thread_id', 'unread_only'].sort(),
+      [
+        'idempotency_key',
+        'in_reply_to',
+        'operator_override',
+        'reasoning_budget',
+        'review_id',
+        'review_verdict',
+        'thread_id',
+        'unread_only',
+        'work_size',
+      ].sort(),
     );
   });
 

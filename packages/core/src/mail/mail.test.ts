@@ -28,7 +28,7 @@ import {
   type DeliveredMail,
   type MailEnvelope,
 } from './events.js';
-import { MailProjector } from './mail-projector.js';
+import { ensureInboxTable, MailProjector } from './mail-projector.js';
 import { InProcessDelivery, LiveDeliveryStub, type Delivery } from './delivery.js';
 import { openMailStore } from './mail-store.js';
 
@@ -70,6 +70,56 @@ function makeRepo(): string {
 }
 
 describe('AC-L1-1 — typed envelope + reserved-field activation + read-back', () => {
+  it('migrates a legacy inbox projection that predates retraction + review verdict columns', () => {
+    const store = openProjectStore('p-legacy-inbox');
+    try {
+      store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        db.exec(`
+          CREATE TABLE inbox (
+            seq             INTEGER PRIMARY KEY,
+            recipient       TEXT NOT NULL,
+            sender          TEXT NOT NULL,
+            type            TEXT NOT NULL,
+            subject         TEXT NOT NULL,
+            body            TEXT NOT NULL,
+            correlation_id  TEXT,
+            causation_id    TEXT,
+            idempotency_key TEXT,
+            ts              INTEGER NOT NULL,
+            kind            TEXT NOT NULL,
+            read            INTEGER NOT NULL DEFAULT 0,
+            resolved        INTEGER NOT NULL DEFAULT 0,
+            thread_id       TEXT NOT NULL,
+            decision        TEXT
+          );
+        `);
+        ensureInboxTable(db);
+        const columns = db.prepare('PRAGMA table_info(inbox)').all() as Array<{ name: string }>;
+        expect(columns.map((c) => c.name)).toEqual(
+          expect.arrayContaining(['retracted', 'review_verdict']),
+        );
+      });
+    } finally {
+      store.close();
+    }
+
+    const mail = openMailStore('p-legacy-inbox');
+    try {
+      expect(mail.inbox('bob')).toEqual([]);
+      const sent = mail.send({
+        type: MAIL_CHAT,
+        to: 'bob',
+        from: 'alice',
+        subject: 'legacy ok',
+        body: 'projection migrated',
+      });
+      expect(mail.inbox('bob')).toEqual([sent]);
+    } finally {
+      mail.close();
+    }
+  });
+
   it('round-trips a chat with every reserved field set; reserved columns persisted', () => {
     const mail = openMailStore('p-roundtrip');
     let delivered: DeliveredMail;

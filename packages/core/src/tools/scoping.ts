@@ -52,15 +52,35 @@ const UNIVERSAL_TOOLSET: readonly string[] = [
  *     researcher, which work inside a sandbox they were given;
  *   - `co_finish` (commit + record a finish + emit `worker_done`) goes to the IMPLEMENTER — the
  *     role that finishes through the gate — not to a lead (which integrates reviewed branches, it
- *     does not finish through the gate), nor to the leaf reviewer / researcher.
+ *     does not finish through the gate), nor to the leaf reviewer / researcher;
+ *   - `co_merge` (the gated integration of a reviewed branch) goes to the LEAD — the role that
+ *     integrates reviewed branches (fulfilling the L5 reservation noted above) — not to a leaf
+ *     implementer / reviewer / researcher, nor to the coordinator (which delegates);
+ *   - `co_push` (push reviewed work to the remote) goes to the LEAD — the gated remote-publish verb,
+ *     consistent with co_merge in scope and audience (AC-L5-6);
+ *   - `co_pr_merge` (open a pull request for reviewed work) goes to the LEAD — the gated PR verb,
+ *     consistent with co_merge and co_push (AC-L5-6);
+ *   - `co_review_finalize` (record a PASS/ISSUES verdict) goes to the REVIEWER — the role that
+ *     finalizes a review — not to the roles that request or integrate it.
  *
  * Scoping is RELEVANCE, not a wall (permissions.md): an irrelevant tool simply isn't offered.
  */
 export const roleToolsets: ReadonlyMap<Role, readonly string[]> = new Map<Role, readonly string[]>([
   ['coordinator', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_sling']],
-  ['lead', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_worktree_info', 'co_sling']],
+  [
+    'lead',
+    [
+      ...UNIVERSAL_TOOLSET,
+      'co_mail_retract',
+      'co_worktree_info',
+      'co_sling',
+      'co_merge',
+      'co_push',
+      'co_pr_merge',
+    ],
+  ],
   ['implementer', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_worktree_info', 'co_finish']],
-  ['reviewer', [...UNIVERSAL_TOOLSET, 'co_worktree_info']],
+  ['reviewer', [...UNIVERSAL_TOOLSET, 'co_worktree_info', 'co_review_finalize']],
   ['researcher', [...UNIVERSAL_TOOLSET]],
 ]);
 

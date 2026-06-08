@@ -11,17 +11,18 @@ import {
   resolveRepoMode,
   repoModeCapabilities,
   detectHostConventions,
-  RepoModeGateStub,
+  CoRepoModeGate,
   type RemoteSignals,
   type RemoteProbe,
   type RepoMode,
+  type GhExec,
 } from './repo-mode.js';
 
-// AC-L3-4 (the L3-ownable half): repo modes = auto-detect (a recorded-signal table → each expected
-// mode) + override-beats-detection (project-override wins, persisted per project) + the Offline
-// push/PR-disabled capability + a minimal Contributor host-convention probe + a documented L5 typed
-// stub. Detection is read-only over the repo; persistence is the config cascade (program-data),
-// provable pristine.
+// AC-L3-4 / AC-L5-1: repo modes = auto-detect (a recorded-signal table → each expected mode) +
+// override-beats-detection (project-override wins, persisted per project) + the Offline push/PR-disabled
+// capability + a minimal Contributor host-convention probe + the L5 enactment gate (CoRepoModeGate:
+// owner/offline merge real; contributor fork→PR + the rich parse deferred). Detection is read-only over
+// the repo; persistence is the config cascade (program-data), provable pristine.
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -163,7 +164,7 @@ describe('resolveRepoMode — override beats detection, persisted per project (A
     }
   });
 
-  it('ignores a malformed override and falls through to detection', () => {
+  it('fails loud on a malformed override instead of falling through to detection', () => {
     const cfg = openConfigStore();
     try {
       cfg.setProjectOverride('p-alpha', REPO_MODE_CONFIG_KEY, 'not-a-mode');
@@ -172,7 +173,9 @@ describe('resolveRepoMode — override beats detection, persisted per project (A
         isForkOfDifferentOwner: false,
         canPush: false,
       });
-      expect(resolveRepoMode('p-alpha', '/x', { probe, config: cfg })).toBe('offline');
+      expect(() => resolveRepoMode('p-alpha', '/x', { probe, config: cfg })).toThrow(
+        /repo\.mode.*not-a-mode.*owner.*contributor.*offline/i,
+      );
     } finally {
       cfg.close();
     }
@@ -277,27 +280,53 @@ describe('detectHostConventions — minimal PR-template + sign-off signals (D3, 
   });
 });
 
-// ── 5) The L5 contract is a documented typed stub (gated verbs / fork→PR / rich parse) ───────────
-describe('RepoModeGateStub — the L5/L9 typed loud-failing stub (freeze #2)', () => {
-  // The concrete stub omits the interface's trailing params (TS allows it; same shape as
-  // FinishReviewGateStub) — it always throws regardless of arguments, so the tests call it bare.
-  it('enactPublish throws (gated verbs are NOT built in L3)', () => {
-    const gate = new RepoModeGateStub();
-    expect(() => gate.enactPublish()).toThrow(/L5 plug-point/);
-    expect(() => gate.enactPublish()).toThrow(/not implemented at L3/);
+// ── 5) The L5 enactment gate (CoRepoModeGate): owner+offline merge real; contributor/rich-parse deferred ─
+describe('CoRepoModeGate — the L5 merge enactment (owner + offline real; the rest loud-fail)', () => {
+  /** A fake GitExec that records each git invocation, so the enactment is testable with no real repo. */
+  function recordingGitExec(): {
+    calls: string[][];
+    exec: (cwd: string, args: readonly string[]) => void;
+  } {
+    const calls: string[][] = [];
+    return { calls, exec: (_cwd, args) => void calls.push([...args]) };
+  }
+
+  const req = {
+    branch: 'co/l5-phase-a',
+    into: 'co/l5-review-gate',
+    message: 'merge(co/l5-phase-a): land phase A  [reviewed: PASS]',
+    repoCwd: '/repo',
+  };
+
+  it.each(['owner', 'offline'] as const)(
+    'enactPublish in %s mode checks out the target and --no-ff merges the reviewed branch',
+    (mode) => {
+      const git = recordingGitExec();
+      const result = new CoRepoModeGate().enactPublish(req, mode, {
+        gitExec: git.exec,
+        headReader: () => 'c'.repeat(40),
+      });
+      expect(result).toEqual({ merged: true, commitSha: 'c'.repeat(40), mode });
+      expect(git.calls).toEqual([
+        ['checkout', 'co/l5-review-gate'],
+        ['merge', '--no-ff', '-m', req.message, 'co/l5-phase-a'],
+      ]);
+    },
+  );
+
+  it('enactPublish in contributor mode points at the available gated push/PR path', () => {
+    const git = recordingGitExec();
+    expect(() =>
+      new CoRepoModeGate().enactPublish(req, 'contributor', { gitExec: git.exec }),
+    ).toThrow(/gated co_push \/ co_pr_merge path/);
+    expect(git.calls).toEqual([]); // it refuses BEFORE touching git.
   });
 
-  it('parseHostConventions throws (the rich CONTRIBUTING/PR-template parse is L5/L9)', () => {
-    const gate = new RepoModeGateStub();
-    expect(() => gate.parseHostConventions()).toThrow(/L5\/L9 plug-point/);
-    expect(() => gate.parseHostConventions()).toThrow(/not implemented at L3/);
-  });
-
-  it('the stub fails loud rather than being a silent no-op (Principle 9)', () => {
-    const gate = new RepoModeGateStub();
-    // Neither method returns a value — both throw. (A silent no-op is exactly what is forbidden.)
-    expect(() => gate.enactPublish()).toThrow();
-    expect(() => gate.parseHostConventions()).toThrow();
+  it('parseHostConventions throws (the rich CONTRIBUTING/PR-template parse is deferred to L9)', () => {
+    // The concrete impl omits the interface's `cwd` param (TS allows it) — it always throws.
+    const gate = new CoRepoModeGate();
+    expect(() => gate.parseHostConventions()).toThrow(/deferred to L9/);
+    expect(() => gate.parseHostConventions()).toThrow(/not implemented/);
   });
 });
 
@@ -381,5 +410,124 @@ describe('repo modes — assertRepoPristine holds (freeze #1, Principle 12)', ()
         return detectRepoMode({ hasRemote: false, isForkOfDifferentOwner: false, canPush: false });
       }),
     ).toThrow(/was modified/);
+  });
+});
+
+// ── 7) CoRepoModeGate.enactPush — owner/contributor real; offline loud-fails (Phase C) ────────────
+describe('CoRepoModeGate.enactPush — push enactment (AC-L5-6)', () => {
+  function recordingGitExec(): {
+    calls: string[][];
+    exec: (cwd: string, args: readonly string[]) => void;
+  } {
+    const calls: string[][] = [];
+    return { calls, exec: (_cwd, args) => void calls.push([...args]) };
+  }
+
+  const pushReq = {
+    branch: 'co/l5-phase-a',
+    into: 'co/l5-review-gate',
+    repoCwd: '/repo',
+  };
+
+  it('owner mode: pushes the integration branch (into) to origin', () => {
+    const git = recordingGitExec();
+    const result = new CoRepoModeGate().enactPush(pushReq, 'owner', { gitExec: git.exec });
+    expect(result).toEqual({ pushed: true, remote: 'origin', mode: 'owner' });
+    expect(git.calls).toEqual([['push', 'origin', 'co/l5-review-gate']]);
+  });
+
+  it('owner mode: respects an explicit remote override', () => {
+    const git = recordingGitExec();
+    const result = new CoRepoModeGate().enactPush({ ...pushReq, remote: 'upstream' }, 'owner', {
+      gitExec: git.exec,
+    });
+    expect(result.remote).toBe('upstream');
+    expect(git.calls).toEqual([['push', 'upstream', 'co/l5-review-gate']]);
+  });
+
+  it('contributor mode: pushes the feature branch (branch) to origin (fork)', () => {
+    const git = recordingGitExec();
+    const result = new CoRepoModeGate().enactPush(pushReq, 'contributor', { gitExec: git.exec });
+    expect(result).toEqual({ pushed: true, remote: 'origin', mode: 'contributor' });
+    expect(git.calls).toEqual([['push', 'origin', 'co/l5-phase-a']]);
+  });
+
+  it('offline mode: refuses loud (push capability is false — AC-L5-6, Principle 9)', () => {
+    const git = recordingGitExec();
+    expect(() => new CoRepoModeGate().enactPush(pushReq, 'offline', { gitExec: git.exec })).toThrow(
+      /push capability is false/,
+    );
+    expect(git.calls).toEqual([]); // refused before any git op
+  });
+});
+
+// ── 8) CoRepoModeGate.enactPrMerge — owner/contributor real; offline loud-fails (Phase C) ─────────
+describe('CoRepoModeGate.enactPrMerge — PR creation enactment (AC-L5-6)', () => {
+  const FAKE_PR_URL = 'https://github.com/owner/repo/pull/42';
+
+  function recordingGhExec(url = FAKE_PR_URL): {
+    calls: string[][];
+    exec: GhExec;
+  } {
+    const calls: string[][] = [];
+    return {
+      calls,
+      exec: (_cwd, args) => {
+        calls.push([...args]);
+        return url;
+      },
+    };
+  }
+
+  const prReq = {
+    branch: 'co/l5-phase-a',
+    into: 'co/l5-review-gate',
+    title: 'feat: land L5 phase A',
+    description: '## Why\n\nbecause\n\n## What changed\n\nstuff',
+    repoCwd: '/repo',
+  };
+
+  it('owner mode: creates a PR via gh and returns the URL', () => {
+    const gh = recordingGhExec();
+    const result = new CoRepoModeGate().enactPrMerge(prReq, 'owner', { ghExec: gh.exec });
+    expect(result).toEqual({ prUrl: FAKE_PR_URL, mode: 'owner' });
+    expect(gh.calls).toHaveLength(1);
+    const call = gh.calls[0]!;
+    expect(call).toContain('pr');
+    expect(call).toContain('create');
+    expect(call).toContain('--base');
+    expect(call).toContain('co/l5-review-gate');
+    expect(call).toContain('--head');
+    expect(call).toContain('co/l5-phase-a');
+    expect(call).toContain('--title');
+    expect(call).toContain('feat: land L5 phase A');
+    expect(call).toContain('--body');
+  });
+
+  it('contributor mode: creates a PR via gh and returns the URL', () => {
+    const gh = recordingGhExec();
+    const result = new CoRepoModeGate().enactPrMerge(prReq, 'contributor', { ghExec: gh.exec });
+    expect(result).toEqual({ prUrl: FAKE_PR_URL, mode: 'contributor' });
+    expect(gh.calls).toHaveLength(1);
+  });
+
+  it('contributor mode: calls detectHostConventions (injectable readFile seam)', () => {
+    const gh = recordingGhExec();
+    let detectCalled = false;
+    // readFile returning a sign-off mention: proves detectHostConventions is called with the seam.
+    const readFile = (path: string): string | null => {
+      detectCalled = true;
+      return path.endsWith('CONTRIBUTING.md') ? 'Please Signed-off-by your commits.\n' : null;
+    };
+    new CoRepoModeGate().enactPrMerge(prReq, 'contributor', { ghExec: gh.exec, readFile });
+    expect(detectCalled).toBe(true);
+  });
+
+  it('offline mode: refuses loud (pr capability is false — AC-L5-6, Principle 9)', () => {
+    const gh = recordingGhExec();
+    expect(() => new CoRepoModeGate().enactPrMerge(prReq, 'offline', { ghExec: gh.exec })).toThrow(
+      /PR capability is false/,
+    );
+    expect(gh.calls).toEqual([]); // refused before any gh op
   });
 });

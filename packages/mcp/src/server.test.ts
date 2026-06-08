@@ -31,6 +31,10 @@ const EXPECTED_TOOLS = [
   'co_orient',
   'co_sling',
   'co_finish',
+  'co_merge',
+  'co_review_finalize',
+  'co_push',
+  'co_pr_merge',
 ];
 
 // ── Per-test program-data dir + live stores (mirrors the CO_DATA_DIR idiom in mail.test.ts) ──
@@ -129,6 +133,51 @@ describe('createCoMcpServer — tool-list parity', () => {
 
     expect(typeSchema?.enum).toEqual([...MAIL_TYPES]);
   });
+
+  it('publishes co_mail_send.review_verdict over MCP', async () => {
+    const ctx = makeTestContext('impl-review-verdict-schema');
+    const client = await connect({ contextFactory: () => ctx });
+
+    const { tools } = await client.listTools();
+    const send = tools.find((t) => t.name === 'co_mail_send');
+    const props = (send?.inputSchema as { properties?: Record<string, unknown> } | undefined)
+      ?.properties;
+    const reviewVerdictSchema = props?.review_verdict as { enum?: unknown[] } | undefined;
+
+    expect(reviewVerdictSchema?.enum).toEqual(['PASS', 'ISSUES']);
+  });
+
+  it('publishes co_sling without agent-supplied account/cost controls or capacity-only WAITING wording', async () => {
+    const ctx = makeTestContext('impl-sling-schema');
+    const client = await connect({ contextFactory: () => ctx });
+
+    const { tools } = await client.listTools();
+    const sling = tools.find((t) => t.name === 'co_sling');
+    expect(sling).toBeDefined();
+    expect(sling?.description).toMatch(/dispatch policy/i);
+    expect(sling?.description).not.toMatch(/when routing inputs .* supplied/i);
+    expect(sling?.description).not.toMatch(/all providers are at capacity/i);
+
+    const props = (sling?.inputSchema as { properties?: Record<string, unknown> } | undefined)
+      ?.properties;
+    expect(props).toBeDefined();
+    expect(props).not.toHaveProperty('accounts');
+    expect(props).not.toHaveProperty('cost');
+    expect(props).not.toHaveProperty('budget');
+
+    const outputProps = (
+      sling?.outputSchema as { properties?: Record<string, unknown> } | undefined
+    )?.properties;
+    const placementProps = (
+      outputProps?.placement as { properties?: Record<string, unknown> } | undefined
+    )?.properties;
+    const waitingProps = (
+      outputProps?.waiting as { properties?: Record<string, unknown> } | undefined
+    )?.properties;
+    expect(placementProps).not.toHaveProperty('account');
+    expect(waitingProps).not.toHaveProperty('maxed_accounts');
+    expect(waitingProps).not.toHaveProperty('unavailable_accounts');
+  });
 });
 
 describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
@@ -153,6 +202,58 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     expect(first?.subject).toBe('hello');
     expect(first?.body).toBe('world');
     expect(first?.seq).toBe(sent.seq);
+  });
+
+  it('round-trips review_response.review_verdict through MCP mail tools', async () => {
+    const leadCtx = makeTestContext('lead-review');
+    const projectId = leadCtx.projectId;
+    const cwd = leadCtx.cwd;
+    const mail = leadCtx.mail!;
+    const registry = leadCtx.registry!;
+    const client = await connect({
+      contextFactory: () => ({
+        agent: '@operator',
+        projectId,
+        cwd,
+        mail,
+        registry,
+      }),
+    });
+
+    const req = mail.send({
+      type: 'review_request',
+      to: '@operator',
+      from: 'lead-review',
+      subject: 'review?',
+      body: 'please review',
+    });
+
+    const sendRes = await client.callTool({
+      name: 'co_mail_send',
+      arguments: {
+        type: 'review_response',
+        in_reply_to: req.seq,
+        subject: 're: review?',
+        body: 'passes',
+        review_verdict: 'PASS',
+      },
+    });
+    expect(sendRes.isError).toBeFalsy();
+    const reply = sendRes.structuredContent as Record<string, unknown>;
+    expect(reply.review_verdict).toBe('PASS');
+
+    const leadClient = await connect({
+      contextFactory: () => ({
+        agent: 'lead-review',
+        projectId,
+        cwd,
+        mail,
+        registry,
+      }),
+    });
+    const inboxRes = await leadClient.callTool({ name: 'co_mail_inbox', arguments: {} });
+    const inbox = inboxRes.structuredContent as { mail: Array<Record<string, unknown>> };
+    expect(inbox.mail.find((m) => m.seq === reply.seq)?.review_verdict).toBe('PASS');
   });
 
   it('co_status returns the calling agent record', async () => {

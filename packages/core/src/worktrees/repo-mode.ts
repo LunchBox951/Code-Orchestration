@@ -3,6 +3,32 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertNever } from '../assert-never.js';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
+import { defaultGitReader } from './detect-base.js';
+import { defaultGitExec, type GitExec } from './sling.js';
+
+/**
+ * Mutating `gh` seam — runs `gh <args>` in `cwd` and returns the trimmed stdout string (e.g. a
+ * PR URL from `gh pr create`). Throws on a non-zero exit (fail loud — Principle 9). Injectable so
+ * the PR-creation path is headless-testable with a fake that records calls + returns a fixture URL,
+ * with NO real network activity in `pnpm test` (AC-L5-6).
+ */
+export type GhExec = (cwd: string, args: readonly string[]) => string;
+
+/** The production {@link GhExec}: run `gh <args>` in `cwd`, return trimmed stdout. */
+export const defaultGhExec: GhExec = (cwd, args) => {
+  try {
+    return execFileSync('gh', args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    throw new Error(`co repo-mode: \`gh ${args.join(' ')}\` failed in '${cwd}': ${detail}`, {
+      cause,
+    });
+  }
+};
 
 /**
  * Repository-relationship modes (AC-L3-4) — `docs/architecture/worktrees.md` §"Repository-relationship
@@ -13,13 +39,13 @@ import { openConfigStore, type ConfigStore } from '../config/config-store.js';
  *   - `contributor`  — fork → PR to upstream; PRs required; yields to the host repo's conventions.
  *   - `offline`      — `co_merge` lands locally; **push / PR disabled**; `co` house style.
  *
- * This module builds the **L3-ownable half**: the read-only detection prober, the pure detection
- * order, the override-beats-detection resolution (persisted in the config cascade), the Offline
- * push/PR capability, and the minimal Contributor host-convention probe. The gated verbs that *act*
- * on a mode (`co_merge` / `co_push` / `co_pr_merge`, the Contributor fork→PR enactment, "the gate
- * applies in all three") are **L5** — marked here by the loud-failing {@link RepoModeGateStub}, never
- * built and never declared as an MCP tool (Principle 7 — gated-by-default holds because the gated
- * verbs are simply NOT BUILT here).
+ * This module builds the detection + capability half (read-only detection prober, the pure detection
+ * order, override-beats-detection resolution persisted in the config cascade, the Offline push/PR
+ * capability, the minimal Contributor host-convention probe) AND — as of L5 — the **owner + offline
+ * merge enactment** the gated `co_merge` uses ({@link CoRepoModeGate.enactPublish}), plus the real
+ * remote push / PR creation enactment the gated `co_push` and `co_pr_merge` use. The rich
+ * `CONTRIBUTING.md`/PR-template parse ({@link CoRepoModeGate.parseHostConventions}) remains L9 and
+ * fails loud rather than no-opping (Principle 7 — gated-by-default; Principle 9 — no silent stub).
  *
  * Pristine (Principle 12): detection and host-convention reads are READ-ONLY over the repo (the
  * prober wraps read-only `git ls-remote` + `gh`, reusing the `--no-optional-locks` discipline; the
@@ -180,10 +206,12 @@ export interface ResolveRepoModeDeps {
  * prober.
  *
  * The override is read from the config cascade (`resolveEffective(projectId)` — global ⊕
- * project-overrides, project wins) and only wins if it names a VALID {@link RepoMode}; a malformed or
- * absent override falls through to `detectRepoMode(probe(cwd))`. The override **persists per project**
- * because it lives in the per-project config layer (program-data) — that is the persistence mechanism,
- * with NO repo write (Principle 12). `config`/`probe` are injectable for headless tests.
+ * project-overrides, project wins) and only wins if it names a VALID {@link RepoMode}. An absent
+ * override falls through to `detectRepoMode(probe(cwd))`; a present-but-malformed override fails loud
+ * so a typo in an intended Offline pin can never silently enable publishing. The override **persists
+ * per project** because it lives in the per-project config layer (program-data) — that is the
+ * persistence mechanism, with NO repo write (Principle 12). `config`/`probe` are injectable for
+ * headless tests.
  */
 export function resolveRepoMode(
   projectId: string,
@@ -194,8 +222,18 @@ export function resolveRepoMode(
   const config = deps.config ?? openConfigStore();
   const ownsConfig = deps.config === undefined;
   try {
-    const override = asRepoMode(config.resolveEffective(projectId)[REPO_MODE_CONFIG_KEY]);
-    if (override !== undefined) return override; // project-override wins over detection.
+    const effective = config.resolveEffective(projectId);
+    const rawOverride = effective[REPO_MODE_CONFIG_KEY];
+    const override = asRepoMode(rawOverride);
+    if (Object.prototype.hasOwnProperty.call(effective, REPO_MODE_CONFIG_KEY)) {
+      if (override === undefined) {
+        throw new Error(
+          `repo.mode override '${String(rawOverride)}' is invalid; expected one of ` +
+            REPO_MODES.join(', '),
+        );
+      }
+      return override;
+    }
     return detectRepoMode(probe(cwd));
   } finally {
     if (ownsConfig) config.close();
@@ -215,9 +253,9 @@ export interface RepoModeCapabilities {
  * The capability a mode grants — **the tested L3-ownable invariant: Offline disables push/PR.** Owner
  * and Contributor both allow push (owner → default branch, contributor → fork) and a PR per the table; only
  * Offline refuses both. This is a pure capability LOOKUP — it does NOT enact anything. The *enactment*
- * (the gated verbs that consult it, the Contributor fork→PR flow, "the gate applies in all three") is
- * L5: see {@link RepoModeGateStub}. Exhaustive over {@link RepoMode} via {@link assertNever} — a new
- * mode forces a decision here (no silent default).
+ * is {@link CoRepoModeGate}: local merge, remote push, and PR creation are all real gated paths.
+ * Exhaustive over {@link RepoMode} via {@link assertNever} — a new mode forces a decision here (no
+ * silent default).
  */
 export function repoModeCapabilities(mode: RepoMode): RepoModeCapabilities {
   switch (mode) {
@@ -241,8 +279,9 @@ export function repoModeCapabilities(mode: RepoMode): RepoModeCapabilities {
  *                           `CONTRIBUTING.md`), NOT a rich parse.
  *
  * The **rich `CONTRIBUTING.md` / PR-template parse** (extracting the actual template body, checklist
- * items, required trailers, etc.) is explicitly DEFERRED to L5/L9 — see {@link RepoModeGateStub}. This
- * probe READS repo files and writes nothing (Principle 12 — pristine holds).
+ * items, required trailers, etc.) is explicitly DEFERRED to L9 — see
+ * {@link CoRepoModeGate.parseHostConventions}. This probe READS repo files and writes nothing
+ * (Principle 12 — pristine holds).
  */
 export interface HostConventions {
   /** Does the repo ship a pull-request template? (presence only — not its contents.) */
@@ -302,56 +341,272 @@ function defaultReadFileOrNull(path: string): string | null {
 }
 
 /**
- * The L5 plug-point — the gated verbs + Contributor fork→PR enactment + "the gate applies in all
- * three" + the rich CONTRIBUTING/PR-template parse that L3 STOPS short of (freeze #2). A TYPED stub
- * marking the seam — copied from L1's `LiveDeliveryStub` / L3-C's `FinishReviewGateStub`: it fails
- * loud (Principle 9) rather than being a silent no-op, because a silent stub is exactly the fallback
- * that hid the prototype's gaps. NOTHING in L3 calls it — it exists so the L5 boundary is a real,
- * typed thing rather than an absence, and so the absence of any gated merge/push/PR verb in L3 is a
- * deliberate, documented boundary (Principle 7 — gated-by-default holds because the gated verbs are
- * simply NOT BUILT here, and NO `co_*` tool is declared for them — Principle 4).
+ * What {@link RepoModeGate.enactPublish} is handed to enact a gated merge: the reviewed source `branch`,
+ * the `into` target it lands on, the house-style merge commit `message` (rendered by the review gate via
+ * {@link import('./messages.js').renderMergeMessage}, NOT here — Principle 3), and the `repoCwd` git
+ * runs in. Voice never reaches the artifact: this seam receives an already-rendered message.
+ */
+export interface PublishRequest {
+  /** The reviewed source branch being integrated (e.g. `co/l5-phase-a`). */
+  readonly branch: string;
+  /** The target branch the merge lands on (e.g. `co/l5-review-gate`). */
+  readonly into: string;
+  /** The already-rendered house-style merge commit message. */
+  readonly message: string;
+  /** The repository the merge runs in (the lead's worktree cwd). */
+  readonly repoCwd: string;
+}
+
+/** The structured result of an enacted publish — the merge commit's facts + the mode it ran in. */
+export interface PublishResult {
+  readonly merged: boolean;
+  readonly commitSha: string;
+  readonly mode: RepoMode;
+}
+
+/** Injectable git seams for {@link RepoModeGate.enactPublish}; both default to production. */
+export interface EnactPublishDeps {
+  /** Mutating git seam (checkout + merge). Defaults to {@link defaultGitExec}. */
+  readonly gitExec?: GitExec;
+  /** Read the post-merge HEAD sha. Defaults to a read-only `git rev-parse HEAD` (fail loud on a gap). */
+  readonly headReader?: (repoCwd: string) => string;
+}
+
+/** The default post-merge HEAD reader: read-only `git rev-parse HEAD`, fail loud (Principle 9) on a gap. */
+function defaultHeadReader(repoCwd: string): string {
+  const sha = defaultGitReader(repoCwd, ['rev-parse', 'HEAD']);
+  if (sha == null || sha.length === 0) {
+    throw new Error(
+      `RepoModeGate.enactPublish: cannot read HEAD after merge in '${repoCwd}' ` +
+        '(git unavailable or not a repository).',
+    );
+  }
+  return sha;
+}
+
+/**
+ * What {@link RepoModeGate.enactPush} is handed: the reviewed `branch`, the integration `into` target,
+ * and the `repoCwd`. The push target differs by mode: owner pushes `into` (the integration branch
+ * carrying the merge commit) to the remote; contributor pushes `branch` (the feature branch) to origin
+ * (the fork). `remote` defaults to `'origin'`.
+ */
+export interface EnactPushRequest {
+  /** The reviewed source branch (for contributor: this is pushed to the fork). */
+  readonly branch: string;
+  /** The integration target branch (for owner: this is pushed to origin). */
+  readonly into: string;
+  /** The repository the push runs in. */
+  readonly repoCwd: string;
+  /** Remote to push to. Defaults to `'origin'`. */
+  readonly remote?: string;
+}
+
+/** The structured result of a push enacted by {@link RepoModeGate.enactPush}. */
+export interface EnactPushResult {
+  readonly pushed: boolean;
+  readonly remote: string;
+  readonly mode: RepoMode;
+}
+
+/** Injectable git seam for {@link RepoModeGate.enactPush}; defaults to production. */
+export interface EnactPushDeps {
+  /** Mutating git seam (`git push`). Defaults to {@link defaultGitExec}. */
+  readonly gitExec?: GitExec;
+}
+
+/**
+ * What {@link RepoModeGate.enactPrMerge} is handed: the `branch` to open the PR from, the `into`
+ * base branch, an already-rendered `description` (from `renderPrMessage`), and a `title`. The
+ * `description` is NEVER authored by the provider — the caller renders it from a structured intent
+ * before this seam is called (Principle 3).
+ */
+export interface EnactPrMergeRequest {
+  /** The head branch to open the PR from. */
+  readonly branch: string;
+  /** The base branch the PR targets. */
+  readonly into: string;
+  /** The PR title (one line). */
+  readonly title: string;
+  /** The already-rendered PR body (from {@link import('./messages.js').renderPrMessage}). */
+  readonly description: string;
+  /** The repository the PR creation runs in. */
+  readonly repoCwd: string;
+}
+
+/** The structured result of a PR enactment by {@link RepoModeGate.enactPrMerge}. */
+export interface EnactPrMergeResult {
+  readonly prUrl: string;
+  readonly mode: RepoMode;
+}
+
+/** Injectable seams for {@link RepoModeGate.enactPrMerge}; both default to production. */
+export interface EnactPrMergeDeps {
+  /** Mutating `gh` seam (`gh pr create`). Defaults to {@link defaultGhExec}. */
+  readonly ghExec?: GhExec;
+  /**
+   * File reader for {@link detectHostConventions} — injectable so contributor-mode convention
+   * detection is testable headless without a fixture tree. Defaults to `defaultReadFileOrNull`.
+   */
+  readonly readFile?: (path: string) => string | null;
+}
+
+/**
+ * The repository-mode enactment gate. As of Phase C the push + PR verbs are REAL:
+ *
+ *   - {@link enactPublish} — owner + offline: a local `--no-ff` merge (the `co_merge` path). Contributor
+ *     (fork→PR) throws loud — use `enactPush` + `enactPrMerge` instead.
+ *   - {@link enactPush} — owner: `git push origin <into>` (push the integration branch); contributor:
+ *     `git push origin <branch>` (push the feature branch to fork); offline: refuse (Principle 9).
+ *   - {@link enactPrMerge} — owner + contributor: `gh pr create` with the pre-rendered description;
+ *     offline: refuse. Contributor additionally probes host conventions via {@link detectHostConventions}
+ *     (the minimal Phase C probe; the rich parse is L9 — {@link parseHostConventions} stays loud-failing).
+ *   - {@link parseHostConventions} — the rich `CONTRIBUTING.md`/PR-template parse remains **L9**.
+ *
+ * The only repo writes are: a merge commit (enactPublish), a git push (enactPush), and a gh PR
+ * (enactPrMerge). Orchestration state lands in program-data (Principle 12).
  */
 export interface RepoModeGate {
   /**
-   * Enact the publishing surface for a reviewed branch in `mode` — the gated `co_merge`/`co_push`
-   * (Owner → default branch · Offline → local only) and the Contributor fork→PR flow, with the review gate
-   * applied in all three. Returns `never`: L5 finalizes the params + lifecycle; this only marks the
-   * seam.
+   * Enact a gated merge in `mode`. Real for `owner` + `offline` (local merge); throws for `contributor`
+   * (fork→PR publishing — use `enactPush` + `enactPrMerge`). The PASS gate is applied by the review gate
+   * BEFORE this is called — this seam only enacts the merge for an already-blessed branch.
    */
-  enactPublish(branch: string, mode: RepoMode): never;
+  enactPublish(req: PublishRequest, mode: RepoMode, deps?: EnactPublishDeps): PublishResult;
+  /**
+   * Enact a gated push in `mode`. Owner pushes the integration branch to origin; contributor pushes
+   * the feature branch to the fork remote; offline refuses loud (AC-L5-6, Principle 9).
+   */
+  enactPush(req: EnactPushRequest, mode: RepoMode, deps?: EnactPushDeps): EnactPushResult;
+  /**
+   * Enact a gated PR creation in `mode`. Owner + contributor create a PR via `gh`; offline refuses
+   * loud (AC-L5-6, Principle 9). Contributor additionally probes host conventions (minimal Phase C
+   * probe — {@link detectHostConventions}; the rich parse is {@link parseHostConventions}, L9).
+   */
+  enactPrMerge(
+    req: EnactPrMergeRequest,
+    mode: RepoMode,
+    deps?: EnactPrMergeDeps,
+  ): EnactPrMergeResult;
   /**
    * The RICH host-convention parse a Contributor PR yields to — extract the actual PR-template body,
    * required checklist items, and trailers from `CONTRIBUTING.md` / the PR template. Returns `never`:
-   * the rich parse is L5/L9 (this layer ships only the minimal presence/sign-off probe above).
+   * the rich parse is L9 (this layer ships only the minimal presence/sign-off probe above).
    */
   parseHostConventions(cwd: string): never;
 }
 
-/** The L5 STUB gate. Both methods fail loud (Principle 9) until L5/L9 own enactment + the rich parse —
- * never a silent no-op. They throw regardless of arguments. */
-export class RepoModeGateStub implements RepoModeGate {
-  // L5 PLUG-POINT (review-gates.md). The production gate must:
-  //  (1) enact the gated publish per mode — Owner → gated co_merge/co_push to default branch; Contributor →
-  //      fork→PR to upstream; Offline → local co_merge only (push/PR refused per repoModeCapabilities);
-  //  (2) apply the review gate in ALL THREE modes (no path to master/remote/PR without a PASS);
-  //  (3) yield a Contributor PR to the RICH host conventions (parse CONTRIBUTING.md / the PR template,
-  //      not just the minimal presence/sign-off signal detectHostConventions returns).
-  // Until then this stub fails loud (Principle 9).
-  enactPublish(): never {
-    throw new Error(
-      'RepoModeGateStub.enactPublish: the gated publish (co_merge / co_push / fork→PR) is not ' +
-        'implemented at L3. This is the L5 plug-point: enact the publishing surface per repository- ' +
-        'relationship mode, with the review gate applied in all three (no un-gated merge/push/PR verb ' +
-        'is exposed in L3 — Principle 7). L3 only resolves the mode + its capabilities.',
-    );
+/**
+ * The production {@link RepoModeGate}. As of Phase C, `enactPublish` (local merge), `enactPush`
+ * (remote push), and `enactPrMerge` (PR creation) are all REAL; `parseHostConventions` stays the
+ * loud-failing L9 seam (never a silent no-op — Principle 9).
+ */
+export class CoRepoModeGate implements RepoModeGate {
+  enactPublish(req: PublishRequest, mode: RepoMode, deps: EnactPublishDeps = {}): PublishResult {
+    const gitExec = deps.gitExec ?? defaultGitExec;
+    const headReader = deps.headReader ?? defaultHeadReader;
+    switch (mode) {
+      case 'owner':
+      case 'offline': {
+        // Owner + offline both land a LOCAL merge in L5: check out the target, then a `--no-ff` merge
+        // of the reviewed branch with the already-rendered house-style message. Owner's remote PUSH is
+        // Phase C (`co_push`); Offline never pushes (repoModeCapabilities). The merge commit is the
+        // only repo write — orchestration state is recorded to program-data (Principle 12).
+        gitExec(req.repoCwd, ['checkout', req.into]);
+        gitExec(req.repoCwd, ['merge', '--no-ff', '-m', req.message, req.branch]);
+        return { merged: true, commitSha: headReader(req.repoCwd), mode };
+      }
+      case 'contributor':
+        throw new Error(
+          'RepoModeGate.enactPublish: contributor mode cannot locally merge; publish through the ' +
+            'gated co_push / co_pr_merge path, or resolve the repo mode to owner/offline for a ' +
+            'local merge.',
+        );
+      default:
+        return assertNever(mode);
+    }
+  }
+
+  enactPush(req: EnactPushRequest, mode: RepoMode, deps: EnactPushDeps = {}): EnactPushResult {
+    const gitExec = deps.gitExec ?? defaultGitExec;
+    const remote = req.remote ?? 'origin';
+    switch (mode) {
+      case 'owner':
+        // Owner: push the integration branch (into) — which already carries the merge commit — to origin.
+        gitExec(req.repoCwd, ['push', remote, req.into]);
+        return { pushed: true, remote, mode: 'owner' };
+      case 'contributor':
+        // Contributor: push the feature branch to origin (the fork); the PR creation is enactPrMerge.
+        gitExec(req.repoCwd, ['push', remote, req.branch]);
+        return { pushed: true, remote, mode: 'contributor' };
+      case 'offline':
+        throw new Error(
+          'RepoModeGate.enactPush: refused — push capability is false in offline mode ' +
+            '(repoModeCapabilities.push === false). Configure owner or contributor mode to enable ' +
+            'remote push (AC-L5-6, Principle 9 — no silent no-op).',
+        );
+      default:
+        return assertNever(mode);
+    }
+  }
+
+  enactPrMerge(
+    req: EnactPrMergeRequest,
+    mode: RepoMode,
+    deps: EnactPrMergeDeps = {},
+  ): EnactPrMergeResult {
+    const ghExec = deps.ghExec ?? defaultGhExec;
+    switch (mode) {
+      case 'owner': {
+        const prUrl = ghExec(req.repoCwd, [
+          'pr',
+          'create',
+          '--base',
+          req.into,
+          '--head',
+          req.branch,
+          '--title',
+          req.title,
+          '--body',
+          req.description,
+        ]);
+        return { prUrl, mode: 'owner' };
+      }
+      case 'contributor': {
+        // Detect minimal host conventions (PR-template presence + sign-off indicator). The rich
+        // CONTRIBUTING.md / PR-template parse is deferred to L9 (parseHostConventions stays loud-failing).
+        // Phase C: we probe and note conventions; the agent has already surfaced them in PrIntent.conventions.
+        void detectHostConventions(req.repoCwd, deps.readFile);
+        const prUrl = ghExec(req.repoCwd, [
+          'pr',
+          'create',
+          '--base',
+          req.into,
+          '--head',
+          req.branch,
+          '--title',
+          req.title,
+          '--body',
+          req.description,
+        ]);
+        return { prUrl, mode: 'contributor' };
+      }
+      case 'offline':
+        throw new Error(
+          'RepoModeGate.enactPrMerge: refused — PR capability is false in offline mode ' +
+            '(repoModeCapabilities.pr === false). Configure owner or contributor mode to enable ' +
+            'PR creation (AC-L5-6, Principle 9 — no silent no-op).',
+        );
+      default:
+        return assertNever(mode);
+    }
   }
 
   parseHostConventions(): never {
     throw new Error(
-      'RepoModeGateStub.parseHostConventions: the rich CONTRIBUTING.md / PR-template parse is not ' +
-        'implemented at L3. This is the L5/L9 plug-point: extract the template body, checklist, and ' +
-        'required trailers a Contributor PR must yield to. L3 only detects PR-template presence + a ' +
-        'minimal sign-off signal (detectHostConventions).',
+      'RepoModeGate.parseHostConventions: the rich CONTRIBUTING.md / PR-template parse is not ' +
+        'implemented (deferred to L9): extract the template body, checklist, and required trailers a ' +
+        'Contributor PR must yield to. This module detects PR-template presence + a minimal sign-off ' +
+        'signal only (detectHostConventions).',
     );
   }
 }

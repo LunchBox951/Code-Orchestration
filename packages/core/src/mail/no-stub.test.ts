@@ -17,6 +17,8 @@ import {
   MAIL_APPROVAL_RESPONSE,
   MAIL_ESCALATION,
   MAIL_WORKER_DONE,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
@@ -131,6 +133,22 @@ function exerciseEveryType(mail: MailStore): Record<MailType, DeliveredMail> {
     subject: 'worker_done: co/feature',
     body: 'finished co/feature; tests 3/3 passed',
   });
+  const reviewRequest = mail.send({
+    type: MAIL_REVIEW_REQUEST,
+    to: OPERATOR,
+    from: 'lead',
+    subject: 'review co/phase-e?',
+    body: 'requesting human review of co/phase-e into co/review-gate',
+  });
+  const reviewResponse = mail.reply(
+    mail.inbox(OPERATOR).find((m) => m.seq === reviewRequest.seq)!,
+    {
+      type: MAIL_REVIEW_RESPONSE,
+      subject: 're: review co/phase-e?',
+      body: 'PASS — looks good',
+      reviewVerdict: 'PASS',
+    },
+  );
   return {
     [MAIL_CHAT]: chat,
     [MAIL_OPERATOR_MESSAGE]: operatorMessage,
@@ -140,6 +158,8 @@ function exerciseEveryType(mail: MailStore): Record<MailType, DeliveredMail> {
     [MAIL_APPROVAL_RESPONSE]: approvalResponse,
     [MAIL_ESCALATION]: escalation,
     [MAIL_WORKER_DONE]: workerDone,
+    [MAIL_REVIEW_REQUEST]: reviewRequest,
+    [MAIL_REVIEW_RESPONSE]: reviewResponse,
   };
 }
 
@@ -149,7 +169,7 @@ describe('AC-L1-7 — no-stub completeness: GREEN over the real seed enum', () =
   });
 
   it('proves it is not vacuous — the enum has every seed type and is non-empty', () => {
-    expect(MAIL_TYPES.length).toBe(8);
+    expect(MAIL_TYPES.length).toBe(10);
     expect([...MAIL_TYPES].sort()).toEqual(
       [
         MAIL_APPROVAL,
@@ -160,6 +180,8 @@ describe('AC-L1-7 — no-stub completeness: GREEN over the real seed enum', () =
         MAIL_ESCALATION,
         MAIL_OPERATOR_MESSAGE,
         MAIL_WORKER_DONE,
+        MAIL_REVIEW_REQUEST,
+        MAIL_REVIEW_RESPONSE,
       ].sort(),
     );
   });
@@ -285,6 +307,8 @@ describe('AC-L1-7 — every declared type has a real LIVE flow (not just a regis
       expect([...seen].sort()).toEqual([...MAIL_TYPES].sort());
       // The structured `approval_response` carried its decision through the flow.
       expect(delivered[MAIL_APPROVAL_RESPONSE].decision).toBe('approve');
+      // The structured `review_response` carried its reviewVerdict through the flow.
+      expect(delivered[MAIL_REVIEW_RESPONSE].reviewVerdict).toBe('PASS');
     } finally {
       mail.close();
     }
@@ -356,7 +380,7 @@ describe('AC-L1-9 — byte-equal replay holds with the FULL type set', () => {
         JSON.stringify(
           (tx.raw as DatabaseSync)
             .prepare(
-              'SELECT seq, recipient, sender, type, subject, body, correlation_id, causation_id, idempotency_key, ts, kind, read, resolved, thread_id, decision FROM inbox ORDER BY seq',
+              'SELECT seq, recipient, sender, type, subject, body, correlation_id, causation_id, idempotency_key, ts, kind, read, resolved, thread_id, decision, review_verdict FROM inbox ORDER BY seq',
             )
             .all(),
         ),
@@ -392,5 +416,6 @@ describe('AC-L1-9 — byte-equal replay holds with the FULL type set', () => {
       expect(live).toContain(`"type":"${type}"`);
     }
     expect(live).toContain('"decision":"approve"');
+    expect(live).toContain('"review_verdict":"PASS"');
   });
 });

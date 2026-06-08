@@ -35,6 +35,10 @@ const mailSendInput = z.object({
     .enum(['approve', 'decline'])
     .optional()
     .describe('Only for an approval_response reply: approve or decline the requested action.'),
+  review_verdict: z
+    .enum(['PASS', 'ISSUES'])
+    .optional()
+    .describe('Only for a review_response reply: the structured human review verdict.'),
 });
 type MailSendInput = z.infer<typeof mailSendInput>;
 
@@ -66,6 +70,7 @@ export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
         from: ctx.agent,
         ...(input.idempotency_key != null ? { idempotencyKey: input.idempotency_key } : {}),
         ...(input.decision != null ? { decision: input.decision } : {}),
+        ...(input.review_verdict != null ? { reviewVerdict: input.review_verdict } : {}),
       });
     } else {
       if (input.to == null || input.to.length === 0) {
@@ -83,6 +88,7 @@ export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
         body: input.body,
         ...(input.idempotency_key != null ? { idempotencyKey: input.idempotency_key } : {}),
         ...(input.decision != null ? { decision: input.decision } : {}),
+        ...(input.review_verdict != null ? { reviewVerdict: input.review_verdict } : {}),
       });
     }
     return toWireMail(delivered);

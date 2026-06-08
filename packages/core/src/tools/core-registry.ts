@@ -12,6 +12,10 @@ import { worktreeInfoTool } from './specs/worktree-info.js';
 import { orientTool } from './specs/orient.js';
 import { slingTool } from './specs/sling.js';
 import { finishTool } from './specs/finish.js';
+import { mergeTool } from './specs/merge.js';
+import { reviewFinalizeTool } from './specs/review-finalize.js';
+import { pushTool } from './specs/push.js';
+import { prMergeTool } from './specs/pr-merge.js';
 
 /**
  * Build the canonical core registry: a fresh {@link ToolRegistry} with every real core tool
@@ -38,5 +42,9 @@ export function buildCoreRegistry(): ToolRegistry {
   registry.register(orientTool);
   registry.register(slingTool);
   registry.register(finishTool);
+  registry.register(mergeTool);
+  registry.register(reviewFinalizeTool);
+  registry.register(pushTool);
+  registry.register(prMergeTool);
   return registry;
 }
