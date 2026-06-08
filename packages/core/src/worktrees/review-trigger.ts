@@ -1,4 +1,5 @@
 import type { RepoMode } from './repo-mode.js';
+import type { ReviewScope } from '../review/ladder.js';
 
 /**
  * The L5 review-trigger + merge gate — the seam `co_finish` STOPS short of (AC-L3-6, freeze #2), now
@@ -21,6 +22,17 @@ export interface ReviewTriggerRequest {
   readonly branch: string;
   /** Who asked for the review. */
   readonly requestedBy: string;
+  /**
+   * The review scope — determines the reviewer kind when `projectId` is provided (AC-L5-5).
+   * Defaults to `'worker_merge'` when omitted. Additive: existing callers compile unchanged.
+   */
+  readonly scope?: ReviewScope;
+  /**
+   * The project id for config resolution. When provided alongside `scope`, the gate reads
+   * `review.<scope>.reviewer` from the config cascade and branches on `human` vs `agent`.
+   * When absent, the gate defaults to the `agent` path. Additive: existing callers compile unchanged.
+   */
+  readonly projectId?: string;
 }
 
 /** The recorded-request facts {@link FinishReviewGate.triggerReview} returns (ts persisted by the store). */

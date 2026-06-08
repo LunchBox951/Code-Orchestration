@@ -11,6 +11,7 @@ import {
   applyStrikePolicy,
   REVIEW_ROUND_BUDGET_KEY,
   REVIEW_ROUND_BUDGET_DEFAULT,
+  type StrikeEnforcementDeps,
 } from './strikes.js';
 import type { ReviewVerdictRecord } from './events.js';
 
@@ -148,13 +149,7 @@ describe('applyStrikePolicy — 3-strike escalation enforcement (AC-L5-4)', () =
     return { reviews, mail };
   }
 
-  function makeDeps(
-    reviews: ReviewStore,
-    mail: MailStore,
-    budget = BUDGET,
-  ): ReturnType<typeof applyStrikePolicy> extends never
-    ? never
-    : Parameters<typeof applyStrikePolicy>[0] {
+  function makeDeps(reviews: ReviewStore, mail: MailStore, budget = BUDGET): StrikeEnforcementDeps {
     return {
       reviews,
       mail,
