@@ -50,6 +50,8 @@ export type {
   CompletionPredicate,
   ApprovalDecision,
   ApprovalResponse,
+  ReviewResponse,
+  ReviewVerdictValue,
   MailPayload,
 } from './mail/events.js';
 export {
@@ -63,6 +65,8 @@ export {
   MAIL_APPROVAL_RESPONSE,
   MAIL_ESCALATION,
   MAIL_WORKER_DONE,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
@@ -70,6 +74,7 @@ export {
   MAIL_EVENT_V,
   mailMessageSchema,
   approvalResponseSchema,
+  reviewResponseSchema,
   mailReadSchema,
   mailForwardSchema,
   mailRetractSchema,
@@ -416,6 +421,27 @@ export {
   nextReviewAction,
   applyStrikePolicy,
 } from './review/strikes.js';
+// L5 Phase E human-review path (AC-L5-5): the `review_request` / `review_response` mail pair, the
+// log-derived `reviewRequestOutcome` (the `approvalOutcome` twin), the `reviewRequestEnvelope`
+// builder (operator-terminal by construction), `recordHumanVerdict` (re-enters the gate identically
+// to an agent verdict), `resolveReviewerKind` (reads `review.<scope>.reviewer` from the config
+// cascade; defaults to `'agent'`), and the L9 `HumanReviewGateStub` (loud-failing typed seam for
+// the operator diff-viewer / verdict-accept UI — never a silent no-op, Principle 9).
+export type {
+  ReviewRequestOutcome,
+  ReviewRequestEnvelopeParams,
+  HumanVerdictParams,
+  HumanReviewGate,
+} from './review/human-review.js';
+export {
+  reviewReviewerKey,
+  resolveReviewerKind,
+  resolveReviewerKindFromConfig,
+  reviewRequestOutcome,
+  reviewRequestEnvelope,
+  recordHumanVerdict,
+  HumanReviewGateStub,
+} from './review/human-review.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
 // seam (spec §4.4) every later L4 phase reads. `Provider`/`UsageWindow`/`UsageSnapshot`/

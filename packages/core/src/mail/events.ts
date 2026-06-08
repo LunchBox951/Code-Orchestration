@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { NewEvent } from '../store/types.js';
 import type { SchemaMap } from '../replay/decode.js';
 import type { UpcasterRegistry } from '../replay/upcaster.js';
+import { verdictSchema, type Verdict } from '../review/verdict.js';
 
 /**
  * L1 mail bus events live in the PROJECT store (one per registered project), so
@@ -65,6 +66,15 @@ export const MAIL_ESCALATION = 'escalation' as const;
  * structured finish facts L5 consumes live in the worktree store's finish record, not in this ping.
  */
 export const MAIL_WORKER_DONE = 'worker_done' as const;
+/**
+ * L5-E adds the first-class `review_request` actionable + its `review_response` closer (AC-L5-5).
+ * `review_request` asks `@operator` to act as the human reviewer for a scope (operator-terminal by
+ * construction, like `approval`); the response carries a structured `reviewVerdict` (PASS | ISSUES) —
+ * the first non-`decision` structured field, mirroring exactly how `approval_response`'s `decision`
+ * works. The gate reads the recorded `reviewVerdict` to re-enter the review loop log-derived (replay-safe).
+ */
+export const MAIL_REVIEW_REQUEST = 'review_request' as const;
+export const MAIL_REVIEW_RESPONSE = 'review_response' as const;
 
 /** Registered seed-type enum — `send` rejects any type not in here (freeze #2, #5). */
 export const MAIL_TYPES = [
@@ -76,6 +86,8 @@ export const MAIL_TYPES = [
   MAIL_APPROVAL_RESPONSE,
   MAIL_ESCALATION,
   MAIL_WORKER_DONE,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
 ] as const;
 export type MailType = (typeof MAIL_TYPES)[number];
 
@@ -141,11 +153,25 @@ export type ApprovalResponse = z.infer<typeof approvalResponseSchema>;
 export type ApprovalDecision = ApprovalResponse['decision'];
 
 /**
- * Every mail payload extends `{subject, body}`; `approval_response` additionally
- * carries a `decision`. {@link validateEnvelope} returns this union (the parsed,
- * schema-valid payload for the envelope's type).
+ * The `review_response` payload: the shared prose plus a structured `reviewVerdict`
+ * (PASS | ISSUES — reusing the L5 verdict enum from `review/verdict.ts`). Mirrors exactly
+ * how `approvalResponseSchema`'s `decision` works: the verdict is carried on the wire by
+ * {@link MailEnvelope.reviewVerdict} and persisted log-derived onto {@link DeliveredMail.reviewVerdict}
+ * so the human-review gate can read it replay-safely (AC-L5-5).
  */
-export type MailPayload = MailMessage | ApprovalResponse;
+export const reviewResponseSchema = mailMessageSchema.extend({
+  reviewVerdict: verdictSchema,
+});
+export type ReviewResponse = z.infer<typeof reviewResponseSchema>;
+/** The verdict a `review_response` carries: PASS or ISSUES. Re-exported as an alias of {@link Verdict}. */
+export type ReviewVerdictValue = ReviewResponse['reviewVerdict'];
+
+/**
+ * Every mail payload extends `{subject, body}`; `approval_response` additionally
+ * carries a `decision`; `review_response` carries a `reviewVerdict`. {@link validateEnvelope} returns
+ * this union (the parsed, schema-valid payload for the envelope's type).
+ */
+export type MailPayload = MailMessage | ApprovalResponse | ReviewResponse;
 
 /**
  * The read-receipt payload: the `seq` of the viewed mail. A non-negative integer
@@ -195,6 +221,8 @@ export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [MAIL_APPROVAL_RESPONSE, approvalResponseSchema],
   [MAIL_ESCALATION, mailMessageSchema], // {subject, body}: a readable problem summary + context
   [MAIL_WORKER_DONE, mailMessageSchema], // {subject, body}: the finish's commit + test summary
+  [MAIL_REVIEW_REQUEST, mailMessageSchema], // {subject, body}: human review ask — structured facts in the review store
+  [MAIL_REVIEW_RESPONSE, reviewResponseSchema], // {subject, body, reviewVerdict}: human PASS|ISSUES decision
   [EVENT_MAIL_READ, mailReadSchema],
   [EVENT_MAIL_FORWARD, mailForwardSchema],
   [EVENT_MAIL_RETRACTED, mailRetractSchema], // infrastructure tombstone; never a MAIL_TYPES member
@@ -219,6 +247,7 @@ export interface MailEnvelope {
   readonly causationId?: string; // triggering event
   readonly idempotencyKey?: string; // dedupe key
   readonly decision?: ApprovalDecision; // structured payload field — ONLY `approval_response` uses it
+  readonly reviewVerdict?: Verdict; // structured payload field — ONLY `review_response` uses it (AC-L5-5)
 }
 
 /**
@@ -245,6 +274,8 @@ export interface DeliveredMail {
   readonly retracted?: boolean; // the sender withdrew it (tombstone); dropped from inbox/outstanding
   // ── W4 read-model state (log-derived) ──
   readonly decision?: ApprovalDecision; // set for `approval_response` rows; the gate reads it
+  // ── L5-E read-model state (log-derived) ──
+  readonly reviewVerdict?: Verdict; // set for `review_response` rows; the human-review gate reads it (AC-L5-5)
 }
 
 /** A recipient's stream scope: `mail:<recipient>`. */
@@ -299,18 +330,22 @@ export function validateEnvelope(envelope: MailEnvelope): MailPayload {
   if (envelope.type === MAIL_APPROVAL && envelope.to !== OPERATOR) {
     throw new Error(`mail: approval must be addressed to ${OPERATOR}`);
   }
+  if (envelope.type === MAIL_REVIEW_REQUEST && envelope.to !== OPERATOR) {
+    throw new Error(`mail: review_request must be addressed to ${OPERATOR}`);
+  }
   const schema = mailSchemas.get(envelope.type);
   if (schema == null) {
     // A registered MAIL_TYPES member with no schema is a programming error (Principle 9).
     throw new Error(`mail: no schema registered for type '${envelope.type}'`);
   }
   // The candidate payload = the shared prose fields plus any type-specific wire field.
-  // Only `approval_response` reads `decision`; the (non-strict) `{subject, body}`
-  // schemas strip it, so an existing type is unaffected by a stray decision.
+  // Only `approval_response` reads `decision`; only `review_response` reads `reviewVerdict`;
+  // the (non-strict) `{subject, body}` schemas strip them, so existing types are unaffected.
   const candidate: Record<string, unknown> = {
     subject: envelope.subject,
     body: envelope.body,
     ...(envelope.decision != null ? { decision: envelope.decision } : {}),
+    ...(envelope.reviewVerdict != null ? { reviewVerdict: envelope.reviewVerdict } : {}),
   };
   return schema.parse(candidate) as MailPayload;
 }
@@ -417,6 +452,8 @@ export const mailKinds: ReadonlyMap<MailType, MailKind> = new Map<MailType, Mail
   [MAIL_APPROVAL_RESPONSE, 'informational'], // the recorded decision; closes the approval
   [MAIL_ESCALATION, 'actionable'], // the holder must resolve-or-forward it (never drop)
   [MAIL_WORKER_DONE, 'informational'], // a worker finished; bus-visible, demands no response
+  [MAIL_REVIEW_REQUEST, 'actionable'], // asks @operator to review a scope; sticky until answered
+  [MAIL_REVIEW_RESPONSE, 'informational'], // the human PASS|ISSUES verdict; closes the review_request
 ]);
 
 /**
@@ -506,6 +543,19 @@ export const completionPredicates: ReadonlyMap<MailType, CompletionPredicate> = 
       inSameThread(item, closer) &&
       closer.type !== MAIL_ESCALATION &&
       sentBackToRequester(item, closer),
+  ],
+  [
+    // A `review_request` is resolved by an in-thread `review_response` from the holder (@operator)
+    // back to the requester — EITHER verdict resolves the actionable (the human has decided); the
+    // human-review gate reads {@link DeliveredMail.reviewVerdict} to re-enter the loop (AC-L5-5).
+    // Mirrors the `approval` predicate exactly (same threading shape, different type pair).
+    MAIL_REVIEW_REQUEST,
+    (item, closer) =>
+      closer.type === MAIL_REVIEW_RESPONSE &&
+      sentByHolder(item, closer) &&
+      sentBackToRequester(item, closer) &&
+      inSameThread(item, closer) &&
+      causedBy(item, closer),
   ],
 ]);
 
