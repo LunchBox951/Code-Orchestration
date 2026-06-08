@@ -88,7 +88,7 @@ export const kickbackTool: ToolSpec<KickbackInput, KickbackOutput> = {
   description:
     'Return a branch to its worker after a merge-review returned ISSUES. Tracked via the review ' +
     'round-budget/strike counter. Below budget: sends a kickback mail to the worker listing blockers ' +
-    'and suggestions. At budget: fires one escalation to your parent instead (the 3-strike valve). ' +
+    'and suggestions. At budget: fires one escalation to your parent instead (the round-budget escalation valve). ' +
     'Only a coordinator or lead who is the direct parent of `worker` may call this.',
   inputSchema: kickbackInput,
   outputSchema: kickbackOutput,
