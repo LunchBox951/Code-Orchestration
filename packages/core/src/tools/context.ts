@@ -3,6 +3,7 @@ import type { ProjectRegistry, ProjectId } from '../registry/registry.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
 import type { DispatchStore } from '../dispatch/dispatch-store.js';
 import type { ReviewStore } from '../review/review-store.js';
+import type { RosterStore } from '../roles/roster-store.js';
 import type { UsageSourceFactory } from '../dispatch/cli-render.js';
 
 /**
@@ -44,6 +45,13 @@ export interface ToolContext {
    * the worktrees/dispatch seams.
    */
   readonly reviews?: ReviewStore;
+  /**
+   * OPTIONAL L6a program-data handle: the agent roster store (agent→role→parent records), opened +
+   * injected by the mount alongside {@link reviews}. Optional + additive so every existing
+   * ToolContext construction site (L1/L2/L3/L4/L5 tests, mcp/cli) keeps compiling; an L6 tool
+   * that needs it (`co_kickback`) loud-fails when absent (Principle 9), mirroring the reviews seam.
+   */
+  readonly roster?: RosterStore;
   /**
    * OPTIONAL L4 passive/live usage-source factory. When the mount supplies it, dispatching tools refresh
    * stale/missing usage buckets through {@link import('../dispatch/provider-source.js').readProviderUsageCached}

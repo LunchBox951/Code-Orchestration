@@ -45,7 +45,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
     mandate:
       'task owner: shape intent → lock spec → plan phases → dispatch → gate → publish → close. Plans the work itself, spawning Researchers when investigation is needed.',
     writeScope: 'delegates',
-    toolset: [...UNIVERSAL, 'co_mail_retract', 'co_sling'],
+    toolset: [...UNIVERSAL, 'co_mail_retract', 'co_sling', 'co_kickback'],
     capabilities: new Set<Capability>(),
   },
   lead: {
@@ -59,6 +59,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
       'co_worktree_info',
       'co_sling',
       'co_merge',
+      'co_kickback',
       'co_push',
       'co_pr_merge',
     ],

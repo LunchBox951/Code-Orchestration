@@ -792,6 +792,17 @@ export { openRosterStore } from './roles/roster-store.js';
 export type { SpawnViolation } from './roles/spawn-rules.js';
 export { SPAWN_RULES, canSpawn, checkSpawnPlan, validateSpawnPlan } from './roles/spawn-rules.js';
 
+// L6a Phase C — production role-based ParentResolver + escalation authority cut + co_kickback tool
+// (AC-L6a-4, AC-L6a-5, AC-L6a-8 partial, AC-L6a-9). `roleParentResolver` is the production
+// resolver that routes by role+tree (L6 PLUG-POINT in escalation.ts). `escalationDisposition` +
+// `lowestCompetentResolver` implement the authority cut so only genuine intent reaches @operator.
+// `co_kickback` is the coordinator/lead verb for returning a branch after ISSUES, tracked via the
+// strike counter (reuses review/strikes.ts — no rebuilt loop). Fixes the coordinator→lead kickback
+// gap recorded in `.co/issues/2026-06-08-coordinator-cannot-kickback-failed-merge-review.md`.
+export { roleParentResolver } from './mail/escalation.js';
+export type { EscalationTopic } from './roles/authority.js';
+export { escalationDisposition, lowestCompetentResolver } from './roles/authority.js';
+
 // L6a Phase B — fixed shipped sub-role set + narrow-only invariant + completeness discipline
 // (AC-L6a-2, AC-L6a-8 partial, AC-L6a-9). Sub-roles specialize a base role's approach (soft) and
 // may narrow but never widen its permission profile (hard). Researcher sub-roles carry the only
