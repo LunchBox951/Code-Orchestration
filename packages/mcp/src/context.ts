@@ -5,6 +5,7 @@ import {
   openMailStore,
   openRegistry,
   openReviewStore,
+  openRosterStore,
   openWorktreeStore,
   toolsForRole,
   type Role,
@@ -110,6 +111,10 @@ export function defaultContextFactory(): () => ToolContext {
   // L5: open + inject the review store (verdict/request/serialize). ReviewProjector owns a distinct
   // scope (`review:`) and read-model table from the other stores, so sharing the same store.db is safe.
   const reviews = openReviewStore(projectId);
+  // L6a: open + inject the roster store (agent→role→parent projection). RosterProjector owns a
+  // distinct scope (`agent:`) and read-model table (`roster`) from the other stores, so sharing the
+  // same store.db is safe. A tool never opens its own store; the mount resolves and injects it.
+  const roster = openRosterStore(projectId);
   if (explicitProjectId != null && resolvedFromCwd == null) {
     const normalizedCwd = resolve(cwd);
     const isRecordedSandbox = worktrees
@@ -120,6 +125,7 @@ export function defaultContextFactory(): () => ToolContext {
       worktrees.close();
       dispatch.close();
       reviews.close();
+      roster.close();
       registry.close();
       throw new Error(
         `co MCP server: ${CO_PROJECT_ID_ENV} '${projectId}' does not record cwd '${cwd}' as a ` +
@@ -136,6 +142,7 @@ export function defaultContextFactory(): () => ToolContext {
     worktrees,
     dispatch,
     reviews,
+    roster,
     usageSourceFactory: defaultUsageSourceFactory,
   };
   return () => ctx;

@@ -1,8 +1,10 @@
+import type { CommitIdentityReader } from '../permissions/identity-guard.js';
 import type { MailStore } from '../mail/mail-store.js';
 import type { ProjectRegistry, ProjectId } from '../registry/registry.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
 import type { DispatchStore } from '../dispatch/dispatch-store.js';
 import type { ReviewStore } from '../review/review-store.js';
+import type { RosterStore } from '../roles/roster-store.js';
 import type { UsageSourceFactory } from '../dispatch/cli-render.js';
 
 /**
@@ -45,9 +47,23 @@ export interface ToolContext {
    */
   readonly reviews?: ReviewStore;
   /**
+   * OPTIONAL L6a program-data handle: the agent roster store (agent→role→parent records), opened +
+   * injected by the mount alongside {@link reviews}. Optional + additive so every existing
+   * ToolContext construction site (L1/L2/L3/L4/L5 tests, mcp/cli) keeps compiling; an L6 tool
+   * that needs it (`co_kickback`) loud-fails when absent (Principle 9), mirroring the reviews seam.
+   */
+  readonly roster?: RosterStore;
+  /**
    * OPTIONAL L4 passive/live usage-source factory. When the mount supplies it, dispatching tools refresh
    * stale/missing usage buckets through {@link import('../dispatch/provider-source.js').readProviderUsageCached}
    * before placement. Tests may omit it and seed `dispatch` directly.
    */
   readonly usageSourceFactory?: UsageSourceFactory;
+  /**
+   * OPTIONAL L6a injectable commit-identity reader seam (AC-L6a-7): used by `co_push` and
+   * `co_pr_merge` to read commit identities for the guard pre-check. Defaults to
+   * `defaultCommitIdentityReader` (real `git log`); tests inject a fixture reader so no real git
+   * is needed for guard logic tests.
+   */
+  readonly commitIdentityReader?: CommitIdentityReader;
 }

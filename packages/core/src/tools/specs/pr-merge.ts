@@ -1,6 +1,11 @@
 import { z } from 'zod';
+import {
+  checkPublishIdentities,
+  defaultCommitIdentityReader,
+  resolvePersonaAllowlist,
+} from '../../permissions/identity-guard.js';
 import { CoReviewGate } from '../../review/merge.js';
-import { detectBaseRef } from '../../worktrees/detect-base.js';
+import { detectBaseRef, resolveRefSha } from '../../worktrees/detect-base.js';
 import type { PrIntent } from '../../worktrees/messages.js';
 import type { ToolSpec } from '../registry.js';
 
@@ -127,6 +132,29 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
         'co_pr_merge: the mount did not inject a worktree store (ctx.worktrees absent).',
       );
     }
+
+    // Identity pre-check (AC-L6a-7): refuse if any commit carries an off-persona identity.
+    // Only enforce when a persona allowlist is configured (non-breaking when unconfigured).
+    const allowlist = resolvePersonaAllowlist(ctx.projectId);
+    if (allowlist.length > 0) {
+      const baseSha = ctx.worktrees.getWorktree(input.branch)?.baseSha;
+      if (baseSha !== undefined) {
+        const branchHead = resolveRefSha(ctx.cwd, input.branch);
+        const range = `${baseSha}..${branchHead}`;
+        const reader = ctx.commitIdentityReader ?? defaultCommitIdentityReader;
+        const commits = reader.read(ctx.cwd, range);
+        const violations = checkPublishIdentities(commits, allowlist);
+        if (violations.length > 0) {
+          const details = violations
+            .map((v) => `  ${v.sha.slice(0, 12)} [${v.field}] ${v.identity}`)
+            .join('\n');
+          throw new Error(
+            `co_pr_merge: blocked — commits contain identities outside the persona allowlist:\n${details}`,
+          );
+        }
+      }
+    }
+
     const into = input.into ?? detectBaseRef(ctx.cwd);
     // Production parent-resolver from the worktree-recorded spawning parent (Phase D).
     const parentAgent = ctx.worktrees.getWorktree(input.branch)?.parent;

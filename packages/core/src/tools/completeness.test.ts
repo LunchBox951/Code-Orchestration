@@ -26,6 +26,7 @@ const EXPECTED_TOOLS = [
   'co_review_finalize',
   'co_push',
   'co_pr_merge',
+  'co_kickback',
 ] as const;
 
 const BOGUS = 'co_bogus';

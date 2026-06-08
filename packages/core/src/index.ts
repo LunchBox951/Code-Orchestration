@@ -761,5 +761,93 @@ export {
   CO_LIVE_E2E_ENV,
 } from './dispatch/provider-source.js';
 
+// L6a Phase A — authoritative role profiles + durable agent→role→parent projection + spawn rules
+// (AC-L6a-1, AC-L6a-3, AC-L6a-8, AC-L6a-9, AC-L6a-10). Five base roles promoted from a seed
+// toolset list to full permission profiles (mandate + writeScope + toolset + capabilities);
+// `roleToolsets` in scoping.ts is now DERIVED from these authoritative profiles. A durable,
+// event-sourced agent→role→parent projection (`roster` table) is replay-equal over L0. Structural
+// spawn rules are a pure static check (no spawn runtime — that is L7).
+export type { RoleProfile, WriteScope, Capability, RoleProfileViolation } from './roles/profile.js';
+export { ROLE_PROFILES, profileFor, checkRoleProfileCompleteness } from './roles/profile.js';
+// L6a roles events: `agent.registered` — the durable, validated record of which role an agent was
+// dispatched under and who spawned it. Event-sourced over L0 (program-data only, Principle 12).
+export type { AgentRegistered, AgentRecord } from './roles/events.js';
+export {
+  ROLES_EVENT_V,
+  EVENT_AGENT_REGISTERED,
+  AGENT_SCOPE_PREFIX,
+  agentScope,
+  agentRegisteredSchema,
+  rolesSchemas,
+  rolesUpcasters,
+  makeAgentRegisteredEvent,
+} from './roles/events.js';
+// L6a roster projection: the `RosterProjector` folds `agent.registered` into a `roster` read-model
+// table; `openRosterStore` is the typed facade (record + read-back + replay-equal).
+export { RosterProjector } from './roles/roster-projector.js';
+export type { RosterStore } from './roles/roster-store.js';
+export { openRosterStore } from './roles/roster-store.js';
+// L6a spawn rules: structural parent→child constraints from agent-roles.md. Pure static check —
+// the runtime enforcement gate at spawn time is L7.
+export type { SpawnViolation } from './roles/spawn-rules.js';
+export { SPAWN_RULES, canSpawn, checkSpawnPlan, validateSpawnPlan } from './roles/spawn-rules.js';
+
+// L6a Phase C — production role-based ParentResolver + escalation authority cut + co_kickback tool
+// (AC-L6a-4, AC-L6a-5, AC-L6a-8 partial, AC-L6a-9). `roleParentResolver` is the production
+// resolver that routes by role+tree (L6 PLUG-POINT in escalation.ts). `escalationDisposition` +
+// `lowestCompetentResolver` implement the authority cut so only genuine intent reaches @operator.
+// `co_kickback` is the coordinator/lead verb for returning a branch after ISSUES, tracked via the
+// strike counter (reuses review/strikes.ts — no rebuilt loop). Fixes the coordinator→lead kickback
+// gap recorded in `.co/issues/2026-06-08-coordinator-cannot-kickback-failed-merge-review.md`.
+export { roleParentResolver } from './mail/escalation.js';
+export type { EscalationTopic } from './roles/authority.js';
+export { escalationDisposition, lowestCompetentResolver } from './roles/authority.js';
+
+// L6a Phase B — fixed shipped sub-role set + narrow-only invariant + completeness discipline
+// (AC-L6a-2, AC-L6a-8 partial, AC-L6a-9). Sub-roles specialize a base role's approach (soft) and
+// may narrow but never widen its permission profile (hard). Researcher sub-roles carry the only
+// real permission delta: `researcher:external` retains web-search; `codebase`/`diagnostic`/
+// `decision` narrow it away. Coordinator and Lead have no sub-roles (owner tiers). All checks are
+// pure — no I/O, no clock.
+export type { SubRoleSpec } from './roles/sub-roles.js';
+export { SUB_ROLES, subRolesFor, findSubRole, parseSubRoleId } from './roles/sub-roles.js';
+export type { NarrowViolation } from './roles/narrow-only.js';
+export { narrowOnly, validateSubRoles } from './roles/narrow-only.js';
+export type { SubRoleViolation } from './roles/sub-role-completeness.js';
+export { checkSubRoleCompleteness } from './roles/sub-role-completeness.js';
+
+// L6a Phase D1 — non-destructive block-list registry + drift check + reactive-nudge catalog.
+// The declared LIST and DATA only (Principle 6 — block only the workarounds, everything else
+// is a nudge). Enforcement hooks (PreToolUse, Claude/Codex variants) and nudge injection are
+// L7 typed stubs here; the production wiring lands in L7 (permissions.md:90-98 / :64-66).
+export type { BlockCategory, BlockRule } from './permissions/block-list.js';
+export { BLOCK_LIST, matchBlock } from './permissions/block-list.js';
+export type { EnforcedConfig, DriftViolation } from './permissions/drift.js';
+export { checkBlockListDrift, readEnforcedConfig } from './permissions/drift.js';
+export type { NudgeRule } from './permissions/nudges.js';
+export { NUDGE_CATALOG, nudgeFor, injectNudge } from './permissions/nudges.js';
+
+// L6a Phase D2 — pre-publish identity guard + worktree persona-pinning (AC-L6a-7).
+// The permanent fix for DCO leaks: (1) a pure pre-publish check that refuses a push or PR-merge if
+// any commit's author/committer/Signed-off-by is outside the configured persona allowlist (fail-loud,
+// Principle 9); (2) `resolvePersona` consumed by `slingWorktree` to pin the local git identity in
+// every new sandbox immediately after `git worktree add`, so `git commit -s` never falls through to
+// global config. Both sides are config-driven (empty allowlist → guard skipped; undefined persona →
+// pinning no-op). All git I/O behind the injectable `CommitIdentityReader` seam (AC-L6a-9).
+export type {
+  PersonaIdentity,
+  CommitIdentity,
+  IdentityViolation,
+  CommitIdentityReader,
+} from './permissions/identity-guard.js';
+export {
+  IDENTITY_PERSONA_ALLOWLIST_KEY,
+  IDENTITY_PERSONA_KEY,
+  resolvePersonaAllowlist,
+  resolvePersona,
+  checkPublishIdentities,
+  defaultCommitIdentityReader,
+} from './permissions/identity-guard.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
