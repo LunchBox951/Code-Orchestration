@@ -1,56 +1,69 @@
+import type { RepoMode } from './repo-mode.js';
+
 /**
- * The L5 review-trigger + merge plug-point — the gate `co_finish` STOPS short of (AC-L3-6, freeze
- * #2). In L3, `co_finish` commits the worktree, records the finish, and emits `worker_done`
+ * The L5 review-trigger + merge gate — the seam `co_finish` STOPS short of (AC-L3-6, freeze #2), now
+ * made REAL in L5. In L3, `co_finish` commits the worktree, records the finish, and emits `worker_done`
  * (informational), then STOPS: it does NOT dispatch a reviewer and it does NOT merge. Triggering the
- * honest-verification review (comparing the finish's tests against the captured baseline) and the
- * gated merge to a phase/integration branch are L5's job.
+ * review and the gated merge are L5's job — and this interface is now the typed contract for them
+ * (the real implementation is {@link import('../review/merge.js').CoReviewGate}, consumed by `co_merge`).
  *
- * This is a TYPED stub marking that seam — copied from L1's {@link import('../mail/delivery.js').LiveDeliveryStub}
- * / L2's `LiveSessionHostStub`: it fails loud (Principle 9) rather than being a silent no-op, because
- * a silent stub is exactly the fallback that hid the prototype's gaps. `co_finish` never calls it —
- * it exists so the L5 plug-point is a real, typed thing rather than an absence, and so the absence of
- * a gated merge/push/PR verb in L3 is a deliberate, documented boundary (P7 — gated-by-default holds
- * because the gated verbs are simply NOT BUILT here).
+ * `co_finish` STILL does not call this (unchanged — it stops short by design). The gate is reached only
+ * through the lead-facing `co_merge` (merge) and, in a later phase, the request flow (triggerReview).
  */
-export interface FinishReviewGate {
-  /**
-   * Dispatch the honest-verification reviewer for a finished branch and gate on its verdict.
-   * Returns `never`: L5 finalizes the parameters + lifecycle; this signature only marks the seam.
-   */
-  triggerReview(branch: string): never;
-  /**
-   * Merge a reviewed branch (only on a PASS) in the project's repository-relationship mode.
-   * Returns `never`: the gated merge/push/PR verbs are L5; this signature only marks the seam.
-   */
-  merge(branch: string): never;
+
+/** What {@link FinishReviewGate.triggerReview} records: a request to review `branch` into `target`. */
+export interface ReviewTriggerRequest {
+  /** The id shared by this review's request + its eventual verdict. */
+  readonly reviewId: string;
+  /** The merge target the review is for (e.g. `co/l5-review-gate`). */
+  readonly target: string;
+  /** The reviewed source branch (e.g. `co/l5-phase-a`). */
+  readonly branch: string;
+  /** Who asked for the review. */
+  readonly requestedBy: string;
+}
+
+/** The recorded-request facts {@link FinishReviewGate.triggerReview} returns (ts persisted by the store). */
+export interface ReviewTriggerResult {
+  readonly reviewId: string;
+  readonly target: string;
+  readonly branch: string;
+  readonly requestedTs: number;
 }
 
 /**
- * The L5 STUB gate. Both methods fail loud (Principle 9) until L5 owns the review-trigger + merge —
- * never a silent no-op. The signatures omit the params the interface declares (TS allows a method to
- * ignore trailing parameters) — they always throw regardless of arguments.
+ * What {@link FinishReviewGate.merge} is handed: the reviewed source `branch`, the `into` target it
+ * lands on, and the structured merge intent (`summary`/`body`) `co` renders into the house-style merge
+ * message (Principle 3 — no provider voice). `projectId`/`repoCwd` locate the program-data store + the
+ * git repo.
  */
-export class FinishReviewGateStub implements FinishReviewGate {
-  // L5 PLUG-POINT (review-gates.md). The production gate must:
-  //  (1) run the finish's test suite in the sandbox and compare it against the captured baseline
-  //      (a NEW failure is a regression; a pre-existing one is not) — the honest-verification step;
-  //  (2) dispatch a reviewer and gate the merge on a PASS (no path to master/remote/PR without one);
-  //  (3) render the merge/PR text via the message contract (renderMergeMessage / renderPrMessage)
-  //      in the project's repository-relationship mode.
-  // Until then this stub fails loud (Principle 9).
-  triggerReview(): never {
-    throw new Error(
-      'FinishReviewGateStub.triggerReview: the honest-verification review-trigger is not ' +
-        'implemented at L3. This is the L5 plug-point: compare the finish record against the ' +
-        'captured baseline and gate on a reviewer PASS. co_finish only records the finish here.',
-    );
-  }
+export interface ReviewMergeRequest {
+  readonly branch: string;
+  readonly into: string;
+  readonly summary: string;
+  readonly body?: string;
+  readonly projectId: string;
+  readonly repoCwd: string;
+}
 
-  merge(): never {
-    throw new Error(
-      'FinishReviewGateStub.merge: the gated merge is not implemented at L3. This is the L5 ' +
-        'plug-point: merge a reviewed branch only on a PASS (no un-gated merge/push/PR verb is ' +
-        'exposed in L3 — P7). co_finish does not merge.',
-    );
-  }
+/** The structured result of a gated merge — the merge commit's facts + the repo mode it ran in. */
+export interface ReviewMergeResult {
+  readonly merged: boolean;
+  readonly commitSha: string;
+  readonly commitMessage: string;
+  readonly mode: RepoMode;
+}
+
+/**
+ * The L5 review gate. Both methods are REAL (no longer `: never`):
+ *
+ *   - `triggerReview` records a `review.requested` for a branch on a target (the request flow's real
+ *     consumer is Phase E; the recorder is real now).
+ *   - `merge` enacts the **gated** merge — it refuses unless a `PASS` verdict is recorded for the
+ *     branch on the target (AC-L5-1), renders the house-style merge message, and enacts owner/offline
+ *     via {@link import('./repo-mode.js').CoRepoModeGate} (contributor publishing is Phase C).
+ */
+export interface FinishReviewGate {
+  triggerReview(req: ReviewTriggerRequest): ReviewTriggerResult;
+  merge(req: ReviewMergeRequest): ReviewMergeResult;
 }

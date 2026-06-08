@@ -11,17 +11,17 @@ import {
   resolveRepoMode,
   repoModeCapabilities,
   detectHostConventions,
-  RepoModeGateStub,
+  CoRepoModeGate,
   type RemoteSignals,
   type RemoteProbe,
   type RepoMode,
 } from './repo-mode.js';
 
-// AC-L3-4 (the L3-ownable half): repo modes = auto-detect (a recorded-signal table → each expected
-// mode) + override-beats-detection (project-override wins, persisted per project) + the Offline
-// push/PR-disabled capability + a minimal Contributor host-convention probe + a documented L5 typed
-// stub. Detection is read-only over the repo; persistence is the config cascade (program-data),
-// provable pristine.
+// AC-L3-4 / AC-L5-1: repo modes = auto-detect (a recorded-signal table → each expected mode) +
+// override-beats-detection (project-override wins, persisted per project) + the Offline push/PR-disabled
+// capability + a minimal Contributor host-convention probe + the L5 enactment gate (CoRepoModeGate:
+// owner/offline merge real; contributor fork→PR + the rich parse deferred). Detection is read-only over
+// the repo; persistence is the config cascade (program-data), provable pristine.
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -277,27 +277,53 @@ describe('detectHostConventions — minimal PR-template + sign-off signals (D3, 
   });
 });
 
-// ── 5) The L5 contract is a documented typed stub (gated verbs / fork→PR / rich parse) ───────────
-describe('RepoModeGateStub — the L5/L9 typed loud-failing stub (freeze #2)', () => {
-  // The concrete stub omits the interface's trailing params (TS allows it; same shape as
-  // FinishReviewGateStub) — it always throws regardless of arguments, so the tests call it bare.
-  it('enactPublish throws (gated verbs are NOT built in L3)', () => {
-    const gate = new RepoModeGateStub();
-    expect(() => gate.enactPublish()).toThrow(/L5 plug-point/);
-    expect(() => gate.enactPublish()).toThrow(/not implemented at L3/);
+// ── 5) The L5 enactment gate (CoRepoModeGate): owner+offline merge real; contributor/rich-parse deferred ─
+describe('CoRepoModeGate — the L5 merge enactment (owner + offline real; the rest loud-fail)', () => {
+  /** A fake GitExec that records each git invocation, so the enactment is testable with no real repo. */
+  function recordingGitExec(): {
+    calls: string[][];
+    exec: (cwd: string, args: readonly string[]) => void;
+  } {
+    const calls: string[][] = [];
+    return { calls, exec: (_cwd, args) => void calls.push([...args]) };
+  }
+
+  const req = {
+    branch: 'co/l5-phase-a',
+    into: 'co/l5-review-gate',
+    message: 'merge(co/l5-phase-a): land phase A  [reviewed: PASS]',
+    repoCwd: '/repo',
+  };
+
+  it.each(['owner', 'offline'] as const)(
+    'enactPublish in %s mode checks out the target and --no-ff merges the reviewed branch',
+    (mode) => {
+      const git = recordingGitExec();
+      const result = new CoRepoModeGate().enactPublish(req, mode, {
+        gitExec: git.exec,
+        headReader: () => 'c'.repeat(40),
+      });
+      expect(result).toEqual({ merged: true, commitSha: 'c'.repeat(40), mode });
+      expect(git.calls).toEqual([
+        ['checkout', 'co/l5-review-gate'],
+        ['merge', '--no-ff', '-m', req.message, 'co/l5-phase-a'],
+      ]);
+    },
+  );
+
+  it('enactPublish in contributor mode throws (fork→PR publishing is Phase C)', () => {
+    const git = recordingGitExec();
+    expect(() =>
+      new CoRepoModeGate().enactPublish(req, 'contributor', { gitExec: git.exec }),
+    ).toThrow(/contributor publishing \(fork→PR\) is Phase C/);
+    expect(git.calls).toEqual([]); // it refuses BEFORE touching git.
   });
 
-  it('parseHostConventions throws (the rich CONTRIBUTING/PR-template parse is L5/L9)', () => {
-    const gate = new RepoModeGateStub();
-    expect(() => gate.parseHostConventions()).toThrow(/L5\/L9 plug-point/);
-    expect(() => gate.parseHostConventions()).toThrow(/not implemented at L3/);
-  });
-
-  it('the stub fails loud rather than being a silent no-op (Principle 9)', () => {
-    const gate = new RepoModeGateStub();
-    // Neither method returns a value — both throw. (A silent no-op is exactly what is forbidden.)
-    expect(() => gate.enactPublish()).toThrow();
-    expect(() => gate.parseHostConventions()).toThrow();
+  it('parseHostConventions throws (the rich CONTRIBUTING/PR-template parse is deferred to L9)', () => {
+    // The concrete impl omits the interface's `cwd` param (TS allows it) — it always throws.
+    const gate = new CoRepoModeGate();
+    expect(() => gate.parseHostConventions()).toThrow(/deferred to L9/);
+    expect(() => gate.parseHostConventions()).toThrow(/not implemented/);
   });
 });
 

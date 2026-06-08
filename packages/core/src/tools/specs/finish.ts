@@ -85,9 +85,9 @@ type FinishOutput = z.infer<typeof finishOutput>;
  * `co_finish` (AC-L3-6): COMMIT the worktree with a house-style message rendered from the agent's
  * intent (DCO-signed), RECORD the finish (commit + the finish's test run — the durable input L5
  * compares against the captured baseline), and EMIT `worker_done` (informational) to the parent the
- * sling recorded. It does NOT dispatch a reviewer and does NOT merge — that gate is L5
- * (`FinishReviewGateStub` marks the seam). The registry exposes NO `co_merge` / `co_push` /
- * `co_pr_merge` verb, so L3 introduces no un-gated path to master/remote/PR (Principle 7).
+ * sling recorded. It does NOT dispatch a reviewer and does NOT merge — that gate is L5's lead-facing
+ * `co_merge` (which refuses without a recorded PASS). `co_finish` itself stays a leaf, non-publishing
+ * verb, so it introduces no un-gated path to master/remote/PR (Principle 7).
  *
  * The handler loud-fails if the mount did not inject a worktree store (Principle 9 — a tool never
  * opens its own store), mirroring `co_sling`. It injects `readWorktreeInfo` as the finish core's

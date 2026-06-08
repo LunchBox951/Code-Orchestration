@@ -22,6 +22,8 @@ const EXPECTED_TOOLS = [
   'co_orient',
   'co_sling',
   'co_finish',
+  'co_merge',
+  'co_review_finalize',
 ] as const;
 
 const BOGUS = 'co_bogus';
