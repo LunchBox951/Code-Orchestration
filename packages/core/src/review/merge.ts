@@ -5,6 +5,7 @@ import {
   CoRepoModeGate,
   resolveRepoMode,
   type EnactPublishDeps,
+  type EnactPushDeps,
   type GhExec,
   type RepoMode,
   type RepoModeGate,
@@ -82,6 +83,10 @@ export interface ReviewPushResult {
   readonly pushed: boolean;
   readonly remote: string;
   readonly mode: RepoMode;
+  /** Present when the PASS carried pre-existing baseline failures (flag — never silent, AC-L5-3). */
+  readonly baselineFailures?: readonly string[];
+  /** True when a baseline-failure escalation mail was emitted (requires mail + parentResolver seam). */
+  readonly escalated?: boolean;
 }
 
 /** What {@link CoReviewGate.prMerge} is handed: the reviewed `branch`, `into`, the structured PR intent, and title. */
@@ -100,6 +105,10 @@ export interface ReviewPrMergeResult {
   readonly prUrl: string;
   readonly prDescription: string;
   readonly mode: RepoMode;
+  /** Present when the PASS carried pre-existing baseline failures (flag — never silent, AC-L5-3). */
+  readonly baselineFailures?: readonly string[];
+  /** True when a baseline-failure escalation mail was emitted (requires mail + parentResolver seam). */
+  readonly escalated?: boolean;
 }
 
 /**
@@ -125,11 +134,21 @@ export class CoReviewGate implements FinishReviewGate {
   }
 
   /**
-   * Shared PASS gate + honest-verify logic used by merge, push, and prMerge. Throws on any gate
-   * failure (no verdict, not PASS, regression, missing baseline/finish, PASS-without-marker). Returns
-   * the resolved mode for the caller to route on.
+   * Shared PASS gate + honest-verify + baseline-failure escalation used by push and prMerge. Throws
+   * on any gate failure (no verdict, not PASS, regression, missing baseline/finish, PASS-without-
+   * marker). On a clean or baseline-only PASS, returns the mode + escalation signal so the caller
+   * can surface them in its result (AC-L5-3 — baseline failures are never silent).
+   *
+   * Note: ReviewScope.pr_merge should be threaded to reviewer dispatch (so reviewers apply the
+   * strictest bar for co_push/co_pr_merge calls). That threading is a Phase D/E concern — Phase D
+   * wires the production parent-resolver; Phase E wires the reviewer dispatch with scope context.
    */
-  private gateOnPass(branch: string, into: string, projectId: string, repoCwd: string): RepoMode {
+  private gateOnPass(
+    branch: string,
+    into: string,
+    projectId: string,
+    repoCwd: string,
+  ): { mode: RepoMode; baselineFailures?: readonly string[]; escalated?: boolean } {
     const resolveMode = this.deps.resolveMode ?? resolveRepoMode;
     const mode = resolveMode(projectId, repoCwd);
 
@@ -166,7 +185,30 @@ export class CoReviewGate implements FinishReviewGate {
       );
     }
 
-    return mode;
+    // Baseline failures: flag + escalate (never silent — AC-L5-3). Mirrors merge() step 6.
+    const baselineFailures =
+      verifyOutcome.baselineFailures.length > 0
+        ? (verifyOutcome.baselineFailures as readonly string[])
+        : undefined;
+    let escalated = false;
+    if (classification.mustEscalate && this.deps.mail && this.deps.parentResolver) {
+      const from = this.deps.agentId ?? 'co.review-gate';
+      escalate(this.deps.mail, this.deps.parentResolver, {
+        from,
+        subject: `baseline failure(s) in PASS for '${branch}'`,
+        body:
+          `The PASS for '${branch}' into '${into}' carries pre-existing baseline ` +
+          `failure(s): ${verifyOutcome.baselineFailures.join(', ')}. The publish was allowed ` +
+          'but these failures require attention — they pre-existed the branch-off baseline.',
+      });
+      escalated = true;
+    }
+
+    return {
+      mode,
+      ...(baselineFailures != null ? { baselineFailures } : {}),
+      ...(escalated ? { escalated } : {}),
+    };
   }
 
   triggerReview(req: ReviewTriggerRequest): ReviewTriggerResult {
@@ -284,34 +326,43 @@ export class CoReviewGate implements FinishReviewGate {
   }
 
   /**
-   * Gated push (AC-L5-6): gate on a recorded PASS + honest-verify, then push the reviewed work to
-   * the remote. Owner pushes the integration branch (`into`) to origin; contributor pushes the
-   * feature branch (`branch`) to origin (the fork). Offline refuses loud (Principle 9).
+   * Gated push (AC-L5-6): gate on a recorded PASS + honest-verify + escalate on baseline failures
+   * (never silent — AC-L5-3), then push the reviewed work to the remote. Owner pushes the
+   * integration branch (`into`) to origin; contributor pushes the feature branch (`branch`) to
+   * origin (the fork). Offline refuses loud (Principle 9).
    */
   push(req: ReviewPushRequest): ReviewPushResult {
     const repoModeGate = this.deps.repoModeGate ?? new CoRepoModeGate();
-    const mode = this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd);
+    const gateResult = this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd);
 
-    const enactDeps: EnactPublishDeps = {
+    const enactDeps: EnactPushDeps = {
       ...(this.deps.gitExec != null ? { gitExec: this.deps.gitExec } : {}),
     };
     const result = repoModeGate.enactPush(
       { branch: req.branch, into: req.into, repoCwd: req.repoCwd, remote: req.remote },
-      mode,
+      gateResult.mode,
       enactDeps,
     );
-    return { pushed: result.pushed, remote: result.remote, mode: result.mode };
+    return {
+      pushed: result.pushed,
+      remote: result.remote,
+      mode: result.mode,
+      ...(gateResult.baselineFailures != null
+        ? { baselineFailures: gateResult.baselineFailures }
+        : {}),
+      ...(gateResult.escalated ? { escalated: gateResult.escalated } : {}),
+    };
   }
 
   /**
-   * Gated PR creation (AC-L5-6): gate on a recorded PASS + honest-verify, render the PR description
-   * from the structured intent via {@link renderPrMessage} (provider-deterministic — Principle 3),
-   * then create the PR. Offline refuses loud (Principle 9). Contributor probes host conventions
-   * (minimal Phase C probe — the rich parse is deferred to L9).
+   * Gated PR creation (AC-L5-6): gate on a recorded PASS + honest-verify + escalate on baseline
+   * failures (never silent — AC-L5-3), render the PR description from the structured intent via
+   * {@link renderPrMessage} (provider-deterministic — Principle 3), then create the PR. Offline
+   * refuses loud (Principle 9). Contributor probes host conventions (minimal Phase C probe).
    */
   prMerge(req: ReviewPrMergeRequest): ReviewPrMergeResult {
     const repoModeGate = this.deps.repoModeGate ?? new CoRepoModeGate();
-    const mode = this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd);
+    const gateResult = this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd);
 
     // Render the house-style PR description from the structured intent (Principle 3 — co owns the
     // contract; provider voice cannot reach the artifact by construction).
@@ -325,9 +376,17 @@ export class CoReviewGate implements FinishReviewGate {
         description: prDescription,
         repoCwd: req.repoCwd,
       },
-      mode,
+      gateResult.mode,
       { ghExec: this.deps.ghExec },
     );
-    return { prUrl: result.prUrl, prDescription, mode: result.mode };
+    return {
+      prUrl: result.prUrl,
+      prDescription,
+      mode: result.mode,
+      ...(gateResult.baselineFailures != null
+        ? { baselineFailures: gateResult.baselineFailures }
+        : {}),
+      ...(gateResult.escalated ? { escalated: gateResult.escalated } : {}),
+    };
   }
 }

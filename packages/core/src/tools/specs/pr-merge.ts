@@ -58,6 +58,17 @@ const prMergeOutput = z.object({
   mode: z
     .enum(['owner', 'contributor', 'offline'])
     .describe('The repository-relationship mode the PR creation ran in.'),
+  baseline_failures: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Pre-existing baseline failures the PASS carried — present when honest-verification found ' +
+        'fail→fail tests. The PR was created but these failures require attention (AC-L5-3).',
+    ),
+  escalated: z
+    .boolean()
+    .optional()
+    .describe('True when a baseline-failure escalation was emitted to the parent agent.'),
 });
 type PrMergeOutput = z.infer<typeof prMergeOutput>;
 
@@ -119,6 +130,10 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
       pr_url: result.prUrl,
       pr_description: result.prDescription,
       mode: result.mode,
+      ...(result.baselineFailures != null
+        ? { baseline_failures: [...result.baselineFailures] }
+        : {}),
+      ...(result.escalated != null ? { escalated: result.escalated } : {}),
     };
   },
 };
