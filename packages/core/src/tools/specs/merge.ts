@@ -33,6 +33,22 @@ const mergeInput = z.object({
         'integration branch).',
     ),
   intent: mergeIntentInput,
+  operator_override: z
+    .boolean()
+    .optional()
+    .describe(
+      'Audited operator escape hatch (AC-L5-6): bypass the recorded-PASS gate. REQUIRES a non-empty ' +
+        'reason — it records a review.override event and stamps the merge message ' +
+        '[reviewed: override — <reason>]. Honest-verification still runs for the record (never silent).',
+    ),
+  reason: z
+    .string()
+    .optional()
+    .describe(
+      'The reason for the operator override — REQUIRED (non-empty) when operator_override is set. ' +
+        'Recorded in the audit event and rendered verbatim into the merge message; an override ' +
+        'without a reason is refused.',
+    ),
 });
 type MergeInput = z.infer<typeof mergeInput>;
 
@@ -54,6 +70,21 @@ const mergeOutput = z.object({
     .boolean()
     .optional()
     .describe('True when a baseline-failure escalation was emitted to the parent agent.'),
+  overridden: z
+    .boolean()
+    .optional()
+    .describe('True when the PASS gate was bypassed by an audited operator override (AC-L5-6).'),
+  override_reason: z
+    .string()
+    .optional()
+    .describe('The recorded override reason, present when overridden.'),
+  tore_down: z
+    .boolean()
+    .optional()
+    .describe(
+      'True once the merged branch’s sandbox was torn down after the merge was recorded; false when ' +
+        'the teardown trigger failed (the merge still succeeded — teardown never masks it, AC-L5-7).',
+    ),
 });
 type MergeOutput = z.infer<typeof mergeOutput>;
 
@@ -87,26 +118,37 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         'co_merge: the mount did not inject a worktree store (ctx.worktrees absent).',
       );
     }
+    // Capture the (now-present) worktree store + repo cwd for the teardown closure; the guards above
+    // narrow them, but a nested closure does not inherit that narrowing.
+    const worktrees = ctx.worktrees;
+    const repoCwd = ctx.cwd;
     // Default the target to the detected base of the lead's worktree (its integration branch), the
     // same auto-detection co_sling uses — never a hard-coded master (AC-L3-1).
-    const into = input.into ?? detectBaseRef(ctx.cwd);
+    const into = input.into ?? detectBaseRef(repoCwd);
     // Build the production parent-resolver from the worktree-recorded spawning parent
     // (AC-L5-4 / Phase D): baseline-failure escalations go to the branch's recorded parent.
-    const parentAgent = ctx.worktrees.getWorktree(input.branch)?.parent;
+    const parentAgent = worktrees.getWorktree(input.branch)?.parent;
     const gate = new CoReviewGate({
       reviews: ctx.reviews,
-      worktrees: ctx.worktrees,
+      worktrees,
       mail: ctx.mail,
       agentId: ctx.agent,
       ...(parentAgent != null ? { parentResolver: { parentOf: () => parentAgent } } : {}),
+      // Merge-time teardown trigger (AC-L5-7): the merge gate tears the merged branch's sandbox down
+      // AFTER the merge is recorded + the slot released — never before (the review-finalize cure).
+      teardown: {
+        teardown: (branch) => void worktrees.removeWorktree(branch, { repoCwd }),
+      },
     });
     const result = gate.merge({
       branch: input.branch,
       into,
       summary: input.intent.summary,
       projectId: ctx.projectId,
-      repoCwd: ctx.cwd,
+      repoCwd,
       ...(input.intent.body != null ? { body: input.intent.body } : {}),
+      ...(input.operator_override != null ? { operatorOverride: input.operator_override } : {}),
+      ...(input.reason != null ? { reason: input.reason } : {}),
     });
     return {
       merged: result.merged,
@@ -117,6 +159,9 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         ? { baseline_failures: [...result.baselineFailures] }
         : {}),
       ...(result.escalated != null ? { escalated: result.escalated } : {}),
+      ...(result.overridden != null ? { overridden: result.overridden } : {}),
+      ...(result.overrideReason != null ? { override_reason: result.overrideReason } : {}),
+      ...(result.toreDown != null ? { tore_down: result.toreDown } : {}),
     };
   },
 };

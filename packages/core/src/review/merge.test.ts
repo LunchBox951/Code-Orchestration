@@ -3,13 +3,28 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
+import type { ConfigStore } from '../config/config-store.js';
 import { assertRepoPristine } from '../config/pristine.js';
+import { openDispatchStore } from '../dispatch/dispatch-store.js';
 import { MAIL_ESCALATION } from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
+import { openProjectStore } from '../store/sqlite-store.js';
 import type { GhExec, RepoMode } from '../worktrees/repo-mode.js';
 import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
 import { openReviewStore, type ReviewStore } from './review-store.js';
-import { CoReviewGate } from './merge.js';
+import { CoReviewGate, ReviewerSpawnGateStub } from './merge.js';
+import { acquireMergeSlot } from './serialize.js';
+
+/** A fake config returning a fixed effective config for any projectId (mirrors human-review.test.ts). */
+function fakeConfig(overrides: Record<string, unknown> = {}): ConfigStore {
+  return {
+    setGlobal: () => undefined,
+    setProjectOverride: () => undefined,
+    resolveEffective: () => overrides,
+    close: () => undefined,
+  };
+}
 
 // AC-L5-1, AC-L5-3 — the gated merge core (CoReviewGate). The merge refuses unless a PASS verdict is
 // recorded + honest-verification clears it; with a clean PASS it merges in owner/offline. Gating logic
@@ -932,5 +947,341 @@ describe('CoReviewGate.merge — real git enactment (AC-L5-1)', () => {
     ).toThrow(/no review verdict is recorded/);
     // HEAD is unchanged — the gate refused before any git op.
     expect(git(repo, ['rev-parse', 'HEAD'])).toBe(headBefore);
+  });
+});
+
+// ── Audited operator override (AC-L5-6) ──────────────────────────────────────────────────────────
+describe('CoReviewGate.merge — audited operator override (AC-L5-6)', () => {
+  it('operator_override WITHOUT a reason is refused loud (Principle 9), before any git op', () => {
+    const reviews = openReviewStore('p-merge');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge');
+    worktreeStores.push(worktrees);
+    const { gate, git } = fakeGate(reviews, worktrees, 'owner');
+    expect(() => gate.merge({ ...mergeReq, operatorOverride: true })).toThrow(
+      /operator_override requires a non-empty reason/,
+    );
+    expect(() => gate.merge({ ...mergeReq, operatorOverride: true, reason: '   ' })).toThrow(
+      /non-empty reason/,
+    );
+    expect(git.calls).toEqual([]);
+  });
+
+  it('operator_override WITH a reason bypasses the PASS gate, records review.override, stamps the marker', () => {
+    const reviews = openReviewStore('p-merge-override');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge-override');
+    worktreeStores.push(worktrees);
+    // NO recorded PASS exists — the override is the explicit escape hatch around a missing verdict.
+    const { gate, git } = fakeGate(reviews, worktrees, 'offline');
+    const result = gate.merge({
+      ...mergeReq,
+      projectId: 'p-merge-override',
+      operatorOverride: true,
+      reason: 'hotfix: prod down',
+    });
+    expect(result.merged).toBe(true);
+    expect(result.overridden).toBe(true);
+    expect(result.overrideReason).toBe('hotfix: prod down');
+    expect(result.commitMessage).toBe(
+      `merge(${BRANCH}): land L5 phase A  [reviewed: override — hotfix: prod down]`,
+    );
+    expect(git.calls).toEqual([
+      ['checkout', TARGET],
+      ['merge', '--no-ff', '-m', result.commitMessage, BRANCH],
+    ]);
+
+    // The override is durably audited in the read-model (overridden flag + reason + who).
+    const probe = openProjectStore('p-merge-override');
+    try {
+      const row = probe.transaction((tx) =>
+        (tx.raw as DatabaseSync)
+          .prepare(
+            'SELECT overridden, override_reason, override_by FROM reviews WHERE target = ? AND branch = ?',
+          )
+          .get(TARGET, BRANCH),
+      ) as Record<string, unknown>;
+      expect(row.overridden).toBe(1);
+      expect(row.override_reason).toBe('hotfix: prod down');
+      expect(row.override_by).toBe('co.review-gate');
+    } finally {
+      probe.close();
+    }
+  });
+
+  it('override still runs honest-verify FOR THE RECORD: a regression is escalated, never refused', () => {
+    const reviews = openReviewStore('p-merge-ovr-reg');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge-ovr-reg');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-merge-ovr-reg');
+    mailStores.push(mail);
+    // baseline passes, finish regresses — a real regression a normal PASS gate would refuse.
+    worktrees.recordWorktreeAndBaseline(
+      { branch: BRANCH, baseRef: TARGET, baseSha: FAKE_SHA, path: '/tmp/fake', parent: 'lead-1' },
+      {
+        branch: BRANCH,
+        baseRef: TARGET,
+        baseSha: FAKE_SHA,
+        tests: [{ name: 'test-a', passed: true }],
+      },
+    );
+    worktrees.recordFinish({
+      branch: BRANCH,
+      baseSha: FAKE_SHA,
+      commitSha: 'b'.repeat(40),
+      tests: [{ name: 'test-a', passed: false }],
+    });
+    const git = recordingGitExec();
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'owner',
+      gitExec: git.exec,
+      headReader: () => 'c'.repeat(40),
+      mail,
+      agentId: 'lead-9',
+      parentResolver: { parentOf: () => 'coordinator-1' },
+    });
+    const result = gate.merge({
+      ...mergeReq,
+      projectId: 'p-merge-ovr-reg',
+      operatorOverride: true,
+      reason: 'accept known regression',
+    });
+    expect(result.merged).toBe(true); // the override proceeds DESPITE the regression.
+    expect(result.overridden).toBe(true);
+    expect(result.escalated).toBe(true);
+    const esc = mail.inbox('coordinator-1').filter((m) => m.type === MAIL_ESCALATION);
+    expect(esc).toHaveLength(1);
+    expect(esc[0]!.body).toContain('test-a');
+  });
+});
+
+// ── Merge-time teardown trigger ordering (AC-L5-7) ───────────────────────────────────────────────
+describe('CoReviewGate.merge — merge-time teardown trigger ordering (AC-L5-7)', () => {
+  it('tears the sandbox down AFTER the merge git calls (ordering proven by a shared event log)', () => {
+    const reviews = openReviewStore('p-merge-td');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge-td');
+    worktreeStores.push(worktrees);
+    recordPass(reviews, worktrees);
+    const events: string[] = [];
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      gitExec: (_cwd, args) => void events.push(`git:${args[0]}`),
+      headReader: () => 'c'.repeat(40),
+      teardown: { teardown: (branch) => void events.push(`teardown:${branch}`) },
+    });
+    const result = gate.merge(mergeReq);
+    expect(result.merged).toBe(true);
+    expect(result.toreDown).toBe(true);
+    // Teardown fires LAST — after the merge is recorded (never before — the review-finalize cure).
+    expect(events).toEqual(['git:checkout', 'git:merge', `teardown:${BRANCH}`]);
+  });
+
+  it('a teardown FAILURE never masks the recorded merge (merged stays true; toreDown=false)', () => {
+    const reviews = openReviewStore('p-merge-td-fail');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge-td-fail');
+    worktreeStores.push(worktrees);
+    recordPass(reviews, worktrees);
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      gitExec: recordingGitExec().exec,
+      headReader: () => 'c'.repeat(40),
+      teardown: {
+        teardown: () => {
+          throw new Error('worktree remove failed (deleted cwd)');
+        },
+      },
+    });
+    const result = gate.merge(mergeReq);
+    expect(result.merged).toBe(true);
+    expect(result.toreDown).toBe(false);
+  });
+});
+
+// ── Per-target serialization through the gate (AC-L5-7) ──────────────────────────────────────────
+describe('CoReviewGate.merge — per-target serialization (AC-L5-7)', () => {
+  it('refuses a merge while another branch holds the target slot (the second waits)', () => {
+    const reviews = openReviewStore('p-merge-ser');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge-ser');
+    worktreeStores.push(worktrees);
+    recordPass(reviews, worktrees);
+    // Another branch already holds the merge slot for TARGET (it is mid-merge / queued ahead).
+    acquireMergeSlot(reviews, TARGET, 'co/other-branch');
+    const { gate, git } = fakeGate(reviews, worktrees, 'offline');
+    expect(() => gate.merge(mergeReq)).toThrow(/is the active reviewer\/merge/);
+    expect(git.calls).toEqual([]); // serialized — refused before any git op.
+  });
+
+  it('a normal merge releases the slot so the next merge into the target can proceed', () => {
+    const reviews = openReviewStore('p-merge-ser2');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-merge-ser2');
+    worktreeStores.push(worktrees);
+    recordPass(reviews, worktrees);
+    const { gate } = fakeGate(reviews, worktrees, 'offline');
+    gate.merge(mergeReq);
+    // The slot is free again after the merge landed + the slot was released.
+    expect(reviews.activeSerialized(TARGET)).toBeUndefined();
+  });
+});
+
+// ── Agent reviewer placement via L4 (AC-L5-11) + the L7 spawn stub ───────────────────────────────
+describe('CoReviewGate.triggerReview — agent reviewer placement (AC-L5-11)', () => {
+  it('an agent review RESOLVES + RECORDS a placement.decided keyed on the scope reviewer role; never launches', () => {
+    const reviews = openReviewStore('p-place');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-place');
+    worktreeStores.push(worktrees);
+    const dispatch = openDispatchStore('p-place');
+    try {
+      const gate = new CoReviewGate({
+        reviews,
+        worktrees,
+        resolveMode: () => 'offline',
+        config: fakeConfig(),
+        dispatch,
+        nowMs: 0,
+      });
+      gate.triggerReview({
+        reviewId: 'rev-1',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'pr_merge',
+        projectId: 'p-place',
+      });
+      const placements = dispatch.readPlacements();
+      expect(placements).toHaveLength(1);
+      expect(placements[0]!.role).toBe('reviewer:pr'); // pr_merge → reviewer:pr (default profile).
+      // No usage seeded ⇒ no healthy candidate ⇒ a WAITING decision is recorded (never a launch).
+      expect(placements[0]!.kind).toBe('waiting');
+    } finally {
+      dispatch.close();
+    }
+  });
+
+  it('is deterministic — identical injected inputs ⇒ identical placement decision', () => {
+    function run(projectId: string): { role: string; kind: string } {
+      const reviews = openReviewStore(projectId);
+      reviewStores.push(reviews);
+      const worktrees = openWorktreeStore(projectId);
+      worktreeStores.push(worktrees);
+      const dispatch = openDispatchStore(projectId);
+      try {
+        const gate = new CoReviewGate({
+          reviews,
+          worktrees,
+          resolveMode: () => 'offline',
+          config: fakeConfig(),
+          dispatch,
+          nowMs: 1_000,
+        });
+        gate.triggerReview({
+          reviewId: 'rev-det',
+          target: TARGET,
+          branch: BRANCH,
+          requestedBy: 'lead-1',
+          scope: 'worker_merge',
+          projectId,
+        });
+        const p = dispatch.readPlacements()[0]!;
+        return { role: p.role, kind: p.kind };
+      } finally {
+        dispatch.close();
+      }
+    }
+    const a = run('p-place-det-a');
+    const b = run('p-place-det-b');
+    expect(a).toEqual(b);
+    expect(a).toEqual({ role: 'reviewer', kind: 'waiting' });
+  });
+
+  it('reviewer_profiles config overrides the scope→reviewer-role map', () => {
+    const reviews = openReviewStore('p-place-cfg');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-place-cfg');
+    worktreeStores.push(worktrees);
+    const dispatch = openDispatchStore('p-place-cfg');
+    try {
+      const config = fakeConfig({ reviewer_profiles: { pr_merge: 'reviewer:senior' } });
+      const gate = new CoReviewGate({
+        reviews,
+        worktrees,
+        resolveMode: () => 'offline',
+        config,
+        dispatch,
+        nowMs: 0,
+      });
+      gate.triggerReview({
+        reviewId: 'rev-cfg',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'pr_merge',
+        projectId: 'p-place-cfg',
+      });
+      expect(dispatch.readPlacements()[0]!.role).toBe('reviewer:senior');
+    } finally {
+      dispatch.close();
+    }
+  });
+
+  it('no dispatch store wired ⇒ no placement recorded (backward-compatible agent path)', () => {
+    const reviews = openReviewStore('p-place-none');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-place-none');
+    worktreeStores.push(worktrees);
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      config: fakeConfig(),
+    });
+    const res = gate.triggerReview({
+      reviewId: 'rev-none',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge',
+      projectId: 'p-place-none',
+    });
+    expect(res.reviewId).toBe('rev-none'); // request recorded; nothing launched, nothing thrown.
+  });
+
+  it('the reviewer SPAWN is the L7 stub — it fails loud, and the gate never calls it', () => {
+    // The stub (like CleanupGateStub / HumanReviewGateStub) always throws regardless of arguments —
+    // it marks the L7 plug-point; L5 records the placement but never launches.
+    expect(() => new ReviewerSpawnGateStub().spawn()).toThrow(/not implemented \(deferred to L7\)/);
+  });
+});
+
+// ── #135 nit: the human-path mail guard fails loud (Principle 9) ─────────────────────────────────
+describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
+  it('a human review requested WITHOUT a mail store fails loud (no silent drop)', () => {
+    const reviews = openReviewStore('p-135');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-135');
+    worktreeStores.push(worktrees);
+    const config = fakeConfig({ 'review.worker_merge.reviewer': 'human' });
+    const gate = new CoReviewGate({ reviews, worktrees, resolveMode: () => 'offline', config }); // NO mail
+    expect(() =>
+      gate.triggerReview({
+        reviewId: 'rev-135',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'worker_merge',
+        projectId: 'p-135',
+      }),
+    ).toThrow(/no mail store is wired/);
   });
 });

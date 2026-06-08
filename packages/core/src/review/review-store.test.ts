@@ -459,6 +459,112 @@ describe('AC-L5-4 — strike counter replay: PASS reset is byte-identical on reb
   });
 });
 
+// ── ReviewStore.recordSerialized / activeSerialized / serializedBranches (Phase F, AC-L5-7) ───────
+describe('ReviewStore.recordSerialized + activeSerialized (AC-L5-7 plumbing)', () => {
+  it('activeSerialized returns undefined for a target with no merge.serialized events', () => {
+    const store = openReviewStore('p-ser-zero');
+    try {
+      expect(store.activeSerialized('co/l5-review-gate')).toBeUndefined();
+      expect(store.serializedBranches('co/l5-review-gate')).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('an odd write HOLDS the slot; the paired even write RELEASES it (the toggle)', () => {
+    const store = openReviewStore('p-ser-toggle');
+    try {
+      const t = 'co/l5-review-gate';
+      store.recordSerialized({ target: t, branch: 'co/a' });
+      expect(store.activeSerialized(t)).toBe('co/a');
+      store.recordSerialized({ target: t, branch: 'co/a' });
+      expect(store.activeSerialized(t)).toBeUndefined();
+      store.recordSerialized({ target: t, branch: 'co/b' });
+      expect(store.activeSerialized(t)).toBe('co/b');
+      // Both branches carry the serialized flag in the read-model (branch order).
+      expect(store.serializedBranches(t)).toEqual(['co/a', 'co/b']);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('serialization is scoped per target — a different target is independent', () => {
+    const store = openReviewStore('p-ser-scope');
+    try {
+      store.recordSerialized({ target: 'co/t1', branch: 'co/a' });
+      store.recordSerialized({ target: 'co/t2', branch: 'co/b' });
+      expect(store.activeSerialized('co/t1')).toBe('co/a');
+      expect(store.activeSerialized('co/t2')).toBe('co/b');
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// ── ReviewStore.recordOverride (Phase F, AC-L5-6) ─────────────────────────────────────────────────
+describe('ReviewStore.recordOverride (AC-L5-6 plumbing)', () => {
+  it('records an audited override; no false PASS is conjured for the branch', () => {
+    const rs = openReviewStore('p-override');
+    try {
+      rs.recordOverride({
+        target: 'co/l5-review-gate',
+        branch: 'co/c',
+        reason: 'operator force-land',
+        overriddenBy: 'lead-2',
+      });
+      // A verdict was never recorded — the override row exists independently (no false PASS).
+      expect(rs.getVerdict('co/l5-review-gate', 'co/c')).toBeUndefined();
+    } finally {
+      rs.close();
+    }
+  });
+});
+
+// ── AC-L5-7 / AC-L5-11 — the merge.serialized toggle replays byte-identical (event-sourced slot) ────
+describe('AC-L5-7 — activeSerialized is event-sourced: rebuild preserves the slot', () => {
+  it('the toggle fold reaches the same active slot after a full rebuildAll (non-vacuous)', () => {
+    const store = openProjectStore('p-ser-replay');
+    const projectors = [new ReviewProjector()];
+    const t = 'co/l5-review-gate';
+    // grant a · release a · grant b ⇒ b holds. (Replaying the same log reaches the same slot.)
+    const sequence = [
+      makeMergeSerializedEvent('p-ser-replay', { target: t, branch: 'co/a' }),
+      makeMergeSerializedEvent('p-ser-replay', { target: t, branch: 'co/a' }),
+      makeMergeSerializedEvent('p-ser-replay', { target: t, branch: 'co/b' }),
+    ];
+    try {
+      for (const e of sequence) {
+        store.transaction((tx) => {
+          const [s] = tx.append([e]);
+          applyEvent(tx, decode(s!, reviewUpcasters, reviewSchemas), projectors);
+        });
+      }
+      // The slot is derived from the event stream (readStream + fold), so it is replay-invariant.
+      const live = openReviewStore('p-ser-replay');
+      try {
+        expect(live.activeSerialized(t)).toBe('co/b');
+      } finally {
+        live.close();
+      }
+
+      // Rebuild the read-model from the log; the read-model `serialized` flag is byte-identical.
+      const snap = (db: DatabaseSync): string =>
+        JSON.stringify(
+          db
+            .prepare('SELECT target, branch, serialized FROM reviews ORDER BY target, branch')
+            .all(),
+        );
+      const before = store.transaction((tx) => snap(tx.raw as DatabaseSync));
+      rebuildAll(store, projectors, (e) => decode(e, reviewUpcasters, reviewSchemas));
+      const after = store.transaction((tx) => snap(tx.raw as DatabaseSync));
+      expect(after).toBe(before);
+      expect(before).toContain('"serialized":1');
+    } finally {
+      store.close();
+    }
+  });
+});
+
 // ── Principle 12: the review store writes only program-data, never the repo ──────────────────────
 describe('AC-L5-1 — assertRepoPristine holds around the review recorders', () => {
   it('recordVerdict + recordReviewRequested write nothing into the target repo', () => {
