@@ -1,3 +1,4 @@
+import type { CommitIdentityReader } from '../permissions/identity-guard.js';
 import type { MailStore } from '../mail/mail-store.js';
 import type { ProjectRegistry, ProjectId } from '../registry/registry.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
@@ -58,4 +59,11 @@ export interface ToolContext {
    * before placement. Tests may omit it and seed `dispatch` directly.
    */
   readonly usageSourceFactory?: UsageSourceFactory;
+  /**
+   * OPTIONAL L6a injectable commit-identity reader seam (AC-L6a-7): used by `co_push` and
+   * `co_pr_merge` to read commit identities for the guard pre-check. Defaults to
+   * `defaultCommitIdentityReader` (real `git log`); tests inject a fixture reader so no real git
+   * is needed for guard logic tests.
+   */
+  readonly commitIdentityReader?: CommitIdentityReader;
 }

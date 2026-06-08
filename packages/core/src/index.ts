@@ -827,5 +827,27 @@ export { checkBlockListDrift, readEnforcedConfig } from './permissions/drift.js'
 export type { NudgeRule } from './permissions/nudges.js';
 export { NUDGE_CATALOG, nudgeFor, injectNudge } from './permissions/nudges.js';
 
+// L6a Phase D2 — pre-publish identity guard + worktree persona-pinning (AC-L6a-7).
+// The permanent fix for DCO leaks: (1) a pure pre-publish check that refuses a push or PR-merge if
+// any commit's author/committer/Signed-off-by is outside the configured persona allowlist (fail-loud,
+// Principle 9); (2) `resolvePersona` consumed by `slingWorktree` to pin the local git identity in
+// every new sandbox immediately after `git worktree add`, so `git commit -s` never falls through to
+// global config. Both sides are config-driven (empty allowlist → guard skipped; undefined persona →
+// pinning no-op). All git I/O behind the injectable `CommitIdentityReader` seam (AC-L6a-9).
+export type {
+  PersonaIdentity,
+  CommitIdentity,
+  IdentityViolation,
+  CommitIdentityReader,
+} from './permissions/identity-guard.js';
+export {
+  IDENTITY_PERSONA_ALLOWLIST_KEY,
+  IDENTITY_PERSONA_KEY,
+  resolvePersonaAllowlist,
+  resolvePersona,
+  checkPublishIdentities,
+  defaultCommitIdentityReader,
+} from './permissions/identity-guard.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

@@ -62,8 +62,7 @@ export const BLOCK_LIST: readonly BlockRule[] = [
       return (
         hasFlag(argv, '--force', '-f', '--force-with-lease') ||
         // combined short flags like -fv, -vf
-        argv.some((t) => (/^-[a-zA-Z]*f[a-zA-Z]*$/.test(t) && t !== '-f' ? true : false)) ||
-        hasFlag(argv, '-f')
+        argv.some((t) => /^-[a-zA-Z]*f[a-zA-Z]*$/.test(t) && t !== '-f')
       );
     },
   },

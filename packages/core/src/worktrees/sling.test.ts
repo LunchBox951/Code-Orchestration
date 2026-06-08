@@ -3,9 +3,12 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { openConfigStore, type ConfigStore } from '../config/config-store.js';
+import { IDENTITY_PERSONA_KEY } from '../permissions/identity-guard.js';
 import { projectDataDir } from '../store/paths.js';
 import { openWorktreeStore, type WorktreeStore } from './worktree-store.js';
-import { slingWorktree, worktreePathFor, type BaselineProbe } from './sling.js';
+import { type GitReader } from './detect-base.js';
+import { slingWorktree, worktreePathFor, type BaselineProbe, type GitExec } from './sling.js';
 
 // AC-L3-1 (co_sling core): from the auto-detected base, create an isolated worktree+branch under
 // program-data, record it, and capture a branch-off baseline — never touching the repo with
@@ -243,5 +246,89 @@ describe('worktreePathFor — injective, bounded under program-data', () => {
     expect(a).not.toBe(b);
     expect(a.startsWith(join(projectDataDir('p'), 'worktrees'))).toBe(true);
     expect(() => worktreePathFor('p', 'co/../escape')).toThrow(/traversal|escape/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Persona-pinning (AC-L6a-7): worktree persona pin via fake GitExec
+// ---------------------------------------------------------------------------
+
+describe('slingWorktree — persona identity pinning (AC-L6a-7)', () => {
+  let cfgStores: ConfigStore[] = [];
+
+  afterEach(() => {
+    for (const c of cfgStores) c.close();
+    cfgStores = [];
+  });
+
+  function openCfg(): ConfigStore {
+    const c = openConfigStore();
+    cfgStores.push(c);
+    return c;
+  }
+
+  /** A fake GitReader that resolves refs to a constant sha so slingWorktree can run headlessly. */
+  const fakeGitReader: GitReader = (_cwd, args) => {
+    const joined = args.join(' ');
+    if (joined.includes('symbolic-ref')) return null;
+    if (joined.includes('rev-parse') || joined.includes('main')) return 'abc123sha';
+    return 'main';
+  };
+
+  /** A recording fake GitExec: captures all calls without executing real git. */
+  function makeRecordingExec(): { exec: GitExec; calls: Array<[string, string[]]> } {
+    const calls: Array<[string, string[]]> = [];
+    const exec: GitExec = (cwd, args) => {
+      calls.push([cwd, [...args]]);
+    };
+    return { exec, calls };
+  }
+
+  it('issues git config user.email and user.name on the sandbox when persona is configured', () => {
+    const cfg = openCfg();
+    cfg.setGlobal(IDENTITY_PERSONA_KEY, { name: 'Persona', email: 'persona@noreply.github.com' });
+    cfg.close();
+    cfgStores.pop();
+
+    const { exec, calls } = makeRecordingExec();
+    const store = openWorktreeStore('p-pin');
+    stores.push(store);
+
+    slingWorktree(
+      store,
+      { parent: 'lead-7', branch: 'co/pin', repoCwd: '/fake-repo', projectId: 'p-pin' },
+      { gitReader: fakeGitReader, gitExec: exec, provisioner: () => {}, probe: () => [] },
+    );
+
+    // Verify that user.email and user.name were set on the SANDBOX path (not repoCwd).
+    const emailCall = calls.find((c) => c[1][0] === 'config' && c[1][1] === 'user.email');
+    const nameCall = calls.find((c) => c[1][0] === 'config' && c[1][1] === 'user.name');
+
+    expect(emailCall).toBeDefined();
+    expect(emailCall![1]).toEqual(['config', 'user.email', 'persona@noreply.github.com']);
+    expect(nameCall).toBeDefined();
+    expect(nameCall![1]).toEqual(['config', 'user.name', 'Persona']);
+
+    // The sandbox path (cwd for those calls) must NOT be the repoCwd.
+    expect(emailCall![0]).not.toBe('/fake-repo');
+    expect(nameCall![0]).not.toBe('/fake-repo');
+    // Both must target the same worktree sandbox path.
+    expect(emailCall![0]).toBe(nameCall![0]);
+  });
+
+  it('makes NO git config calls when identity.persona is not configured', () => {
+    // No config seeded.
+    const { exec, calls } = makeRecordingExec();
+    const store = openWorktreeStore('p-no-pin');
+    stores.push(store);
+
+    slingWorktree(
+      store,
+      { parent: 'lead-7', branch: 'co/no-pin', repoCwd: '/fake-repo', projectId: 'p-no-pin' },
+      { gitReader: fakeGitReader, gitExec: exec, provisioner: () => {}, probe: () => [] },
+    );
+
+    const configCalls = calls.filter((c) => c[1][0] === 'config');
+    expect(configCalls).toHaveLength(0);
   });
 });
