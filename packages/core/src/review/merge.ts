@@ -1,5 +1,6 @@
 import { escalate, type ParentResolver } from '../mail/escalation.js';
 import type { MailStore } from '../mail/mail-store.js';
+import { openConfigStore, type ConfigStore } from '../config/config-store.js';
 import { renderMergeMessage, renderPrMessage, type PrIntent } from '../worktrees/messages.js';
 import {
   CoRepoModeGate,
@@ -20,6 +21,7 @@ import type {
 import type { GitExec } from '../worktrees/sling.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
 import { classifyPass, honestVerify } from './honest-verify.js';
+import { resolveReviewerKind, reviewRequestEnvelope } from './human-review.js';
 import type { ReviewStore } from './review-store.js';
 
 /**
@@ -67,6 +69,12 @@ export interface ReviewGateDeps {
    * real network activity in `pnpm test` (AC-L5-6). Defaults to production `defaultGhExec`.
    */
   readonly ghExec?: GhExec;
+  /**
+   * Config store for resolver-kind resolution (AC-L5-5). Injectable so `triggerReview` is
+   * headless-testable with a fake config. When absent, the human-review path opens + closes its own
+   * config store (mirrors `resolveRepoMode`'s `deps.config ?? openConfigStore()`).
+   */
+  readonly config?: ConfigStore;
 }
 
 /** What {@link CoReviewGate.push} is handed: the reviewed `branch`, the integration `into`, and location. */
@@ -212,12 +220,51 @@ export class CoReviewGate implements FinishReviewGate {
   }
 
   triggerReview(req: ReviewTriggerRequest): ReviewTriggerResult {
+    // Record the review request in the store (both paths do this).
     const rec = this.deps.reviews.recordReviewRequested({
       reviewId: req.reviewId,
       target: req.target,
       branch: req.branch,
       requestedBy: req.requestedBy,
     });
+
+    // Resolve the reviewer kind when scope + projectId are provided (AC-L5-5).
+    const scope = req.scope ?? 'worker_merge';
+    const projectId = req.projectId;
+    if (projectId != null) {
+      const config = this.deps.config ?? openConfigStore();
+      const ownsConfig = this.deps.config === undefined;
+      try {
+        const kind = resolveReviewerKind(config, projectId, scope);
+        if (kind === 'human') {
+          // Human path: send a sticky actionable review_request to @operator. No reviewer placement
+          // (placement is agent-only — Phase F; for a human scope there is none, ever — AC-L5-5).
+          if (this.deps.mail) {
+            const envelope = reviewRequestEnvelope({
+              from: req.requestedBy,
+              subject: `review requested: '${req.branch}' into '${req.target}'`,
+              body:
+                `A human review has been requested for '${req.branch}' into '${req.target}' ` +
+                `(scope: ${scope}, reviewId: ${req.reviewId}). Reply with a review_response ` +
+                `(reviewVerdict: PASS or ISSUES) to re-enter the gate.`,
+              idempotencyKey: `review-request:${req.reviewId}`,
+            });
+            this.deps.mail.send(envelope);
+          }
+          return {
+            reviewId: rec.reviewId,
+            target: rec.target,
+            branch: rec.branch,
+            requestedTs: rec.requestedTs,
+          };
+        }
+        // Agent path: record review.requested (done above); reviewer placement is Phase F.
+      } finally {
+        if (ownsConfig) config.close();
+      }
+    }
+
+    // Default: agent path — review.requested recorded above; no mail sent (reviewer placement is Phase F).
     return {
       reviewId: rec.reviewId,
       target: rec.target,
