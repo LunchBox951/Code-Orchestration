@@ -374,6 +374,43 @@ describe('co_kickback — branch must belong to caller-owned worktree', () => {
     expect(stores.reviews.getStrikeCount(TARGET, BRANCH)).toBe(0);
   });
 
+  it('rejects when the branch is assigned to a different worker', async () => {
+    const stores = openStores('p-kb-wrong-worktree-agent');
+    buildRoster(stores.roster);
+    stores.roster.recordAgent({ agentId: 'impl-2', role: 'implementer', parent: 'lead-1' });
+    stores.worktrees.recordWorktree({
+      branch: BRANCH,
+      baseRef: TARGET,
+      baseSha: 'b'.repeat(40),
+      path: `/fake/worktrees/${BRANCH}`,
+      parent: 'lead-1',
+      agent: 'impl-1',
+    });
+    stores.worktrees.recordFinish({
+      branch: BRANCH,
+      baseSha: 'b'.repeat(40),
+      commitSha: 'c'.repeat(40),
+      tests: [],
+      agent: 'impl-2',
+    });
+    recordIssues(stores.reviews, 'rev-wrong-worktree-agent', ['wrong assignee']);
+    const ctx = makeCtx('lead-1', stores, '/fake/cwd', {
+      worker: 'impl-2',
+      seedWorktree: false,
+      seedFinish: false,
+    });
+
+    await expect(
+      invokeTool(registry, ctx, 'co_kickback', {
+        branch: BRANCH,
+        worker: 'impl-2',
+        blockers: ['wrong assignee'],
+        into: TARGET,
+      }),
+    ).rejects.toThrow(/assigned agent|worktree agent/i);
+    expect(stores.reviews.getStrikeCount(TARGET, BRANCH)).toBe(0);
+  });
+
   it('rejects when the branch was finished by a sibling worker', async () => {
     const stores = openStores('p-kb-sibling-worker');
     buildRoster(stores.roster);

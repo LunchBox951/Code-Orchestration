@@ -309,6 +309,22 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
             const existingRequest = selectReviewRequest(db, request.target, request.branch);
             if (existingRequest != null && existingRequest.reviewId === request.reviewId) {
               assertSameHumanReviewRequest(existingRequest, request, 'mail human review request');
+              const active = activeSerializedFromEvents(db, request.target);
+              if (active !== undefined && active !== request.branch) {
+                throw new Error(
+                  `mail human review request: refused — '${active}' is the active ` +
+                    `reviewer/merge for '${request.target}'.`,
+                );
+              }
+              if (active === undefined) {
+                const [stored] = tx.append([
+                  makeMergeSerializedEvent(projectId, {
+                    target: request.target,
+                    branch: request.branch,
+                  }),
+                ]);
+                applyStored(tx, stored!);
+              }
               return { mail: existing, request: existingRequest };
             }
             throw new Error(

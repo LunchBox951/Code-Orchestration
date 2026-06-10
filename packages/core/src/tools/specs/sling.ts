@@ -35,7 +35,6 @@ const slingInput = z
     agent: z
       .string()
       .min(1)
-      .optional()
       .describe(
         'The child agent id assigned to this sandbox. L7 supplies it before mounting the sandbox; ' +
           'scoped MCP mounts must match it.',
@@ -352,7 +351,7 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     // PLACED: create the sandbox and return placement + worktree facts.
     const result = slingWorktree(ctx.worktrees, {
       parent: input.parent,
-      ...(input.agent != null ? { agent: input.agent } : {}),
+      agent: input.agent,
       role: childRole,
       ...(parsedRole.name != null ? { subRole: parsedRole.name } : {}),
       branch: input.branch,

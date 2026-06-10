@@ -136,6 +136,12 @@ describe('matchBlock — blocked commands', () => {
     expect(matchBlock('git merge --quit')).toBeNull();
   });
 
+  it('raw-git-merge: git pull can merge into the current branch', () => {
+    expect(matchBlock('git pull origin main')?.id).toBe('raw-git-merge');
+    expect(matchBlock('git pull . co/feature')?.id).toBe('raw-git-merge');
+    expect(matchBlock('git -C repo pull upstream main')?.id).toBe('raw-git-merge');
+  });
+
   it('raw-git-push: git push origin main (non-force)', () => {
     expect(matchBlock('git push origin main')?.id).toBe('raw-git-push');
   });
@@ -149,6 +155,13 @@ describe('matchBlock — blocked commands', () => {
 
   it('raw-git-push: git -C repo push origin main (non-force)', () => {
     expect(matchBlock('git -C repo push origin main')?.id).toBe('raw-git-push');
+  });
+
+  it('raw-git-push: git send-pack can update remote refs directly', () => {
+    expect(matchBlock('git send-pack origin HEAD:refs/heads/main')?.id).toBe('raw-git-push');
+    expect(matchBlock('git -C repo send-pack origin co/feature:refs/heads/main')?.id).toBe(
+      'raw-git-push',
+    );
   });
 
   it('raw-git-push: wrapped/path git push variants', () => {
@@ -221,6 +234,15 @@ describe('matchBlock — blocked commands', () => {
     expect(matchBlock('gh pr --repo owner/repo merge 5')?.id).toBe('raw-gh-pr-merge');
     expect(matchBlock('gh pr -R owner/repo merge 5')?.id).toBe('raw-gh-pr-merge');
     expect(matchBlock('gh pr --repo owner/repo create --fill')?.id).toBe('raw-gh-pr-merge');
+  });
+
+  it('raw-gh-pr-merge: gh api can create or merge pull requests directly', () => {
+    expect(matchBlock('gh api repos/owner/repo/pulls/18/merge --method PUT')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
+    expect(matchBlock('gh api /repos/owner/repo/pulls --method POST -f head=co/x')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
   });
 
   it('raw-gh-pr-merge: wrapped/path gh pr merge variants', () => {

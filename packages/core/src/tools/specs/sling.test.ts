@@ -143,6 +143,7 @@ describe('co_sling — via invokeTool', () => {
 
     const out = (await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/feature',
     })) as {
       status: 'placed';
@@ -164,7 +165,11 @@ describe('co_sling — via invokeTool', () => {
     expect(out.placement.provider).toBe('claude');
 
     // Recorded per project + branch, with the explicit parent (no @operator default).
-    expect(ctx.worktrees?.getWorktree('co/feature')?.parent).toBe('lead-7');
+    expect(ctx.worktrees?.getWorktree('co/feature')).toMatchObject({
+      parent: 'lead-7',
+      agent: 'impl-1',
+      role: 'implementer',
+    });
     expect(ctx.worktrees?.getBaseline('co/feature')).toBeDefined();
     expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(1);
   });
@@ -173,7 +178,11 @@ describe('co_sling — via invokeTool', () => {
     const repo = makeMainRepo();
     const ctx = makeContext('lead-7', repo);
     await expect(
-      invokeTool(buildCoreRegistry(), ctx, 'co_sling', { parent: 'lead-7', branch: 'feature' }),
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-1',
+        branch: 'feature',
+      }),
     ).rejects.toThrow(/input failed schema validation/i);
   });
 
@@ -185,12 +194,21 @@ describe('co_sling — via invokeTool', () => {
     ).rejects.toThrow(/input failed schema validation/i);
   });
 
+  it('requires an assigned child agent before creating a mountable sandbox', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContext('lead-7', repo);
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', { parent: 'lead-7', branch: 'co/x' }),
+    ).rejects.toThrow(/input failed schema validation/i);
+  });
+
   it('rejects a parent that does not match the mounted caller before creating a worktree', async () => {
     const repo = makeMainRepo();
     const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
     await expect(
       invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
         parent: 'other-lead',
+        agent: 'impl-1',
         branch: 'co/wrong-parent',
       }),
     ).rejects.toThrow(/parent.*mounted caller/i);
@@ -208,6 +226,7 @@ describe('co_sling — via invokeTool', () => {
     await expect(
       invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
         parent: 'lead-7',
+        agent: 'impl-1',
         branch: 'co/unregistered-caller',
       }),
     ).rejects.toThrow(/not registered in the roster/i);
@@ -223,6 +242,7 @@ describe('co_sling — via invokeTool', () => {
     await expect(
       invokeTool(buildCoreRegistry(), unknownCtx, 'co_sling', {
         parent: 'lead-7',
+        agent: 'impl-1',
         branch: 'co/unknown-role',
         role: 'wizard',
       }),
@@ -234,6 +254,7 @@ describe('co_sling — via invokeTool', () => {
     await expect(
       invokeTool(buildCoreRegistry(), illegalCtx, 'co_sling', {
         parent: 'lead-8',
+        agent: 'lead-child-1',
         branch: 'co/lead-child',
         role: 'lead',
       }),
@@ -246,7 +267,11 @@ describe('co_sling — via invokeTool', () => {
     const repo = makeMainRepo();
     const ctx = makeContext('lead-7', repo, { withWorktrees: false });
     await expect(
-      invokeTool(buildCoreRegistry(), ctx, 'co_sling', { parent: 'lead-7', branch: 'co/x' }),
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-1',
+        branch: 'co/x',
+      }),
     ).rejects.toThrow(/did not inject a worktree store/i);
   });
 });
@@ -324,6 +349,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/routed-placed',
       role: 'implementer',
       work_size: 'average',
@@ -360,6 +386,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'reviewer-1',
       branch: 'co/canonical-role',
       role: ' Reviewer:PR ',
       work_size: 'average',
@@ -382,6 +409,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(reg, ctx, 'co_sling', {
       parent: 'impl-1',
+      agent: 'researcher-1',
       branch: 'co/research-child',
       role: 'researcher',
     })) as Record<string, unknown>;
@@ -397,6 +425,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/routed-waiting',
       role: 'implementer',
       work_size: 'average',
@@ -431,6 +460,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/no-routing',
     })) as Record<string, unknown>;
 
@@ -451,6 +481,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     await expect(
       invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
         parent: 'lead-7',
+        agent: 'impl-1',
         branch: 'co/accounts-only',
         accounts: [{ provider: 'codex', account: accountForProvider('codex') }],
       }),
@@ -475,6 +506,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/diagnostic-placed',
     })) as Record<string, unknown>;
 
@@ -509,6 +541,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/diagnostic-waiting',
     })) as Record<string, unknown>;
 
@@ -557,6 +590,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     await expect(
       invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
         parent: 'lead-7',
+        agent: 'impl-1',
         branch: 'co/existing',
       }),
     ).rejects.toThrow(/git worktree add/i);
@@ -570,6 +604,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     await expect(
       invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
         parent: 'lead-7',
+        agent: 'impl-1',
         branch: 'co/needs-dispatch',
         role: 'implementer',
         work_size: 'average',

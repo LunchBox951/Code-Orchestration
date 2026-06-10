@@ -24,7 +24,7 @@ import type { ToolContext } from '../tools/context.js';
 import { openReviewStore, type ReviewStore } from './review-store.js';
 import { CoReviewGate } from './merge.js';
 import type { ReviewScope } from './ladder.js';
-import { acquireMergeSlot } from './serialize.js';
+import { acquireMergeSlot, releaseMergeSlot } from './serialize.js';
 import {
   resolveReviewerKind,
   reviewRequestOutcome,
@@ -1741,6 +1741,117 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
     expect(second).toEqual(first);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
     expect(mail.outstandingCount(OPERATOR)).toBe(1);
+  });
+
+  it('human scope: idempotent retry repairs a missing serialized slot', () => {
+    const reviews = openReviewStore('p-hr-trigger-dup-repair-slot');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-hr-trigger-dup-repair-slot');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-hr-trigger-dup-repair-slot');
+    mailStores.push(mail);
+
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+    const input = {
+      reviewId: 'rev-dup-human-repair-slot',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge' as const,
+      projectId: 'p-hr-trigger-dup-repair-slot',
+    };
+    gate.triggerReview(input);
+    releaseMergeSlot(reviews, TARGET, BRANCH);
+    expect(reviews.activeSerialized(TARGET)).toBeUndefined();
+
+    const retry = gate.triggerReview(input);
+
+    expect(retry.reviewId).toBe(input.reviewId);
+    expect(reviews.activeSerialized(TARGET)).toBe(BRANCH);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
+  });
+
+  it('human scope: pending review holds the target slot and blocks competing branches', () => {
+    const reviews = openReviewStore('p-hr-trigger-serializes-target');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-hr-trigger-serializes-target');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-hr-trigger-serializes-target');
+    mailStores.push(mail);
+
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+
+    gate.triggerReview({
+      reviewId: 'rev-human-serializes-target',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge',
+      projectId: 'p-hr-trigger-serializes-target',
+    });
+
+    expect(reviews.activeSerialized(TARGET)).toBe(BRANCH);
+    expect(() =>
+      gate.triggerReview({
+        reviewId: 'rev-human-serializes-target-other',
+        target: TARGET,
+        branch: 'co/l5-phase-other',
+        requestedBy: 'lead-1',
+        scope: 'worker_merge',
+        projectId: 'p-hr-trigger-serializes-target',
+      }),
+    ).toThrow(/active reviewer\/merge|serialize/);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
+  });
+
+  it('human scope: verdict releases the slot acquired by the real request path', () => {
+    const reviews = openReviewStore('p-hr-trigger-release-real-slot');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-hr-trigger-release-real-slot');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-hr-trigger-release-real-slot');
+    mailStores.push(mail);
+
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+
+    gate.triggerReview({
+      reviewId: 'rev-human-release-real-slot',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge',
+      projectId: 'p-hr-trigger-release-real-slot',
+    });
+    expect(reviews.activeSerialized(TARGET)).toBe(BRANCH);
+
+    recordHumanVerdict(reviews, {
+      reviewId: 'rev-human-release-real-slot',
+      target: TARGET,
+      branch: BRANCH,
+      verdict: 'ISSUES',
+      body: 'needs another pass',
+    });
+
+    expect(reviews.getVerdict(TARGET, BRANCH)?.verdict).toBe('ISSUES');
+    expect(reviews.activeSerialized(TARGET)).toBeUndefined();
   });
 
   it('human scope: retry repairs an existing durable request that has no review_request mail', () => {

@@ -177,6 +177,13 @@ export const kickbackTool: ToolSpec<KickbackInput, KickbackOutput> = {
           `'${ctx.agent}'. Only the spawning parent may kick back its branch.`,
       );
     }
+    if (worktree.agent != null && worktree.agent !== input.worker) {
+      throw new Error(
+        `co_kickback: branch '${input.branch}' worktree agent is '${worktree.agent}', not ` +
+          `'${input.worker}'. Refusing to route kickback to a worker that was not assigned ` +
+          'the branch.',
+      );
+    }
 
     const finish = ctx.worktrees.getFinish(input.branch);
     const finishedByWorker =

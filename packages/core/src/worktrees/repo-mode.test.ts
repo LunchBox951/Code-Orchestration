@@ -334,6 +334,7 @@ describe('CoRepoModeGate — the L5 merge enactment (owner + offline real; the r
       { ...req, branch: 'main..topic' },
       { ...req, into: 'HEAD' },
       { ...req, into: 'origin/main' },
+      { ...req, into: 'upstream/main' },
       { ...req, into: 'refs/heads/main' },
       { ...req, branch: 'a'.repeat(40) },
     ]) {
@@ -497,6 +498,7 @@ describe('CoRepoModeGate.enactPush — push enactment (AC-L5-6)', () => {
       { ...pushReq, branch: 'main..topic' },
       { ...pushReq, into: 'HEAD' },
       { ...pushReq, into: 'origin/main' },
+      { ...pushReq, into: 'upstream/main' },
       { ...pushReq, into: 'refs/heads/main' },
       { ...pushReq, branch: 'a'.repeat(40) },
     ]) {
@@ -590,6 +592,7 @@ describe('CoRepoModeGate.enactPrMerge — PR creation enactment (AC-L5-6)', () =
       { ...prReq, branch: 'main..topic' },
       { ...prReq, into: 'HEAD' },
       { ...prReq, into: 'origin/main' },
+      { ...prReq, into: 'upstream/main' },
       { ...prReq, into: 'refs/heads/main' },
       { ...prReq, branch: 'a'.repeat(40) },
     ]) {

@@ -171,6 +171,12 @@ export function finishWorktree(
         'torn-down sandbox.',
     );
   }
+  if (record.agent != null && record.agent !== agent) {
+    throw new Error(
+      `co_finish: assigned worktree agent for branch '${branch}' is '${record.agent}', not ` +
+        `'${agent}'. Refusing to finish a sandbox assigned to another agent.`,
+    );
+  }
   assertCwdMatchesRecordedSandbox(repoCwd, record);
   finishRecordedSchema.parse({
     branch,

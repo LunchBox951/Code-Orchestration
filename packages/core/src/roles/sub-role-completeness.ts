@@ -72,14 +72,15 @@ export function checkSubRoleCompleteness(
       }
       seenNames.add(sub.name);
 
-      if (sub.approach.trim() && seenApproaches.has(sub.approach)) {
+      const normalizedApproach = sub.approach.trim();
+      if (normalizedApproach && seenApproaches.has(normalizedApproach)) {
         violations.push({
           subRole: id,
-          reason: `approach is identical to sub-role '${baseRole}:${seenApproaches.get(sub.approach)}' — sub-roles must meaningfully differ`,
+          reason: `approach is identical to sub-role '${baseRole}:${seenApproaches.get(normalizedApproach)}' — sub-roles must meaningfully differ`,
         });
       }
-      if (sub.approach.trim()) {
-        seenApproaches.set(sub.approach, sub.name);
+      if (normalizedApproach) {
+        seenApproaches.set(normalizedApproach, sub.name);
       }
     }
   }

@@ -78,9 +78,10 @@ implementation.
 
 7. **Gated by default; strict, made safe by escalation** (Principle 7 — gated-by-default). Nothing
    reaches master/remote/PR without a PASS — agent *or* human (human review is a per-repo, per-scope
-   option). Two verdicts only (PASS / ISSUES); the **blocker bar tightens as code nears production** —
-   nits ride as suggestions into isolated branches but become blockers at the PR/master gate. The
-   gate can be ruthless only *because* escalation gives a stuck-but-honest worker an exit.
+   option) — except an explicit, audited `@operator` override with a recorded reason. Two verdicts
+   only (PASS / ISSUES); the **blocker bar tightens as code nears production** — nits ride as
+   suggestions into isolated branches but become blockers at the PR/master gate. The gate can be
+   ruthless only *because* escalation gives a stuck-but-honest worker an exit.
 
 8. **Filter up — the operator owns only the big decisions** (Principle 8 — filter-up). Problems and
    questions climb the spawn chain, resolved at the lowest competent level; only genuine intent and

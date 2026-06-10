@@ -154,6 +154,7 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
     const slingCtx = makeContext('lead-7', repo, repo);
     const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/feature',
     })) as { worktree_path: string };
     const sandbox = sling.worktree_path;
@@ -208,6 +209,7 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
     const slingCtx = makeContext('lead-7', repo, repo);
     const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/feature',
     })) as { worktree_path: string };
     const sandbox = sling.worktree_path;
@@ -239,6 +241,20 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
     expect(git(sandbox, 'rev-parse', 'HEAD')).toBe(beforeHead);
     expect(wrongParent.worktrees?.getFinish('co/feature')).toBeUndefined();
     expect(wrongParent.mail.inbox('lead-7')).toHaveLength(0);
+
+    const sibling = makeContext('impl-2', repo, sandbox, {
+      role: 'implementer',
+      parent: 'lead-7',
+    });
+    await expect(
+      invokeTool(reg, sibling, 'co_finish', {
+        intent: { type: 'feat', summary: 'try sibling finish' },
+        tests: [{ name: 'unit', passed: true }],
+      }),
+    ).rejects.toThrow(/assigned agent|worktree agent/i);
+    expect(git(sandbox, 'rev-parse', 'HEAD')).toBe(beforeHead);
+    expect(sibling.worktrees?.getFinish('co/feature')).toBeUndefined();
+    expect(sibling.mail.inbox('lead-7')).toHaveLength(0);
   });
 
   it('loud-fails when the mount did not inject a worktree store (Principle 9)', async () => {
@@ -308,6 +324,7 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
     const slingCtx = makeContext('lead-7', repo, repo);
     const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/leaky-env',
     })) as { worktree_path: string };
 
@@ -331,6 +348,7 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
     });
     const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/leaky-override',
     })) as { worktree_path: string };
 
@@ -355,6 +373,7 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
     });
     const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/leaky-override-drift',
     })) as { worktree_path: string };
     expect(slingCtx.worktrees?.getWorktree('co/leaky-override-drift')?.provisioned).toEqual([
@@ -386,6 +405,7 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
     });
     const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/leaky-override-malformed-drift',
     })) as { worktree_path: string };
 

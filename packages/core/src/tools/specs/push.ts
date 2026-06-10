@@ -309,7 +309,8 @@ export const pushTool: ToolSpec<PushInput, PushOutput> = {
         worktree.baseSha,
       );
     }
-    const range = `${destinationHead ?? fallbackBase}..${refHead}`;
+    const identityBase = mode === 'contributor' ? fallbackBase : (destinationHead ?? fallbackBase);
+    const range = `${identityBase}..${refHead}`;
     assertPushIdentities(
       'co_push',
       ctx.cwd,

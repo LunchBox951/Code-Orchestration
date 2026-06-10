@@ -39,6 +39,19 @@ describe('checkSubRoleCompleteness — RED on synthetic violations', () => {
     expect(violations.some((v) => v.reason.includes('identical'))).toBe(true);
   });
 
+  it('flags a duplicate approach even when whitespace differs', () => {
+    const dup: SubRoleSpec = {
+      baseRole: 'implementer',
+      name: 'dup-whitespace',
+      approach:
+        '  implementation-first: write the change, then write tests that lock the decisions in against regression — tests follow code  ',
+      profile: ROLE_PROFILES['implementer'],
+    };
+    const violations = checkSubRoleCompleteness([...SUB_ROLES, dup]);
+    expect(violations.some((v) => v.subRole === 'implementer:dup-whitespace')).toBe(true);
+    expect(violations.some((v) => v.reason.includes('identical'))).toBe(true);
+  });
+
   it('flags a sub-role declared for coordinator (owner tier)', () => {
     const bad: SubRoleSpec = {
       baseRole: 'coordinator',

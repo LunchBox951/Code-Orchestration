@@ -475,6 +475,43 @@ describe('co_push identity guard (AC-L6a-7)', () => {
     expect(seenRanges[0]).not.toContain(localBase);
   });
 
+  it('contributor repeat publish still checks every commit since the PR base', async () => {
+    const repo = makeRepo();
+    addOrigin(repo);
+    const remoteBase = git(repo, 'rev-parse', 'origin/main');
+    git(repo, 'checkout', 'co/feature');
+    git(repo, 'push', 'origin', 'co/feature');
+    const existingForkHead = git(repo, 'rev-parse', 'origin/co/feature');
+    const branchHead = commitSigned(repo, 'feat2.txt', 'more feature\n', 'feat: continue feature');
+    const seenRanges: string[] = [];
+    const trackingReader: CommitIdentityReader = {
+      read: (_cwd, range) => {
+        seenRanges.push(range);
+        return [
+          {
+            sha: 'd'.repeat(40),
+            author: PERSONA,
+            committer: PERSONA,
+            signoffs: [PERSONA],
+          },
+        ];
+      },
+    };
+    const cfg = openConfigStore();
+    configs.push(cfg);
+    cfg.setProjectOverride('p-push-guard', IDENTITY_PERSONA_ALLOWLIST_KEY, [PERSONA]);
+    cfg.setProjectOverride('p-push-guard', REPO_MODE_CONFIG_KEY, 'contributor');
+
+    const { ctx } = makeCtx(repo, trackingReader, { baseSha: remoteBase });
+    const reg = buildCoreRegistry();
+
+    await expect(invokeTool(reg, ctx, 'co_push', { branch: 'co/feature' })).rejects.toThrow(
+      /no review verdict/i,
+    );
+    expect(seenRanges).toEqual([`${remoteBase}..${branchHead}`]);
+    expect(seenRanges[0]).not.toContain(existingForkHead);
+  });
+
   it('contributor first publish refuses a fork base ahead of the upstream base', async () => {
     const repo = makeRepo();
     addOrigin(repo);

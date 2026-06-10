@@ -108,6 +108,7 @@ function assertSafeBranchName(verb: string, name: string, value: string): void {
     value === 'HEAD' ||
     value.startsWith('refs/') ||
     value.startsWith('origin/') ||
+    value.startsWith('upstream/') ||
     /^[0-9a-f]{40}$/iu.test(value) ||
     value.startsWith('-') ||
     value.startsWith('+') ||

@@ -2045,7 +2045,9 @@ function gitArgs(
   const alias = aliases.get(subcommandKey);
   if (alias == null || alias.trim().length === 0) return ['push'];
   const expanded = tokenize(`${alias} ${argv.slice(i + 1).join(' ')}`);
-  const blockedIndex = expanded.findIndex((token) => token === 'push' || token === 'merge');
+  const blockedIndex = expanded.findIndex(
+    (token) => token === 'push' || token === 'merge' || token === 'pull' || token === 'send-pack',
+  );
   return blockedIndex === -1 ? expanded : expanded.slice(blockedIndex);
 }
 
@@ -2168,6 +2170,36 @@ function ghCommandArgs(argv: string[]): readonly string[] {
   if (args[0] !== 'pr') return args;
   const i = skipLeadingOptions([...args], 1, GH_GLOBAL_OPTIONS_WITH_VALUE);
   return ['pr', ...args.slice(i)];
+}
+
+function ghApiMethod(args: readonly string[]): string | undefined {
+  for (let i = 1; i < args.length; i++) {
+    const token = args[i]!;
+    if (token === '--method' || token === '-X') return args[i + 1]?.toUpperCase();
+    if (token.startsWith('--method=')) return token.slice('--method='.length).toUpperCase();
+    if (/^-X[A-Za-z]+$/u.test(token)) return token.slice(2).toUpperCase();
+  }
+  return undefined;
+}
+
+function ghApiEndpoint(args: readonly string[]): string | undefined {
+  for (const token of args.slice(1)) {
+    if (token === '--') continue;
+    if (token.startsWith('-')) continue;
+    return token.replace(/^\/+/u, '');
+  }
+  return undefined;
+}
+
+function ghApiBypassesPrGate(args: readonly string[]): boolean {
+  if (args[0] !== 'api') return false;
+  const endpoint = ghApiEndpoint(args);
+  if (endpoint == null) return false;
+  if (/^repos\/[^/]+\/[^/]+\/pulls\/\d+\/merge$/u.test(endpoint)) return true;
+  if (/^repos\/[^/]+\/[^/]+\/pulls$/u.test(endpoint)) {
+    return ghApiMethod(args) === 'POST';
+  }
+  return false;
 }
 
 function ghAliasSet(argv: string[]): { name: string; value: string; shell: boolean } | undefined {
@@ -2535,6 +2567,7 @@ export const BLOCK_LIST: readonly BlockRule[] = [
       const argv = tokenize(command);
       if (hasHelpFlag(argv)) return false;
       const args = gitArgs(argv);
+      if (args[0] === 'pull') return true;
       if (args[0] !== 'merge') return false;
       return !args.some((arg) => arg === '--abort' || arg === '--quit');
     },
@@ -2549,6 +2582,7 @@ export const BLOCK_LIST: readonly BlockRule[] = [
       const argv = tokenize(command);
       if (hasHelpFlag(argv)) return false;
       const args = gitArgs(argv);
+      if (args[0] === 'send-pack') return true;
       if (args[0] !== 'push') return false;
       // A force-push is already caught by git-force-push; return true only for non-force pushes
       // so the more-specific rule takes priority when both would match.
@@ -2568,6 +2602,7 @@ export const BLOCK_LIST: readonly BlockRule[] = [
       const argv = tokenize(command);
       if (hasHelpFlag(argv)) return false;
       const args = ghCommandArgs(argv);
+      if (ghApiBypassesPrGate(args)) return true;
       return args[0] === 'pr' && (args[1] === 'merge' || args[1] === 'create');
     },
   },

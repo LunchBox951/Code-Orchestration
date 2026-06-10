@@ -682,17 +682,17 @@ describe('defaultContextFactory — gated verbs reach domain gate (review store 
     if (parent !== 'coord-1') {
       roster.recordAgent({ agentId: parent, role: 'lead', parent: 'coord-1' });
     }
+    const role = agent === parent ? 'lead' : agent.startsWith('impl-') ? 'implementer' : 'reviewer';
     if (agent !== parent && agent !== 'coord-1') {
-      roster.recordAgent({ agentId: agent, role: 'reviewer', parent });
+      roster.recordAgent({ agentId: agent, role, parent });
     }
     roster.close();
     const worktrees = openWorktreeStore(projectId);
-    const role = agent === parent ? 'lead' : 'reviewer';
     const slung = slingWorktree(
       worktrees,
       { parent, agent, branch: 'co/gate-test', repoCwd: repo, projectId, role } as Parameters<
         typeof slingWorktree
-      >[1] & { readonly role: 'lead' | 'reviewer' },
+      >[1] & { readonly role: 'lead' | 'implementer' | 'reviewer' },
       { probe: () => [] },
     );
     worktrees.close();
@@ -702,7 +702,7 @@ describe('defaultContextFactory — gated verbs reach domain gate (review store 
       process.env[CO_ROLE_ENV] = 'lead';
       process.env[CO_PARENT_ENV] = 'coord-1';
     } else {
-      process.env[CO_ROLE_ENV] = 'reviewer';
+      process.env[CO_ROLE_ENV] = role;
       process.env[CO_PARENT_ENV] = parent;
     }
     chdir(slung.worktreePath);
@@ -911,7 +911,7 @@ describe('defaultContextFactory — gated verbs reach domain gate (review store 
   });
 
   it('co_kickback sends mail through the real mount (roster injected, not absent)', async () => {
-    const { repo } = setupSlungProject('reviewer-1', 'lead-1');
+    const { repo } = setupSlungProject('impl-1', 'lead-1');
     chdir(repo);
     const mountAndClose = (agent: string, role: string, parent: string): void => {
       process.env[CO_AGENT_ENV] = agent;
