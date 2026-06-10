@@ -71,6 +71,8 @@ function makeMainRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'co-mcp-context-repo-'));
   tmpDirs.push(dir);
   execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'ignore' });
+  git(dir, 'config', 'user.email', 't@example.com');
+  git(dir, 'config', 'user.name', 'Test');
   writeFileSync(join(dir, 'README.md'), 'hello\n');
   git(dir, 'add', '.');
   git(dir, 'commit', '-m', 'init');
