@@ -9,9 +9,11 @@ import {
   MAIL_TYPES,
   openMailStore,
   openRegistry,
+  openReviewStore,
   toolsForRole,
   type MailStore,
   type ProjectRegistry,
+  type ReviewStore,
   type ToolContext,
 } from '@co/core';
 import { createCoMcpServer, type CoMcpServerOptions } from './server.js';
@@ -42,22 +44,26 @@ const EXPECTED_TOOLS = [
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
 let openStores: MailStore[] = [];
+let openReviews: ReviewStore[] = [];
 let openRegs: ProjectRegistry[] = [];
 
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
   dataDirs = [];
   openStores = [];
+  openReviews = [];
   openRegs = [];
 });
 
 afterEach(() => {
   for (const m of openStores) m.close();
+  for (const r of openReviews) r.close();
   for (const r of openRegs) r.close();
   process.env = ORIGINAL_ENV;
   for (const dir of dataDirs) rmSync(dir, { recursive: true, force: true });
   dataDirs = [];
   openStores = [];
+  openReviews = [];
   openRegs = [];
 });
 
@@ -75,8 +81,10 @@ function makeTestContext(agent: string): ToolContext {
   const cwd = join(dataDir, 'repo');
   const projectId = registry.register(cwd);
   const mail = openMailStore(projectId);
+  const reviews = openReviewStore(projectId);
   openStores.push(mail);
-  return { agent, projectId, cwd, mail, registry };
+  openReviews.push(reviews);
+  return { agent, projectId, cwd, mail, registry, reviews };
 }
 
 /** Connect an in-memory MCP client to a co server built with the given options (no subprocess). */
@@ -122,7 +130,7 @@ describe('createCoMcpServer — tool-list parity', () => {
     expect(props).toHaveProperty('subject');
   });
 
-  it('publishes co_mail_send.type as the exact MAIL_TYPES enum over MCP', async () => {
+  it('publishes co_mail_send.type as the sendable mail enum over MCP', async () => {
     const ctx = makeTestContext('impl-mail-enum');
     const client = await connect({ contextFactory: () => ctx });
 
@@ -132,7 +140,9 @@ describe('createCoMcpServer — tool-list parity', () => {
       ?.properties;
     const typeSchema = props?.type as { enum?: unknown[] } | undefined;
 
-    expect(typeSchema?.enum).toEqual([...MAIL_TYPES]);
+    expect(typeSchema?.enum).toEqual(
+      MAIL_TYPES.filter((type) => type !== 'worker_done' && type !== 'review_request'),
+    );
   });
 
   it('publishes co_mail_send.review_verdict over MCP', async () => {
@@ -210,6 +220,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     const projectId = leadCtx.projectId;
     const cwd = leadCtx.cwd;
     const mail = leadCtx.mail!;
+    const reviews = leadCtx.reviews!;
     const registry = leadCtx.registry!;
     const client = await connect({
       contextFactory: () => ({
@@ -217,24 +228,36 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
         projectId,
         cwd,
         mail,
+        reviews,
         registry,
       }),
     });
 
-    const req = mail.send({
-      type: 'review_request',
-      to: '@operator',
-      from: 'lead-review',
-      subject: 'review?',
-      body: 'please review',
-    });
+    const req = mail.requestHumanReview(
+      {
+        type: 'review_request',
+        to: '@operator',
+        from: 'lead-review',
+        subject: 'review requested',
+        body: 'please review',
+        idempotencyKey: 'review-request:rev-mcp-review-response',
+      },
+      {
+        reviewId: 'rev-mcp-review-response',
+        target: 'main',
+        branch: 'co/feature',
+        scope: 'pr_merge',
+        requestedBy: 'lead-review',
+        reviewerKind: 'human',
+      },
+    ).mail;
 
     const sendRes = await client.callTool({
       name: 'co_mail_send',
       arguments: {
         type: 'review_response',
         in_reply_to: req.seq,
-        subject: 're: review?',
+        subject: 're: review requested',
         body: 'passes',
         review_verdict: 'PASS',
       },
@@ -249,6 +272,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
         projectId,
         cwd,
         mail,
+        reviews,
         registry,
       }),
     });

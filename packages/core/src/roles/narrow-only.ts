@@ -80,8 +80,21 @@ export function narrowOnly(base: RoleProfile, sub: SubRoleSpec): NarrowViolation
       });
     }
   } else {
-    const baseRank = WRITE_SCOPE_RANK[baseScope] ?? -1;
-    const subRank = WRITE_SCOPE_RANK[subScope] ?? -1;
+    const baseRank = WRITE_SCOPE_RANK[baseScope];
+    const subRank = WRITE_SCOPE_RANK[subScope];
+    if (baseRank == null) {
+      violations.push({
+        subRole: id,
+        reason: `base role has unknown writeScope '${baseScope}'; cannot prove sub-role is narrow-only`,
+      });
+    }
+    if (subRank == null) {
+      violations.push({
+        subRole: id,
+        reason: `sub-role has unknown writeScope '${subScope}'; cannot prove sub-role is narrow-only`,
+      });
+    }
+    if (baseRank == null || subRank == null) return violations;
     if (subRank > baseRank) {
       violations.push({
         subRole: id,

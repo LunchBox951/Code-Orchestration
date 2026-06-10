@@ -35,6 +35,8 @@ import {
 import { MailProjector } from './mail-projector.js';
 import { openMailStore, type MailStore } from './mail-store.js';
 import { checkMailTypeCompleteness } from './completeness.js';
+import { buildHumanReviewVerdict } from '../review/human-review.js';
+import { openReviewStore, type ReviewStore } from '../review/review-store.js';
 
 // ── Program-data dir per test (mirrors mail.test.ts) ──────────────────────────
 const ORIGINAL_ENV = process.env;
@@ -80,7 +82,7 @@ function realArgs() {
  * `approval`). Returns the delivered mail per type — proof each declared type has a real
  * flow, not just a registry entry.
  */
-function exerciseEveryType(mail: MailStore): Record<MailType, DeliveredMail> {
+function exerciseEveryType(mail: MailStore, reviews: ReviewStore): Record<MailType, DeliveredMail> {
   const chat = mail.send({
     type: MAIL_CHAT,
     to: 'bob',
@@ -133,21 +135,41 @@ function exerciseEveryType(mail: MailStore): Record<MailType, DeliveredMail> {
     subject: 'worker_done: co/feature',
     body: 'finished co/feature; tests 3/3 passed',
   });
-  const reviewRequest = mail.send({
-    type: MAIL_REVIEW_REQUEST,
-    to: OPERATOR,
-    from: 'lead',
-    subject: 'review co/phase-e?',
-    body: 'requesting human review of co/phase-e into co/review-gate',
-  });
-  const reviewResponse = mail.reply(
+  const reviewRequestFacts = {
+    reviewId: 'rev-no-stub-review-response',
+    target: 'main',
+    branch: 'co/phase-e',
+    scope: 'pr_merge' as const,
+    requestedBy: 'lead',
+    reviewerKind: 'human' as const,
+  };
+  const reviewRequest = mail.requestHumanReview(
+    {
+      type: MAIL_REVIEW_REQUEST,
+      to: OPERATOR,
+      from: 'lead',
+      subject: 'review co/phase-e?',
+      body: 'requesting human review of co/phase-e into co/review-gate',
+      idempotencyKey: `review-request:${reviewRequestFacts.reviewId}`,
+    },
+    reviewRequestFacts,
+  ).mail;
+  const reviewResponse = mail.replyWithReviewVerdict(
     mail.inbox(OPERATOR).find((m) => m.seq === reviewRequest.seq)!,
     {
       type: MAIL_REVIEW_RESPONSE,
       subject: 're: review co/phase-e?',
       body: 'PASS — looks good',
+      from: OPERATOR,
       reviewVerdict: 'PASS',
     },
+    buildHumanReviewVerdict(reviews, {
+      reviewId: reviewRequestFacts.reviewId,
+      target: reviewRequestFacts.target,
+      branch: reviewRequestFacts.branch,
+      verdict: 'PASS',
+      body: 'PASS — looks good',
+    }),
   );
   return {
     [MAIL_CHAT]: chat,
@@ -292,8 +314,9 @@ describe('AC-L1-7 — no-stub completeness: RED for a declared-but-unflowed type
 describe('AC-L1-7 — every declared type has a real LIVE flow (not just a registry entry)', () => {
   it('sends/replies every MAIL_TYPES member and each round-trips into its recipient inbox', () => {
     const mail = openMailStore('p-exercise-all');
+    const reviews = openReviewStore('p-exercise-all');
     try {
-      const delivered = exerciseEveryType(mail);
+      const delivered = exerciseEveryType(mail, reviews);
       const seen = new Set<MailType>();
       for (const type of MAIL_TYPES) {
         const d = delivered[type];
@@ -310,6 +333,7 @@ describe('AC-L1-7 — every declared type has a real LIVE flow (not just a regis
       // The structured `review_response` carried its reviewVerdict through the flow.
       expect(delivered[MAIL_REVIEW_RESPONSE].reviewVerdict).toBe('PASS');
     } finally {
+      reviews.close();
       mail.close();
     }
   });
@@ -393,9 +417,11 @@ describe('AC-L1-9 — byte-equal replay holds with the FULL type set', () => {
   it('a log exercising every MAIL_TYPES member rebuilds byte-identical to the live read-model', () => {
     const projectId = 'p-fulltype-replay';
     const mail = openMailStore(projectId);
+    const reviews = openReviewStore(projectId);
     try {
-      exerciseEveryType(mail);
+      exerciseEveryType(mail, reviews);
     } finally {
+      reviews.close();
       mail.close();
     }
 
@@ -403,8 +429,11 @@ describe('AC-L1-9 — byte-equal replay holds with the FULL type set', () => {
 
     // Discard + re-fold the whole log into a fresh read-model.
     const store = openProjectStore(projectId);
+    const mailProjector = new MailProjector();
     try {
-      rebuildAll(store, [new MailProjector()], (e) => decode(e, mailUpcasters, mailSchemas));
+      rebuildAll(store, [mailProjector], (e) =>
+        mailProjector.handles(e.type) ? decode(e, mailUpcasters, mailSchemas) : e,
+      );
     } finally {
       store.close();
     }

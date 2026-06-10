@@ -25,14 +25,15 @@ inseparable.
   quality-affecting reservation is a **blocker** (→ ISSUES) and a non-quality reservation is
   a **suggestion on a PASS**, so "acceptable with suggestions" is just PASS + suggestions —
   the soft middle carried no gating weight. (Agent and human reviewers render the same two
-  verdicts; [MAIL-BUS](mail-bus.md) already draws the verdict as ✅ / ❌.)
+  verdicts; [MAIL-BUS](mail-bus.md) carries the typed verdict and the app chooses the visual
+  treatment.)
 
 ### Strictness scales with proximity to production
 
 The two verdicts are fixed, but **the threshold for what counts as a blocker tightens as code
 approaches production.** The same nit is a *suggestion* early and a *blocker* late — the cost
 of letting it through rises the closer the change gets to leaving the sandbox. The ladder
-follows the review scopes (worker merge → phase merge → PR / master):
+follows the review scopes (worker merge → phase merge → outward PR / remote publish):
 
 - **Worker merge → a lead/phase branch (most lenient).** The work is still in an isolated
   branch with more review ahead of it. Correctness and quality-affecting problems still block,
@@ -42,7 +43,7 @@ follows the review scopes (worker merge → phase merge → PR / master):
 - **Phase merge → the integration / master-bound branch (stricter).** Accumulated nits get a
   harder look; suggestions tolerated per-worker are expected resolved before the phase
   consolidates.
-- **PR / push to master (strictest).** The code is leaving the sandbox, so the reviewer is
+- **Outward PR / remote publish (strictest).** The code is leaving the sandbox, so the reviewer is
   **selective and harsh: nits and polish that rode as suggestions earlier now become blockers.**
   Nothing cosmetic passes into prod. This is why `reviewer:pr` is the heaviest seat (pinned to
   Opus — [DISPATCH](dispatch.md)) and why outward merges are the prime candidate for **human review** (below).
@@ -60,10 +61,24 @@ changes — only the bar for `ISSUES` rises stage by stage.
   reject; a failing test **in** the baseline = flagged and escalated, never silently
   passed. This turns "failed before" into a *recorded fact*, not an assertion — the fast
   path for the exact rubber-stamp the prototype committed.
+- In contributor mode, `co_push` keeps the per-target serialization slot after pushing the
+  reviewed branch; the slot is released by `co_pr_merge` after the PR is created. That keeps
+  the reviewed `pr_merge` PASS bound across the fork push -> PR handoff, so another branch
+  cannot advance the target between the two publish steps.
+
+### Audited operator override
+
+The only explicit escape hatch around a missing PASS is an **`@operator` override**. It is
+not an agent path: `co_merge`, `co_push`, and `co_pr_merge` accept it only from
+`@operator`, require a non-empty reason, record `review.override` before any publish side
+effect, and render the reason into the reviewed marker (`override — <reason>`). The
+override bypasses the PASS gate and recorded worktree-parent ownership only; worktree
+existence, removed-state, repo-mode, identity, signoff, and capability checks still run
+normally.
 
 ### The 3-strike rule
 
-The prototype's `review_round_budget` (default 5) merely *bounded* the kickback↔fix loop
+The prototype's old `review_round_budget` merely *bounded* the kickback↔fix loop
 and then stalled. It is repurposed into an **escalation trigger**: after **3 consecutive
 failed reviews** on the same work item (configurable), the loop stops kicking back and
 **escalates to the spawning parent** (protocol in [MAIL-BUS](mail-bus.md); authority in [AGENT-ROLES](agent-roles.md)). A
@@ -74,12 +89,14 @@ trapping honest workers.
 
 The gate needs a *trustworthy verdict*; **who** produces it is a configurable trust choice — an
 **agent reviewer** (default, scalable) or the **operator** (human review). This is a **per-repo,
-per-scope setting** (the config cascade, [INIT](init-and-config.md)): each review scope (worker merge, phase merge, PR
-merge) is assigned *agent* or *human*. A repo can require **PR merges to be human-reviewed** while
-internal worker merges stay agent-reviewed.
+per-scope setting** (the config cascade, [INIT](init-and-config.md)): each review scope (worker
+merge, phase merge, outward PR / publish handoff) is assigned *agent* or *human*. A repo can
+require **PR creation and remote publish handoffs to be human-reviewed** while internal worker
+merges stay agent-reviewed.
 
-When a scope is human-reviewed, the gate **skips the reviewer agent** and sends an **actionable
-review-request mail** to the operator ([MAIL](mail-bus.md) — it stays unread until a verdict is rendered, so it
+When a scope is human-reviewed, the gate **skips the reviewer agent** and records the target
+slot, `review.requested` row, and **actionable review-request mail** to the operator in one
+program-data transaction ([MAIL](mail-bus.md) — it stays unread until a verdict is rendered, so it
 can't be lost). The operator reviews the diff **in-app** (the diff viewer / gate UI — [TUI](tui.md)),
 against the **same acceptance criteria** an agent reviewer would use, and renders **PASS / ISSUES**
 (blockers required for ISSUES). The verdict re-enters the gate identically — merge proceeds or

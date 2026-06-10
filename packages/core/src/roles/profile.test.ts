@@ -55,6 +55,16 @@ describe('ROLE_PROFILES — five authoritative profiles', () => {
       expect(ROLE_PROFILES[role].capabilities.has('web-search')).toBe(false);
     }
   });
+
+  it('both code-owning worker roles can finish through the durable co_finish path', () => {
+    expect(ROLE_PROFILES.lead.toolset).toContain('co_finish');
+    expect(ROLE_PROFILES.implementer.toolset).toContain('co_finish');
+  });
+
+  it('implementer can request scoped researcher dispatch through co_sling only', () => {
+    expect(ROLE_PROFILES.implementer.toolset).toContain('co_sling');
+    expect(ROLE_PROFILES.implementer.mandate).toMatch(/researcher/i);
+  });
 });
 
 describe('roleToolsets — derived from ROLE_PROFILES', () => {
@@ -114,7 +124,7 @@ describe('checkRoleProfileCompleteness — green on real profiles, red on crafte
 });
 
 describe('AC-L6a-8 (partial) — checkToolCompleteness still green after refactor', () => {
-  it('the tool completeness gate is still GREEN over the real registry (no tool added)', () => {
+  it('the tool completeness gate stays GREEN over the real registry', () => {
     expect(checkToolCompleteness(buildCoreRegistry())).toEqual([]);
   });
 });

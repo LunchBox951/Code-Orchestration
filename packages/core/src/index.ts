@@ -172,7 +172,7 @@ export { checkToolCompleteness } from './tools/index.js';
 // target repo's project memory (the prompting split, Principle 11). `Role`/`BASE_ROLES`/
 // `roleToolsets`/`toolsForRole` are the per-role tool-scoping mechanism + seed over the current
 // tools (AC-L2-5): the relevance-scoping hook the MCP mount feeds into `createCoMcpServer({ tools })`,
-// fail-loud on a phantom tool. Authoritative rosters and sub-roles are an L6 concern.
+// fail-loud on a phantom tool. L6a rosters/sub-roles are layered on top for caller authorization.
 export { orientContent } from './tools/index.js';
 export type { Role } from './tools/index.js';
 export { BASE_ROLES, roleToolsets, toolsForRole } from './tools/index.js';
@@ -293,7 +293,13 @@ export {
   CoRepoModeGate,
 } from './worktrees/repo-mode.js';
 export type { GitReader } from './worktrees/detect-base.js';
-export { detectBaseRef, defaultGitReader, resolveRefSha } from './worktrees/detect-base.js';
+export {
+  detectBaseRef,
+  detectCurrentBranchTarget,
+  detectIntegrationTarget,
+  defaultGitReader,
+  resolveRefSha,
+} from './worktrees/detect-base.js';
 export type {
   GitExec,
   BaselineProbe,
@@ -337,8 +343,9 @@ export {
 // L5 review gate (AC-L5-1): the event-sourced review/ module — the PASS|ISSUES verdict model, the
 // five-event log (review.requested/verdict/strike + merge.serialized + review.override, all defined +
 // projected now so B–F add only writers), the per-(target, branch) review store, and the gated merge
-// core (CoReviewGate) the lead-facing co_merge consumes. Nothing reaches a merge without a recorded
-// PASS; the verdict is a structured RECORDED EVENT (Principle 5), never a prose blob or a shell exit
+// core (CoReviewGate) the coordinator-or-lead co_merge consumes. Nothing reaches a merge without a recorded
+// PASS or an explicit audited `@operator` override; the verdict is a structured RECORDED EVENT
+// (Principle 5), never a prose blob or a shell exit
 // code. The honest-verification baseline, strictness ladder + push/PR, strike policy, human-review
 // routing, and serialization/override records are now folded into the L5 gate; rich live reviewer
 // dispatch and operator UI seams remain delegated to later layers.
@@ -420,15 +427,21 @@ export { classifyFinding, applyLadder } from './review/ladder.js';
 // counter (`consecutiveStrikes` over verdict history), the pure decision fn (`nextReviewAction`),
 // and the cohesive enforcement path (`applyStrikePolicy` — records the strike, computes the action,
 // fires exactly one escalation at the budget threshold via the spawning-parent resolver). The
-// production resolver is wired into co_merge / co_push / co_pr_merge via the worktree-recorded
-// `parent` field. A PASS resets the run (projector: PASS verdict → strikes = 0). Headless-testable
-// over injectable seams (StrikeEnforcementDeps / StrikeEnforcementContext).
-export type { StrikeEnforcementDeps, StrikeEnforcementContext } from './review/strikes.js';
+// production resolver is wired into co_merge / co_push / co_pr_merge through the caller's roster
+// parent. A PASS resets the run (projector: PASS verdict → strikes = 0). Headless-testable over
+// injectable seams (StrikeEnforcementDeps / StrikeEnforcementContext).
+export type {
+  StrikeEnforcementDeps,
+  StrikeEnforcementContext,
+  StrikeNotificationPlan,
+  StrikePolicyAction,
+} from './review/strikes.js';
 export {
   REVIEW_ROUND_BUDGET_KEY,
   REVIEW_ROUND_BUDGET_DEFAULT,
   consecutiveStrikes,
   nextReviewAction,
+  resolveReviewRoundBudget,
   applyStrikePolicy,
 } from './review/strikes.js';
 // L5 Phase E human-review path (AC-L5-5): the `review_request` / `review_response` mail pair, the
@@ -797,8 +810,8 @@ export { SPAWN_RULES, canSpawn, checkSpawnPlan, validateSpawnPlan } from './role
 // resolver that routes by role+tree (L6 PLUG-POINT in escalation.ts). `escalationDisposition` +
 // `lowestCompetentResolver` implement the authority cut so only genuine intent reaches @operator.
 // `co_kickback` is the coordinator/lead verb for returning a branch after ISSUES, tracked via the
-// strike counter (reuses review/strikes.ts — no rebuilt loop). Fixes the coordinator→lead kickback
-// gap recorded in `.co/issues/2026-06-08-coordinator-cannot-kickback-failed-merge-review.md`.
+// strike counter (reuses review/strikes.ts — no rebuilt loop). AC-L6a-5 covers coordinator/lead
+// kickback authority and review-budget escalation.
 export { roleParentResolver } from './mail/escalation.js';
 export type { EscalationTopic } from './roles/authority.js';
 export { escalationDisposition, lowestCompetentResolver } from './roles/authority.js';
@@ -820,7 +833,7 @@ export { checkSubRoleCompleteness } from './roles/sub-role-completeness.js';
 // The declared LIST and DATA only (Principle 6 — block only the workarounds, everything else
 // is a nudge). Enforcement hooks (PreToolUse, Claude/Codex variants) and nudge injection are
 // L7 typed stubs here; the production wiring lands in L7 (permissions.md:90-98 / :64-66).
-export type { BlockCategory, BlockRule } from './permissions/block-list.js';
+export type { BlockCategory, BlockRule, MatchBlockOptions } from './permissions/block-list.js';
 export { BLOCK_LIST, matchBlock } from './permissions/block-list.js';
 export type { EnforcedConfig, DriftViolation } from './permissions/drift.js';
 export { checkBlockListDrift, readEnforcedConfig } from './permissions/drift.js';
@@ -829,16 +842,19 @@ export { NUDGE_CATALOG, nudgeFor, injectNudge } from './permissions/nudges.js';
 
 // L6a Phase D2 — pre-publish identity guard + worktree persona-pinning (AC-L6a-7).
 // The permanent fix for DCO leaks: (1) a pure pre-publish check that refuses a push or PR-merge if
-// any commit's author/committer/Signed-off-by is outside the configured persona allowlist (fail-loud,
-// Principle 9); (2) `resolvePersona` consumed by `slingWorktree` to pin the local git identity in
-// every new sandbox immediately after `git worktree add`, so `git commit -s` never falls through to
-// global config. Both sides are config-driven (empty allowlist → guard skipped; undefined persona →
-// pinning no-op). All git I/O behind the injectable `CommitIdentityReader` seam (AC-L6a-9).
+// any commit's author/committer/Signed-off-by is outside the configured persona allowlist, or lacks a
+// valid Signed-off-by when the allowlist is empty (fail-loud, Principle 9); (2) `resolvePersona`
+// consumed by `slingWorktree` to pin the local git identity in every new sandbox immediately after
+// `git worktree add`, so `git commit -s` never falls through to global config. Both sides are
+// config-driven (empty allowlist → DCO-only guard; undefined persona → pinning no-op). Commit-range
+// git I/O is behind `CommitIdentityReader`; local merge-commit identity inspection is behind
+// `GitConfigIdentityReader` (AC-L6a-9).
 export type {
   PersonaIdentity,
   CommitIdentity,
   IdentityViolation,
   CommitIdentityReader,
+  GitConfigIdentityReader,
 } from './permissions/identity-guard.js';
 export {
   IDENTITY_PERSONA_ALLOWLIST_KEY,
@@ -846,7 +862,9 @@ export {
   resolvePersonaAllowlist,
   resolvePersona,
   checkPublishIdentities,
+  checkMergeCommitIdentity,
   defaultCommitIdentityReader,
+  defaultGitConfigIdentityReader,
 } from './permissions/identity-guard.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */

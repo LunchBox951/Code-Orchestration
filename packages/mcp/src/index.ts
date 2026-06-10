@@ -4,5 +4,11 @@
 // live pty session-hosting transport L7 will own is a typed, loud-failing stub.
 export { createCoMcpServer, type CoMcpServerOptions } from './server.js';
 export { serve } from './serve.js';
-export { defaultContextFactory, CO_AGENT_ENV, CO_ROLE_ENV, CO_PROJECT_ID_ENV } from './context.js';
+export {
+  defaultContextFactory,
+  CO_AGENT_ENV,
+  CO_ROLE_ENV,
+  CO_PARENT_ENV,
+  CO_PROJECT_ID_ENV,
+} from './context.js';
 export { type LiveSessionHost, LiveSessionHostStub } from './live-session-host.js';

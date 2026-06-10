@@ -24,6 +24,21 @@ describe('narrowOnly — widening detection', () => {
     expect(violations.some((v) => v.reason.includes('wider'))).toBe(true);
   });
 
+  it('flags malformed writeScope values instead of ranking them as narrower', () => {
+    const base = ROLE_PROFILES['reviewer'];
+    const sub: SubRoleSpec = {
+      baseRole: 'reviewer',
+      name: 'malformed',
+      approach: 'typo in writeScope',
+      profile: { ...base, writeScope: 'everything' as never },
+    };
+
+    const violations = narrowOnly(base, sub);
+
+    expect(violations.length).toBeGreaterThan(0);
+    expect(violations.some((v) => v.reason.includes('unknown writeScope'))).toBe(true);
+  });
+
   it('flags a sub-role whose toolset adds a tool the base lacks (toolset widening)', () => {
     const base = ROLE_PROFILES['implementer'];
     const sub: SubRoleSpec = {

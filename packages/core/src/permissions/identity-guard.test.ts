@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
@@ -7,6 +8,8 @@ import {
   IDENTITY_PERSONA_ALLOWLIST_KEY,
   IDENTITY_PERSONA_KEY,
   checkPublishIdentities,
+  checkSignedOffCommits,
+  defaultCommitIdentityReader,
   resolvePersonaAllowlist,
   resolvePersona,
   type CommitIdentity,
@@ -39,6 +42,27 @@ function openCfg(): ConfigStore {
   const c = openConfigStore();
   configs.push(c);
   return c;
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+}
+
+function makeRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'co-idguard-repo-'));
+  tmpDirs.push(dir);
+  execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'ignore' });
+  git(dir, 'config', 'user.email', 'persona@noreply.github.com');
+  git(dir, 'config', 'user.name', 'Persona');
+  git(dir, 'config', 'commit.gpgsign', 'false');
+  writeFileSync(join(dir, 'README.md'), 'base\n');
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-m', 'chore: init');
+  return dir;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +117,17 @@ describe('checkPublishIdentities — pure guard', () => {
     expect(violations[0]!.identity).toBe('LunchBox951 <skyler.clemens@gmail.com>');
   });
 
+  it('missing Signed-off-by trailer → violation even when author and committer are allowlisted', () => {
+    const commit: CommitIdentity = {
+      ...cleanCommit,
+      signoffs: [],
+    };
+    const violations = checkPublishIdentities([commit], ALLOWLIST);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.field).toBe('signed-off-by');
+    expect(violations[0]!.reason).toMatch(/missing/i);
+  });
+
   it('multiple violations across fields on one commit', () => {
     const commit: CommitIdentity = {
       sha: 'b'.repeat(40),
@@ -121,9 +156,9 @@ describe('checkPublishIdentities — pure guard', () => {
       signoffs: [],
     };
     const violations = checkPublishIdentities([bad1, bad2], ALLOWLIST);
-    expect(violations).toHaveLength(2);
+    expect(violations).toHaveLength(4);
     expect(violations[0]!.sha).toBe(bad1.sha);
-    expect(violations[1]!.sha).toBe(bad2.sha);
+    expect(violations[2]!.sha).toBe(bad2.sha);
   });
 
   it('email-case normalization: uppercase email in commit matches lowercase allowlist', () => {
@@ -138,6 +173,16 @@ describe('checkPublishIdentities — pure guard', () => {
     };
     // Both normalize to lowercase email → no violation.
     expect(checkPublishIdentities([commit], allowlist)).toEqual([]);
+  });
+
+  it('bare-email allowlist entry matches any identity with that email', () => {
+    const commit: CommitIdentity = {
+      sha: 'e'.repeat(40),
+      author: 'Persona <persona@noreply.github.com>',
+      committer: 'Different Name <persona@noreply.github.com>',
+      signoffs: ['Another Name <PERSONA@NOREPLY.GITHUB.COM>'],
+    };
+    expect(checkPublishIdentities([commit], ['<persona@noreply.github.com>'])).toEqual([]);
   });
 
   it('whitespace normalization: extra spaces trimmed before comparison', () => {
@@ -160,6 +205,22 @@ describe('checkPublishIdentities — pure guard', () => {
 
   it('empty commit list → no violations', () => {
     expect(checkPublishIdentities([], ALLOWLIST)).toEqual([]);
+  });
+});
+
+describe('checkSignedOffCommits — DCO floor', () => {
+  it('rejects malformed Signed-off-by trailers when no persona allowlist is configured', () => {
+    const violations = checkSignedOffCommits([
+      {
+        ...cleanCommit,
+        signoffs: ['not-an-identity'],
+      },
+    ]);
+
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.field).toBe('signed-off-by');
+    expect(violations[0]!.identity).toBe('not-an-identity');
+    expect(violations[0]!.reason).toMatch(/malformed/i);
   });
 });
 
@@ -197,12 +258,28 @@ describe('resolvePersonaAllowlist', () => {
     expect(resolvePersonaAllowlist('p-override')).toEqual(['Project <p@example.com>']);
   });
 
-  it('non-array config value falls back to []', () => {
+  it('non-array config value fails loud instead of disabling the guard', () => {
     const cfg = openCfg();
     cfg.setGlobal(IDENTITY_PERSONA_ALLOWLIST_KEY, 'not-an-array');
     cfg.close();
     configs.pop();
-    expect(resolvePersonaAllowlist('p-bad')).toEqual([]);
+    expect(() => resolvePersonaAllowlist('p-bad')).toThrow(/identity\.persona_allowlist/i);
+  });
+
+  it('blank allowlist entries fail loud', () => {
+    const cfg = openCfg();
+    cfg.setGlobal(IDENTITY_PERSONA_ALLOWLIST_KEY, ['Persona <persona@noreply.github.com>', '  ']);
+    cfg.close();
+    configs.pop();
+    expect(() => resolvePersonaAllowlist('p-blank')).toThrow(/identity\.persona_allowlist/i);
+  });
+
+  it('malformed allowlist entries fail loud', () => {
+    const cfg = openCfg();
+    cfg.setGlobal(IDENTITY_PERSONA_ALLOWLIST_KEY, ['not-an-identity']);
+    cfg.close();
+    configs.pop();
+    expect(() => resolvePersonaAllowlist('p-malformed')).toThrow(/identity\.persona_allowlist/i);
   });
 });
 
@@ -238,19 +315,53 @@ describe('resolvePersona', () => {
     expect(resolvePersona('p-override')).toEqual({ name: 'Local', email: 'local@example.com' });
   });
 
-  it('non-object config value returns undefined', () => {
+  it('non-object config value fails loud instead of disabling persona pinning', () => {
     const cfg = openCfg();
     cfg.setGlobal(IDENTITY_PERSONA_KEY, 'not-an-object');
     cfg.close();
     configs.pop();
-    expect(resolvePersona('p-bad')).toBeUndefined();
+    expect(() => resolvePersona('p-bad')).toThrow(/identity\.persona/i);
   });
 
-  it('object missing required fields returns undefined', () => {
+  it('object missing required fields fails loud', () => {
     const cfg = openCfg();
     cfg.setGlobal(IDENTITY_PERSONA_KEY, { name: 'Only Name' }); // missing email
     cfg.close();
     configs.pop();
-    expect(resolvePersona('p-incomplete')).toBeUndefined();
+    expect(() => resolvePersona('p-incomplete')).toThrow(/identity\.persona/i);
+  });
+
+  it('malformed persona email fails loud', () => {
+    const cfg = openCfg();
+    cfg.setGlobal(IDENTITY_PERSONA_KEY, { name: 'CO Bot', email: 'not-an-email' });
+    cfg.close();
+    configs.pop();
+    expect(() => resolvePersona('p-bad-email')).toThrow(/identity\.persona/i);
+  });
+});
+
+describe('defaultCommitIdentityReader', () => {
+  it('throws when git cannot inspect the requested range', () => {
+    const repo = makeRepo();
+    expect(() => defaultCommitIdentityReader.read(repo, `${'a'.repeat(40)}..HEAD`)).toThrow(
+      /cannot inspect commit identities/i,
+    );
+  });
+
+  it('reads Signed-off-by trailers case-insensitively', () => {
+    const repo = makeRepo();
+    writeFileSync(join(repo, 'case.txt'), 'case\n');
+    git(repo, 'add', '.');
+    git(
+      repo,
+      'commit',
+      '-m',
+      'feat: case signoff',
+      '-m',
+      'signed-off-by: Personal <personal@example.com>',
+    );
+    const commits = defaultCommitIdentityReader.read(repo, 'HEAD~1..HEAD');
+
+    expect(commits[0]?.signoffs).toEqual(['Personal <personal@example.com>']);
   });
 });

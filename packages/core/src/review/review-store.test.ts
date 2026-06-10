@@ -121,6 +121,34 @@ describe('ReviewStore — record + read verdicts', () => {
     }
   });
 
+  it('backfills legacy verdict_seq values from review.verdict events', () => {
+    const first = openReviewStore('p-legacy-verdict-seq');
+    let expectedSeq: number;
+    try {
+      const saved = first.recordVerdict(verdict({ reviewId: 'rev-seq' }));
+      expectedSeq = saved.recordedSeq!;
+    } finally {
+      first.close();
+    }
+    const raw = openProjectStore('p-legacy-verdict-seq');
+    try {
+      raw.transaction((tx) => {
+        (tx.raw as DatabaseSync).exec('UPDATE reviews SET verdict_seq = NULL');
+      });
+    } finally {
+      raw.close();
+    }
+
+    const reopened = openReviewStore('p-legacy-verdict-seq');
+    try {
+      expect(reopened.getVerdict('co/l5-review-gate', 'co/l5-phase-a')?.recordedSeq).toBe(
+        expectedSeq,
+      );
+    } finally {
+      reopened.close();
+    }
+  });
+
   it('records a PASS verdict and reads it back, structured (per target + branch)', () => {
     const store = openReviewStore('p-verdict');
     try {
@@ -270,6 +298,111 @@ describe('ReviewStore — record + read verdicts', () => {
     }
   });
 
+  it('refuses a second verdict for the same review request', () => {
+    const store = openReviewStore('p-req-duplicate-verdict');
+    try {
+      store.recordReviewRequested(request({ reviewId: 'rev-dup-verdict' }));
+      store.recordVerdict(
+        verdict({
+          reviewId: 'rev-dup-verdict',
+          verdict: 'ISSUES',
+          blockers: [{ summary: 'needs work' }],
+        }),
+      );
+
+      expect(() =>
+        store.recordVerdict(verdict({ reviewId: 'rev-dup-verdict', verdict: 'PASS' })),
+      ).toThrow(/already recorded/);
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a')?.verdict).toBe('ISSUES');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a duplicate request with the same reviewId preserves an already recorded verdict', () => {
+    const store = openReviewStore('p-request-duplicate-preserves-verdict');
+    try {
+      store.recordReviewRequested(request({ reviewId: 'rev-dup' }));
+      store.recordVerdict(verdict({ reviewId: 'rev-dup' }));
+
+      const rerequest = store.recordReviewRequested(request({ reviewId: 'rev-dup' }));
+
+      expect(rerequest.reviewId).toBe('rev-dup');
+      expect(store.getVerdict('co/l5-review-gate', 'co/l5-phase-a')?.verdict).toBe('PASS');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a duplicate request with the same reviewId but different fields is refused', () => {
+    const store = openReviewStore('p-request-duplicate-mismatch');
+    try {
+      store.recordReviewRequested(request({ reviewId: 'rev-dup-mismatch' }));
+
+      expect(() =>
+        store.recordReviewRequested(request({ reviewId: 'rev-dup-mismatch', scope: 'pr_merge' })),
+      ).toThrow(/duplicate reviewId.*scope/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a duplicate reviewId on another target or branch is refused project-wide', () => {
+    const store = openReviewStore('p-request-duplicate-cross-target');
+    try {
+      store.recordReviewRequested(request({ reviewId: 'rev-cross-target' }));
+
+      expect(() =>
+        store.recordReviewRequested(
+          request({
+            reviewId: 'rev-cross-target',
+            target: 'co/another-target',
+            branch: 'co/another-branch',
+          }),
+        ),
+      ).toThrow(/duplicate reviewId.*already belongs/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a historical reviewId cannot be reused after a newer request overwrites the row', () => {
+    const store = openReviewStore('p-request-duplicate-history');
+    try {
+      store.recordReviewRequested(request({ reviewId: 'rev-historical' }));
+      store.recordReviewRequested(request({ reviewId: 'rev-newer' }));
+
+      expect(() =>
+        store.recordReviewRequested(
+          request({
+            reviewId: 'rev-historical',
+            target: 'co/another-target',
+            branch: 'co/another-branch',
+          }),
+        ),
+      ).toThrow(/duplicate reviewId.*already belongs/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a historical reviewId cannot be reused on the same target and branch after supersession', () => {
+    const store = openReviewStore('p-request-duplicate-history-same-branch');
+    try {
+      store.recordReviewRequested(request({ reviewId: 'rev-old' }));
+      store.recordReviewRequested(request({ reviewId: 'rev-current' }));
+
+      expect(() => store.recordReviewRequested(request({ reviewId: 'rev-old' }))).toThrow(
+        /duplicate reviewId.*already belongs/i,
+      );
+      expect(store.getReviewRequest('co/l5-review-gate', 'co/l5-phase-a')?.reviewId).toBe(
+        'rev-current',
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it('a verdict inherits the matching request scope when no verdict scope is supplied', () => {
     const store = openReviewStore('p-verdict-inherits-request-scope');
     try {
@@ -338,8 +471,8 @@ describe('AC-L5-11 — review read-model rebuilds byte-identical (all five event
       db
         .prepare(
           'SELECT target, branch, scope, review_id, verdict, blockers, suggestions, verification, reviewer, ' +
-            'verdict_ts, requested_by, requested_ts, strikes, serialized, overridden, override_reason, ' +
-            'override_by FROM reviews ORDER BY target, branch',
+            'verdict_ts, verdict_seq, requested_by, requested_ts, strikes, serialized, overridden, ' +
+            'override_reason, override_by, override_verification_failures FROM reviews ORDER BY target, branch',
         )
         .all(),
     );
@@ -361,6 +494,7 @@ describe('AC-L5-11 — review read-model rebuilds byte-identical (all five event
         }),
       ),
       // A re-review of co/a (UPSERT — last wins): the rebuild must reach the same final row.
+      makeReviewRequestedEvent('p-replay', request({ reviewId: 'r-a2', branch: 'co/a' })),
       makeReviewVerdictEvent(
         'p-replay',
         verdict({ reviewId: 'r-a2', branch: 'co/a', verdict: 'PASS' }),
@@ -387,7 +521,7 @@ describe('AC-L5-11 — review read-model rebuilds byte-identical (all five event
         reason: 'flaky',
       }),
       makeReviewStrikeEvent('p-replay', {
-        reviewId: 'r-b',
+        reviewId: 'r-b2',
         target: t,
         branch: 'co/b',
         reason: 'again',
@@ -460,6 +594,29 @@ describe('ReviewStore.recordStrike + getStrikeCount (AC-L5-4 plumbing)', () => {
     }
   });
 
+  it('recordStrike is idempotent per (target, branch, reviewId)', () => {
+    const store = openReviewStore('p-strike-idempotent');
+    try {
+      store.recordStrike({
+        reviewId: 'rev-1',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'failing tests',
+      });
+      store.recordStrike({
+        reviewId: 'rev-1',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'retry',
+      });
+
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(1);
+      expect(store.hasStrike('co/l5-review-gate', 'co/l5-phase-a', 'rev-1')).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
   it('recording a PASS verdict resets the strike counter to 0', () => {
     const store = openReviewStore('p-strike-pass-reset');
     try {
@@ -483,6 +640,33 @@ describe('ReviewStore.recordStrike + getStrikeCount (AC-L5-4 plumbing)', () => {
     }
   });
 
+  it('PASS reset does not make an already-consumed reviewId strikeable again', () => {
+    const store = openReviewStore('p-strike-pass-keeps-consumed-review');
+    try {
+      store.recordStrike({
+        reviewId: 'rev-1',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'blocker',
+      });
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(1);
+
+      store.recordVerdict(verdict({ verdict: 'PASS', blockers: [] }));
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(0);
+      expect(store.hasStrike('co/l5-review-gate', 'co/l5-phase-a', 'rev-1')).toBe(true);
+
+      store.recordStrike({
+        reviewId: 'rev-1',
+        target: 'co/l5-review-gate',
+        branch: 'co/l5-phase-a',
+        reason: 'retry after pass',
+      });
+      expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
   it('recording an ISSUES verdict does NOT reset the counter', () => {
     const store = openReviewStore('p-strike-issues-norepo');
     try {
@@ -494,6 +678,195 @@ describe('ReviewStore.recordStrike + getStrikeCount (AC-L5-4 plumbing)', () => {
       });
       store.recordVerdict(verdict({ verdict: 'ISSUES', blockers: [{ summary: 'b' }] }));
       expect(store.getStrikeCount('co/l5-review-gate', 'co/l5-phase-a')).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('backfills legacy strike idempotency rows from review.strike events on open', () => {
+    const projectId = 'p-strike-backfill';
+    const target = 'co/l5-review-gate';
+    const branch = 'co/l5-phase-a';
+    const reviewId = 'rev-legacy-strike';
+    const raw = openProjectStore(projectId);
+    try {
+      raw.transaction((tx) => {
+        tx.append([
+          makeReviewStrikeEvent(projectId, {
+            reviewId,
+            target,
+            branch,
+            reason: 'legacy strike',
+          }),
+        ]);
+        const db = tx.raw as DatabaseSync;
+        ensureReviewTables(db, { backfillStrikes: false });
+        db.prepare(
+          `INSERT INTO reviews (target, branch, scope, review_id, strikes)
+           VALUES (?, ?, 'worker_merge', ?, 1)`,
+        ).run(target, branch, reviewId);
+        db.exec('DROP TABLE review_strikes');
+      });
+    } finally {
+      raw.close();
+    }
+
+    const store = openReviewStore(projectId);
+    try {
+      expect(store.getStrikeCount(target, branch)).toBe(1);
+      expect(store.hasStrike(target, branch, reviewId)).toBe(true);
+      store.recordStrike({ reviewId, target, branch, reason: 'retry' });
+      expect(store.getStrikeCount(target, branch)).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('backfills legacy duplicate strike rows to the replay-equivalent visible count', () => {
+    const projectId = 'p-strike-backfill-duplicates';
+    const target = 'co/l5-review-gate';
+    const branch = 'co/l5-phase-a';
+    const raw = openProjectStore(projectId);
+    try {
+      raw.transaction((tx) => {
+        tx.append([
+          makeReviewStrikeEvent(projectId, {
+            reviewId: 'rev-before-pass',
+            target,
+            branch,
+            reason: 'legacy duplicate before pass',
+          }),
+          makeReviewStrikeEvent(projectId, {
+            reviewId: 'rev-before-pass',
+            target,
+            branch,
+            reason: 'legacy duplicate before pass',
+          }),
+          makeReviewVerdictEvent(
+            projectId,
+            verdict({ reviewId: 'rev-pass', target, branch, verdict: 'PASS' }),
+          ),
+          makeReviewStrikeEvent(projectId, {
+            reviewId: 'rev-after-pass',
+            target,
+            branch,
+            reason: 'legacy duplicate after pass',
+          }),
+          makeReviewStrikeEvent(projectId, {
+            reviewId: 'rev-after-pass',
+            target,
+            branch,
+            reason: 'legacy duplicate after pass',
+          }),
+        ]);
+        const db = tx.raw as DatabaseSync;
+        ensureReviewTables(db);
+        db.prepare(
+          `INSERT INTO reviews (target, branch, scope, review_id, strikes)
+           VALUES (?, ?, 'worker_merge', ?, 4)
+           ON CONFLICT(target, branch) DO UPDATE SET strikes = 4`,
+        ).run(target, branch, 'rev-after-pass');
+        db.exec('DROP TABLE review_strikes');
+      });
+    } finally {
+      raw.close();
+    }
+
+    const store = openReviewStore(projectId);
+    try {
+      expect(store.hasStrike(target, branch, 'rev-before-pass')).toBe(true);
+      expect(store.hasStrike(target, branch, 'rev-after-pass')).toBe(true);
+      expect(store.getStrikeCount(target, branch)).toBe(1);
+      store.recordStrike({ reviewId: 'rev-after-pass', target, branch, reason: 'retry' });
+      expect(store.getStrikeCount(target, branch)).toBe(1);
+      store.recordStrike({ reviewId: 'rev-new', target, branch, reason: 'fresh' });
+      expect(store.getStrikeCount(target, branch)).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('backfills a post-PASS duplicate reviewId strike as already consumed', () => {
+    const projectId = 'p-strike-backfill-pass-duplicate';
+    const target = 'co/l5-review-gate';
+    const branch = 'co/l5-phase-a';
+    const raw = openProjectStore(projectId);
+    try {
+      raw.transaction((tx) => {
+        tx.append([
+          makeReviewStrikeEvent(projectId, {
+            reviewId: 'rev-retry',
+            target,
+            branch,
+            reason: 'legacy strike before pass',
+          }),
+          makeReviewVerdictEvent(
+            projectId,
+            verdict({ reviewId: 'rev-pass', target, branch, verdict: 'PASS' }),
+          ),
+          makeReviewStrikeEvent(projectId, {
+            reviewId: 'rev-retry',
+            target,
+            branch,
+            reason: 'legacy retry after pass',
+          }),
+        ]);
+        const db = tx.raw as DatabaseSync;
+        ensureReviewTables(db);
+        db.prepare(
+          `INSERT INTO reviews (target, branch, scope, review_id, strikes)
+           VALUES (?, ?, 'worker_merge', ?, 1)
+           ON CONFLICT(target, branch) DO UPDATE SET strikes = 1`,
+        ).run(target, branch, 'rev-retry');
+        db.exec('DROP TABLE review_strikes');
+      });
+    } finally {
+      raw.close();
+    }
+
+    const store = openReviewStore(projectId);
+    try {
+      expect(store.hasStrike(target, branch, 'rev-retry')).toBe(true);
+      expect(store.getStrikeCount(target, branch)).toBe(0);
+      store.recordStrike({ reviewId: 'rev-retry', target, branch, reason: 'retry' });
+      expect(store.getStrikeCount(target, branch)).toBe(0);
+      store.recordStrike({ reviewId: 'rev-new', target, branch, reason: 'fresh' });
+      expect(store.getStrikeCount(target, branch)).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('backfills legacy strike rows even when the reviews row is missing', () => {
+    const projectId = 'p-strike-backfill-missing-review-row';
+    const target = 'co/l5-review-gate';
+    const branch = 'co/l5-phase-a';
+    const raw = openProjectStore(projectId);
+    try {
+      raw.transaction((tx) => {
+        tx.append([
+          makeReviewStrikeEvent(projectId, {
+            reviewId: 'rev-legacy',
+            target,
+            branch,
+            reason: 'legacy strike',
+          }),
+        ]);
+        const db = tx.raw as DatabaseSync;
+        ensureReviewTables(db);
+        db.prepare('DELETE FROM reviews WHERE target = ? AND branch = ?').run(target, branch);
+        db.exec('DROP TABLE review_strikes');
+      });
+    } finally {
+      raw.close();
+    }
+
+    const store = openReviewStore(projectId);
+    try {
+      expect(store.hasStrike(target, branch, 'rev-legacy')).toBe(true);
+      expect(store.getStrikeCount(target, branch)).toBe(1);
+      store.recordStrike({ reviewId: 'rev-legacy', target, branch, reason: 'retry' });
+      expect(store.getStrikeCount(target, branch)).toBe(1);
     } finally {
       store.close();
     }
@@ -797,6 +1170,167 @@ describe('AC-L5-8 + AC-L5-11 — specRef on review.requested replays byte-identi
       expect(live).toContain('"branch":"co/b"');
       // Branch co/b has null spec_ref_kind (no specRef provided).
       expect(live).not.toContain('<TODO>');
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('ReviewProjector — committed invalid review histories fail on rebuild', () => {
+  it('allows exact duplicate same-branch review request events during replay', () => {
+    const store = openProjectStore('p-review-replay-idempotent-review-id');
+    try {
+      store.append([
+        makeReviewRequestedEvent(
+          'p-review-replay-idempotent-review-id',
+          request({ reviewId: 'rev-idempotent-replay', branch: 'co/a' }),
+        ),
+        makeReviewRequestedEvent(
+          'p-review-replay-idempotent-review-id',
+          request({ reviewId: 'rev-idempotent-replay', branch: 'co/a' }),
+        ),
+      ]);
+
+      expect(() =>
+        rebuildAll(store, [new ReviewProjector()], (e) =>
+          decode(e, reviewUpcasters, reviewSchemas),
+        ),
+      ).not.toThrow();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('treats an exact duplicate request after a verdict as a replay no-op', () => {
+    const store = openProjectStore('p-review-replay-idempotent-after-verdict');
+    try {
+      store.append([
+        makeReviewRequestedEvent(
+          'p-review-replay-idempotent-after-verdict',
+          request({ reviewId: 'rev-idempotent-after-verdict', branch: 'co/a' }),
+        ),
+        makeReviewVerdictEvent(
+          'p-review-replay-idempotent-after-verdict',
+          verdict({ reviewId: 'rev-idempotent-after-verdict', branch: 'co/a', verdict: 'PASS' }),
+        ),
+        makeReviewRequestedEvent(
+          'p-review-replay-idempotent-after-verdict',
+          request({ reviewId: 'rev-idempotent-after-verdict', branch: 'co/a' }),
+        ),
+      ]);
+
+      rebuildAll(store, [new ReviewProjector()], (e) => decode(e, reviewUpcasters, reviewSchemas));
+      const row = store.transaction(
+        (tx) =>
+          (tx.raw as DatabaseSync)
+            .prepare("SELECT verdict, reviewer FROM reviews WHERE branch = 'co/a'")
+            .get() as Record<string, unknown> | undefined,
+      );
+      expect(row).toEqual({ verdict: 'PASS', reviewer: 'rev-7' });
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects duplicate reviewIds across committed request events during replay', () => {
+    const store = openProjectStore('p-review-replay-duplicate-review-id');
+    try {
+      store.append([
+        makeReviewRequestedEvent(
+          'p-review-replay-duplicate-review-id',
+          request({ reviewId: 'rev-dup-replay', branch: 'co/a' }),
+        ),
+        makeReviewRequestedEvent(
+          'p-review-replay-duplicate-review-id',
+          request({ reviewId: 'rev-dup-replay', branch: 'co/b' }),
+        ),
+      ]);
+
+      expect(() =>
+        rebuildAll(store, [new ReviewProjector()], (e) =>
+          decode(e, reviewUpcasters, reviewSchemas),
+        ),
+      ).toThrow(/duplicate reviewId.*already belongs/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects a duplicate historical request after a newer request superseded the row', () => {
+    const store = openProjectStore('p-review-replay-historical-duplicate');
+    try {
+      store.append([
+        makeReviewRequestedEvent(
+          'p-review-replay-historical-duplicate',
+          request({ reviewId: 'rev-old-replay', branch: 'co/a' }),
+        ),
+        makeReviewRequestedEvent(
+          'p-review-replay-historical-duplicate',
+          request({ reviewId: 'rev-new-replay', branch: 'co/a' }),
+        ),
+        makeReviewRequestedEvent(
+          'p-review-replay-historical-duplicate',
+          request({ reviewId: 'rev-old-replay', branch: 'co/a' }),
+        ),
+      ]);
+
+      expect(() =>
+        rebuildAll(store, [new ReviewProjector()], (e) =>
+          decode(e, reviewUpcasters, reviewSchemas),
+        ),
+      ).toThrow(/duplicate reviewId.*conflicts|earlier request event/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects a stale verdict for an older review request id', () => {
+    const store = openProjectStore('p-review-replay-stale-verdict');
+    try {
+      store.append([
+        makeReviewRequestedEvent(
+          'p-review-replay-stale-verdict',
+          request({ reviewId: 'rev-old', scope: 'pr_merge' }),
+        ),
+        makeReviewRequestedEvent(
+          'p-review-replay-stale-verdict',
+          request({ reviewId: 'rev-new', scope: 'pr_merge' }),
+        ),
+        makeReviewVerdictEvent(
+          'p-review-replay-stale-verdict',
+          verdict({ reviewId: 'rev-old', scope: 'pr_merge' }),
+        ),
+      ]);
+
+      expect(() =>
+        rebuildAll(store, [new ReviewProjector()], (e) =>
+          decode(e, reviewUpcasters, reviewSchemas),
+        ),
+      ).toThrow(/stale review verdict/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects a verdict whose scope differs from the latest request scope', () => {
+    const store = openProjectStore('p-review-replay-scope-mismatch');
+    try {
+      store.append([
+        makeReviewRequestedEvent(
+          'p-review-replay-scope-mismatch',
+          request({ reviewId: 'rev-worker', scope: 'worker_merge' }),
+        ),
+        makeReviewVerdictEvent(
+          'p-review-replay-scope-mismatch',
+          verdict({ reviewId: 'rev-worker', scope: 'pr_merge' }),
+        ),
+      ]);
+
+      expect(() =>
+        rebuildAll(store, [new ReviewProjector()], (e) =>
+          decode(e, reviewUpcasters, reviewSchemas),
+        ),
+      ).toThrow(/scope.*pr_merge.*worker_merge/i);
     } finally {
       store.close();
     }

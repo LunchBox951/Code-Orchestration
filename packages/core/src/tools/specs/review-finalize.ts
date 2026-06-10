@@ -1,6 +1,11 @@
 import { z } from 'zod';
+import type { ReviewRequestRecord } from '../../review/events.js';
+import type { ReviewScope } from '../../review/ladder.js';
+import { resolveReviewerProfiles, reviewerRoleForScope } from '../../review/merge.js';
+import type { ReviewStore } from '../../review/review-store.js';
 import { assertValidVerdict, type ReviewVerdict } from '../../review/verdict.js';
 import type { ToolSpec } from '../registry.js';
+import { assertToolCallerRole } from '../caller-auth.js';
 
 // Every input field carries a .describe() (Principle 5 — the schemas are the single syntax source).
 // The verdict is STRUCTURED (verdict enum + named blockers/suggestions + an optional verification
@@ -35,8 +40,8 @@ const reviewFinalizeInput = z.object({
     .enum(['worker_merge', 'phase_merge', 'pr_merge'])
     .optional()
     .describe(
-      'The review strictness scope this verdict was judged under; defaults to worker_merge. ' +
-        'Use pr_merge for PR/remote publish reviews.',
+      'The review strictness scope this verdict was judged under; when omitted, defaults to the ' +
+        'requested scope recorded with this review_id. Use pr_merge for PR/remote publish reviews.',
     ),
   review_id: z
     .string()
@@ -70,6 +75,58 @@ const reviewFinalizeOutput = z.object({
 });
 type ReviewFinalizeOutput = z.infer<typeof reviewFinalizeOutput>;
 
+function expectedReviewerFromPlacement(
+  ctx: {
+    readonly dispatch?: {
+      readPlacements: () => readonly {
+        agent: string;
+        role: string;
+        kind?: string;
+        reviewId?: string;
+        reviewTarget?: string;
+        reviewBranch?: string;
+        reviewScope?: string;
+      }[];
+    };
+  },
+  request: ReviewRequestRecord,
+): string | undefined {
+  if (ctx.dispatch == null) return undefined;
+  const reviewId = request.reviewId;
+  const matches = ctx.dispatch
+    .readPlacements()
+    .filter(
+      (placement) =>
+        placement.agent === `${placement.role}@${reviewId}` &&
+        (placement.role === 'reviewer' || placement.role.startsWith('reviewer:')),
+    );
+  if (matches.length === 0) {
+    throw new Error(
+      `co_review_finalize: refused — no recorded reviewer placement exists for review_id ` +
+        `'${reviewId}'.`,
+    );
+  }
+  const compatible = matches.filter(
+    (placement) =>
+      (placement.reviewId == null || placement.reviewId === request.reviewId) &&
+      (placement.reviewTarget == null || placement.reviewTarget === request.target) &&
+      (placement.reviewBranch == null || placement.reviewBranch === request.branch) &&
+      (placement.reviewScope == null || placement.reviewScope === request.scope),
+  );
+  if (compatible.length === 0) {
+    throw new Error(
+      `co_review_finalize: refused — recorded reviewer placement for review_id '${reviewId}' ` +
+        'does not match the current review request target/branch/scope.',
+    );
+  }
+  const placed = compatible.filter((placement) => placement.kind === 'placed');
+  if (placed.length > 0) return placed.at(-1)!.agent;
+  throw new Error(
+    `co_review_finalize: refused — reviewer placement for review_id '${reviewId}' is waiting ` +
+      'and has not been placed yet.',
+  );
+}
+
 /**
  * `co_review_finalize` (AC-L5-1): the reviewer-facing verb that RECORDS a structured verdict as a
  * `review.verdict` event via `ctx.reviews`. It runs {@link assertValidVerdict}, so an
@@ -90,13 +147,51 @@ export const reviewFinalizeTool: ToolSpec<ReviewFinalizeInput, ReviewFinalizeOut
   description:
     'Record your structured review verdict (PASS or ISSUES) for a reviewed branch on a target. An ' +
     'ISSUES verdict must name at least one blocker; a PASS must carry none. The verdict is recorded ' +
-    'as an event your lead’s gated co_merge reads — it does not merge or tear anything down.',
+    'as an event read by gated merge, push, and PR tools — it does not merge or tear anything down.',
   inputSchema: reviewFinalizeInput,
   outputSchema: reviewFinalizeOutput,
   handler: (ctx, input): ReviewFinalizeOutput => {
     if (!ctx.reviews) {
       throw new Error(
         'co_review_finalize: the mount did not inject a review store (ctx.reviews absent).',
+      );
+    }
+    if (!ctx.roster) {
+      throw new Error(
+        'co_review_finalize: the mount did not inject a roster store (ctx.roster absent).',
+      );
+    }
+    assertToolCallerRole('co_review_finalize', ctx.roster, ctx.agent, ['reviewer']);
+    const request = ctx.reviews.getReviewRequest(input.target, input.branch);
+    if (request == null || request.reviewId !== input.review_id) {
+      throw new Error(
+        `co_review_finalize: refused — no matching review request exists for ` +
+          `'${input.branch}' into '${input.target}' with review_id '${input.review_id}'.`,
+      );
+    }
+    const scope = input.scope ?? request.scope;
+    if (scope !== request.scope) {
+      throw new Error(
+        `co_review_finalize: refused — verdict scope '${scope}' does not match requested ` +
+          `scope '${request.scope}'.`,
+      );
+    }
+    if (request.reviewerKind === 'human') {
+      throw new Error(
+        `co_review_finalize: refused — review_id '${request.reviewId}' is routed to human ` +
+          'review; record it by replying with review_response mail.',
+      );
+    }
+    const expectedReviewer =
+      expectedReviewerFromPlacement(ctx, request) ??
+      `${reviewerRoleForScope(
+        request.scope,
+        resolveReviewerProfiles(ctx.projectId),
+      )}@${request.reviewId}`;
+    if (ctx.agent !== expectedReviewer) {
+      throw new Error(
+        `co_review_finalize: refused — assigned reviewer for review_id '${request.reviewId}' is ` +
+          `'${expectedReviewer}', not '${ctx.agent}'.`,
       );
     }
     const verdict: ReviewVerdict = {
@@ -118,17 +213,21 @@ export const reviewFinalizeTool: ToolSpec<ReviewFinalizeInput, ReviewFinalizeOut
     }
     // Record from the (mutable) zod-parsed input — `verdict` above is the readonly view used only for
     // the cross-field validation; the event payload schema re-validates on append.
-    const record = ctx.reviews.recordVerdict({
+    const recordedVerdict = {
       reviewId: input.review_id,
       target: input.target,
       branch: input.branch,
-      ...(input.scope != null ? { scope: input.scope } : {}),
+      scope,
       reviewer: ctx.agent,
       verdict: input.verdict,
       blockers: input.blockers,
       suggestions: input.suggestions,
       ...(input.verification != null ? { verification: input.verification } : {}),
-    });
+    };
+    const record =
+      input.verdict === 'ISSUES'
+        ? recordIssuesVerdictAndRelease(ctx.reviews, recordedVerdict, scope)
+        : ctx.reviews.recordVerdict(recordedVerdict);
     return {
       review_id: record.reviewId,
       verdict: record.verdict,
@@ -136,3 +235,19 @@ export const reviewFinalizeTool: ToolSpec<ReviewFinalizeInput, ReviewFinalizeOut
     };
   },
 };
+
+function recordIssuesVerdictAndRelease(
+  reviews: Pick<ReviewStore, 'recordVerdictAndRelease' | 'getVerdict'>,
+  recordedVerdict: Parameters<ReviewStore['recordVerdictAndRelease']>[0],
+  scope: ReviewScope,
+): NonNullable<ReturnType<ReviewStore['getVerdict']>> {
+  reviews.recordVerdictAndRelease(recordedVerdict);
+  const record = reviews.getVerdict(recordedVerdict.target, recordedVerdict.branch, scope);
+  if (record == null) {
+    throw new Error(
+      `co_review_finalize: verdict row missing after atomic ISSUES record for ` +
+        `'${recordedVerdict.branch}' into '${recordedVerdict.target}'.`,
+    );
+  }
+  return record;
+}

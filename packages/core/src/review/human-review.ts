@@ -8,6 +8,7 @@ import {
 } from '../mail/events.js';
 import type { MailStore } from '../mail/mail-store.js';
 import { openConfigStore } from '../config/config-store.js';
+import type { ReviewVerdictRecorded } from './events.js';
 import type { ReviewScope } from './ladder.js';
 import type { ReviewStore } from './review-store.js';
 import type { Verdict } from './verdict.js';
@@ -152,12 +153,46 @@ export interface HumanVerdictParams {
  * drive the gate; the human's full prose is in the mail body which the operator can read).
  */
 export function recordHumanVerdict(reviews: ReviewStore, params: HumanVerdictParams): void {
+  const recordedVerdict = buildHumanReviewVerdict(reviews, params);
+  if (params.verdict === 'ISSUES') {
+    reviews.recordVerdictAndRelease(recordedVerdict);
+  } else {
+    reviews.recordVerdict(recordedVerdict);
+  }
+}
+
+export function buildHumanReviewVerdict(
+  reviews: Pick<ReviewStore, 'getReviewRequest'>,
+  params: HumanVerdictParams,
+): ReviewVerdictRecorded {
   const request = reviews.getReviewRequest(params.target, params.branch);
-  const scope =
-    params.scope ??
-    (request?.reviewId === params.reviewId ? request.scope : undefined) ??
-    'worker_merge';
-  reviews.recordVerdict({
+  if (request == null) {
+    throw new Error(
+      `recordHumanVerdict: missing durable human review.requested row for ` +
+        `'${params.branch}' into '${params.target}'; human verdicts must answer a ` +
+        'review_request.',
+    );
+  }
+  if (request.reviewId !== params.reviewId) {
+    throw new Error(
+      `recordHumanVerdict: stale review verdict '${params.reviewId}' for '${params.branch}' ` +
+        `into '${params.target}' does not match the latest request '${request.reviewId}'.`,
+    );
+  }
+  if (request.reviewerKind !== 'human') {
+    throw new Error(
+      `recordHumanVerdict: review request '${params.reviewId}' for '${params.branch}' into ` +
+        `'${params.target}' is not a human review_request (reviewerKind=${request.reviewerKind}).`,
+    );
+  }
+  if (params.scope != null && params.scope !== request.scope) {
+    throw new Error(
+      `recordHumanVerdict: verdict scope '${params.scope}' for '${params.branch}' into ` +
+        `'${params.target}' does not match the human review.requested scope '${request.scope}'.`,
+    );
+  }
+  const scope = request.scope;
+  return {
     reviewId: params.reviewId,
     target: params.target,
     branch: params.branch,
@@ -181,7 +216,7 @@ export function recordHumanVerdict(reviews: ReviewStore, params: HumanVerdictPar
       suite_result: params.verdict === 'PASS' ? 'pass' : 'fail',
       baseline_compared: false,
     },
-  });
+  };
 }
 
 // ── L9 stub: operator-facing review presentation seam ────────────────────────────────────────────

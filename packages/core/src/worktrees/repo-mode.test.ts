@@ -299,7 +299,7 @@ describe('CoRepoModeGate — the L5 merge enactment (owner + offline real; the r
   };
 
   it.each(['owner', 'offline'] as const)(
-    'enactPublish in %s mode checks out the target and --no-ff merges the reviewed branch',
+    'enactPublish in %s mode checks out the target and --no-ff --signoff merges the reviewed branch',
     (mode) => {
       const git = recordingGitExec();
       const result = new CoRepoModeGate().enactPublish(req, mode, {
@@ -309,7 +309,7 @@ describe('CoRepoModeGate — the L5 merge enactment (owner + offline real; the r
       expect(result).toEqual({ merged: true, commitSha: 'c'.repeat(40), mode });
       expect(git.calls).toEqual([
         ['checkout', 'co/l5-review-gate'],
-        ['merge', '--no-ff', '-m', req.message, 'co/l5-phase-a'],
+        ['merge', '--no-ff', '--signoff', '-m', req.message, 'co/l5-phase-a'],
       ]);
     },
   );
@@ -320,6 +320,29 @@ describe('CoRepoModeGate — the L5 merge enactment (owner + offline real; the r
       new CoRepoModeGate().enactPublish(req, 'contributor', { gitExec: git.exec }),
     ).toThrow(/gated co_push \/ co_pr_merge path/);
     expect(git.calls).toEqual([]); // it refuses BEFORE touching git.
+  });
+
+  it('enactPublish rejects unsafe publish refs before invoking git', () => {
+    const gate = new CoRepoModeGate();
+    for (const unsafe of [
+      { ...req, into: '--detach' },
+      { ...req, branch: '--force' },
+      { ...req, into: ':main' },
+      { ...req, branch: '+co/l5-phase-a' },
+      { ...req, into: 'HEAD~1' },
+      { ...req, into: '@{-1}' },
+      { ...req, branch: 'main..topic' },
+      { ...req, into: 'HEAD' },
+      { ...req, into: 'origin/main' },
+      { ...req, into: 'refs/heads/main' },
+      { ...req, branch: 'a'.repeat(40) },
+    ]) {
+      const git = recordingGitExec();
+      expect(() => gate.enactPublish(unsafe, 'owner', { gitExec: git.exec })).toThrow(
+        /safe branch name/,
+      );
+      expect(git.calls).toEqual([]);
+    }
   });
 
   it('parseHostConventions throws (the rich CONTRIBUTING/PR-template parse is deferred to L9)', () => {
@@ -459,6 +482,31 @@ describe('CoRepoModeGate.enactPush — push enactment (AC-L5-6)', () => {
     );
     expect(git.calls).toEqual([]); // refused before any git op
   });
+
+  it('rejects leading-dash remotes and refs before invoking git', () => {
+    const gate = new CoRepoModeGate();
+    for (const req of [
+      { ...pushReq, remote: '--force' },
+      { ...pushReq, into: '--force' },
+      { ...pushReq, branch: '--force' },
+      { ...pushReq, into: ':main' },
+      { ...pushReq, into: 'main:other' },
+      { ...pushReq, branch: '+main' },
+      { ...pushReq, into: 'HEAD~1' },
+      { ...pushReq, into: '@{-1}' },
+      { ...pushReq, branch: 'main..topic' },
+      { ...pushReq, into: 'HEAD' },
+      { ...pushReq, into: 'origin/main' },
+      { ...pushReq, into: 'refs/heads/main' },
+      { ...pushReq, branch: 'a'.repeat(40) },
+    ]) {
+      const git = recordingGitExec();
+      expect(() => gate.enactPush(req, 'owner', { gitExec: git.exec })).toThrow(
+        /must (not start with '-'|be a safe branch name)/,
+      );
+      expect(git.calls).toEqual([]);
+    }
+  });
 });
 
 // ── 8) CoRepoModeGate.enactPrMerge — owner/contributor real; offline loud-fails (Phase C) ─────────
@@ -529,5 +577,27 @@ describe('CoRepoModeGate.enactPrMerge — PR creation enactment (AC-L5-6)', () =
       /PR capability is false/,
     );
     expect(gh.calls).toEqual([]); // refused before any gh op
+  });
+
+  it('rejects unsafe PR head/base refs before invoking gh', () => {
+    const gate = new CoRepoModeGate();
+    for (const req of [
+      { ...prReq, into: ':main' },
+      { ...prReq, into: 'owner:main' },
+      { ...prReq, branch: '+co/l5-phase-a' },
+      { ...prReq, branch: 'HEAD~1' },
+      { ...prReq, into: '@{-1}' },
+      { ...prReq, branch: 'main..topic' },
+      { ...prReq, into: 'HEAD' },
+      { ...prReq, into: 'origin/main' },
+      { ...prReq, into: 'refs/heads/main' },
+      { ...prReq, branch: 'a'.repeat(40) },
+    ]) {
+      const gh = recordingGhExec();
+      expect(() => gate.enactPrMerge(req, 'owner', { ghExec: gh.exec })).toThrow(
+        /safe branch name/,
+      );
+      expect(gh.calls).toEqual([]);
+    }
   });
 });

@@ -1,7 +1,7 @@
 import type { MailStore } from '../mail/mail-store.js';
 import { MAIL_WORKER_DONE } from '../mail/events.js';
 import { resolve } from 'node:path';
-import type { TestOutcome } from './events.js';
+import { finishRecordedSchema, type TestOutcome } from './events.js';
 import { renderCommitMessage, type CommitIntent } from './messages.js';
 import type { GitReader } from './detect-base.js';
 import { DEFAULT_PROVISION_MANIFEST, type ProvisioningManifest } from './provision.js';
@@ -172,6 +172,13 @@ export function finishWorktree(
     );
   }
   assertCwdMatchesRecordedSandbox(repoCwd, record);
+  finishRecordedSchema.parse({
+    branch,
+    baseSha: record.baseSha,
+    commitSha: 'pre-commit-validation',
+    tests: [...tests],
+    agent,
+  });
 
   // 2) Render the house-style commit message (provider-deterministic — no voice parameter).
   const commitMessage = renderCommitMessage(intent);
@@ -198,7 +205,7 @@ export function finishWorktree(
     `Tests: ${summarizeTests(tests)}.` +
     (notes != null && notes.trim().length > 0 ? `\n\nNotes: ${notes.trim()}` : '');
   const delivered = store.recordFinishAndWorkerDone(
-    { branch, baseSha: record.baseSha, commitSha, tests: [...tests] },
+    { branch, baseSha: record.baseSha, commitSha, tests: [...tests], agent },
     {
       type: MAIL_WORKER_DONE,
       to: record.parent,

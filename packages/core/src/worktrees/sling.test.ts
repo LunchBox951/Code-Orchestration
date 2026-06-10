@@ -6,9 +6,16 @@ import { join } from 'node:path';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
 import { IDENTITY_PERSONA_KEY } from '../permissions/identity-guard.js';
 import { projectDataDir } from '../store/paths.js';
+import { WORKTREE_PROVISION_CONFIG_KEY } from './provision.js';
 import { openWorktreeStore, type WorktreeStore } from './worktree-store.js';
 import { type GitReader } from './detect-base.js';
-import { slingWorktree, worktreePathFor, type BaselineProbe, type GitExec } from './sling.js';
+import {
+  defaultGitExec,
+  slingWorktree,
+  worktreePathFor,
+  type BaselineProbe,
+  type GitExec,
+} from './sling.js';
 
 // AC-L3-1 (co_sling core): from the auto-detected base, create an isolated worktree+branch under
 // program-data, record it, and capture a branch-off baseline — never touching the repo with
@@ -51,6 +58,14 @@ function git(cwd: string, ...args: string[]): string {
     ],
     { cwd, encoding: 'utf8' },
   ).trim();
+}
+
+function rawGit(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+function branchExists(cwd: string, branch: string): boolean {
+  return git(cwd, 'branch', '--list', branch).length > 0;
 }
 
 /** A real repo with a `main` branch + one commit, no remote → base auto-detects to `main`. */
@@ -204,6 +219,7 @@ describe('slingWorktree — create + record from the auto-detected base', () => 
   it('does not record a live worktree without its baseline when the baseline probe fails', () => {
     const repo = makeMainRepo();
     const store = openStore('p-probe-fail');
+    const path = worktreePathFor('p-probe-fail', 'co/probe-fail');
 
     expect(() =>
       slingWorktree(
@@ -220,6 +236,63 @@ describe('slingWorktree — create + record from the auto-detected base', () => 
 
     expect(store.getWorktree('co/probe-fail')).toBeUndefined();
     expect(store.getBaseline('co/probe-fail')).toBeUndefined();
+    expect(existsSync(path)).toBe(false);
+    expect(branchExists(repo, 'co/probe-fail')).toBe(false);
+  });
+
+  it('cleans up the git worktree and branch when provisioning fails after worktree add', () => {
+    const repo = makeMainRepo();
+    const store = openStore('p-provision-fail');
+    const path = worktreePathFor('p-provision-fail', 'co/provision-fail');
+
+    expect(() =>
+      slingWorktree(
+        store,
+        {
+          parent: 'lead-7',
+          branch: 'co/provision-fail',
+          repoCwd: repo,
+          projectId: 'p-provision-fail',
+        },
+        {
+          provisioner: () => {
+            throw new Error('provision exploded');
+          },
+          probe: knownProbe,
+        },
+      ),
+    ).toThrow(/provision exploded/);
+
+    expect(store.getWorktree('co/provision-fail')).toBeUndefined();
+    expect(store.getBaseline('co/provision-fail')).toBeUndefined();
+    expect(existsSync(path)).toBe(false);
+    expect(branchExists(repo, 'co/provision-fail')).toBe(false);
+  });
+
+  it('cleans up the git worktree and branch when the durable store record fails', () => {
+    const repo = makeMainRepo();
+    const path = worktreePathFor('p-store-fail', 'co/store-fail');
+    const store = {
+      recordWorktreeAndBaseline: () => {
+        throw new Error('store exploded');
+      },
+    } as unknown as WorktreeStore;
+
+    expect(() =>
+      slingWorktree(
+        store,
+        {
+          parent: 'lead-7',
+          branch: 'co/store-fail',
+          repoCwd: repo,
+          projectId: 'p-store-fail',
+        },
+        { provisioner: () => {}, probe: knownProbe },
+      ),
+    ).toThrow(/store exploded/);
+
+    expect(existsSync(path)).toBe(false);
+    expect(branchExists(repo, 'co/store-fail')).toBe(false);
   });
 
   it('rejects a non-co/ branch and an empty parent fail-loud (Principle 9)', () => {
@@ -284,7 +357,7 @@ describe('slingWorktree — persona identity pinning (AC-L6a-7)', () => {
     return { exec, calls };
   }
 
-  it('issues git config user.email and user.name on the sandbox when persona is configured', () => {
+  it('issues git config --worktree user.email and user.name on the sandbox when persona is configured', () => {
     const cfg = openCfg();
     cfg.setGlobal(IDENTITY_PERSONA_KEY, { name: 'Persona', email: 'persona@noreply.github.com' });
     cfg.close();
@@ -301,19 +374,92 @@ describe('slingWorktree — persona identity pinning (AC-L6a-7)', () => {
     );
 
     // Verify that user.email and user.name were set on the SANDBOX path (not repoCwd).
-    const emailCall = calls.find((c) => c[1][0] === 'config' && c[1][1] === 'user.email');
-    const nameCall = calls.find((c) => c[1][0] === 'config' && c[1][1] === 'user.name');
+    const extensionCall = calls.find(
+      (c) => c[0] === '/fake-repo' && c[1].join(' ') === 'config extensions.worktreeConfig true',
+    );
+    const emailCall = calls.find(
+      (c) => c[1][0] === 'config' && c[1][1] === '--worktree' && c[1][2] === 'user.email',
+    );
+    const nameCall = calls.find(
+      (c) => c[1][0] === 'config' && c[1][1] === '--worktree' && c[1][2] === 'user.name',
+    );
 
+    expect(extensionCall).toBeDefined();
     expect(emailCall).toBeDefined();
-    expect(emailCall![1]).toEqual(['config', 'user.email', 'persona@noreply.github.com']);
+    expect(emailCall![1]).toEqual([
+      'config',
+      '--worktree',
+      'user.email',
+      'persona@noreply.github.com',
+    ]);
     expect(nameCall).toBeDefined();
-    expect(nameCall![1]).toEqual(['config', 'user.name', 'Persona']);
+    expect(nameCall![1]).toEqual(['config', '--worktree', 'user.name', 'Persona']);
 
     // The sandbox path (cwd for those calls) must NOT be the repoCwd.
     expect(emailCall![0]).not.toBe('/fake-repo');
     expect(nameCall![0]).not.toBe('/fake-repo');
     // Both must target the same worktree sandbox path.
     expect(emailCall![0]).toBe(nameCall![0]);
+  });
+
+  it('pins persona in the worktree-local config without changing the source repo user identity', () => {
+    const repo = makeMainRepo();
+    rawGit(repo, 'config', 'user.email', 'source@example.com');
+    rawGit(repo, 'config', 'user.name', 'Source User');
+
+    const cfg = openCfg();
+    cfg.setGlobal(IDENTITY_PERSONA_KEY, { name: 'Persona', email: 'persona@noreply.github.com' });
+    cfg.close();
+    cfgStores.pop();
+
+    const store = openWorktreeStore('p-real-pin');
+    stores.push(store);
+    const result = slingWorktree(
+      store,
+      { parent: 'lead-7', branch: 'co/real-pin', repoCwd: repo, projectId: 'p-real-pin' },
+      { probe: () => [] },
+    );
+
+    expect(rawGit(repo, 'config', '--get', 'user.email')).toBe('source@example.com');
+    expect(rawGit(repo, 'config', '--get', 'user.name')).toBe('Source User');
+    expect(rawGit(repo, 'config', '--get', 'extensions.worktreeConfig')).toBe('true');
+    expect(rawGit(result.worktreePath, 'config', '--worktree', '--get', 'user.email')).toBe(
+      'persona@noreply.github.com',
+    );
+    expect(rawGit(result.worktreePath, 'config', '--worktree', '--get', 'user.name')).toBe(
+      'Persona',
+    );
+  });
+
+  it('cleans up the git worktree and branch when persona pinning fails after worktree add', () => {
+    const repo = makeMainRepo();
+    const path = worktreePathFor('p-pin-fail', 'co/pin-fail');
+    const cfg = openCfg();
+    cfg.setGlobal(IDENTITY_PERSONA_KEY, { name: 'Persona', email: 'persona@noreply.github.com' });
+    cfg.close();
+    cfgStores.pop();
+
+    const store = openWorktreeStore('p-pin-fail');
+    stores.push(store);
+    const gitExec: GitExec = (cwd, args) => {
+      if (args[0] === 'config' && args[1] === '--worktree' && args[2] === 'user.email') {
+        throw new Error('pin exploded');
+      }
+      defaultGitExec(cwd, args);
+    };
+
+    expect(() =>
+      slingWorktree(
+        store,
+        { parent: 'lead-7', branch: 'co/pin-fail', repoCwd: repo, projectId: 'p-pin-fail' },
+        { gitExec, probe: () => [] },
+      ),
+    ).toThrow(/pin exploded/);
+
+    expect(store.getWorktree('co/pin-fail')).toBeUndefined();
+    expect(store.getBaseline('co/pin-fail')).toBeUndefined();
+    expect(existsSync(path)).toBe(false);
+    expect(branchExists(repo, 'co/pin-fail')).toBe(false);
   });
 
   it('makes NO git config calls when identity.persona is not configured', () => {
@@ -330,5 +476,61 @@ describe('slingWorktree — persona identity pinning (AC-L6a-7)', () => {
 
     const configCalls = calls.filter((c) => c[1][0] === 'config');
     expect(configCalls).toHaveLength(0);
+  });
+
+  it('validates malformed persona config before creating the worktree branch', () => {
+    const cfg = openCfg();
+    cfg.setGlobal(IDENTITY_PERSONA_KEY, { name: '', email: 'persona@noreply.github.com' });
+    cfg.close();
+    cfgStores.pop();
+
+    const { exec, calls } = makeRecordingExec();
+    const store = openWorktreeStore('p-bad-persona');
+    stores.push(store);
+
+    expect(() =>
+      slingWorktree(
+        store,
+        {
+          parent: 'lead-7',
+          branch: 'co/bad-persona',
+          repoCwd: '/fake-repo',
+          projectId: 'p-bad-persona',
+        },
+        { gitReader: fakeGitReader, gitExec: exec, provisioner: () => {}, probe: () => [] },
+      ),
+    ).toThrow(/identity\.persona|persona/i);
+
+    expect(calls).toHaveLength(0);
+    expect(store.getWorktree('co/bad-persona')).toBeUndefined();
+    expect(store.getBaseline('co/bad-persona')).toBeUndefined();
+  });
+
+  it('validates malformed provision config before creating the worktree branch', () => {
+    const cfg = openCfg();
+    cfg.setGlobal(WORKTREE_PROVISION_CONFIG_KEY, { node_modules: 'teleport' });
+    cfg.close();
+    cfgStores.pop();
+
+    const { exec, calls } = makeRecordingExec();
+    const store = openWorktreeStore('p-bad-provision');
+    stores.push(store);
+
+    expect(() =>
+      slingWorktree(
+        store,
+        {
+          parent: 'lead-7',
+          branch: 'co/bad-provision',
+          repoCwd: '/fake-repo',
+          projectId: 'p-bad-provision',
+        },
+        { gitReader: fakeGitReader, gitExec: exec, probe: () => [] },
+      ),
+    ).toThrow(/worktree\.provision|malformed/i);
+
+    expect(calls).toHaveLength(0);
+    expect(store.getWorktree('co/bad-provision')).toBeUndefined();
+    expect(store.getBaseline('co/bad-provision')).toBeUndefined();
   });
 });

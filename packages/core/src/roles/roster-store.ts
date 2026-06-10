@@ -22,6 +22,7 @@ import {
   ensureRosterTables,
   selectAgent,
   selectAllAgents,
+  validateAgentRegistration,
 } from './roster-projector.js';
 
 export interface RosterStore {
@@ -50,6 +51,8 @@ export function openRosterStore(projectId: string): RosterStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensureRosterTables(db);
+        const existing = validateAgentRegistration(db, rec);
+        if (existing != null) return existing;
         const [stored] = tx.append([makeAgentRegisteredEvent(projectId, rec)]);
         applyEvent(tx, decode(stored!, rolesUpcasters, rolesSchemas), projectors);
         const row = selectAgent(db, rec.agentId);

@@ -180,6 +180,10 @@ export const placementDecidedPlacedSchema = z.object({
   role: z.string().min(1),
   work_size: workSizeSchema,
   reasoning_budget: reasoningBudgetSchema,
+  review_id: z.string().min(1).optional(),
+  review_target: z.string().min(1).optional(),
+  review_branch: z.string().min(1).optional(),
+  review_scope: z.enum(['worker_merge', 'phase_merge', 'pr_merge']).optional(),
   provider: providerSchema,
   account: z.string().min(1).optional(),
   model: z.string().min(1),
@@ -192,6 +196,10 @@ export const placementDecidedWaitingSchema = z.object({
   role: z.string().min(1),
   work_size: workSizeSchema,
   reasoning_budget: reasoningBudgetSchema,
+  review_id: z.string().min(1).optional(),
+  review_target: z.string().min(1).optional(),
+  review_branch: z.string().min(1).optional(),
+  review_scope: z.enum(['worker_merge', 'phase_merge', 'pr_merge']).optional(),
   eta_reset_at: z.string().optional(),
   reason: z.string().min(1),
   maxed_providers: z.array(providerSchema),
@@ -219,6 +227,10 @@ export interface PlacementRecord {
   readonly role: string;
   readonly workSize: string;
   readonly reasoningBudget: string;
+  readonly reviewId?: string;
+  readonly reviewTarget?: string;
+  readonly reviewBranch?: string;
+  readonly reviewScope?: string;
   readonly kind: 'placed' | 'waiting';
   /** placed only */
   readonly provider?: string;

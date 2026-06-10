@@ -44,9 +44,9 @@ These are the top-level conditions that, all met, *are* v1.
 - `SH-4` ☐ `co` successfully operates on **at least one stranger repo**, including a **local-only
   (Offline-mode)** repo with no remote — proving Principle 5 (`self-describing`) and that GitHub is
   never a hard dependency.
-- `SH-5` ☐ Every hard gate holds under self-hosting: no raw `git push` / `gh pr merge` path exists;
-  only gated `co merge` / `co push` / `co pr-merge` reach `master`/remote/PR (Principle 7 —
-  `gated-by-default`).
+- `SH-5` ☐ Every hard gate holds under self-hosting: no raw `git push` / `gh pr create` /
+  `gh pr merge` path exists; only gated `co merge` / `co push` / `co pr-merge` reach
+  `master`/remote/PR (Principle 7 — `gated-by-default`).
 
 ## B. The two surfaces (P1, P2, P3, P15)
 
@@ -64,16 +64,22 @@ These are the top-level conditions that, all met, *are* v1.
 - `SF-6` ◐ Artifacts (mail, commit messages) are **rendered per audience** — structured under the
   hood, clean human view on top; provider voice stays out of artifacts (Principle 3). L1 ships the
   renderer-registry seam + a generic default renderer; L3 ships provider-deterministic commit /
-  merge / PR message renderers and `co_finish` consumes the commit renderer. Remaining: per-type
-  human mail renderers are the app (L9), and merge/PR renderers get their gated consumers in L5.
+  merge / PR message renderers and `co_finish` consumes the commit renderer. L6a wires merge / PR
+  renderers into the gated `co_merge` and `co_pr_merge` tools. Remaining: per-type human mail
+  renderers are the app (L9).
 
 ## C. Roles, dispatch & escalation (P8, P11, P13)
 
-- `RL-1` ☐ The five base roles work — **Coordinator, Lead, Implementer, Reviewer, Researcher** —
-  each with a distinct mandate + permission profile (Principle 11, `AGENT-ROLES`).
-- `RL-2` ☐ Sub-roles specialize approach and may only **narrow** permissions (Principle 11).
+- `RL-1` ◐ The five base roles work — **Coordinator, Lead, Implementer, Reviewer, Researcher** —
+  each with a distinct mandate + permission profile (Principle 11, `AGENT-ROLES`). L6a lands the
+  authoritative profiles, role-scoped toolsets, durable roster records, spawn-rule checks, and
+  owner-tier tool preflights. Remaining: live Conductor/session enforcement around every hosted
+  agent and app-visible role operations.
+- `RL-2` ◐ Sub-roles specialize approach and may only **narrow** permissions (Principle 11). L6a
+  lands sub-role vocabulary, parse/validation, and completeness checks that reject widening.
+  Remaining: live sub-role-specific hosted behavior beyond the base-role tool ceiling.
 - `RL-3` ◐ Escalation works: repeated failure / stuck worker / intent ambiguity climbs the spawn
-  chain (parent → Coordinator → operator), resolved at the lowest competent level (Principle 8). L1 delivers the escalation protocol — resolve-or-forward (never-drop; send throws on failed persist), ask-on-intent-ambiguity, parent<->child threaded brainstorm, the upward chain, and clarify-timeout=forward-up policy. Remaining: the 3-strike trigger (L5) + roster/authority (L6).
+  chain (parent → Coordinator → operator), resolved at the lowest competent level (Principle 8). L1 delivers the escalation protocol — resolve-or-forward (never-drop; send throws on failed persist), ask-on-intent-ambiguity, parent<->child threaded brainstorm, the upward chain, and clarify-timeout=forward-up policy. L6a adds durable roster authority and the `co_kickback` review-budget escalation trigger. Remaining: live stuck-worker / intent-ambiguity triggers from the Conductor/session layer.
 - `RL-4` ◐ A **rate-limit-aware balancer** spreads load across the default provider accounts; when tapped, it
   **paces** rather than degrading quality (Principle 13, `DISPATCH`, `COST-and-USAGE`). L4 ships
   provider/account usage buckets, passive live usage adapters, provider-neutral tier placement across
@@ -83,23 +89,32 @@ These are the top-level conditions that, all met, *are* v1.
 
 ## D. Review gate & integration (P6, P7, P10)
 
-- `RG-1` ☐ Nothing reaches `master`/remote/PR without a **PASS** (agent or human); two verdicts only
-  (PASS / ISSUES) (Principle 7).
-- `RG-2` ☐ The blocker bar **tightens toward production** — nits ride as suggestions into `dev`,
-  become blockers at the `main`/PR gate (Principle 7).
-- `RG-3` ☐ Operator override exists, is **audited, and records its reason** (Principle 7).
+- `RG-1` ◐ Nothing reaches `master`/remote/PR without a **PASS** (agent or human) except the
+  audited `@operator` override in `RG-3`; two verdicts only (PASS / ISSUES) (Principle 7). L6a
+  lands the headless `co_merge` / `co_push` / `co_pr_merge` PASS gates, stale-finish checks, and
+  owner/contributor publish guards. Remaining: L7 hosted-surface enforcement so live agents cannot
+  use a raw fallback path.
+- `RG-2` ◐ The blocker bar **tightens toward production** — nits ride as suggestions into `dev`,
+  become blockers at the `main`/PR gate (Principle 7). L6a lands the deterministic review ladder
+  and reviewer-profile routing by scope. Remaining: live reviewer sessions must apply the ladder
+  while producing verdicts.
+- `RG-3` ◐ Operator override exists, is **audited, and records its reason** (Principle 7). L6a
+  lands the headless `co_merge`/`co_push`/`co_pr_merge` override path with operator-only reasoned
+  audit records. Remaining: L7 hosted-surface enforcement/UX around invoking the override.
 - `RG-4` ☐ Acceptance criteria are the **cohesion contract**: the spec produces them, the plan
   structures them, the implementer targets them, tests encode them, the reviewer enforces them
   (Principle 10) — and they trace to this document.
-- `RG-5` ☐ Only the **destructive boundary** is hard-blocked; protocol adherence is reactive nudges
-  (Principle 6, `PERMISSIONS`).
+- `RG-5` ◐ Only the **destructive boundary** is hard-blocked; protocol adherence is reactive nudges
+  (Principle 6, `PERMISSIONS`). L6a lands the declared hard-block registry, drift check, and
+  non-blocking nudges. Remaining: L7 runtime hook enforcement in the hosted agent surfaces.
 
 ## E. Worktrees & pristine repo (P6, P12)
 
 - `WT-1` ◐ Every worker gets an **isolated worktree/branch**; parallel work never collides; merges
   are explicit and locked (Principle 6, `WORKTREES`). L3 ships `co_sling`: branch/base capture,
-  injective program-data sandbox paths, and recorded worktree+baseline facts. Remaining: worker
-  spawn into those sandboxes (L7) and locked/gated integration (L5).
+  injective program-data sandbox paths, and recorded worktree+baseline facts. L6a adds locked,
+  gated headless integration through the review/publish tools. Remaining: worker spawn into those
+  sandboxes (L7) and live hosted enforcement around the same gates.
 - `WT-2` ◐ Gitignored essentials are copied/pointer-linked into worktrees so non-trivial repos and
   environments don't break (Principle 6). L3 ships the provisioning manifest with symlink / copy /
   isolated-copy mechanisms, config overrides, and runnable fixture coverage. Remaining: richer
@@ -109,7 +124,8 @@ These are the top-level conditions that, all met, *are* v1.
 - `WT-4` ◐ Repository-relationship modes work — **Owner / Contributor / Offline** — auto-detected
   with override; the review gate applies in all three (`WORKTREES`). L3 ships read-only
   auto-detection, `repo.mode` override, Offline push/PR-disabled capabilities, and minimal host
-  convention probes. Remaining: the L5 gated publish verbs applying the gate in all three modes.
+  convention probes. L6a applies the gated publish verbs across Owner, Contributor, and Offline
+  modes. Remaining: live hosted use of those verbs and upstream PR lifecycle beyond creation.
 
 ## F. State, recovery & observability (P9, P14)
 

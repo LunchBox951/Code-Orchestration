@@ -65,9 +65,9 @@ describe('AC-L2-5 — toolsForRole returns the role’s scoped tools, in registr
   });
 
   it('registry order is preserved (the lead’s offered tools appear in registry order)', () => {
-    // co_finish is implementer-scoped (a lead integrates reviewed branches; it does not finish
-    // through the gate), so no single role carries the whole registry. The order invariant still
-    // holds: the lead's offered tools are its seed filtered IN REGISTRY ORDER.
+    // A lead may own a branch kicked back by its coordinator, so it needs the same durable finish
+    // path an implementer uses. The order invariant still holds: the lead's offered tools are its
+    // seed filtered IN REGISTRY ORDER.
     const order = buildCoreRegistry()
       .list()
       .map((t) => t.name);
@@ -75,8 +75,8 @@ describe('AC-L2-5 — toolsForRole returns the role’s scoped tools, in registr
     expect(toolsForRole('lead').map((t) => t.name)).toEqual(
       order.filter((n) => leadSeed.includes(n)),
     );
-    // co_finish is offered to the implementer, not the lead.
-    expect(toolsForRole('lead').map((t) => t.name)).not.toContain('co_finish');
+    // co_finish is offered to both code-owning worker roles.
+    expect(toolsForRole('lead').map((t) => t.name)).toContain('co_finish');
     expect(toolsForRole('implementer').map((t) => t.name)).toContain('co_finish');
   });
 });

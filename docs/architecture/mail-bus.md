@@ -10,8 +10,9 @@ view.** Because mail is typed, the app knows each schema and renders it natively
 
 - `clarify_request` → a question card with a reply box
 - `approval` → an approve / decline card with the action laid out
-- `review_verdict` → ✅ / ❌ with the blockers formatted
 - `review_request` (human-review scope) → a diff-review card with the acceptance criteria + **PASS / ISSUES** actions
+- `review_response` → a rendered **PASS / ISSUES** verdict from `review_verdict`, with blocker /
+  suggestion prose rendered from the message body
 - `escalation` → a readable problem summary + context
 - prose types (`chat`, `operator_message`) → just nice markdown
 
@@ -63,13 +64,12 @@ declared mail type has a **real, exercised flow.** The prototype's "declared but
 types are exactly the half-implemented surface we banned — the set is rationalized to types
 with live flows, and a stubbed type fails the build.
 
-The *concrete* enum is **deferred** — derived from the live flows as the operator-facing topics
-lock, not ported wholesale from the prototype (the same deferral the CLI and MCP surfaces take —
-[CLI-REFERENCE](cli-reference.md), [MCP-TOOLS](mcp-tools.md)). One structural change is already certain: the prototype's `dispatch`
-type does **not** carry, because spawning is an MCP tool call to the Conductor, not mail
-([CORE-CONCEPTS](../concepts.md)). And types whose *delivery* rides on the runtime mechanism — e.g. whether a finish
-or a `nudge` is a mail envelope or direct session-injection — are settled with the substrate
-([runtime-substrate](../research/runtime-substrate.md)).
+The concrete enum now lives in `packages/core/src/mail/events.ts` and is kept honest by the
+completeness gate. Prototype-only types are not ported wholesale: the prototype's `dispatch` type
+does **not** carry, because spawning is an MCP tool call to the Conductor, not mail
+([CORE-CONCEPTS](../concepts.md)). Types whose *delivery* rides on the runtime mechanism — e.g.
+whether a finish or a `nudge` is a mail envelope or direct session-injection — are settled with the
+substrate ([runtime-substrate](../research/runtime-substrate.md)) before they enter the enum.
 
 ### Escalation is a first-class protocol, not ad-hoc mail
 

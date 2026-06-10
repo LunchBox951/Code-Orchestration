@@ -41,6 +41,9 @@ const CREATE_WORKTREE_TABLES = `
     base_sha   TEXT NOT NULL,
     path       TEXT NOT NULL,
     parent     TEXT NOT NULL,
+    agent      TEXT,
+    role       TEXT,
+    sub_role   TEXT,
     created_ts INTEGER NOT NULL,
     removed    INTEGER NOT NULL DEFAULT 0,
     provisioned TEXT
@@ -57,7 +60,9 @@ const CREATE_WORKTREE_TABLES = `
     base_sha    TEXT NOT NULL,
     commit_sha  TEXT NOT NULL,
     tests       TEXT NOT NULL,
-    recorded_ts INTEGER NOT NULL
+    recorded_ts INTEGER NOT NULL,
+    recorded_seq INTEGER,
+    agent       TEXT
   );
 `;
 
@@ -67,13 +72,53 @@ const CREATE_WORKTREE_TABLES = `
  */
 export function ensureWorktreeTables(db: DatabaseSync): void {
   db.exec(CREATE_WORKTREE_TABLES);
-  const columns = db.prepare('PRAGMA table_info(worktrees)').all() as Array<{ name: string }>;
-  if (!columns.some((c) => c.name === 'provisioned')) {
+  const worktreeColumns = db.prepare('PRAGMA table_info(worktrees)').all() as Array<{
+    name: string;
+  }>;
+  if (!worktreeColumns.some((c) => c.name === 'provisioned')) {
     db.exec('ALTER TABLE worktrees ADD COLUMN provisioned TEXT');
   }
+  if (!worktreeColumns.some((c) => c.name === 'agent')) {
+    db.exec('ALTER TABLE worktrees ADD COLUMN agent TEXT');
+  }
+  if (!worktreeColumns.some((c) => c.name === 'role')) {
+    db.exec('ALTER TABLE worktrees ADD COLUMN role TEXT');
+  }
+  if (!worktreeColumns.some((c) => c.name === 'sub_role')) {
+    db.exec('ALTER TABLE worktrees ADD COLUMN sub_role TEXT');
+  }
+  const finishColumns = db.prepare('PRAGMA table_info(finishes)').all() as Array<{ name: string }>;
+  if (!finishColumns.some((c) => c.name === 'agent')) {
+    db.exec('ALTER TABLE finishes ADD COLUMN agent TEXT');
+  }
+  if (!finishColumns.some((c) => c.name === 'recorded_seq')) {
+    db.exec('ALTER TABLE finishes ADD COLUMN recorded_seq INTEGER');
+  }
+  backfillFinishRecordedSeq(db);
 }
 
-// `handles()` guarantees only these two types reach `apply()`; modelling them as a StoredEvent
+function worktreeTableExists(db: DatabaseSync, name: string): boolean {
+  const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  return row != null;
+}
+
+function backfillFinishRecordedSeq(db: DatabaseSync): void {
+  if (!worktreeTableExists(db, 'events')) return;
+  db.prepare(
+    `UPDATE finishes
+        SET recorded_seq = (
+          SELECT e.seq
+            FROM events e
+           WHERE e.type = ?
+             AND json_extract(e.payload, '$.branch') = finishes.branch
+           ORDER BY e.seq DESC
+           LIMIT 1
+        )
+      WHERE recorded_seq IS NULL`,
+  ).run(EVENT_FINISH_RECORDED);
+}
+
+// `handles()` guarantees only these worktree event types reach `apply()`; modelling them as a StoredEvent
 // subtype lets the switch be GENUINELY exhaustive (assertNever sees a real `never`), mirroring
 // registry/projects-projector.ts.
 interface WorktreeCreatedEvent extends StoredEvent {
@@ -110,6 +155,9 @@ export function rowToWorktreeRecord(row: Record<string, unknown>): WorktreeRecor
     baseSha: String(row.base_sha),
     path: String(row.path),
     parent: String(row.parent),
+    ...(row.agent != null ? { agent: String(row.agent) } : {}),
+    ...(row.role != null ? { role: String(row.role) } : {}),
+    ...(row.sub_role != null ? { subRole: String(row.sub_role) } : {}),
     createdTs: Number(row.created_ts),
     removed: Number(row.removed) === 1,
     ...(provisioned !== undefined ? { provisioned } : {}),
@@ -135,13 +183,15 @@ export function rowToFinishRecord(row: Record<string, unknown>): FinishRecord {
     commitSha: String(row.commit_sha),
     tests: JSON.parse(String(row.tests)) as TestOutcome[],
     recordedTs: Number(row.recorded_ts),
+    ...(row.recorded_seq != null ? { recordedSeq: Number(row.recorded_seq) } : {}),
+    ...(row.agent != null ? { agent: String(row.agent) } : {}),
   };
 }
 
 const WORKTREE_COLUMNS =
-  'branch, base_ref, base_sha, path, parent, created_ts, removed, provisioned';
+  'branch, base_ref, base_sha, path, parent, agent, role, sub_role, created_ts, removed, provisioned';
 const BASELINE_COLUMNS = 'branch, base_ref, base_sha, tests, captured_ts';
-const FINISH_COLUMNS = 'branch, base_sha, commit_sha, tests, recorded_ts';
+const FINISH_COLUMNS = 'branch, base_sha, commit_sha, tests, recorded_ts, recorded_seq, agent';
 
 /** The worktree record for `branch`, or undefined. */
 export function selectWorktree(db: DatabaseSync, branch: string): WorktreeRecord | undefined {
@@ -205,17 +255,21 @@ export class WorktreeProjector implements Projector {
     const worktreeEvent = event as WorktreeEvent;
     switch (worktreeEvent.type) {
       case EVENT_WORKTREE_CREATED: {
-        const { branch, baseRef, baseSha, path, parent, provisioned } = worktreeEvent.payload;
+        const { branch, baseRef, baseSha, path, parent, agent, role, subRole, provisioned } =
+          worktreeEvent.payload;
         db.prepare(
           `INSERT INTO worktrees
-             (branch, base_ref, base_sha, path, parent, created_ts, removed, provisioned)
-           VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
+             (branch, base_ref, base_sha, path, parent, agent, role, sub_role, created_ts, removed, provisioned)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
         ).run(
           branch,
           baseRef,
           baseSha,
           path,
           parent,
+          agent ?? null,
+          role ?? null,
+          subRole ?? null,
           event.ts,
           provisioned != null ? JSON.stringify(provisioned) : null,
         );
@@ -232,20 +286,30 @@ export class WorktreeProjector implements Projector {
         return;
       }
       case EVENT_FINISH_RECORDED: {
-        const { branch, baseSha, commitSha, tests } = worktreeEvent.payload;
+        const { branch, baseSha, commitSha, tests, agent } = worktreeEvent.payload;
         // UPSERT (last finish wins) — a worker may re-finish after a review kickback, so the
         // read-model holds the LATEST finish per branch. Replaying the log in seq order reaches
         // the same final row, so the rebuild stays byte-identical. event.ts is the persisted
         // record time (never wall-clock).
         db.prepare(
-          `INSERT INTO finishes (branch, base_sha, commit_sha, tests, recorded_ts)
-           VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO finishes (branch, base_sha, commit_sha, tests, recorded_ts, recorded_seq, agent)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(branch) DO UPDATE SET
              base_sha = excluded.base_sha,
              commit_sha = excluded.commit_sha,
              tests = excluded.tests,
-             recorded_ts = excluded.recorded_ts`,
-        ).run(branch, baseSha, commitSha, JSON.stringify(tests), event.ts);
+             recorded_ts = excluded.recorded_ts,
+             recorded_seq = excluded.recorded_seq,
+             agent = excluded.agent`,
+        ).run(
+          branch,
+          baseSha,
+          commitSha,
+          JSON.stringify(tests),
+          event.ts,
+          event.seq,
+          agent ?? null,
+        );
         return;
       }
       case EVENT_WORKTREE_REMOVED: {

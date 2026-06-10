@@ -1,7 +1,25 @@
 import { z } from 'zod';
+import { OPERATOR } from '../../mail/events.js';
+import { roleParentResolver } from '../../mail/escalation.js';
+import {
+  checkMergeCommitIdentity,
+  checkPublishIdentities,
+  checkSignedOffCommits,
+  defaultCommitIdentityReader,
+  defaultGitConfigIdentityReader,
+  resolvePersonaAllowlist,
+  type CommitIdentityReader,
+  type GitConfigIdentityReader,
+} from '../../permissions/identity-guard.js';
 import { CoReviewGate } from '../../review/merge.js';
-import { detectBaseRef } from '../../worktrees/detect-base.js';
+import {
+  defaultGitReader,
+  detectCurrentBranchTarget,
+  resolveRefSha,
+} from '../../worktrees/detect-base.js';
+import { resolveRepoMode } from '../../worktrees/repo-mode.js';
 import type { ToolSpec } from '../registry.js';
+import { assertToolCallerRole } from '../caller-auth.js';
 
 // Every input field carries a .describe() (Principle 5). The merge INTENT is structured (not a prose
 // blob) so `co` — not the provider — renders the house-style merge message from it (AC-L3-3 /
@@ -22,34 +40,28 @@ const mergeIntentInput = z
   })
   .describe('The structured merge intent co renders into the house-style merge commit message.');
 
-const mergeInput = z.object({
-  branch: z.string().min(1).describe('The reviewed source branch to merge.'),
-  into: z
-    .string()
-    .min(1)
-    .optional()
-    .describe(
-      'The target branch to merge into. Defaults to the detected base of your worktree (e.g. your ' +
-        'integration branch).',
-    ),
-  intent: mergeIntentInput,
-  operator_override: z
-    .boolean()
-    .optional()
-    .describe(
-      'Audited operator escape hatch (AC-L5-6): bypass the recorded-PASS gate. REQUIRES a non-empty ' +
-        'reason — it records a review.override event and stamps the merge message ' +
-        '[reviewed: override — <reason>]. Honest-verification still runs for the record (never silent).',
-    ),
-  reason: z
-    .string()
-    .optional()
-    .describe(
-      'The reason for the operator override — REQUIRED (non-empty) when operator_override is set. ' +
-        'Recorded in the audit event and rendered verbatim into the merge message; an override ' +
-        'without a reason is refused.',
-    ),
-});
+const mergeInput = z
+  .object({
+    branch: z.string().min(1).describe('The reviewed source branch to merge.'),
+    into: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'The target branch to merge into. Defaults to the detected base of your worktree (e.g. your ' +
+          'integration branch).',
+      ),
+    intent: mergeIntentInput,
+    operator_override: z
+      .boolean()
+      .optional()
+      .describe('Operator-only audited override of the PASS gate. Requires `reason`.'),
+    reason: z
+      .string()
+      .optional()
+      .describe('Operator-only non-empty reason recorded with `operator_override`.'),
+  })
+  .strict();
 type MergeInput = z.infer<typeof mergeInput>;
 
 const mergeOutput = z.object({
@@ -63,21 +75,27 @@ const mergeOutput = z.object({
     .array(z.string())
     .optional()
     .describe(
-      'Pre-existing baseline failures the PASS carried — present when honest-verification found ' +
-        'fail→fail tests. The merge proceeded but these failures require attention (AC-L5-3).',
+      'Pre-existing baseline failures found by honest-verification, including fail-to-fail tests. ' +
+        'Present on recorded PASS and audited override paths. The merge proceeded but these ' +
+        'failures require attention (AC-L5-3).',
+    ),
+  verification_failures: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Verification failures surfaced on an audited operator override, including regressions and ' +
+        'baseline failures. The override proceeded by explicit operator decision.',
     ),
   escalated: z
     .boolean()
     .optional()
     .describe('True when a baseline-failure escalation was emitted to the parent agent.'),
-  overridden: z
+  escalation_failed: z
     .boolean()
     .optional()
-    .describe('True when the PASS gate was bypassed by an audited operator override (AC-L5-6).'),
-  override_reason: z
-    .string()
-    .optional()
-    .describe('The recorded override reason, present when overridden.'),
+    .describe(
+      'True when a post-merge escalation failed to persist; the merge still succeeded and is reported.',
+    ),
   tore_down: z
     .boolean()
     .optional()
@@ -85,16 +103,90 @@ const mergeOutput = z.object({
       'True once the merged branch’s sandbox was torn down after the merge was recorded; false when ' +
         'the teardown trigger failed (the merge still succeeded — teardown never masks it, AC-L5-7).',
     ),
+  overridden: z
+    .boolean()
+    .optional()
+    .describe('True when @operator used the audited override path.'),
+  override_reason: z
+    .string()
+    .optional()
+    .describe('The audited operator override reason, present when overridden is true.'),
 });
 type MergeOutput = z.infer<typeof mergeOutput>;
 
+function assertMergeIdentities(
+  repoCwd: string,
+  range: string,
+  allowlist: readonly string[],
+  reader: CommitIdentityReader,
+): void {
+  const commits = reader.read(repoCwd, range);
+  const violations =
+    allowlist.length > 0
+      ? checkPublishIdentities(commits, allowlist)
+      : checkSignedOffCommits(commits);
+  if (violations.length > 0) {
+    const details = violations
+      .map((v) => `  ${v.sha.slice(0, 12)} [${v.field}] ${v.identity}`)
+      .join('\n');
+    const reason =
+      allowlist.length > 0
+        ? 'commits contain identities outside the persona allowlist'
+        : 'commits violate the DCO Signed-off-by requirement';
+    throw new Error(`co_merge: blocked — ${reason}:\n${details}`);
+  }
+}
+
+function assertMergeCommitIdentity(
+  repoCwd: string,
+  allowlist: readonly string[],
+  reader: GitConfigIdentityReader,
+): void {
+  const identity = reader.read(repoCwd);
+  const violations = checkMergeCommitIdentity(identity, allowlist);
+  if (violations.length > 0) {
+    const details = violations.map((v) => `  ${v.sha} [${v.field}] ${v.identity}`).join('\n');
+    const reason =
+      allowlist.length > 0
+        ? 'merge commit identity is outside the persona allowlist'
+        : 'merge commit identity violates the DCO Signed-off-by requirement';
+    throw new Error(`co_merge: blocked — ${reason}:\n${details}`);
+  }
+}
+
+function assertReviewedRefMatchesFinish(
+  repoCwd: string,
+  branch: string,
+  branchHead: string,
+  finishCommitSha: string | undefined,
+): void {
+  if (finishCommitSha == null || branchHead === finishCommitSha) return;
+  throw new Error(
+    `co_merge: refused — reviewed commit for '${branch}' is stale. Recorded PASS covers ` +
+      `${finishCommitSha}, but '${branch}' now resolves to ${branchHead} in '${repoCwd}'. ` +
+      'Re-run finish and review before publishing moved work.',
+  );
+}
+
+function resolveMergeBaseSha(repoCwd: string, into: string, branch: string): string {
+  const sha = defaultGitReader(repoCwd, ['merge-base', into, branch]);
+  if (sha == null || sha.length === 0) {
+    throw new Error(
+      `co_merge: cannot inspect commit identities — cannot resolve merge-base for ` +
+        `'${branch}' into '${into}'.`,
+    );
+  }
+  return sha;
+}
+
 /**
- * `co_merge` (AC-L5-1): the lead-facing verb that integrates a reviewed branch — GATED on a recorded
+ * `co_merge` (AC-L5-1): the coordinator-or-lead verb that integrates a reviewed branch — GATED on a recorded
  * PASS. It refuses unless `ctx.reviews.getVerdict(target, branch)` is a recorded `PASS` (absent or
- * `ISSUES` ⇒ refuse, loud — there is NO un-gated merge path), renders the house-style merge message
- * (`[reviewed: PASS]`), and enacts the merge for `owner` + `offline` modes (a local `--no-ff` merge).
- * `contributor` local merge is refused; contributors publish through the gated co_push /
- * co_pr_merge path.
+ * `ISSUES` ⇒ refuse, loud), except for the explicit `@operator` audited override path which requires
+ * a non-empty reason. It renders the house-style merge message (`[reviewed: PASS]` or
+ * `[reviewed: override — <reason>]`) and enacts the merge for `owner` + `offline` modes (a local
+ * `--no-ff` merge). `contributor` local merge is refused; contributors publish through the gated
+ * co_push / co_pr_merge path.
  *
  * The handler loud-fails if the mount did not inject the review or worktree store (Principle 9 — a tool
  * never opens its own store). It delegates to {@link CoReviewGate} — the single gated merge core — so
@@ -108,7 +200,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
     'Integrate a reviewed branch into your target branch — only if a PASS verdict is recorded for it. ' +
     'co renders the house-style merge message from your intent and merges in owner/offline mode. It ' +
     'refuses without a recorded PASS; contributor mode publishes through the gated co_push / ' +
-    'co_pr_merge path.',
+    'co_pr_merge path. @operator may use an audited override with a non-empty reason.',
   inputSchema: mergeInput,
   outputSchema: mergeOutput,
   handler: (ctx, input): MergeOutput => {
@@ -120,16 +212,76 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         'co_merge: the mount did not inject a worktree store (ctx.worktrees absent).',
       );
     }
+    if (!ctx.roster) {
+      throw new Error('co_merge: the mount did not inject a roster store (ctx.roster absent).');
+    }
+    const operatorOverride = input.operator_override === true;
+    if (operatorOverride) {
+      if (ctx.agent !== OPERATOR) {
+        throw new Error(
+          `co_merge: operator_override is reserved for ${OPERATOR}; caller '${ctx.agent}' ` +
+            'must use the recorded-PASS gate.',
+        );
+      }
+      if (input.reason == null || input.reason.trim().length === 0) {
+        throw new Error('co_merge: operator_override requires a non-empty reason.');
+      }
+    } else {
+      assertToolCallerRole('co_merge', ctx.roster, ctx.agent, ['coordinator', 'lead']);
+    }
     // Capture the (now-present) worktree store + repo cwd for the teardown closure; the guards above
     // narrow them, but a nested closure does not inherit that narrowing.
     const worktrees = ctx.worktrees;
     const repoCwd = ctx.cwd;
     // Default the target to the detected base of the lead's worktree (its integration branch), the
     // same auto-detection co_sling uses — never a hard-coded master (AC-L3-1).
-    const into = input.into ?? detectBaseRef(repoCwd);
-    // Build the production parent-resolver from the worktree-recorded spawning parent
-    // (AC-L5-4 / Phase D): baseline-failure escalations go to the branch's recorded parent.
-    const parentAgent = worktrees.getWorktree(input.branch)?.parent;
+    const into = input.into ?? detectCurrentBranchTarget(repoCwd);
+    const worktree = worktrees.getWorktree(input.branch);
+    if (worktree == null || worktree.removed) {
+      throw new Error(
+        `co_merge: cannot merge branch '${input.branch}' — no live worktree record exists for ` +
+          'that branch.',
+      );
+    }
+    if (!operatorOverride && worktree.parent !== ctx.agent) {
+      throw new Error(
+        `co_merge: branch '${input.branch}' worktree parent is '${worktree.parent}', not ` +
+          `'${ctx.agent}'. Only the spawning parent may merge the branch.`,
+      );
+    }
+
+    if (resolveRepoMode(ctx.projectId, repoCwd) === 'contributor') {
+      throw new Error(
+        `co_merge: contributor mode publishes via the gated co_push / co_pr_merge path. ` +
+          `Cannot locally merge '${input.branch}' into '${into}' in contributor mode.`,
+      );
+    }
+
+    // Identity pre-check (AC-L6a-7): local merges publish the reviewed branch into `into`, so they
+    // must enforce the same DCO/persona floor as co_push/co_pr_merge before any git side effect.
+    const allowlist = resolvePersonaAllowlist(ctx.projectId);
+    const branchHead = resolveRefSha(repoCwd, input.branch);
+    assertReviewedRefMatchesFinish(
+      repoCwd,
+      input.branch,
+      branchHead,
+      ctx.worktrees.getFinish(input.branch)?.commitSha,
+    );
+    const mergeBase = resolveMergeBaseSha(repoCwd, into, input.branch);
+    assertMergeIdentities(
+      repoCwd,
+      `${mergeBase}..${branchHead}`,
+      allowlist,
+      ctx.commitIdentityReader ?? defaultCommitIdentityReader,
+    );
+    assertMergeCommitIdentity(
+      repoCwd,
+      allowlist,
+      ctx.gitConfigIdentityReader ?? defaultGitConfigIdentityReader,
+    );
+
+    // Build the production parent-resolver from the caller's roster parent
+    // (AC-L5-4 / Phase D): baseline-failure escalations go one level above the caller.
     // L7 SEAM NOTE (placement recording): CoReviewGate.triggerReview resolves + records a reviewer
     // placement (placement.decided) via the L4 dispatch store. `dispatch`/`config`/`nowMs` are
     // intentionally NOT injected here — triggerReview has zero production callers at this surface
@@ -142,7 +294,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
       worktrees,
       mail: ctx.mail,
       agentId: ctx.agent,
-      ...(parentAgent != null ? { parentResolver: { parentOf: () => parentAgent } } : {}),
+      ...(operatorOverride ? {} : { parentResolver: roleParentResolver(ctx.roster) }),
       // Merge-time teardown trigger (AC-L5-7): the merge gate tears the merged branch's sandbox down
       // AFTER the merge is recorded + the slot released — never before (the review-finalize cure).
       teardown: {
@@ -156,8 +308,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
       projectId: ctx.projectId,
       repoCwd,
       ...(input.intent.body != null ? { body: input.intent.body } : {}),
-      ...(input.operator_override != null ? { operatorOverride: input.operator_override } : {}),
-      ...(input.reason != null ? { reason: input.reason } : {}),
+      ...(operatorOverride ? { operatorOverride: true, reason: input.reason } : {}),
     });
     return {
       merged: result.merged,
@@ -167,10 +318,14 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
       ...(result.baselineFailures != null
         ? { baseline_failures: [...result.baselineFailures] }
         : {}),
+      ...(result.verificationFailures != null
+        ? { verification_failures: [...result.verificationFailures] }
+        : {}),
       ...(result.escalated != null ? { escalated: result.escalated } : {}),
+      ...(result.escalationFailed != null ? { escalation_failed: result.escalationFailed } : {}),
+      ...(result.toreDown != null ? { tore_down: result.toreDown } : {}),
       ...(result.overridden != null ? { overridden: result.overridden } : {}),
       ...(result.overrideReason != null ? { override_reason: result.overrideReason } : {}),
-      ...(result.toreDown != null ? { tore_down: result.toreDown } : {}),
     };
   },
 };

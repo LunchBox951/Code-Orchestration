@@ -52,6 +52,17 @@ function snapshot(db: DatabaseSync): string {
   return JSON.stringify(rows);
 }
 
+function appendRosterEvents(
+  store: ReturnType<typeof openProjectStore>,
+  events: readonly ReturnType<typeof makeAgentRegisteredEvent>[],
+): void {
+  store.append(events);
+}
+
+function rebuildRoster(store: ReturnType<typeof openProjectStore>): void {
+  rebuildAll(store, [new RosterProjector()], (e) => decode(e, rolesUpcasters, rolesSchemas));
+}
+
 describe('RosterStore — record + read agents', () => {
   it('records three agents and reads each back correctly', () => {
     const store = openRosterStore('p-roster-1');
@@ -102,6 +113,8 @@ describe('RosterStore — record + read agents', () => {
   it('records and reads back a sub-role', () => {
     const store = openRosterStore('p-roster-subrole');
     try {
+      store.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+      store.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
       const rec = store.recordAgent({
         agentId: 'impl-test-1',
         role: 'implementer',
@@ -110,6 +123,90 @@ describe('RosterStore — record + read agents', () => {
       });
       expect(rec.subRole).toBe('test');
       expect(store.getAgent('impl-test-1')?.subRole).toBe('test');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects a sub-role that is not shipped for the base role', () => {
+    const store = openRosterStore('p-roster-bad-subrole');
+    try {
+      store.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+      store.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
+
+      expect(() =>
+        store.recordAgent({
+          agentId: 'researcher-1',
+          role: 'researcher',
+          subRole: 'test',
+          parent: 'lead-1',
+        }),
+      ).toThrow(/unknown sub-role/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects a coordinator whose parent is not @operator', () => {
+    const store = openRosterStore('p-roster-bad-coord-parent');
+    try {
+      expect(() =>
+        store.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: 'coord-parent' }),
+      ).toThrow(/coordinator.*@operator/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects @operator as a registrable agent id', () => {
+    const store = openRosterStore('p-roster-operator-agent');
+    try {
+      store.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+
+      expect(() =>
+        store.recordAgent({ agentId: '@operator', role: 'lead', parent: 'coord-1' }),
+      ).toThrow(/reserved.*@operator/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects non-coordinator agents with a missing parent record', () => {
+    const store = openRosterStore('p-roster-ghost-parent');
+    try {
+      expect(() =>
+        store.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-missing' }),
+      ).toThrow(/parent.*coord-missing.*not registered/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects parent-child edges that violate spawn rules', () => {
+    const store = openRosterStore('p-roster-bad-spawn-edge');
+    try {
+      store.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+      store.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
+
+      expect(() =>
+        store.recordAgent({ agentId: 'lead-2', role: 'lead', parent: 'lead-1' }),
+      ).toThrow(/lead never spawns a lead/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects conflicting re-registration for the same agent id', () => {
+    const store = openRosterStore('p-roster-conflicting-reregister');
+    try {
+      store.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+      store.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
+      store.recordAgent({ agentId: 'worker-1', role: 'implementer', parent: 'lead-1' });
+
+      expect(() =>
+        store.recordAgent({ agentId: 'worker-1', role: 'researcher', parent: 'lead-1' }),
+      ).toThrow(/already registered/i);
+      expect(store.getAgent('worker-1')?.role).toBe('implementer');
     } finally {
       store.close();
     }
@@ -172,6 +269,127 @@ describe('AC-L6a-1 — replay equality: live fold → rebuildAll → byte-equal'
       expect(live).toContain('"coordinator"');
       expect(live).toContain('"@operator"');
       expect(live).toContain('"code"');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay fails loud on conflicting agent re-registration', () => {
+    const store = openProjectStore('p-roster-replay-conflict');
+    const events = [
+      makeAgentRegisteredEvent('p-roster-replay-conflict', {
+        agentId: 'coord-1',
+        role: 'coordinator',
+        parent: '@operator',
+      }),
+      makeAgentRegisteredEvent('p-roster-replay-conflict', {
+        agentId: 'lead-1',
+        role: 'lead',
+        parent: 'coord-1',
+      }),
+      makeAgentRegisteredEvent('p-roster-replay-conflict', {
+        agentId: 'worker-1',
+        role: 'implementer',
+        parent: 'lead-1',
+      }),
+      makeAgentRegisteredEvent('p-roster-replay-conflict', {
+        agentId: 'worker-1',
+        role: 'researcher',
+        parent: 'lead-1',
+      }),
+    ];
+    try {
+      appendRosterEvents(store, events);
+
+      expect(() => rebuildRoster(store)).toThrow(/already registered/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay fails loud when @operator is registered as an agent id', () => {
+    const store = openProjectStore('p-roster-replay-operator');
+    const event = makeAgentRegisteredEvent('p-roster-replay-operator', {
+      agentId: '@operator',
+      role: 'coordinator',
+      parent: '@operator',
+    });
+    try {
+      appendRosterEvents(store, [event]);
+
+      expect(() => rebuildRoster(store)).toThrow(/reserved.*@operator/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay fails loud when committed history contains a missing parent', () => {
+    const store = openProjectStore('p-roster-replay-missing-parent');
+    try {
+      appendRosterEvents(store, [
+        makeAgentRegisteredEvent('p-roster-replay-missing-parent', {
+          agentId: 'lead-1',
+          role: 'lead',
+          parent: 'coord-missing',
+        }),
+      ]);
+
+      expect(() => rebuildRoster(store)).toThrow(/parent.*coord-missing.*not registered/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay fails loud when committed history contains an illegal spawn edge', () => {
+    const store = openProjectStore('p-roster-replay-bad-spawn-edge');
+    try {
+      appendRosterEvents(store, [
+        makeAgentRegisteredEvent('p-roster-replay-bad-spawn-edge', {
+          agentId: 'coord-1',
+          role: 'coordinator',
+          parent: '@operator',
+        }),
+        makeAgentRegisteredEvent('p-roster-replay-bad-spawn-edge', {
+          agentId: 'lead-1',
+          role: 'lead',
+          parent: 'coord-1',
+        }),
+        makeAgentRegisteredEvent('p-roster-replay-bad-spawn-edge', {
+          agentId: 'lead-2',
+          role: 'lead',
+          parent: 'lead-1',
+        }),
+      ]);
+
+      expect(() => rebuildRoster(store)).toThrow(/lead never spawns a lead/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay fails loud when committed history contains an invalid sub-role', () => {
+    const store = openProjectStore('p-roster-replay-bad-subrole');
+    try {
+      appendRosterEvents(store, [
+        makeAgentRegisteredEvent('p-roster-replay-bad-subrole', {
+          agentId: 'coord-1',
+          role: 'coordinator',
+          parent: '@operator',
+        }),
+        makeAgentRegisteredEvent('p-roster-replay-bad-subrole', {
+          agentId: 'lead-1',
+          role: 'lead',
+          parent: 'coord-1',
+        }),
+        makeAgentRegisteredEvent('p-roster-replay-bad-subrole', {
+          agentId: 'researcher-1',
+          role: 'researcher',
+          subRole: 'test',
+          parent: 'lead-1',
+        }),
+      ]);
+
+      expect(() => rebuildRoster(store)).toThrow(/unknown sub-role/i);
     } finally {
       store.close();
     }

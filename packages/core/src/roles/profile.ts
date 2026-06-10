@@ -45,7 +45,15 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
     mandate:
       'task owner: shape intent → lock spec → plan phases → dispatch → gate → publish → close. Plans the work itself, spawning Researchers when investigation is needed.',
     writeScope: 'delegates',
-    toolset: [...UNIVERSAL, 'co_mail_retract', 'co_sling', 'co_kickback'],
+    toolset: [
+      ...UNIVERSAL,
+      'co_mail_retract',
+      'co_sling',
+      'co_kickback',
+      'co_merge',
+      'co_push',
+      'co_pr_merge',
+    ],
     capabilities: new Set<Capability>(),
   },
   lead: {
@@ -58,6 +66,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
       'co_mail_retract',
       'co_worktree_info',
       'co_sling',
+      'co_finish',
       'co_merge',
       'co_kickback',
       'co_push',
@@ -67,9 +76,10 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
   },
   implementer: {
     baseRole: 'implementer',
-    mandate: 'changes code in an isolated worktree, finishes through the gate.',
+    mandate:
+      'changes code in an isolated worktree, finishes through the gate, and may request scoped researcher dispatch.',
     writeScope: 'code',
-    toolset: [...UNIVERSAL, 'co_mail_retract', 'co_worktree_info', 'co_finish'],
+    toolset: [...UNIVERSAL, 'co_mail_retract', 'co_worktree_info', 'co_finish', 'co_sling'],
     capabilities: new Set<Capability>(),
   },
   reviewer: {

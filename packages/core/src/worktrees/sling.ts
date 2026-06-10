@@ -5,7 +5,7 @@ import { resolvePersona } from '../permissions/identity-guard.js';
 import { projectDataDir } from '../store/paths.js';
 import { detectBaseRef, defaultGitReader, resolveRefSha, type GitReader } from './detect-base.js';
 import type { TestOutcome } from './events.js';
-import { defaultProvisioner, type Provisioner } from './provision.js';
+import { provisionWorktree, resolveProvisioningManifest, type Provisioner } from './provision.js';
 import type { WorktreeStore } from './worktree-store.js';
 
 /**
@@ -60,6 +60,12 @@ export const emptyBaselineProbe: BaselineProbe = () => [];
 export interface SlingParams {
   /** The spawner this sandbox is created for — recorded as the worktree's parent. Required. */
   readonly parent: string;
+  /** The assigned child agent that is allowed to mount this sandbox. */
+  readonly agent?: string;
+  /** The intended base role for the child agent mounted into this sandbox. */
+  readonly role?: string;
+  /** Optional intended child sub-role name, when dispatch used a sub-role such as `reviewer:pr`. */
+  readonly subRole?: string;
   /** The new branch to create; must start with `co/`. */
   readonly branch: string;
   /** Optional base ref override; when omitted the base is auto-detected. */
@@ -137,9 +143,7 @@ export function slingWorktree(
   const gitReader = deps.gitReader ?? defaultGitReader;
   const gitExec = deps.gitExec ?? defaultGitExec;
   const probe = deps.probe ?? emptyBaselineProbe;
-  const provisioner = deps.provisioner ?? defaultProvisioner;
-
-  const { parent, branch, base, repoCwd, projectId } = params;
+  const { parent, agent, role, subRole, branch, base, repoCwd, projectId } = params;
   if (parent.length === 0) {
     throw new Error('co_sling: `parent` is required (the spawner; there is no @operator default).');
   }
@@ -150,41 +154,71 @@ export function slingWorktree(
   // 1) Resolve the base — auto-detect unless explicitly overridden — then its commit sha.
   const baseRef = base ?? detectBaseRef(repoCwd, gitReader);
   const baseSha = resolveRefSha(repoCwd, baseRef, gitReader);
+  // Resolve persona before creating git state, so a malformed identity config cannot leave behind an
+  // unrecorded worktree/branch.
+  const persona = resolvePersona(projectId);
+  // Resolve the default provisioning manifest before creating git state, so malformed config cannot
+  // leave behind an unrecorded worktree/branch. Custom test provisioners remain responsible for their
+  // own validation because they are injected seams.
+  const provisionManifest =
+    deps.provisioner == null ? resolveProvisioningManifest(projectId) : undefined;
+  const provisioner =
+    deps.provisioner ?? ((ctx) => provisionWorktree({ ...ctx, manifest: provisionManifest ?? [] }));
 
   // 2) Create the worktree+branch under program-data (never in the repo).
   const worktreePath = worktreePathFor(projectId, branch);
   mkdirSync(dirname(worktreePath), { recursive: true });
   gitExec(repoCwd, ['worktree', 'add', '-b', branch, worktreePath, baseRef]);
 
-  // 2b) Pin the operator persona git identity in the new sandbox (AC-L6a-7): prevents `git commit -s`
-  //     from falling through to the global config and leaking personal email in Signed-off-by.
-  //     No-op when identity.persona is unconfigured (non-breaking).
-  const persona = resolvePersona(projectId);
-  if (persona !== undefined) {
-    gitExec(worktreePath, ['config', 'user.email', persona.email]);
-    gitExec(worktreePath, ['config', 'user.name', persona.name]);
+  try {
+    // 2b) Pin the operator persona git identity in the new sandbox (AC-L6a-7): prevents `git commit -s`
+    //     from falling through to the global config and leaking personal email in Signed-off-by.
+    //     `extensions.worktreeConfig` is a git-admin write in the source repo's .git/config that enables
+    //     per-worktree config; it is not orchestration state. The actual persona writes go only to the
+    //     sandbox's worktree-local config, so parallel sandboxes cannot overwrite each other.
+    //     No-op when identity.persona is unconfigured (non-breaking).
+    if (persona !== undefined) {
+      gitExec(repoCwd, ['config', 'extensions.worktreeConfig', 'true']);
+      gitExec(worktreePath, ['config', '--worktree', 'user.email', persona.email]);
+      gitExec(worktreePath, ['config', '--worktree', 'user.name', persona.name]);
+    }
+
+    // 2c) Provision the gitignored working essentials into the sandbox (phase B): reads from the main
+    //     repo, writes only the sandbox, so it is runnable before the baseline is captured.
+    const provisionResult = provisioner({ repoCwd, worktreePath, projectId });
+
+    // 3) Capture the branch-off baseline (L5 compares; we only capture + store).
+    const tests = probe({ repoCwd, worktreePath, branch, baseRef, baseSha });
+
+    // 4) Record the sandbox + baseline atomically so replay never preserves a live worktree
+    //    without its required branch-off baseline.
+    store.recordWorktreeAndBaseline(
+      {
+        branch,
+        baseRef,
+        baseSha,
+        path: worktreePath,
+        parent,
+        ...(agent != null ? { agent } : {}),
+        ...(role != null ? { role } : {}),
+        ...(subRole != null ? { subRole } : {}),
+        provisioned: [...(provisionResult?.provisioned ?? [])],
+      },
+      { branch, baseRef, baseSha, tests: [...tests] },
+    );
+  } catch (error) {
+    try {
+      gitExec(repoCwd, ['worktree', 'remove', '--force', worktreePath]);
+    } catch {
+      // Preserve the setup failure; orphan detection can surface any cleanup residue later.
+    }
+    try {
+      gitExec(repoCwd, ['branch', '-D', branch]);
+    } catch {
+      // Preserve the setup failure; branch cleanup is best-effort after a failed sling.
+    }
+    throw error;
   }
-
-  // 2c) Provision the gitignored working essentials into the sandbox (phase B): reads from the main
-  //     repo, writes only the sandbox, so it is runnable before the baseline is captured.
-  const provisionResult = provisioner({ repoCwd, worktreePath, projectId });
-
-  // 3) Capture the branch-off baseline (L5 compares; we only capture + store).
-  const tests = probe({ repoCwd, worktreePath, branch, baseRef, baseSha });
-
-  // 4) Record the sandbox + baseline atomically so replay never preserves a live worktree
-  //    without its required branch-off baseline.
-  store.recordWorktreeAndBaseline(
-    {
-      branch,
-      baseRef,
-      baseSha,
-      path: worktreePath,
-      parent,
-      provisioned: [...(provisionResult?.provisioned ?? [])],
-    },
-    { branch, baseRef, baseSha, tests: [...tests] },
-  );
 
   return { branch, baseRef, baseSha, worktreePath, baselineCaptured: true };
 }

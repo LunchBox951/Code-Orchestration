@@ -9,6 +9,7 @@ import { openConfigStore, type ConfigStore } from '../../config/config-store.js'
 import { openRegistry, type ProjectRegistry } from '../../registry/registry.js';
 import { openWorktreeStore, type WorktreeStore } from '../../worktrees/worktree-store.js';
 import { openDispatchStore, type DispatchStore } from '../../dispatch/dispatch-store.js';
+import { openRosterStore, type RosterStore } from '../../roles/roster-store.js';
 import { accountForProvider } from '../../dispatch/provider-source.js';
 import { WORKTREE_PROVISION_CONFIG_KEY } from '../../worktrees/provision.js';
 import { worktreePathFor } from '../../worktrees/sling.js';
@@ -25,6 +26,7 @@ let tmpDirs: string[] = [];
 let mails: MailStore[] = [];
 let worktreeStores: WorktreeStore[] = [];
 let dispatchStores: DispatchStore[] = [];
+let rosterStores: RosterStore[] = [];
 let regs: ProjectRegistry[] = [];
 let configs: ConfigStore[] = [];
 
@@ -34,6 +36,7 @@ beforeEach(() => {
   mails = [];
   worktreeStores = [];
   dispatchStores = [];
+  rosterStores = [];
   regs = [];
   configs = [];
   const data = mkdtempSync(join(tmpdir(), 'co-finish-tool-data-'));
@@ -45,6 +48,7 @@ afterEach(() => {
   for (const m of mails) m.close();
   for (const w of worktreeStores) w.close();
   for (const d of dispatchStores) d.close();
+  for (const r of rosterStores) r.close();
   for (const r of regs) r.close();
   for (const c of configs) c.close();
   process.env = ORIGINAL_ENV;
@@ -53,6 +57,7 @@ afterEach(() => {
   mails = [];
   worktreeStores = [];
   dispatchStores = [];
+  rosterStores = [];
   regs = [];
   configs = [];
 });
@@ -80,7 +85,12 @@ function makeContext(
   agent: string,
   repo: string,
   cwd: string,
-  opts: { withWorktrees?: boolean } = {},
+  opts: {
+    withWorktrees?: boolean;
+    registerCaller?: boolean;
+    role?: 'coordinator' | 'lead' | 'implementer' | 'reviewer';
+    parent?: string;
+  } = {},
 ): ToolContext {
   const registry = openRegistry();
   regs.push(registry);
@@ -94,6 +104,17 @@ function makeContext(
   worktreeStores.push(worktrees);
   const dispatch = openDispatchStore(projectId);
   dispatchStores.push(dispatch);
+  const roster = openRosterStore(projectId);
+  rosterStores.push(roster);
+  roster.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+  roster.recordAgent({ agentId: 'lead-7', role: 'lead', parent: 'coord-1' });
+  if (agent !== 'lead-7' && opts.registerCaller !== false) {
+    roster.recordAgent({
+      agentId: agent,
+      role: opts.role ?? 'implementer',
+      parent: opts.parent ?? 'lead-7',
+    });
+  }
   dispatch.recordSnapshot({
     provider: 'claude',
     account: accountForProvider('claude'),
@@ -108,7 +129,7 @@ function makeContext(
       },
     ],
   });
-  return { agent, projectId, cwd, mail, registry, worktrees, dispatch };
+  return { agent, projectId, cwd, mail, registry, worktrees, dispatch, roster };
 }
 
 function openConfig(): ConfigStore {
@@ -167,6 +188,7 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
     // The finish record is durable for L5 (commit + the finish's tests).
     const finish = finishCtx.worktrees?.getFinish('co/feature');
     expect(finish?.commitSha).toBe(out.commit_sha);
+    expect(finish?.agent).toBe('impl-1');
     expect(finish?.tests).toEqual([
       { name: 'unit', passed: true },
       { name: 'integration', passed: true },
@@ -178,6 +200,45 @@ describe('co_finish — via invokeTool over a real slung worktree', () => {
     expect(inbox[0]?.type).toBe(MAIL_WORKER_DONE);
     expect(inbox[0]?.sender).toBe('impl-1');
     expect(inbox[0]?.body).toContain(out.commit_sha);
+  });
+
+  it('refuses unregistered or wrong-parent finishers before committing or recording finish', async () => {
+    const repo = makeMainRepo();
+    const reg = buildCoreRegistry();
+    const slingCtx = makeContext('lead-7', repo, repo);
+    const sling = (await invokeTool(reg, slingCtx, 'co_sling', {
+      parent: 'lead-7',
+      branch: 'co/feature',
+    })) as { worktree_path: string };
+    const sandbox = sling.worktree_path;
+
+    writeFileSync(join(sandbox, 'feature.txt'), 'new work\n');
+    const beforeHead = git(sandbox, 'rev-parse', 'HEAD');
+
+    const unregistered = makeContext('impl-2', repo, sandbox, { registerCaller: false });
+    await expect(
+      invokeTool(reg, unregistered, 'co_finish', {
+        intent: { type: 'feat', summary: 'try to finish' },
+        tests: [{ name: 'unit', passed: true }],
+      }),
+    ).rejects.toThrow(/not registered in the roster/i);
+    expect(git(sandbox, 'rev-parse', 'HEAD')).toBe(beforeHead);
+    expect(unregistered.worktrees?.getFinish('co/feature')).toBeUndefined();
+    expect(unregistered.mail.inbox('lead-7')).toHaveLength(0);
+
+    const wrongParent = makeContext('impl-3', repo, sandbox, {
+      role: 'implementer',
+      parent: 'coord-1',
+    });
+    await expect(
+      invokeTool(reg, wrongParent, 'co_finish', {
+        intent: { type: 'feat', summary: 'try wrong parent' },
+        tests: [{ name: 'unit', passed: true }],
+      }),
+    ).rejects.toThrow(/recorded parent/i);
+    expect(git(sandbox, 'rev-parse', 'HEAD')).toBe(beforeHead);
+    expect(wrongParent.worktrees?.getFinish('co/feature')).toBeUndefined();
+    expect(wrongParent.mail.inbox('lead-7')).toHaveLength(0);
   });
 
   it('loud-fails when the mount did not inject a worktree store (Principle 9)', async () => {

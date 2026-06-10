@@ -133,6 +133,13 @@ describe('AC-L2-4 — the prompting split: orientContent never bakes a target re
     const b = orientContent('reviewer');
     expect(a).toBe(b);
   });
+
+  it('directs agent reviewers to finalize verdicts through the review gate, not mail', () => {
+    const text = orientContent('reviewer');
+
+    expect(text).toMatch(/co_review_finalize/);
+    expect(text).not.toMatch(/verdict[^.]*by mail/i);
+  });
 });
 
 // ── role-scoped + workflow-only ────────────────────────────────────────────────────────────────────
@@ -157,6 +164,13 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
     expect(out.length).toBeGreaterThan(0);
     expect(out).toContain('wizard'); // the header names what was asked
     expect(out.toLowerCase()).toContain('mail'); // generic coordination guidance
+  });
+
+  it('finish topic says finish records and notifies, not that it dispatches review', () => {
+    const out = orientContent('implementer', 'finish');
+    expect(out).toContain('records the finish');
+    expect(out).toContain('notifies your parent');
+    expect(out).not.toMatch(/dispatches review/i);
   });
 
   it('is case/whitespace lenient — a padded, mixed-case role resolves to that role’s arc', () => {

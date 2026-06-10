@@ -2,17 +2,34 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { OPERATOR, MAIL_REVIEW_REQUEST, mailKind, completionPredicate } from '../mail/events.js';
+import type { DatabaseSync } from 'node:sqlite';
+import {
+  OPERATOR,
+  MAIL_ESCALATION,
+  MAIL_REVIEW_REQUEST,
+  mailKind,
+  completionPredicate,
+  type MailEnvelope,
+  type DeliveredMail,
+} from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
+import { InProcessDelivery } from '../mail/delivery.js';
+import { MailProjector } from '../mail/mail-projector.js';
+import { openProjectStore } from '../store/sqlite-store.js';
 import type { ConfigStore } from '../config/config-store.js';
 import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
+import { buildCoreRegistry } from '../tools/core-registry.js';
+import { invokeTool } from '../tools/invoke.js';
+import type { ToolContext } from '../tools/context.js';
 import { openReviewStore, type ReviewStore } from './review-store.js';
 import { CoReviewGate } from './merge.js';
 import type { ReviewScope } from './ladder.js';
+import { acquireMergeSlot } from './serialize.js';
 import {
   resolveReviewerKind,
   reviewRequestOutcome,
   reviewRequestEnvelope,
+  buildHumanReviewVerdict,
   recordHumanVerdict,
 } from './human-review.js';
 
@@ -77,6 +94,96 @@ function recordCleanFinish(worktrees: WorktreeStore): void {
     commitSha: 'b'.repeat(40),
     tests: [{ name: 'test-a', passed: true }],
   });
+}
+
+function recordHumanRequest(
+  reviews: ReviewStore,
+  reviewId: string,
+  requestedBy = 'lead',
+  target = TARGET,
+  branch = BRANCH,
+  scope: ReviewScope = 'pr_merge',
+): void {
+  reviews.recordReviewRequested({
+    reviewId,
+    target,
+    branch,
+    scope,
+    requestedBy,
+    reviewerKind: 'human',
+  });
+}
+
+function requestHumanReviewMail(
+  mail: MailStore,
+  reviews: ReviewStore,
+  params: {
+    readonly reviewId: string;
+    readonly requestedBy?: string;
+    readonly target?: string;
+    readonly branch?: string;
+    readonly scope?: ReviewScope;
+    readonly subject?: string;
+    readonly body?: string;
+  },
+): DeliveredMail {
+  const requestedBy = params.requestedBy ?? 'lead-1';
+  const target = params.target ?? TARGET;
+  const branch = params.branch ?? BRANCH;
+  const scope = params.scope ?? 'pr_merge';
+  return mail.requestHumanReview(
+    {
+      type: MAIL_REVIEW_REQUEST,
+      to: OPERATOR,
+      from: requestedBy,
+      subject: params.subject ?? `review requested: '${branch}' into '${target}'`,
+      body:
+        params.body ?? `Please review this branch. (scope: ${scope}, reviewId: ${params.reviewId})`,
+      idempotencyKey: `review-request:${params.reviewId}`,
+    },
+    {
+      reviewId: params.reviewId,
+      target,
+      branch,
+      requestedBy,
+      scope,
+      reviewerKind: 'human',
+    },
+  ).mail;
+}
+
+function injectLegacyMail(projectId: string, envelope: MailEnvelope): DeliveredMail {
+  const store = openProjectStore(projectId);
+  try {
+    return new InProcessDelivery(projectId, store, [new MailProjector()]).deliver(envelope);
+  } finally {
+    store.close();
+  }
+}
+
+function replyWithHumanVerdict(
+  mail: MailStore,
+  reviews: ReviewStore,
+  requestMail: DeliveredMail,
+  params: { readonly reviewId: string; readonly verdict: 'PASS' | 'ISSUES'; readonly body: string },
+): DeliveredMail {
+  return mail.replyWithReviewVerdict(
+    requestMail,
+    {
+      type: 'review_response',
+      subject: 're: review?',
+      body: params.body,
+      from: OPERATOR,
+      reviewVerdict: params.verdict,
+    },
+    buildHumanReviewVerdict(reviews, {
+      reviewId: params.reviewId,
+      target: TARGET,
+      branch: BRANCH,
+      verdict: params.verdict,
+      body: params.body,
+    }),
+  );
 }
 
 /** A fake git executor recording each invocation, so publish gating stays headless. */
@@ -160,9 +267,14 @@ describe('reviewRequestOutcome — log-derived pending→verdict (approvalOutcom
   it('returns "pending" before the operator responds', () => {
     const mail = openMailStore('p-hr-pending');
     mailStores.push(mail);
-    const req = mail.send(
-      reviewRequestEnvelope({ from: 'lead', subject: 'review?', body: 'please' }),
-    );
+    const reviews = openReviewStore('p-hr-pending');
+    reviewStores.push(reviews);
+    const req = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-hr-outcome-pending',
+      requestedBy: 'lead',
+      subject: 'review?',
+      body: 'please',
+    });
     expect(req.recipient).toBe(OPERATOR);
     expect(req.kind).toBe('actionable');
 
@@ -174,16 +286,20 @@ describe('reviewRequestOutcome — log-derived pending→verdict (approvalOutcom
   it('returns "PASS" once the operator replies with reviewVerdict: PASS', () => {
     const mail = openMailStore('p-hr-pass');
     mailStores.push(mail);
-    const req = mail.send(
-      reviewRequestEnvelope({ from: 'lead', subject: 'review?', body: 'please' }),
-    );
+    const reviews = openReviewStore('p-hr-pass');
+    reviewStores.push(reviews);
+    const req = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-hr-outcome-pass',
+      requestedBy: 'lead',
+      subject: 'review?',
+      body: 'please',
+    });
     const reqRow = mail.inbox(OPERATOR).find((m) => m.seq === req.seq)!;
 
-    mail.reply(reqRow, {
-      type: 'review_response',
-      subject: 're: review?',
+    replyWithHumanVerdict(mail, reviews, reqRow, {
+      reviewId: 'rev-hr-outcome-pass',
+      verdict: 'PASS',
       body: 'looks good',
-      reviewVerdict: 'PASS',
     });
 
     const afterReply = mail.inbox(OPERATOR).find((m) => m.seq === req.seq)!;
@@ -199,16 +315,20 @@ describe('reviewRequestOutcome — log-derived pending→verdict (approvalOutcom
   it('returns "ISSUES" once the operator replies with reviewVerdict: ISSUES', () => {
     const mail = openMailStore('p-hr-issues');
     mailStores.push(mail);
-    const req = mail.send(
-      reviewRequestEnvelope({ from: 'lead', subject: 'review?', body: 'please' }),
-    );
+    const reviews = openReviewStore('p-hr-issues');
+    reviewStores.push(reviews);
+    const req = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-hr-outcome-issues',
+      requestedBy: 'lead',
+      subject: 'review?',
+      body: 'please',
+    });
     const reqRow = mail.inbox(OPERATOR).find((m) => m.seq === req.seq)!;
 
-    mail.reply(reqRow, {
-      type: 'review_response',
-      subject: 're: review?',
+    replyWithHumanVerdict(mail, reviews, reqRow, {
+      reviewId: 'rev-hr-outcome-issues',
+      verdict: 'ISSUES',
       body: 'missing tests',
-      reviewVerdict: 'ISSUES',
     });
 
     const afterReply = mail.inbox(OPERATOR).find((m) => m.seq === req.seq)!;
@@ -217,13 +337,19 @@ describe('reviewRequestOutcome — log-derived pending→verdict (approvalOutcom
   });
 
   it('ignores a review_response not sent by the holder (@operator) back to the requester', () => {
-    const mail = openMailStore('p-hr-spoof');
+    const projectId = 'p-hr-spoof';
+    const mail = openMailStore(projectId);
     mailStores.push(mail);
-    const req = mail.send(
-      reviewRequestEnvelope({ from: 'lead', subject: 'review?', body: 'please' }),
-    );
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const req = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-hr-outcome-spoof',
+      requestedBy: 'lead',
+      subject: 'review?',
+      body: 'please',
+    });
     // A spoofed review_response from an intruder — must not resolve the request.
-    mail.send({
+    injectLegacyMail(projectId, {
       type: 'review_response',
       to: 'lead',
       from: 'intruder',
@@ -250,9 +376,24 @@ describe('reviewRequestOutcome — log-derived pending→verdict (approvalOutcom
 // ── recordHumanVerdict (AC-L5-5 — re-enters gate identically to agent verdict) ───────────────────
 
 describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as agent path)', () => {
+  it('requires a durable human review.requested row before recording a verdict', () => {
+    const reviews = openReviewStore('p-hr-verdict-requires-request');
+    reviewStores.push(reviews);
+
+    expect(() =>
+      recordHumanVerdict(reviews, {
+        reviewId: 'rev-human-missing-request',
+        target: TARGET,
+        branch: BRANCH,
+        verdict: 'PASS',
+      }),
+    ).toThrow(/review\.requested|human review_request/i);
+  });
+
   it('a human PASS verdict is recorded and found by getVerdict', () => {
     const reviews = openReviewStore('p-hr-verdict-pass');
     reviewStores.push(reviews);
+    recordHumanRequest(reviews, 'rev-human-1');
 
     recordHumanVerdict(reviews, {
       reviewId: 'rev-human-1',
@@ -274,6 +415,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
   it('a human PASS preserves pr_merge scope for publish gates', () => {
     const reviews = openReviewStore('p-hr-verdict-pr-scope');
     reviewStores.push(reviews);
+    recordHumanRequest(reviews, 'rev-human-pr');
 
     recordHumanVerdict(reviews, {
       reviewId: 'rev-human-pr',
@@ -295,6 +437,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
     const worktrees = openWorktreeStore('p-hr-verdict-pr-push');
     worktreeStores.push(worktrees);
     recordCleanFinish(worktrees);
+    recordHumanRequest(reviews, 'rev-human-pr-push');
     recordHumanVerdict(reviews, {
       reviewId: 'rev-human-pr-push',
       target: TARGET,
@@ -350,23 +493,13 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
     const persistedRequest = reviews.getReviewRequest(TARGET, BRANCH);
     expect(persistedRequest?.scope).toBe('pr_merge');
     const requestMail = mail.inbox(OPERATOR).find((m) => m.type === 'review_request')!;
-    mail.reply(requestMail, {
-      type: 'review_response',
-      subject: 're: review?',
+    replyWithHumanVerdict(mail, reviews, requestMail, {
+      reviewId: persistedRequest!.reviewId,
+      verdict: 'PASS',
       body: 'passes',
-      reviewVerdict: 'PASS',
     });
     const outcome = reviewRequestOutcome(mail, requestMail);
     if (outcome !== 'PASS') throw new Error(`expected human PASS, got ${outcome}`);
-    const response = mail.inbox('lead-1').find((m) => m.type === 'review_response')!;
-
-    recordHumanVerdict(reviews, {
-      reviewId: persistedRequest!.reviewId,
-      target: persistedRequest!.target,
-      branch: persistedRequest!.branch,
-      verdict: outcome,
-      body: response.body,
-    });
 
     const git = recordingGitExec();
     const publishGate = new CoReviewGate({
@@ -379,6 +512,991 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       publishGate.push({ branch: BRANCH, into: TARGET, projectId, repoCwd: '/repo' }).pushed,
     ).toBe(true);
     expect(git.calls).toEqual([['push', 'origin', TARGET]]);
+  });
+
+  it('co_mail_send review_response records the human verdict and unblocks push', async () => {
+    const projectId = 'p-hr-mail-send-reentry';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    recordCleanFinish(worktrees);
+
+    const requestGate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      config: fakeConfig({ 'review.pr_merge.reviewer': 'human' }),
+      resolveMode: () => 'offline',
+    });
+    requestGate.triggerReview({
+      reviewId: 'rev-human-mail-send',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'pr_merge',
+      projectId,
+    });
+    const requestMail = mail.inbox(OPERATOR).find((m) => m.type === 'review_request')!;
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews,
+      worktrees,
+    };
+
+    await invokeTool(registry, ctx, 'co_mail_send', {
+      type: 'review_response',
+      in_reply_to: requestMail.seq,
+      subject: 're: review requested',
+      body: 'passes',
+      review_verdict: 'PASS',
+    });
+
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
+    const git = recordingGitExec();
+    const publishGate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'owner',
+      gitExec: git.exec,
+    });
+    expect(
+      publishGate.push({ branch: BRANCH, into: TARGET, projectId, repoCwd: '/repo' }).pushed,
+    ).toBe(true);
+    expect(git.calls).toEqual([['push', 'origin', TARGET]]);
+  });
+
+  it('co_mail_send review_response does not reply if atomic review verdict validation fails', async () => {
+    const projectId = 'p-hr-mail-send-record-fail';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const requestMail = injectLegacyMail(projectId, {
+      type: MAIL_REVIEW_REQUEST,
+      to: OPERATOR,
+      from: 'lead-1',
+      subject: `review requested: '${BRANCH}' into '${TARGET}'`,
+      body: 'Please review this branch. (scope: pr_merge, reviewId: rev-human-mail-send-record-fail)',
+      idempotencyKey: 'review-request:rev-human-mail-send-record-fail',
+    });
+    const fakeRequest = {
+      reviewId: 'rev-human-mail-send-record-fail',
+      target: TARGET,
+      branch: BRANCH,
+      scope: 'pr_merge' as const,
+      reviewerKind: 'human' as const,
+      requestedBy: 'lead-1',
+      requestedTs: 1,
+      specRef: { kind: 'no-locked-spec' as const },
+    };
+    const failingReviews: ReviewStore = {
+      ...reviews,
+      getReviewRequest: () => fakeRequest,
+      getReviewRequestById: () => fakeRequest,
+    };
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews: failingReviews,
+      worktrees,
+    };
+
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: requestMail.seq,
+        subject: 're: review requested',
+        body: 'passes',
+        review_verdict: 'PASS',
+      }),
+    ).rejects.toThrow(/no matching review\.requested row/);
+
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
+    expect(mail.inbox(OPERATOR).find((m) => m.seq === requestMail.seq)?.resolved).toBe(false);
+    expect(mail.outstandingCount(OPERATOR)).toBe(1);
+  });
+
+  it('co_mail_send review_response rejects same-key retries that change the verdict', async () => {
+    const projectId = 'p-hr-mail-send-idem-mismatch';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    recordCleanFinish(worktrees);
+
+    const requestGate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      config: fakeConfig({ 'review.pr_merge.reviewer': 'human' }),
+      resolveMode: () => 'offline',
+    });
+    requestGate.triggerReview({
+      reviewId: 'rev-human-mail-send-idem-mismatch',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'pr_merge',
+      projectId,
+    });
+    const requestMail = mail.inbox(OPERATOR).find((m) => m.type === 'review_request')!;
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews,
+      worktrees,
+    };
+
+    await invokeTool(registry, ctx, 'co_mail_send', {
+      type: 'review_response',
+      in_reply_to: requestMail.seq,
+      subject: 're: review requested',
+      body: 'passes',
+      review_verdict: 'PASS',
+      idempotency_key: 'human-review-response:idem-mismatch',
+    });
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: requestMail.seq,
+        subject: 're: review requested',
+        body: 'actually issues',
+        review_verdict: 'ISSUES',
+        idempotency_key: 'human-review-response:idem-mismatch',
+      }),
+    ).rejects.toThrow(/idempotent review_response retry.*changes review_verdict/i);
+
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(1);
+  });
+
+  it('co_mail_send review_response rejects idempotency key reuse across review requests', async () => {
+    const projectId = 'p-hr-mail-send-idem-cross-request';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const firstBranch = 'co/first-review';
+    const secondBranch = 'co/second-review';
+    const firstMail = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-human-idem-first',
+      target: `${TARGET}-first`,
+      branch: firstBranch,
+      requestedBy: 'lead-1',
+    });
+    const secondMail = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-human-idem-second',
+      target: `${TARGET}-second`,
+      branch: secondBranch,
+      requestedBy: 'lead-1',
+    });
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews,
+    };
+
+    await invokeTool(registry, ctx, 'co_mail_send', {
+      type: 'review_response',
+      in_reply_to: firstMail.seq,
+      subject: 're: first',
+      body: 'passes',
+      review_verdict: 'PASS',
+      idempotency_key: 'human-review-response:cross-request',
+    });
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: secondMail.seq,
+        subject: 're: second',
+        body: 'passes',
+        review_verdict: 'PASS',
+        idempotency_key: 'human-review-response:cross-request',
+      }),
+    ).rejects.toThrow(/idempotency_key.*already belongs/i);
+
+    expect(reviews.getVerdict(`${TARGET}-second`, secondBranch, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(1);
+  });
+
+  it('co_mail_send review_response rejects same-key same-verdict retries that change body', async () => {
+    const projectId = 'p-hr-mail-send-idem-same-verdict';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const requestMail = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-human-idem-same-verdict',
+      requestedBy: 'lead-1',
+    });
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews,
+    };
+
+    await invokeTool(registry, ctx, 'co_mail_send', {
+      type: 'review_response',
+      in_reply_to: requestMail.seq,
+      subject: 're: review requested',
+      body: 'first blocker',
+      review_verdict: 'ISSUES',
+      idempotency_key: 'human-review-response:same-verdict',
+    });
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: requestMail.seq,
+        subject: 're: review requested',
+        body: 'different blocker should not overwrite',
+        review_verdict: 'ISSUES',
+        idempotency_key: 'human-review-response:same-verdict',
+      }),
+    ).rejects.toThrow(/idempotent review_response retry.*subject\/body/i);
+
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.blockers[0]?.summary).toBe(
+      'first blocker',
+    );
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(1);
+  });
+
+  it('co_mail_send review_response treats exact same-key same-verdict retries as no-ops', async () => {
+    const projectId = 'p-hr-mail-send-idem-exact';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const requestMail = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-human-idem-exact',
+      requestedBy: 'lead-1',
+    });
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews,
+    };
+
+    const first = await invokeTool(registry, ctx, 'co_mail_send', {
+      type: 'review_response',
+      in_reply_to: requestMail.seq,
+      subject: 're: review requested',
+      body: 'passes',
+      review_verdict: 'PASS',
+      idempotency_key: 'human-review-response:exact',
+    });
+    const second = await invokeTool(registry, ctx, 'co_mail_send', {
+      type: 'review_response',
+      in_reply_to: requestMail.seq,
+      subject: 're: review requested',
+      body: 'passes',
+      review_verdict: 'PASS',
+      idempotency_key: 'human-review-response:exact',
+    });
+
+    expect(second).toEqual(first);
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(1);
+  });
+
+  it('mail-store review verdict replies treat exact same-key retries as no-ops after resolution', () => {
+    const projectId = 'p-hr-mail-store-idem-exact';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const requestMail = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-human-store-idem-exact',
+      requestedBy: 'lead-1',
+    });
+    const draft = {
+      type: 'review_response' as const,
+      subject: 're: review requested',
+      body: 'passes',
+      from: OPERATOR,
+      reviewVerdict: 'PASS' as const,
+      idempotencyKey: 'human-review-response:store-exact',
+    };
+    const verdict = buildHumanReviewVerdict(reviews, {
+      reviewId: 'rev-human-store-idem-exact',
+      target: TARGET,
+      branch: BRANCH,
+      verdict: 'PASS',
+      body: 'passes',
+    });
+
+    const first = mail.replyWithReviewVerdict(requestMail, draft, verdict);
+    const second = mail.replyWithReviewVerdict(requestMail, draft, verdict);
+
+    expect(second).toEqual(first);
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(1);
+  });
+
+  it('mail-store human review requests require a matching review_request envelope', () => {
+    const projectId = 'p-hr-mail-store-request-envelope';
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const request = {
+      reviewId: 'rev-human-request-envelope',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'pr_merge' as const,
+      reviewerKind: 'human' as const,
+    };
+
+    expect(() =>
+      mail.requestHumanReview(
+        {
+          type: 'chat',
+          to: OPERATOR,
+          from: 'lead-1',
+          subject: 'not a review request',
+          body: 'stuck',
+          idempotencyKey: 'review-request:rev-human-request-envelope',
+        },
+        request,
+      ),
+    ).toThrow(/review_request/i);
+    expect(() =>
+      mail.requestHumanReview(
+        {
+          type: MAIL_REVIEW_REQUEST,
+          to: OPERATOR,
+          from: 'lead-2',
+          subject: 'review requested',
+          body: 'wrong sender',
+          idempotencyKey: 'review-request:rev-human-request-envelope',
+        },
+        request,
+      ),
+    ).toThrow(/requestedBy|sender/i);
+    expect(() =>
+      mail.requestHumanReview(
+        {
+          type: MAIL_REVIEW_REQUEST,
+          to: OPERATOR,
+          from: 'lead-1',
+          subject: 'review requested',
+          body: 'wrong key',
+          idempotencyKey: 'review-request:another',
+        },
+        request,
+      ),
+    ).toThrow(/idempotency/i);
+  });
+
+  it('mail-store human review requests reject conflicting idempotency state', () => {
+    const projectId = 'p-hr-mail-store-request-idem-conflict';
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    injectLegacyMail(projectId, {
+      type: MAIL_REVIEW_REQUEST,
+      to: OPERATOR,
+      from: 'lead-1',
+      subject: 'legacy review request',
+      body: 'partial legacy state',
+      idempotencyKey: 'review-request:rev-human-idem-conflict',
+    });
+
+    expect(() =>
+      mail.requestHumanReview(
+        {
+          type: MAIL_REVIEW_REQUEST,
+          to: OPERATOR,
+          from: 'lead-1',
+          subject: 'review requested',
+          body: 'new request',
+          idempotencyKey: 'review-request:rev-human-idem-conflict',
+        },
+        {
+          reviewId: 'rev-human-idem-conflict',
+          target: TARGET,
+          branch: BRANCH,
+          requestedBy: 'lead-1',
+          scope: 'pr_merge',
+          reviewerKind: 'human',
+        },
+      ),
+    ).toThrow(/idempotency|existing/i);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
+  });
+
+  it('mail-store human review requests reject legacy duplicate reviewIds before side effects', () => {
+    const projectId = 'p-hr-mail-store-legacy-duplicate-review-id';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    recordHumanRequest(reviews, 'rev-human-legacy-dup', 'lead-1', TARGET, 'co/original');
+    const raw = openProjectStore(projectId);
+    try {
+      raw.transaction((tx) => {
+        (tx.raw as DatabaseSync).exec('DROP TABLE review_request_ids');
+      });
+    } finally {
+      raw.close();
+    }
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+
+    expect(() =>
+      mail.requestHumanReview(
+        {
+          type: MAIL_REVIEW_REQUEST,
+          to: OPERATOR,
+          from: 'lead-1',
+          subject: 'review requested',
+          body: 'new request',
+          idempotencyKey: 'review-request:rev-human-legacy-dup',
+        },
+        {
+          reviewId: 'rev-human-legacy-dup',
+          target: TARGET,
+          branch: 'co/another',
+          requestedBy: 'lead-1',
+          scope: 'pr_merge',
+          reviewerKind: 'human',
+        },
+      ),
+    ).toThrow(/duplicate reviewId.*already belongs/i);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
+    expect(reviews.getReviewRequest(TARGET, 'co/another')).toBeUndefined();
+  });
+
+  it('human review trigger refuses a different reviewId while the first request is pending', () => {
+    const projectId = 'p-hr-pending-rerequest';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      resolveMode: () => 'offline',
+      config: fakeConfig({ 'review.pr_merge.reviewer': 'human' }),
+    });
+
+    gate.triggerReview({
+      reviewId: 'rev-human-pending-1',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'pr_merge',
+      projectId,
+    });
+
+    expect(() =>
+      gate.triggerReview({
+        reviewId: 'rev-human-pending-2',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'pr_merge',
+        projectId,
+      }),
+    ).toThrow(/pending|active review request/i);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
+    expect(reviews.getReviewRequest(TARGET, BRANCH)?.reviewId).toBe('rev-human-pending-1');
+  });
+
+  it('mail-store review verdict replies require the durable request mail and matching response payload', () => {
+    const projectId = 'p-hr-mail-store-reply-envelope';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const requestMail = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-human-store-reply-envelope',
+      requestedBy: 'lead-1',
+    });
+    const chatMail = mail.send({
+      type: 'chat',
+      to: OPERATOR,
+      from: 'lead-1',
+      subject: 'not the review request',
+      body: 'hello',
+    });
+    const verdict = buildHumanReviewVerdict(reviews, {
+      reviewId: 'rev-human-store-reply-envelope',
+      target: TARGET,
+      branch: BRANCH,
+      verdict: 'PASS',
+      body: 'passes',
+    });
+
+    expect(() =>
+      mail.replyWithReviewVerdict(
+        chatMail,
+        {
+          type: 'review_response',
+          subject: 're: review requested',
+          body: 'passes',
+          from: OPERATOR,
+          reviewVerdict: 'PASS',
+        },
+        verdict,
+      ),
+    ).toThrow(/review_request/i);
+    expect(() =>
+      mail.replyWithReviewVerdict(
+        requestMail,
+        {
+          type: 'chat',
+          subject: 're: review requested',
+          body: 'passes',
+          from: OPERATOR,
+          reviewVerdict: 'PASS',
+        },
+        verdict,
+      ),
+    ).toThrow(/review_response/i);
+    expect(() =>
+      mail.replyWithReviewVerdict(
+        requestMail,
+        {
+          type: 'review_response',
+          subject: 're: review requested',
+          body: 'passes',
+          from: OPERATOR,
+          reviewVerdict: 'ISSUES',
+        },
+        verdict,
+      ),
+    ).toThrow(/review_verdict/i);
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
+  });
+
+  it('mail-store generic reply refuses review_response mail', () => {
+    const projectId = 'p-hr-mail-store-generic-review-response';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const requestMail = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-generic-review-response',
+      requestedBy: 'lead-1',
+      subject: 'review requested',
+      body: 'please review',
+    });
+
+    expect(() =>
+      mail.reply(requestMail, {
+        type: 'review_response',
+        subject: 're: review requested',
+        body: 'passes',
+        from: OPERATOR,
+        reviewVerdict: 'PASS',
+      }),
+    ).toThrow(/replyWithReviewVerdict|review_response/i);
+  });
+
+  it('mail-store generic send refuses review_request and review_response mail', () => {
+    const projectId = 'p-hr-mail-store-generic-review-send';
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+
+    expect(() =>
+      mail.send({
+        type: MAIL_REVIEW_REQUEST,
+        to: OPERATOR,
+        from: 'lead-1',
+        subject: 'review requested',
+        body: 'please review',
+        idempotencyKey: 'review-request:rev-generic-review-send',
+      }),
+    ).toThrow(/requestHumanReview|review_request/i);
+    expect(() =>
+      mail.send({
+        type: 'review_response',
+        to: 'lead-1',
+        from: OPERATOR,
+        subject: 're: review requested',
+        body: 'passes',
+        correlationId: '1',
+        causationId: '1',
+        reviewVerdict: 'PASS',
+      }),
+    ).toThrow(/replyWithReviewVerdict|review_response/i);
+  });
+
+  it('mail-store generic resolve refuses review_request and review_response mail', () => {
+    const projectId = 'p-hr-mail-store-generic-review-resolve';
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const heldForRequest = mail.send({
+      type: MAIL_ESCALATION,
+      to: 'lead-1',
+      from: OPERATOR,
+      subject: 'blocked',
+      body: 'needs action',
+    });
+    const heldForResponse = mail.send({
+      type: MAIL_ESCALATION,
+      to: 'lead-1',
+      from: 'worker-1',
+      subject: 'blocked',
+      body: 'needs action',
+    });
+
+    expect(() =>
+      mail.resolve(heldForRequest, {
+        type: MAIL_REVIEW_REQUEST,
+        to: OPERATOR,
+        from: 'lead-1',
+        subject: 'review requested',
+        body: 'please review',
+        causationId: String(heldForRequest.seq),
+        correlationId: String(heldForRequest.seq),
+      }),
+    ).toThrow(/requestHumanReview|review_request/i);
+    expect(() =>
+      mail.resolve(heldForResponse, {
+        type: 'review_response',
+        to: 'worker-1',
+        from: 'lead-1',
+        subject: 're: review requested',
+        body: 'passes',
+        causationId: String(heldForResponse.seq),
+        correlationId: String(heldForResponse.seq),
+        reviewVerdict: 'PASS',
+      }),
+    ).toThrow(/replyWithReviewVerdict|review_response/i);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
+    expect(mail.inbox('worker-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
+  });
+
+  it('mail-store review verdict replies require reviewer provenance to match the response sender', () => {
+    const projectId = 'p-hr-mail-store-reply-reviewer-provenance';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const requestMail = mail.requestHumanReview(
+      {
+        type: MAIL_REVIEW_REQUEST,
+        to: OPERATOR,
+        from: 'lead-1',
+        subject: 'review requested',
+        body: 'please review',
+        idempotencyKey: 'review-request:rev-human-reviewer-provenance',
+      },
+      {
+        reviewId: 'rev-human-reviewer-provenance',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'pr_merge',
+        reviewerKind: 'human',
+      },
+    ).mail;
+    const verdict = buildHumanReviewVerdict(reviews, {
+      reviewId: 'rev-human-reviewer-provenance',
+      target: TARGET,
+      branch: BRANCH,
+      verdict: 'PASS',
+      body: 'passes',
+    });
+
+    expect(() =>
+      mail.replyWithReviewVerdict(
+        requestMail,
+        {
+          type: 'review_response',
+          subject: 're: review requested',
+          body: 'passes',
+          from: 'operator-proxy',
+          reviewVerdict: 'PASS',
+        },
+        verdict,
+      ),
+    ).toThrow(/sender|reviewer/i);
+  });
+
+  it('mail-store refuses to retract review request and response mail', () => {
+    const projectId = 'p-hr-mail-store-review-retract';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const requestMail = mail.requestHumanReview(
+      {
+        type: MAIL_REVIEW_REQUEST,
+        to: OPERATOR,
+        from: 'lead-1',
+        subject: 'review requested',
+        body: 'please review',
+        idempotencyKey: 'review-request:rev-human-retract',
+      },
+      {
+        reviewId: 'rev-human-retract',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'pr_merge',
+        reviewerKind: 'human',
+      },
+    ).mail;
+    const verdict = buildHumanReviewVerdict(reviews, {
+      reviewId: 'rev-human-retract',
+      target: TARGET,
+      branch: BRANCH,
+      verdict: 'PASS',
+      body: 'passes',
+    });
+    const responseMail = mail.replyWithReviewVerdict(
+      requestMail,
+      {
+        type: 'review_response',
+        subject: 're: review requested',
+        body: 'passes',
+        from: OPERATOR,
+        reviewVerdict: 'PASS',
+        idempotencyKey: 'review-response:rev-human-retract',
+      },
+      verdict,
+    );
+
+    expect(() => mail.retract('lead-1', requestMail.seq)).toThrow(/review_request|review mail/i);
+    expect(() => mail.retract(OPERATOR, responseMail.seq)).toThrow(/review_response|review mail/i);
+    expect(mail.inbox(OPERATOR).some((m) => m.seq === requestMail.seq)).toBe(true);
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
+  });
+
+  it('co_mail_send review_response refuses a new verdict after the request is resolved', async () => {
+    const projectId = 'p-hr-mail-send-resolved-request';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const requestMail = requestHumanReviewMail(mail, reviews, {
+      reviewId: 'rev-human-resolved-request',
+      requestedBy: 'lead-1',
+    });
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews,
+    };
+
+    await invokeTool(registry, ctx, 'co_mail_send', {
+      type: 'review_response',
+      in_reply_to: requestMail.seq,
+      subject: 're: review requested',
+      body: 'passes',
+      review_verdict: 'PASS',
+    });
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: requestMail.seq,
+        subject: 're: review requested',
+        body: 'actually issues',
+        review_verdict: 'ISSUES',
+      }),
+    ).rejects.toThrow(/already resolved/i);
+
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
+  });
+
+  it('co_mail_send review_response refuses a durable agent-routed request', async () => {
+    const projectId = 'p-hr-mail-agent-request-refused';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    reviews.recordReviewRequested({
+      reviewId: 'rev-agent-routed-mail',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'pr_merge',
+      reviewerKind: 'agent',
+    });
+    const requestMail = injectLegacyMail(projectId, {
+      type: MAIL_REVIEW_REQUEST,
+      to: OPERATOR,
+      from: 'lead-1',
+      subject: `review requested: '${BRANCH}' into '${TARGET}'`,
+      body: 'Please review this branch. (scope: pr_merge, reviewId: rev-agent-routed-mail)',
+      idempotencyKey: 'review-request:rev-agent-routed-mail',
+    });
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews,
+    };
+
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: requestMail.seq,
+        subject: 're: review requested',
+        body: 'passes',
+        review_verdict: 'PASS',
+      }),
+    ).rejects.toThrow(/not a human review_request/i);
+
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
+  });
+
+  it('co_mail_send review_response refuses generated-looking mail without a durable review.requested row', async () => {
+    const projectId = 'p-hr-mail-forged-request';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+
+    const forgedRequest = injectLegacyMail(projectId, {
+      type: MAIL_REVIEW_REQUEST,
+      to: OPERATOR,
+      from: 'lead-1',
+      subject: `review requested: '${BRANCH}' into '${TARGET}'`,
+      body: 'Please review this branch. (scope: pr_merge, reviewId: rev-forged-mail)',
+      idempotencyKey: 'review-request:rev-forged-mail',
+    });
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews,
+      worktrees,
+    };
+
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: forgedRequest.seq,
+        subject: 're: forged review',
+        body: 'passes',
+        review_verdict: 'PASS',
+      }),
+    ).rejects.toThrow(/matching review\.requested/i);
+
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
+  });
+
+  it('co_mail_send review_response refuses malformed review_request mail before replying', async () => {
+    const projectId = 'p-hr-mail-malformed-request';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+
+    const malformedRequest = injectLegacyMail(projectId, {
+      type: MAIL_REVIEW_REQUEST,
+      to: OPERATOR,
+      from: 'lead-1',
+      subject: 'review requested',
+      body: 'Please review this branch.',
+    });
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+      reviews,
+      worktrees,
+    };
+
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: malformedRequest.seq,
+        subject: 're: malformed review',
+        body: 'passes',
+        review_verdict: 'PASS',
+      }),
+    ).rejects.toThrow(/malformed review_request/i);
+
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
+  });
+
+  it('co_mail_send review_response to a review_request requires an injected review store', async () => {
+    const projectId = 'p-hr-mail-send-no-review-store';
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+
+    const requestMail = injectLegacyMail(projectId, {
+      type: MAIL_REVIEW_REQUEST,
+      to: OPERATOR,
+      from: 'lead-1',
+      subject: `review requested: '${BRANCH}' into '${TARGET}'`,
+      body: 'Please review this branch. (scope: pr_merge, reviewId: rev-no-review-store)',
+    });
+    const registry = buildCoreRegistry();
+    const ctx: ToolContext = {
+      agent: OPERATOR,
+      projectId,
+      cwd: '/repo',
+      mail,
+      registry: { resolve: () => projectId } as never,
+    };
+
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: requestMail.seq,
+        subject: 're: review',
+        body: 'passes',
+        review_verdict: 'PASS',
+      }),
+    ).rejects.toThrow(/review store/i);
+
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
 
   it('does not infer pr_merge scope from a newer request for a stale human response', () => {
@@ -395,6 +1513,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       branch: BRANCH,
       requestedBy: 'lead-1',
       scope: 'worker_merge',
+      reviewerKind: 'human',
     });
     reviews.recordReviewRequested({
       reviewId: 'rev-pr-new',
@@ -402,6 +1521,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       branch: BRANCH,
       requestedBy: 'lead-1',
       scope: 'pr_merge',
+      reviewerKind: 'human',
     });
 
     expect(() =>
@@ -461,6 +1581,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
   it('a human ISSUES verdict is recorded with a blocker derived from body', () => {
     const reviews = openReviewStore('p-hr-verdict-issues');
     reviewStores.push(reviews);
+    recordHumanRequest(reviews, 'rev-human-2');
 
     recordHumanVerdict(reviews, {
       reviewId: 'rev-human-2',
@@ -477,9 +1598,58 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
     expect(v!.verification?.suite_result).toBe('fail');
   });
 
+  it('a human ISSUES verdict releases this branch active review slot', () => {
+    const reviews = openReviewStore('p-hr-verdict-issues-release');
+    reviewStores.push(reviews);
+    acquireMergeSlot(reviews, TARGET, BRANCH);
+    recordHumanRequest(reviews, 'rev-human-issues-release');
+
+    recordHumanVerdict(reviews, {
+      reviewId: 'rev-human-issues-release',
+      target: TARGET,
+      branch: BRANCH,
+      verdict: 'ISSUES',
+      body: 'needs another pass',
+    });
+
+    expect(reviews.getVerdict(TARGET, BRANCH)?.verdict).toBe('ISSUES');
+    expect(reviews.activeSerialized(TARGET)).toBeUndefined();
+  });
+
+  it('a human ISSUES verdict is not recorded if active slot release fails', () => {
+    const reviews = openReviewStore('p-hr-verdict-issues-release-fail');
+    reviewStores.push(reviews);
+    recordHumanRequest(reviews, 'rev-human-issues-release-fail');
+    let recordCalled = false;
+    const failingReviews: ReviewStore = {
+      ...reviews,
+      recordVerdictAndRelease: () => {
+        throw new Error('verdict/release store unavailable');
+      },
+      recordVerdict: (verdict) => {
+        recordCalled = true;
+        return reviews.recordVerdict(verdict);
+      },
+    };
+
+    expect(() =>
+      recordHumanVerdict(failingReviews, {
+        reviewId: 'rev-human-issues-release-fail',
+        target: TARGET,
+        branch: BRANCH,
+        verdict: 'ISSUES',
+        body: 'needs another pass',
+      }),
+    ).toThrow(/verdict\/release store unavailable/);
+
+    expect(recordCalled).toBe(false);
+    expect(reviews.getVerdict(TARGET, BRANCH)).toBeUndefined();
+  });
+
   it('a human ISSUES with no body falls back to a non-empty blocker summary', () => {
     const reviews = openReviewStore('p-hr-verdict-issues-nobody');
     reviewStores.push(reviews);
+    recordHumanRequest(reviews, 'rev-human-3');
 
     recordHumanVerdict(reviews, {
       reviewId: 'rev-human-3',
@@ -539,6 +1709,275 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
     expect(reviewReq!.kind).toBe('actionable');
     expect(reviewReq!.resolved).toBe(false);
     expect(mail.outstandingCount(OPERATOR)).toBe(1);
+  });
+
+  it('human scope: duplicate request with the same canonical fields does not send duplicate mail', () => {
+    const reviews = openReviewStore('p-hr-trigger-dup');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-hr-trigger-dup');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-hr-trigger-dup');
+    mailStores.push(mail);
+
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+
+    const input = {
+      reviewId: 'rev-dup-human',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge' as const,
+      projectId: 'p-hr-trigger-dup',
+    };
+    const first = gate.triggerReview(input);
+    const second = gate.triggerReview(input);
+
+    expect(second).toEqual(first);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
+    expect(mail.outstandingCount(OPERATOR)).toBe(1);
+  });
+
+  it('human scope: retry repairs an existing durable request that has no review_request mail', () => {
+    const reviews = openReviewStore('p-hr-trigger-repair-mail');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-hr-trigger-repair-mail');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-hr-trigger-repair-mail');
+    mailStores.push(mail);
+    reviews.recordReviewRequested({
+      reviewId: 'rev-repair-human-mail',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge',
+      reviewerKind: 'human',
+      specRefKind: 'no-locked-spec',
+    });
+
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+
+    const result = gate.triggerReview({
+      reviewId: 'rev-repair-human-mail',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge',
+      projectId: 'p-hr-trigger-repair-mail',
+    });
+
+    expect(result.reviewId).toBe('rev-repair-human-mail');
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
+    expect(mail.outstandingCount(OPERATOR)).toBe(1);
+  });
+
+  it('human scope: idempotent request retry with changed fields is refused', () => {
+    const mail = openMailStore('p-hr-trigger-idempotent-mismatch');
+    mailStores.push(mail);
+    const envelope = {
+      type: MAIL_REVIEW_REQUEST,
+      to: OPERATOR,
+      from: 'lead-1',
+      subject: 'review?',
+      body: 'Please review this branch. (scope: worker_merge, reviewId: rev-idem-mismatch)',
+      idempotencyKey: 'review-request:rev-idem-mismatch',
+    } satisfies MailEnvelope;
+    const request = {
+      reviewId: 'rev-idem-mismatch',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge' as const,
+      reviewerKind: 'human' as const,
+    };
+
+    mail.requestHumanReview(envelope, request);
+
+    expect(() =>
+      mail.requestHumanReview(envelope, {
+        ...request,
+        scope: 'pr_merge',
+      }),
+    ).toThrow(/duplicate reviewId.*scope|idempotency_key.*conflicts/i);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
+  });
+
+  it('human scope: duplicate reviewId with mismatched fields is refused before side effects', () => {
+    const reviews = openReviewStore('p-hr-trigger-dup-mismatch');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-hr-trigger-dup-mismatch');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-hr-trigger-dup-mismatch');
+    mailStores.push(mail);
+
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+
+    gate.triggerReview({
+      reviewId: 'rev-dup-human-mismatch',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge',
+      projectId: 'p-hr-trigger-dup-mismatch',
+    });
+
+    expect(() =>
+      gate.triggerReview({
+        reviewId: 'rev-dup-human-mismatch',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-2',
+        scope: 'worker_merge',
+        projectId: 'p-hr-trigger-dup-mismatch',
+      }),
+    ).toThrow(/duplicate reviewId.*requestedBy/i);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
+  });
+
+  it('human scope: cross-target duplicate reviewId is refused before sending mail', () => {
+    const reviews = openReviewStore('p-hr-trigger-dup-cross-target');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-hr-trigger-dup-cross-target');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-hr-trigger-dup-cross-target');
+    mailStores.push(mail);
+
+    reviews.recordReviewRequested({
+      reviewId: 'rev-dup-human-cross-target',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge',
+    });
+
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+
+    expect(() =>
+      gate.triggerReview({
+        reviewId: 'rev-dup-human-cross-target',
+        target: 'co/another-target',
+        branch: 'co/another-branch',
+        requestedBy: 'lead-1',
+        scope: 'worker_merge',
+        projectId: 'p-hr-trigger-dup-cross-target',
+      }),
+    ).toThrow(/duplicate reviewId.*already belongs/i);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
+  });
+
+  it('human scope: records no review_request mail or slot if the atomic request write fails', () => {
+    const reviews = openReviewStore('p-hr-trigger-record-fail');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-hr-trigger-record-fail');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-hr-trigger-record-fail');
+    mailStores.push(mail);
+    const failingMail: MailStore = {
+      ...mail,
+      requestHumanReview: () => {
+        throw new Error('review request store unavailable');
+      },
+    };
+
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail: failingMail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+
+    expect(() =>
+      gate.triggerReview({
+        reviewId: 'rev-human-record-fail',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'worker_merge',
+        projectId: 'p-hr-trigger-record-fail',
+      }),
+    ).toThrow(/review request store unavailable/);
+
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
+    expect(mail.sentBy('lead-1').filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
+    expect(reviews.getReviewRequest(TARGET, BRANCH)).toBeUndefined();
+    expect(reviews.activeSerialized(TARGET)).toBeUndefined();
+  });
+
+  it('human scope: retry after a failed atomic request sends visible mail', () => {
+    const projectId = 'p-hr-trigger-record-fail-retry';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const failingMail: MailStore = {
+      ...mail,
+      requestHumanReview: () => {
+        throw new Error('review request store unavailable once');
+      },
+    };
+
+    const failingGate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail: failingMail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+    const input = {
+      reviewId: 'rev-human-record-fail-retry',
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'worker_merge' as const,
+      projectId,
+    };
+    expect(() => failingGate.triggerReview(input)).toThrow(/review request store unavailable once/);
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
+    expect(mail.sentBy('lead-1').filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
+    expect(reviews.getReviewRequest(TARGET, BRANCH)).toBeUndefined();
+    expect(reviews.activeSerialized(TARGET)).toBeUndefined();
+
+    const retryGate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      mail,
+      config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
+    });
+    retryGate.triggerReview(input);
+
+    const visibleRequests = mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST);
+    expect(visibleRequests).toHaveLength(1);
+    expect(visibleRequests[0]!.retracted).toBe(false);
+    expect(mail.outstandingCount(OPERATOR)).toBe(1);
+    expect(mail.sentBy('lead-1').filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
+    expect(reviews.getReviewRequest(TARGET, BRANCH)?.reviewId).toBe(input.reviewId);
   });
 
   it('human scope: no reviewer placement is recorded (agent placement is Phase F only)', () => {

@@ -9,10 +9,12 @@ import {
   MAIL_CLARIFY_RESPONSE,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
+  MAIL_WORKER_DONE,
   OPERATOR,
 } from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { openRegistry, type ProjectRegistry } from '../registry/registry.js';
+import { openReviewStore, type ReviewStore } from '../review/review-store.js';
 import type { ToolContext } from './context.js';
 import { buildCoreRegistry } from './core-registry.js';
 import { invokeTool } from './invoke.js';
@@ -63,6 +65,7 @@ function setup(): {
   close: () => void;
 } {
   const mail: MailStore = openMailStore('p-tools');
+  const reviews: ReviewStore = openReviewStore('p-tools');
   const registry: ProjectRegistry = openRegistry();
   const reg = buildCoreRegistry();
   return {
@@ -72,10 +75,12 @@ function setup(): {
       projectId: 'p-tools',
       cwd: CWD,
       mail,
+      reviews,
       registry,
     }),
     close: () => {
       mail.close();
+      reviews.close();
       registry.close();
     },
   };
@@ -192,6 +197,38 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
     }
   });
 
+  it('rejects worker_done through generic mail send; co_finish owns that durable signal', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      await expect(
+        invokeTool(reg, ctx('impl-1'), 'co_mail_send', {
+          to: 'lead-1',
+          type: MAIL_WORKER_DONE,
+          subject: 'worker_done: co/feature',
+          body: 'done',
+        }),
+      ).rejects.toThrow(/schema validation/i);
+    } finally {
+      close();
+    }
+  });
+
+  it('rejects review_request through generic mail send; review gates own that durable signal', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      await expect(
+        invokeTool(reg, ctx('lead-1'), 'co_mail_send', {
+          to: OPERATOR,
+          type: MAIL_REVIEW_REQUEST,
+          subject: 'review?',
+          body: 'please review',
+        }),
+      ).rejects.toThrow(/schema validation/i);
+    } finally {
+      close();
+    }
+  });
+
   it('a threaded reply (in_reply_to) lands with correct correlation_id/causation_id', async () => {
     const { reg, ctx, close } = setup();
     try {
@@ -218,20 +255,59 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
     }
   });
 
+  it('rejects review_response replies to non-review_request mail', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      const leadCtx = ctx('lead');
+      const req = leadCtx.mail.send({
+        to: OPERATOR,
+        type: MAIL_CLARIFY_REQUEST,
+        from: 'lead',
+        subject: 'question?',
+        body: 'please answer',
+      });
+
+      await expect(
+        invokeTool(reg, ctx(OPERATOR), 'co_mail_send', {
+          type: MAIL_REVIEW_RESPONSE,
+          in_reply_to: req.seq,
+          subject: 're: question?',
+          body: 'passes',
+          review_verdict: 'PASS',
+        }),
+      ).rejects.toThrow(/review_request/i);
+    } finally {
+      close();
+    }
+  });
+
   it('a review_response carries review_verdict through send, inbox, get, and thread', async () => {
     const { reg, ctx, close } = setup();
     try {
-      const req = (await invokeTool(reg, ctx('lead'), 'co_mail_send', {
-        to: OPERATOR,
-        type: MAIL_REVIEW_REQUEST,
-        subject: 'review?',
-        body: 'please review',
-      })) as WireMail;
+      const leadCtx = ctx('lead');
+      const req = leadCtx.mail.requestHumanReview(
+        {
+          type: MAIL_REVIEW_REQUEST,
+          to: OPERATOR,
+          from: 'lead',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-tools-review-response',
+        },
+        {
+          reviewId: 'rev-tools-review-response',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead',
+          reviewerKind: 'human',
+        },
+      ).mail;
 
       const reply = (await invokeTool(reg, ctx(OPERATOR), 'co_mail_send', {
         type: MAIL_REVIEW_RESPONSE,
         in_reply_to: req.seq,
-        subject: 're: review?',
+        subject: 're: review requested',
         body: 'passes',
         review_verdict: 'PASS',
       })) as WireMail;
@@ -307,6 +383,30 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
     const send = buildCoreRegistry().get('co_mail_send');
     expect(() =>
       send?.inputSchema.parse({ to: 'bob', type: 'wizard_mail', subject: 's', body: 'b' }),
+    ).toThrow();
+  });
+
+  it('co_mail_send schema rejects worker_done before the handler', () => {
+    const send = buildCoreRegistry().get('co_mail_send');
+    expect(() =>
+      send?.inputSchema.parse({
+        to: 'lead-1',
+        type: MAIL_WORKER_DONE,
+        subject: 'worker_done: co/feature',
+        body: 'done',
+      }),
+    ).toThrow();
+  });
+
+  it('co_mail_send schema rejects review_request before the handler', () => {
+    const send = buildCoreRegistry().get('co_mail_send');
+    expect(() =>
+      send?.inputSchema.parse({
+        to: OPERATOR,
+        type: MAIL_REVIEW_REQUEST,
+        subject: 'review?',
+        body: 'please review',
+      }),
     ).toThrow();
   });
 

@@ -18,6 +18,10 @@ const CREATE_PLACEMENT_TABLE = `
     role             TEXT NOT NULL,
     work_size        TEXT NOT NULL,
     reasoning_budget TEXT NOT NULL,
+    review_id        TEXT,
+    review_target    TEXT,
+    review_branch    TEXT,
+    review_scope     TEXT,
     kind             TEXT NOT NULL,
     provider         TEXT,
     account          TEXT,
@@ -40,6 +44,10 @@ export function ensurePlacementTable(db: DatabaseSync): void {
   ensureColumn(db, 'placement_records', 'maxed_accounts', 'TEXT');
   ensureColumn(db, 'placement_records', 'unavailable_accounts', 'TEXT');
   ensureColumn(db, 'placement_records', 'account', 'TEXT');
+  ensureColumn(db, 'placement_records', 'review_id', 'TEXT');
+  ensureColumn(db, 'placement_records', 'review_target', 'TEXT');
+  ensureColumn(db, 'placement_records', 'review_branch', 'TEXT');
+  ensureColumn(db, 'placement_records', 'review_scope', 'TEXT');
 }
 
 function ensureColumn(db: DatabaseSync, table: string, column: string, definition: string): void {
@@ -59,6 +67,10 @@ export function rowToPlacementRecord(row: Record<string, unknown>): PlacementRec
     role: row['role'] as string,
     workSize: row['work_size'] as string,
     reasoningBudget: row['reasoning_budget'] as string,
+    reviewId: row['review_id'] != null ? (row['review_id'] as string) : undefined,
+    reviewTarget: row['review_target'] != null ? (row['review_target'] as string) : undefined,
+    reviewBranch: row['review_branch'] != null ? (row['review_branch'] as string) : undefined,
+    reviewScope: row['review_scope'] != null ? (row['review_scope'] as string) : undefined,
     kind: kind as 'placed' | 'waiting',
     recordedTs: row['ts'] as number,
   };
@@ -156,14 +168,18 @@ export class PlacementProjector implements Projector {
     if (p.kind === 'placed') {
       db.prepare(
         `INSERT OR REPLACE INTO placement_records
-         (seq, agent, role, work_size, reasoning_budget, kind, provider, account, model, effort, context, ts)
-         VALUES (?, ?, ?, ?, ?, 'placed', ?, ?, ?, ?, ?, ?)`,
+         (seq, agent, role, work_size, reasoning_budget, review_id, review_target, review_branch, review_scope, kind, provider, account, model, effort, context, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'placed', ?, ?, ?, ?, ?, ?)`,
       ).run(
         event.seq,
         agent,
         p.role,
         p.work_size,
         p.reasoning_budget,
+        p.review_id ?? null,
+        p.review_target ?? null,
+        p.review_branch ?? null,
+        p.review_scope ?? null,
         p.provider,
         p.account ?? accountForProvider(p.provider),
         p.model,
@@ -174,14 +190,18 @@ export class PlacementProjector implements Projector {
     } else if (p.kind === 'waiting') {
       db.prepare(
         `INSERT OR REPLACE INTO placement_records
-         (seq, agent, role, work_size, reasoning_budget, kind, eta_reset_at, reason, maxed_providers, maxed_accounts, unavailable_providers, unavailable_accounts, ts)
-         VALUES (?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?)`,
+         (seq, agent, role, work_size, reasoning_budget, review_id, review_target, review_branch, review_scope, kind, eta_reset_at, reason, maxed_providers, maxed_accounts, unavailable_providers, unavailable_accounts, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         event.seq,
         agent,
         p.role,
         p.work_size,
         p.reasoning_budget,
+        p.review_id ?? null,
+        p.review_target ?? null,
+        p.review_branch ?? null,
+        p.review_scope ?? null,
         p.eta_reset_at ?? null,
         p.reason,
         JSON.stringify(p.maxed_providers),

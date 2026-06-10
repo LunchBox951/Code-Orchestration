@@ -84,10 +84,16 @@ describe('roleParentResolver — production resolver (AC-L6a-4)', () => {
   });
 
   it('coordinator stored parent is ignored (structural edge, not the stored value)', () => {
-    // Even if a coordinator's stored parent is "some-other-coord", the resolver must return @operator.
-    const store = openStore('p-auth-6');
-    store.recordAgent({ agentId: 'coord-alt', role: 'coordinator', parent: 'some-other-coord' });
-    const resolver = roleParentResolver(store);
+    // Even if a legacy/corrupt coordinator row has "some-other-coord", the resolver must return
+    // @operator. Use a direct fake roster so the production store can reject that invalid record.
+    const resolver = roleParentResolver({
+      getAgent: () => ({
+        agentId: 'coord-alt',
+        role: 'coordinator',
+        parent: 'some-other-coord',
+        registeredTs: 1,
+      }),
+    });
     expect(resolver.parentOf('coord-alt')).toBe(OPERATOR);
   });
 });

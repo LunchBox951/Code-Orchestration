@@ -111,6 +111,7 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
     expect(finish).toBeDefined();
     expect(finish?.commitSha).toBe('c'.repeat(40));
     expect(finish?.baseSha).toBe('b'.repeat(40));
+    expect(finish?.agent).toBe('impl-1');
     expect(finish?.tests).toEqual([
       { name: 'suite/a', passed: true },
       { name: 'suite/b', passed: false },
@@ -234,7 +235,7 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
     expect(mail.inbox('lead-7')).toEqual([]);
   });
 
-  it('does not leave a finish record if worker_done cannot be persisted', () => {
+  it('does not leave a finish record if the finishing agent is invalid', () => {
     const { store, mail } = openStores('p-finish-atomic');
     const repoCwd = '/wt';
     store.recordWorktree({
@@ -253,10 +254,11 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
         { agent: '', repoCwd, intent, tests: [] },
         { readInfo: () => ({ branch: 'co/atomic', headSha: 'a'.repeat(40) }), gitExec: git.exec },
       ),
-    ).toThrow(/from|sender|actor/i);
+    ).toThrow(/agent/i);
 
     expect(store.getFinish('co/atomic')).toBeUndefined();
     expect(mail.inbox('lead-7')).toEqual([]);
+    expect(git.calls).toHaveLength(0);
   });
 });
 

@@ -33,9 +33,9 @@ export { checkToolCompleteness } from './completeness.js';
 // Principle 5) and never bakes a target repo's project memory (the prompting split, Principle 11).
 export { orientContent } from './orient-content.js';
 
-// L2-D per-role tool-scoping (AC-L2-5): the base-role vocabulary + the SEED per-role toolsets over
-// the current tools, and `toolsForRole` — the relevance-scoping hook the MCP mount passes into
-// `createCoMcpServer({ tools })`. Fails loud on a phantom tool (the scoping analogue of the C gate);
-// authoritative rosters are an L6 concern.
+// L2-D/L6a role-scoped tool access: the base-role vocabulary, per-role toolsets, and `toolsForRole`
+// are the relevance-scoping hook the MCP mount passes into `createCoMcpServer({ tools })`. Fails
+// loud on a phantom tool (the scoping analogue of the C gate); L6a rosters/sub-roles layer caller
+// authorization on top.
 export type { Role } from './scoping.js';
 export { BASE_ROLES, roleToolsets, toolsForRole } from './scoping.js';

@@ -5,7 +5,7 @@ import { checkBlockListDrift, readEnforcedConfig } from './drift.js';
 const ALL_IDS = BLOCK_LIST.map((r) => r.id);
 
 describe('checkBlockListDrift', () => {
-  it('returns [] when enforced ids exactly match the registry (AC-L6a-6 GREEN)', () => {
+  it('returns [] when enforced ids exactly match the registry (AC-L6a-6)', () => {
     const result = checkBlockListDrift(BLOCK_LIST, { blockedIds: ALL_IDS });
     expect(result).toEqual([]);
   });
