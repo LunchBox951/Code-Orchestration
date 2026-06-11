@@ -28,6 +28,8 @@ const EXPECTED_TOOLS = [
   'co_pr_merge',
   'co_kickback',
   'co_spec_get',
+  'co_spec_draft',
+  'co_spec_lock',
 ] as const;
 
 const BOGUS = 'co_bogus';

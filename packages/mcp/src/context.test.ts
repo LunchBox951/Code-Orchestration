@@ -861,7 +861,7 @@ describe('defaultContextFactory — gated verbs reach domain gate (review store 
 
     const offered = toolsFromEnv();
     expect(offered?.map((tool) => tool.name).sort()).toEqual(
-      ['co_merge', 'co_pr_merge', 'co_push'].sort(),
+      ['co_merge', 'co_pr_merge', 'co_push', 'co_spec_lock'].sort(),
     );
 
     const registry = buildCoreRegistry();
