@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { finishWorktree } from '../../worktrees/finish.js';
 import { defaultGitReader } from '../../worktrees/detect-base.js';
 import { resolveProvisioningManifest } from '../../worktrees/provision.js';
+import { roleParentResolver } from '../../mail/escalation.js';
+import { assertToolCallerRole } from '../caller-auth.js';
 import type { ToolSpec } from '../registry.js';
 import { readWorktreeInfo } from '../worktree.js';
 
@@ -85,7 +87,7 @@ type FinishOutput = z.infer<typeof finishOutput>;
  * `co_finish` (AC-L3-6): COMMIT the worktree with a house-style message rendered from the agent's
  * intent (DCO-signed), RECORD the finish (commit + the finish's test run — the durable input L5
  * compares against the captured baseline), and EMIT `worker_done` (informational) to the parent the
- * sling recorded. It does NOT dispatch a reviewer and does NOT merge — that gate is L5's lead-facing
+ * sling recorded. It does NOT dispatch a reviewer and does NOT merge — that gate is L5's coordinator-or-lead
  * `co_merge` (which refuses without a recorded PASS). `co_finish` itself stays a leaf, non-publishing
  * verb, so it introduces no un-gated path to master/remote/PR (Principle 7).
  *
@@ -107,6 +109,22 @@ export const finishTool: ToolSpec<FinishInput, FinishOutput> = {
       throw new Error(
         'co_finish: the mount did not inject a worktree store (ctx.worktrees absent).',
       );
+    }
+    if (!ctx.roster) {
+      throw new Error('co_finish: the mount did not inject a roster store (ctx.roster absent).');
+    }
+    assertToolCallerRole('co_finish', ctx.roster, ctx.agent, ['lead', 'implementer']);
+    const { branch } = readWorktreeInfo(ctx.cwd);
+    const worktree = ctx.worktrees.getWorktree(branch);
+    if (worktree != null && !worktree.removed) {
+      const callerParent = roleParentResolver(ctx.roster).parentOf(ctx.agent);
+      if (callerParent !== worktree.parent) {
+        throw new Error(
+          `co_finish: caller '${ctx.agent}' has recorded parent '${callerParent}', but worktree ` +
+            `'${branch}' was recorded with parent '${worktree.parent}'. Refusing to finish for a ` +
+            'different recorded parent.',
+        );
+      }
     }
     const result = finishWorktree(
       ctx.worktrees,

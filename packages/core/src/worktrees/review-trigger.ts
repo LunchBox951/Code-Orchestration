@@ -9,7 +9,7 @@ import type { ReviewScope } from '../review/ladder.js';
  * (the real implementation is {@link import('../review/merge.js').CoReviewGate}, consumed by `co_merge`).
  *
  * `co_finish` STILL does not call this (unchanged — it stops short by design). The gate is reached
- * through the lead-facing review, merge, push, and PR tools.
+ * through the coordinator-or-lead review, merge, push, and PR tools.
  */
 
 /** What {@link FinishReviewGate.triggerReview} records: a request to review `branch` into `target`. */
@@ -78,10 +78,14 @@ export interface ReviewMergeResult {
   readonly commitSha: string;
   readonly commitMessage: string;
   readonly mode: RepoMode;
-  /** Present when the PASS carried pre-existing baseline failures (flag — never silent, AC-L5-3). */
+  /** Present when honest-verification found pre-existing baseline failures (flag — never silent). */
   readonly baselineFailures?: readonly string[];
+  /** Present on operator overrides when honest-verification found any failure, including regressions. */
+  readonly verificationFailures?: readonly string[];
   /** True when a baseline-failure escalation mail was emitted (requires mail + parentResolver seam). */
   readonly escalated?: boolean;
+  /** True when a post-enactment escalation mail failed to persist; the merge still succeeded. */
+  readonly escalationFailed?: boolean;
   /** True when the PASS gate was bypassed by an audited operator override (AC-L5-6). */
   readonly overridden?: boolean;
   /** The recorded override reason, present when {@link overridden}. */

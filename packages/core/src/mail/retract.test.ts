@@ -14,9 +14,11 @@ import {
   MAIL_CLARIFY_REQUEST,
   MAIL_CLARIFY_RESPONSE,
   MAIL_ESCALATION,
+  MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   makeMailEvent,
   makeMailForwardEvent,
+  makeMailRetractEvent,
   mailSchemas,
   mailUpcasters,
 } from './events.js';
@@ -146,6 +148,89 @@ describe('mail.retracted — the sender withdraws a message (tombstone)', () => 
     }
   });
 
+  it('retracting a forwarded escalation lets the reopened held item be forwarded again', () => {
+    const mail = openMailStore('p-retract-forward-retry');
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'worker',
+        subject: 'blocked',
+        body: 'need authority',
+      });
+      const firstForward = mail.forward(held, {
+        type: MAIL_ESCALATION,
+        to: 'coordinator',
+        from: 'lead',
+        subject: held.subject,
+        body: held.body,
+        correlationId: String(held.seq),
+        causationId: String(held.seq),
+      });
+
+      mail.retract('lead', firstForward.seq);
+
+      const reopened = mail.inbox('lead').find((m) => m.seq === held.seq)!;
+      expect(reopened.resolved).toBe(false);
+      const secondForward = mail.forward(reopened, {
+        type: MAIL_ESCALATION,
+        to: 'coordinator-2',
+        from: 'lead',
+        subject: held.subject,
+        body: held.body,
+        correlationId: String(held.seq),
+        causationId: String(held.seq),
+      });
+
+      expect(secondForward.recipient).toBe('coordinator-2');
+      expect(mail.outstandingCount('lead')).toBe(0);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('duplicate retract of an old forward does not reopen an item after it was re-forwarded', () => {
+    const mail = openMailStore('p-retract-duplicate-forward');
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'worker',
+        subject: 'blocked',
+        body: 'need authority',
+      });
+      const firstForward = mail.forward(held, {
+        type: MAIL_ESCALATION,
+        to: 'coordinator',
+        from: 'lead',
+        subject: held.subject,
+        body: held.body,
+        correlationId: String(held.seq),
+        causationId: String(held.seq),
+      });
+
+      mail.retract('lead', firstForward.seq);
+      const reopened = mail.inbox('lead').find((m) => m.seq === held.seq)!;
+      const secondForward = mail.forward(reopened, {
+        type: MAIL_ESCALATION,
+        to: 'coordinator-2',
+        from: 'lead',
+        subject: held.subject,
+        body: held.body,
+        correlationId: String(held.seq),
+        causationId: String(held.seq),
+      });
+
+      expect(mail.outstandingCount('lead')).toBe(0);
+      expect(secondForward.recipient).toBe('coordinator-2');
+      mail.retract('lead', firstForward.seq);
+      expect(mail.outstandingCount('lead')).toBe(0);
+      expect(mail.inbox('lead').find((m) => m.seq === held.seq)?.resolved).toBe(true);
+    } finally {
+      mail.close();
+    }
+  });
+
   it('a retracted actionable item cannot be replied to later through a stale handle', () => {
     const mail = openMailStore('p-retract-stale-reply');
     try {
@@ -236,6 +321,113 @@ describe('mail.retracted — the sender withdraws a message (tombstone)', () => 
     }
   });
 
+  it('a forged retract receipt with mismatched actor is rejected during projection', () => {
+    const projectId = 'p-retract-forged-actor';
+    const store = openProjectStore(projectId);
+    const projectors: Projector[] = [new MailProjector()];
+    const decodeFn = (e: StoredEvent): StoredEvent => decode(e, mailUpcasters, mailSchemas);
+
+    try {
+      const sent = store.transaction((tx) => {
+        const [stored] = tx.append([
+          makeMailEvent(projectId, {
+            type: MAIL_CHAT,
+            to: 'bob',
+            from: 'alice',
+            subject: 's',
+            body: 'b',
+          }),
+        ]);
+        applyEvent(tx, decodeFn(stored!), projectors);
+        return stored!;
+      });
+
+      expect(() =>
+        store.transaction((tx) => {
+          const [stored] = tx.append([
+            { ...makeMailRetractEvent(projectId, 'alice', sent.seq), actor: 'mallory' },
+          ]);
+          applyEvent(tx, decodeFn(stored!), projectors);
+        }),
+      ).toThrow(/actor.*sender/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a forged retract receipt from a non-sender is rejected during projection', () => {
+    const projectId = 'p-retract-forged-sender';
+    const store = openProjectStore(projectId);
+    const projectors: Projector[] = [new MailProjector()];
+    const decodeFn = (e: StoredEvent): StoredEvent => decode(e, mailUpcasters, mailSchemas);
+
+    try {
+      const sent = store.transaction((tx) => {
+        const [stored] = tx.append([
+          makeMailEvent(projectId, {
+            type: MAIL_CHAT,
+            to: 'bob',
+            from: 'alice',
+            subject: 's',
+            body: 'b',
+          }),
+        ]);
+        applyEvent(tx, decodeFn(stored!), projectors);
+        return stored!;
+      });
+
+      expect(() =>
+        store.transaction((tx) => {
+          const [stored] = tx.append([makeMailRetractEvent(projectId, 'mallory', sent.seq)]);
+          applyEvent(tx, decodeFn(stored!), projectors);
+        }),
+      ).toThrow(/sent by 'mallory'|original sender/i);
+
+      const row = store.transaction(
+        (tx) =>
+          (tx.raw as DatabaseSync)
+            .prepare('SELECT retracted FROM inbox WHERE seq = ?')
+            .get(sent.seq) as { retracted: number },
+      );
+      expect(row.retracted).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('review mail retract receipts are rejected during projection', () => {
+    const projectId = 'p-retract-review-mail';
+    const store = openProjectStore(projectId);
+    const projectors: Projector[] = [new MailProjector()];
+    const decodeFn = (e: StoredEvent): StoredEvent => decode(e, mailUpcasters, mailSchemas);
+
+    try {
+      const response = store.transaction((tx) => {
+        const [stored] = tx.append([
+          makeMailEvent(projectId, {
+            type: MAIL_REVIEW_RESPONSE,
+            to: 'lead',
+            from: '@operator',
+            subject: 'review',
+            body: 'PASS',
+            reviewVerdict: 'PASS',
+          }),
+        ]);
+        applyEvent(tx, decodeFn(stored!), projectors);
+        return stored!;
+      });
+
+      expect(() =>
+        store.transaction((tx) => {
+          const [stored] = tx.append([makeMailRetractEvent(projectId, '@operator', response.seq)]);
+          applyEvent(tx, decodeFn(stored!), projectors);
+        }),
+      ).toThrow(/review_response|review mail/i);
+    } finally {
+      store.close();
+    }
+  });
+
   it('LiveDeliveryStub.retract fails loud with the documented L7 plug-point error', () => {
     expect(() => new LiveDeliveryStub().retract()).toThrow(/not implemented|L7 plug-point/i);
   });
@@ -307,6 +499,38 @@ describe('AC-L1-9 preserved — retract writes nothing into a target repo (prist
       const d = mail.send({ type: MAIL_CHAT, to: 'bob', from: 'alice', subject: 's', body: 'b' });
       const result = assertRepoPristine(repo, () => mail.retract('alice', d.seq));
       expect(result.retracted).toBe(true);
+      expect(mail.inbox('bob')).toEqual([]);
+    } finally {
+      mail.close();
+    }
+  });
+});
+
+describe('mail idempotency after retraction', () => {
+  it('retrying a retracted send with the same idempotency key returns the tombstone', () => {
+    const mail = openMailStore('p-retract-idempotency');
+    try {
+      const first = mail.send({
+        type: MAIL_CHAT,
+        to: 'bob',
+        from: 'alice',
+        subject: 's',
+        body: 'b',
+        idempotencyKey: 'chat:once',
+      });
+      const retracted = mail.retract('alice', first.seq);
+      const retry = mail.send({
+        type: MAIL_CHAT,
+        to: 'bob',
+        from: 'alice',
+        subject: 's',
+        body: 'b',
+        idempotencyKey: 'chat:once',
+      });
+
+      expect(retry.seq).toBe(first.seq);
+      expect(retry.retracted).toBe(true);
+      expect(retry).toEqual(retracted);
       expect(mail.inbox('bob')).toEqual([]);
     } finally {
       mail.close();

@@ -1,5 +1,14 @@
 import { z } from 'zod';
-import { MAIL_TYPES, type DeliveredMail } from '../../mail/events.js';
+import {
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
+  MAIL_TYPES,
+  MAIL_WORKER_DONE,
+  type DeliveredMail,
+} from '../../mail/events.js';
+import { buildHumanReviewVerdict } from '../../review/human-review.js';
+import type { ReviewScope } from '../../review/ladder.js';
+import type { ReviewStore } from '../../review/review-store.js';
 import type { ToolSpec } from '../registry.js';
 import { deliveredMailSchema, toWireMail, type WireMail } from './wire.js';
 
@@ -8,6 +17,13 @@ import { deliveredMailSchema, toWireMail, type WireMail } from './wire.js';
 // the schemas are the single syntax source the MCP surface and the phase-D check read).
 
 // ── co_mail_send ──────────────────────────────────────────────────────────────
+type InternalMailType = typeof MAIL_WORKER_DONE | typeof MAIL_REVIEW_REQUEST;
+type SendableMailType = Exclude<(typeof MAIL_TYPES)[number], InternalMailType>;
+const SENDABLE_MAIL_TYPES = MAIL_TYPES.filter(
+  (type): type is SendableMailType => type !== MAIL_WORKER_DONE && type !== MAIL_REVIEW_REQUEST,
+) as [SendableMailType, ...SendableMailType[]];
+const REVIEW_REQUEST_IDEMPOTENCY_PREFIX = 'review-request:';
+
 const mailSendInput = z.object({
   to: z
     .string()
@@ -17,7 +33,7 @@ const mailSendInput = z.object({
         '(the recipient is derived from the answered mail).',
     ),
   type: z
-    .enum(MAIL_TYPES)
+    .enum(SENDABLE_MAIL_TYPES)
     .describe('The mail type (a registered MailType, e.g. clarify_request, escalation, chat).'),
   subject: z.string().describe('Short subject line for the message.'),
   body: z.string().describe('The message body (free-form prose).'),
@@ -42,6 +58,41 @@ const mailSendInput = z.object({
 });
 type MailSendInput = z.infer<typeof mailSendInput>;
 
+function verifiedHumanReviewReentry(
+  reviews: ReviewStore,
+  answered: DeliveredMail,
+): {
+  readonly reviewId: string;
+  readonly target: string;
+  readonly branch: string;
+  readonly scope: ReviewScope;
+} {
+  const reviewId = answered.idempotencyKey?.startsWith(REVIEW_REQUEST_IDEMPOTENCY_PREFIX)
+    ? answered.idempotencyKey.slice(REVIEW_REQUEST_IDEMPOTENCY_PREFIX.length)
+    : undefined;
+  if (reviewId == null || reviewId.length === 0) {
+    throw new Error(
+      `co_mail_send: malformed review_request mail ${answered.seq}; cannot record human review_response.`,
+    );
+  }
+  const request = reviews.getReviewRequestById(reviewId);
+  if (request == null) {
+    throw new Error(
+      `co_mail_send: review_request mail ${answered.seq} has no matching review.requested row.`,
+    );
+  }
+  const mismatches: string[] = [];
+  if (request.reviewerKind !== 'human') mismatches.push('not a human review_request');
+  if (request.requestedBy !== answered.sender) mismatches.push('requestedBy');
+  if (mismatches.length > 0) {
+    throw new Error(
+      `co_mail_send: review_request mail ${answered.seq} does not match review.requested ` +
+        `(${mismatches.join(', ')}).`,
+    );
+  }
+  return request;
+}
+
 export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
   name: 'co_mail_send',
   title: 'Send mail',
@@ -63,7 +114,88 @@ export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
             `${ctx.agent}'s inbox (you must be its recipient).`,
         );
       }
-      delivered = ctx.mail.reply(answered, {
+      const isHumanReviewVerdictReply =
+        answered.type === MAIL_REVIEW_REQUEST &&
+        input.type === MAIL_REVIEW_RESPONSE &&
+        input.review_verdict != null;
+      if (input.type === MAIL_REVIEW_RESPONSE && !isHumanReviewVerdictReply) {
+        throw new Error(
+          'co_mail_send: review_response must reply to review_request and include review_verdict.',
+        );
+      }
+      const existingIdempotentReply =
+        isHumanReviewVerdictReply && input.idempotency_key != null
+          ? ctx.mail
+              .inbox(answered.sender)
+              .find(
+                (m) =>
+                  m.idempotencyKey === input.idempotency_key &&
+                  m.sender === ctx.agent &&
+                  m.type === input.type &&
+                  m.causationId === String(answered.seq),
+              )
+          : undefined;
+      const conflictingIdempotentReply =
+        isHumanReviewVerdictReply && input.idempotency_key != null
+          ? ctx.mail
+              .sentBy(ctx.agent)
+              .find(
+                (m) =>
+                  m.idempotencyKey === input.idempotency_key &&
+                  m.type === input.type &&
+                  m.recipient === answered.sender &&
+                  m.causationId !== String(answered.seq),
+              )
+          : undefined;
+      if (conflictingIdempotentReply != null) {
+        throw new Error(
+          `co_mail_send: idempotency_key '${input.idempotency_key}' already belongs to ` +
+            `review_request mail ${conflictingIdempotentReply.causationId ?? '<unknown>'}; ` +
+            `it cannot answer mail ${answered.seq}.`,
+        );
+      }
+      if (
+        existingIdempotentReply?.reviewVerdict != null &&
+        existingIdempotentReply.reviewVerdict !== input.review_verdict
+      ) {
+        throw new Error(
+          `co_mail_send: idempotent review_response retry for mail ${answered.seq} changes ` +
+            `review_verdict from '${existingIdempotentReply.reviewVerdict}' to ` +
+            `'${input.review_verdict}'.`,
+        );
+      }
+      if (
+        existingIdempotentReply != null &&
+        existingIdempotentReply.reviewVerdict === input.review_verdict
+      ) {
+        if (
+          existingIdempotentReply.subject !== input.subject ||
+          existingIdempotentReply.body !== input.body
+        ) {
+          throw new Error(
+            `co_mail_send: idempotent review_response retry for mail ${answered.seq} changes ` +
+              'subject/body.',
+          );
+        }
+        return toWireMail(existingIdempotentReply);
+      }
+      if (isHumanReviewVerdictReply && ctx.reviews == null) {
+        throw new Error(
+          'co_mail_send: cannot answer a review_request with review_response because the mount ' +
+            'did not inject a review store (ctx.reviews absent).',
+        );
+      }
+      if (isHumanReviewVerdictReply && answered.resolved) {
+        throw new Error(
+          `co_mail_send: review_request mail ${answered.seq} is already resolved; ` +
+            'send a new review_request for a new verdict.',
+        );
+      }
+      const humanReviewReentry =
+        isHumanReviewVerdictReply && ctx.reviews != null
+          ? verifiedHumanReviewReentry(ctx.reviews, answered)
+          : undefined;
+      const replyDraft = {
         type: input.type,
         subject: input.subject,
         body: input.body,
@@ -71,8 +203,35 @@ export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
         ...(input.idempotency_key != null ? { idempotencyKey: input.idempotency_key } : {}),
         ...(input.decision != null ? { decision: input.decision } : {}),
         ...(input.review_verdict != null ? { reviewVerdict: input.review_verdict } : {}),
-      });
+      };
+      delivered =
+        isHumanReviewVerdictReply && ctx.reviews != null
+          ? ctx.mail.replyWithReviewVerdict(
+              answered,
+              replyDraft,
+              buildHumanReviewVerdict(ctx.reviews, {
+                ...humanReviewReentry!,
+                verdict: input.review_verdict!,
+                body: input.body,
+              }),
+            )
+          : ctx.mail.reply(answered, replyDraft);
+      if (
+        isHumanReviewVerdictReply &&
+        delivered.reviewVerdict != null &&
+        delivered.reviewVerdict !== input.review_verdict
+      ) {
+        throw new Error(
+          `co_mail_send: idempotent review_response retry for mail ${answered.seq} changes ` +
+            `review_verdict from '${delivered.reviewVerdict}' to '${input.review_verdict}'.`,
+        );
+      }
     } else {
+      if (input.type === MAIL_REVIEW_RESPONSE) {
+        throw new Error(
+          'co_mail_send: review_response must reply to review_request and include review_verdict.',
+        );
+      }
       if (input.to == null || input.to.length === 0) {
         throw new Error(
           'co_mail_send: `to` is required for a new message (omit it only when replying via in_reply_to).',

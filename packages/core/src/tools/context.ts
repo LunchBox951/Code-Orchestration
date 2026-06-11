@@ -1,9 +1,15 @@
+import type {
+  CommitIdentityReader,
+  GitConfigIdentityReader,
+} from '../permissions/identity-guard.js';
 import type { MailStore } from '../mail/mail-store.js';
 import type { ProjectRegistry, ProjectId } from '../registry/registry.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
 import type { DispatchStore } from '../dispatch/dispatch-store.js';
 import type { ReviewStore } from '../review/review-store.js';
+import type { RosterStore } from '../roles/roster-store.js';
 import type { UsageSourceFactory } from '../dispatch/cli-render.js';
+import type { GhExec } from '../worktrees/repo-mode.js';
 
 /**
  * What every tool handler receives. Assembled by whoever MOUNTS the surface — the
@@ -45,9 +51,35 @@ export interface ToolContext {
    */
   readonly reviews?: ReviewStore;
   /**
+   * OPTIONAL L6a program-data handle: the agent roster store (agent→role→parent records), opened +
+   * injected by the mount alongside {@link reviews}. Optional + additive so every existing
+   * ToolContext construction site (L1/L2/L3/L4/L5 tests, mcp/cli) keeps compiling; L6/L6a tools
+   * that need it (`co_finish`, `co_merge`, `co_review_finalize`, `co_push`, `co_pr_merge`,
+   * `co_kickback`) loud-fail when absent (Principle 9), mirroring the reviews seam.
+   */
+  readonly roster?: RosterStore;
+  /**
    * OPTIONAL L4 passive/live usage-source factory. When the mount supplies it, dispatching tools refresh
    * stale/missing usage buckets through {@link import('../dispatch/provider-source.js').readProviderUsageCached}
    * before placement. Tests may omit it and seed `dispatch` directly.
    */
   readonly usageSourceFactory?: UsageSourceFactory;
+  /**
+   * OPTIONAL L6a injectable commit-identity reader seam (AC-L6a-7): used by `co_merge`,
+   * `co_push`, and `co_pr_merge` to read commit identities for the guard pre-check. Defaults to
+   * `defaultCommitIdentityReader` (real `git log`); tests inject a fixture reader so no real git
+   * is needed for guard logic tests.
+   */
+  readonly commitIdentityReader?: CommitIdentityReader;
+  /**
+   * OPTIONAL L6a injectable git-config identity reader seam (AC-L6a-7): used by `co_merge`
+   * to read the repo-local identity that would author a merge commit. Defaults to
+   * `defaultGitConfigIdentityReader`; tests inject a fixture reader so no real git config is needed.
+   */
+  readonly gitConfigIdentityReader?: GitConfigIdentityReader;
+  /**
+   * OPTIONAL L5/L6a injectable GitHub CLI seam for `co_pr_merge`. Defaults to the production
+   * `gh pr create` runner; tests can inject a fake so PR creation remains headless.
+   */
+  readonly ghExec?: GhExec;
 }

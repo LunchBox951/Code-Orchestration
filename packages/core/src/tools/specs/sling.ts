@@ -14,6 +14,10 @@ import {
 import type { WorkSize, ReasoningBudget } from '../../dispatch/tier.js';
 import type { DispatchDiagnostic, DispatchResolution } from '../../dispatch/throttle.js';
 import type { Provider } from '../../dispatch/usage-source.js';
+import { checkSpawnPlan } from '../../roles/spawn-rules.js';
+import { findSubRole, parseSubRoleId } from '../../roles/sub-roles.js';
+import { BASE_ROLES, type Role } from '../scoping.js';
+import { assertToolCallerRole } from '../caller-auth.js';
 
 // Every input field carries a .describe() (Principle 5 — the schemas are the single syntax source).
 // The caller never supplies its own identity; `parent` is the SPAWNER this sandbox is for, a
@@ -27,6 +31,13 @@ const slingInput = z
       .describe(
         "The spawning agent this sandbox is created for, recorded as the worktree's parent. " +
           'Required — there is no default.',
+      ),
+    agent: z
+      .string()
+      .min(1)
+      .describe(
+        'The child agent id assigned to this sandbox. L7 supplies it before mounting the sandbox; ' +
+          'scoped MCP mounts must match it.',
       ),
     branch: z
       .string()
@@ -191,6 +202,18 @@ const slingOutput = z
   });
 type SlingOutput = z.infer<typeof slingOutput>;
 
+function parseKnownSpawnRole(tool: string, roleId: string): Role {
+  const parsed = parseSubRoleId(roleId.trim().toLowerCase());
+  if (!(BASE_ROLES as readonly string[]).includes(parsed.baseRole)) {
+    throw new Error(`${tool}: unknown role '${roleId}'.`);
+  }
+  const role = parsed.baseRole as Role;
+  if (parsed.name != null && findSubRole(role, parsed.name) == null) {
+    throw new Error(`${tool}: unknown role '${roleId}'.`);
+  }
+  return role;
+}
+
 /**
  * `co_sling` (AC-L3-1; dispatch placement AC-L4-1/AC-L4-3): create + RECORD an isolated
  * worktree+branch sandbox from an auto-detected base ref, and capture the branch-off test baseline. The
@@ -229,8 +252,26 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
           'onto ctx.dispatch (Principle 9 — a tool never opens its own store).',
       );
     }
+    if (input.parent !== ctx.agent) {
+      throw new Error(
+        `co_sling: parent '${input.parent}' does not match mounted caller '${ctx.agent}'. ` +
+          'The mount supplies caller identity; a tool input may not assign lifecycle authority to ' +
+          'another agent.',
+      );
+    }
+    if (!ctx.roster) {
+      throw new Error('co_sling: the mount did not inject a roster store (ctx.roster absent).');
+    }
+    assertToolCallerRole('co_sling', ctx.roster, ctx.agent, ['coordinator', 'lead', 'implementer']);
 
-    const role = input.role ?? 'implementer';
+    const role = input.role?.trim().toLowerCase() ?? 'implementer';
+    const parsedRole = parseSubRoleId(role);
+    const caller = ctx.roster.getAgent(ctx.agent)!;
+    const childRole = parseKnownSpawnRole('co_sling', role);
+    const violation = checkSpawnPlan(caller.role, childRole);
+    if (violation != null) {
+      throw new Error(`co_sling: illegal spawn plan — ${violation.reason}.`);
+    }
     const workSize: WorkSize = (input.work_size ?? 'average') as WorkSize;
     const reasoningBudget: ReasoningBudget = (input.reasoning_budget ??
       'standard') as ReasoningBudget;
@@ -310,6 +351,9 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     // PLACED: create the sandbox and return placement + worktree facts.
     const result = slingWorktree(ctx.worktrees, {
       parent: input.parent,
+      agent: input.agent,
+      role: childRole,
+      ...(parsedRole.name != null ? { subRole: parsedRole.name } : {}),
       branch: input.branch,
       ...(input.base != null ? { base: input.base } : {}),
       repoCwd: ctx.cwd,

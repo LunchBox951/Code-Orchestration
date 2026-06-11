@@ -1,3 +1,4 @@
+import { openConfigStore, type ConfigStore } from '../config/config-store.js';
 import { escalate, type ParentResolver } from '../mail/escalation.js';
 import type { MailStore } from '../mail/mail-store.js';
 import type { ReviewStrike, ReviewVerdictRecord } from './events.js';
@@ -7,7 +8,7 @@ import type { Blocker } from './verdict.js';
 export const REVIEW_ROUND_BUDGET_KEY = 'review_round_budget' as const;
 
 /** Default consecutive-ISSUES budget before the loop escalates instead of kicking back. */
-export const REVIEW_ROUND_BUDGET_DEFAULT = 5;
+export const REVIEW_ROUND_BUDGET_DEFAULT = 3;
 
 /**
  * Counts the trailing run of consecutive `ISSUES` verdicts in `verdicts` (oldest-first).
@@ -34,10 +35,32 @@ export function nextReviewAction(strikeCount: number, budget: number): 'kickback
   return strikeCount >= budget ? 'escalate' : 'kickback';
 }
 
+/** Resolve the configured review-round budget for a project, defaulting to 3 when unset. */
+export function resolveReviewRoundBudget(projectId: string, config?: ConfigStore): number {
+  const store = config ?? openConfigStore();
+  const ownsStore = config == null;
+  try {
+    const effective = store.resolveEffective(projectId);
+    if (!Object.prototype.hasOwnProperty.call(effective, REVIEW_ROUND_BUDGET_KEY)) {
+      return REVIEW_ROUND_BUDGET_DEFAULT;
+    }
+    const raw = effective[REVIEW_ROUND_BUDGET_KEY];
+    if (!Number.isInteger(raw) || Number(raw) < 1) {
+      throw new Error(
+        `${REVIEW_ROUND_BUDGET_KEY}: expected a positive integer review-round budget.`,
+      );
+    }
+    return Number(raw);
+  } finally {
+    if (ownsStore) store.close();
+  }
+}
+
 /** Minimal store seam the enforcement function requires — subset of ReviewStore. */
 interface StrikeStore {
   recordStrike(s: ReviewStrike): void;
   getStrikeCount(target: string, branch: string): number;
+  hasStrike(target: string, branch: string, reviewId: string): boolean;
 }
 
 /** Injectable seams for {@link applyStrikePolicy}. */
@@ -47,6 +70,12 @@ export interface StrikeEnforcementDeps {
   readonly resolver: ParentResolver;
   readonly agentId: string;
   readonly budget: number;
+  /**
+   * Optional notification hook for callers that need to notify before the strike is persisted.
+   * If supplied, it owns any kickback/escalation notification for the planned action; a thrown
+   * notification prevents the strike from being recorded.
+   */
+  readonly beforeRecordStrike?: (plan: StrikeNotificationPlan) => void;
 }
 
 /** Per-verdict context for {@link applyStrikePolicy}. */
@@ -57,12 +86,24 @@ export interface StrikeEnforcementContext {
   readonly blockers: readonly Blocker[];
 }
 
+export interface StrikeNotificationPlan {
+  readonly action: 'kickback' | 'escalate';
+  readonly strikeCount: number;
+  readonly fireEscalation: boolean;
+  readonly reason: string;
+  readonly target: string;
+  readonly branch: string;
+}
+
+export type StrikePolicyAction = 'kickback' | 'escalate' | 'already_struck';
+
 /**
  * Record a strike for a freshly-recorded ISSUES verdict and decide whether to kick back or
  * escalate (AC-L5-4). Steps:
- *   1. Appends a `review.strike` event (reason = summarized blockers).
- *   2. Reads the updated consecutive count from the read-model.
- *   3. Returns `kickback` if count < budget; fires exactly ONE escalation mail to the spawning
+ *   1. Plans the next strike count from the current read-model.
+ *   2. Optionally runs a caller-supplied notification hook BEFORE recording the strike.
+ *   3. Appends a `review.strike` event (reason = summarized blockers).
+ *   4. Returns `kickback` if count < budget; fires exactly ONE escalation mail to the spawning
  *      parent and returns `escalate` when count first reaches budget; returns `escalate` without
  *      re-firing for any count beyond budget (idempotent over the already-escalated run).
  *
@@ -72,24 +113,32 @@ export interface StrikeEnforcementContext {
 export function applyStrikePolicy(
   deps: StrikeEnforcementDeps,
   ctx: StrikeEnforcementContext,
-): 'kickback' | 'escalate' {
+): StrikePolicyAction {
   const reason =
     ctx.blockers.length > 0
       ? ctx.blockers.map((b) => b.summary).join('; ')
       : 'ISSUES verdict (no named blockers)';
 
-  deps.reviews.recordStrike({
-    reviewId: ctx.reviewId,
+  if (deps.reviews.hasStrike(ctx.target, ctx.branch, ctx.reviewId)) {
+    return 'already_struck';
+  }
+
+  const count = deps.reviews.getStrikeCount(ctx.target, ctx.branch) + 1;
+  const action = nextReviewAction(count, deps.budget);
+  const fireEscalation = action === 'escalate' && count === deps.budget;
+
+  deps.beforeRecordStrike?.({
+    action,
+    strikeCount: count,
+    fireEscalation,
+    reason,
     target: ctx.target,
     branch: ctx.branch,
-    reason,
   });
 
-  const count = deps.reviews.getStrikeCount(ctx.target, ctx.branch);
-  const action = nextReviewAction(count, deps.budget);
-
-  // Fire exactly one escalation when the count first reaches the budget threshold.
-  if (action === 'escalate' && count === deps.budget) {
+  // Fire exactly one escalation when the count first reaches the budget threshold. It runs before
+  // the strike is recorded so a failed delivery cannot consume the pressure-release signal.
+  if (deps.beforeRecordStrike == null && fireEscalation) {
     escalate(deps.mail, deps.resolver, {
       from: deps.agentId,
       subject: `review strike budget reached for '${ctx.branch}' into '${ctx.target}' (${count}/${deps.budget})`,
@@ -97,8 +146,16 @@ export function applyStrikePolicy(
         `The branch '${ctx.branch}' has accumulated ${count} consecutive ISSUES verdict(s) ` +
         `(budget: ${deps.budget}) into '${ctx.target}'. The review loop stops kicking back. ` +
         `Blockers: ${reason}.`,
+      idempotencyKey: `review-strike-escalation:${ctx.target}:${ctx.branch}:${ctx.reviewId}`,
     });
   }
+
+  deps.reviews.recordStrike({
+    reviewId: ctx.reviewId,
+    target: ctx.target,
+    branch: ctx.branch,
+    reason,
+  });
 
   return action;
 }

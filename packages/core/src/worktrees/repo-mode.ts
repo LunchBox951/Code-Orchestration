@@ -82,6 +82,55 @@ export interface RemoteSignals {
   readonly canPush: boolean;
 }
 
+function assertPushAtom(name: string, value: string): void {
+  if (value.startsWith('-')) {
+    throw new Error(`RepoModeGate.enactPush: ${name} '${value}' must not start with '-'.`);
+  }
+  if (value.length === 0) {
+    throw new Error(`RepoModeGate.enactPush: ${name} must not be empty.`);
+  }
+}
+
+function hasForbiddenBranchChar(value: string): boolean {
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code <= 0x20 || ch === '~' || ch === '^' || ch === '?' || ch === '*' || ch === '[') {
+      return true;
+    }
+    if (ch === '\\') return true;
+  }
+  return false;
+}
+
+function assertSafeBranchName(verb: string, name: string, value: string): void {
+  if (
+    value.length === 0 ||
+    value === 'HEAD' ||
+    value.startsWith('refs/') ||
+    value.startsWith('origin/') ||
+    value.startsWith('upstream/') ||
+    /^[0-9a-f]{40}$/iu.test(value) ||
+    value.startsWith('-') ||
+    value.startsWith('+') ||
+    value.startsWith(':') ||
+    value.includes(':') ||
+    /\s/u.test(value) ||
+    hasForbiddenBranchChar(value) ||
+    value.includes('..') ||
+    value.includes('@{') ||
+    value === '@' ||
+    value.startsWith('/') ||
+    value.endsWith('/') ||
+    value.endsWith('.') ||
+    value.includes('//') ||
+    value
+      .split('/')
+      .some((part) => part.length === 0 || part.startsWith('.') || part.endsWith('.lock'))
+  ) {
+    throw new Error(`${verb}: ${name} '${value}' must be a safe branch name, not a refspec.`);
+  }
+}
+
 /** Produce the detection {@link RemoteSignals} for the repo at `cwd`. Injectable so detection is
  * testable headless against a recorded signals table, with no real git / `gh`. */
 export type RemoteProbe = (cwd: string) => RemoteSignals;
@@ -504,6 +553,8 @@ export class CoRepoModeGate implements RepoModeGate {
   enactPublish(req: PublishRequest, mode: RepoMode, deps: EnactPublishDeps = {}): PublishResult {
     const gitExec = deps.gitExec ?? defaultGitExec;
     const headReader = deps.headReader ?? defaultHeadReader;
+    assertSafeBranchName('RepoModeGate.enactPublish', 'branch', req.branch);
+    assertSafeBranchName('RepoModeGate.enactPublish', 'into', req.into);
     switch (mode) {
       case 'owner':
       case 'offline': {
@@ -512,7 +563,7 @@ export class CoRepoModeGate implements RepoModeGate {
         // Phase C (`co_push`); Offline never pushes (repoModeCapabilities). The merge commit is the
         // only repo write — orchestration state is recorded to program-data (Principle 12).
         gitExec(req.repoCwd, ['checkout', req.into]);
-        gitExec(req.repoCwd, ['merge', '--no-ff', '-m', req.message, req.branch]);
+        gitExec(req.repoCwd, ['merge', '--no-ff', '--signoff', '-m', req.message, req.branch]);
         return { merged: true, commitSha: headReader(req.repoCwd), mode };
       }
       case 'contributor':
@@ -529,6 +580,9 @@ export class CoRepoModeGate implements RepoModeGate {
   enactPush(req: EnactPushRequest, mode: RepoMode, deps: EnactPushDeps = {}): EnactPushResult {
     const gitExec = deps.gitExec ?? defaultGitExec;
     const remote = req.remote ?? 'origin';
+    assertPushAtom('remote', remote);
+    assertSafeBranchName('RepoModeGate.enactPush', 'branch', req.branch);
+    assertSafeBranchName('RepoModeGate.enactPush', 'into', req.into);
     switch (mode) {
       case 'owner':
         // Owner: push the integration branch (into) — which already carries the merge commit — to origin.
@@ -555,6 +609,8 @@ export class CoRepoModeGate implements RepoModeGate {
     deps: EnactPrMergeDeps = {},
   ): EnactPrMergeResult {
     const ghExec = deps.ghExec ?? defaultGhExec;
+    assertSafeBranchName('RepoModeGate.enactPrMerge', 'branch', req.branch);
+    assertSafeBranchName('RepoModeGate.enactPrMerge', 'into', req.into);
     switch (mode) {
       case 'owner': {
         const prUrl = ghExec(req.repoCwd, [

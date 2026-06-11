@@ -28,6 +28,17 @@ export const defaultGitReader: GitReader = (cwd, args) => {
 };
 
 const REMOTE_REF_PREFIX = 'refs/remotes/';
+const LOCAL_HEAD_PREFIX = 'refs/heads/';
+
+function remoteDefaultToLocalBranch(ref: string): string | undefined {
+  if (ref.startsWith(REMOTE_REF_PREFIX)) {
+    const remoteAndBranch = ref.slice(REMOTE_REF_PREFIX.length);
+    const slash = remoteAndBranch.indexOf('/');
+    return slash === -1 ? undefined : remoteAndBranch.slice(slash + 1);
+  }
+  if (ref.startsWith(LOCAL_HEAD_PREFIX)) return ref.slice(LOCAL_HEAD_PREFIX.length);
+  return undefined;
+}
 
 /**
  * Auto-detect the base ref a new sandbox should branch from — THE #1 frozen invariant (AC-L3-1).
@@ -64,6 +75,58 @@ export function detectBaseRef(cwd: string, gitReader: GitReader = defaultGitRead
 
   // 4) remote-less / fresh repo — branch from local HEAD.
   return 'HEAD';
+}
+
+/**
+ * Auto-detect the local integration target used by publish tools (`co_merge`, `co_push`,
+ * `co_pr_merge`). Unlike {@link detectBaseRef}, this must return a LOCAL branch/base name:
+ * `origin/main` is a good branch-off point for a new sandbox, but it is not a safe integration target
+ * for checkout, push, or a GitHub PR base.
+ */
+export function detectIntegrationTarget(
+  cwd: string,
+  gitReader: GitReader = defaultGitReader,
+): string {
+  const originHead = gitReader(cwd, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+  if (originHead != null) {
+    const branch = remoteDefaultToLocalBranch(originHead);
+    if (branch != null) {
+      if (gitReader(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]) != null) {
+        return branch;
+      }
+      throw new Error(
+        `co publish: origin/HEAD points at '${branch}', but no local '${branch}' branch exists. ` +
+          'Pass `into` explicitly.',
+      );
+    }
+  }
+
+  if (gitReader(cwd, ['rev-parse', '--verify', '--quiet', 'refs/heads/main']) != null) {
+    return 'main';
+  }
+
+  if (gitReader(cwd, ['rev-parse', '--verify', '--quiet', 'refs/heads/master']) != null) {
+    return 'master';
+  }
+
+  return detectCurrentBranchTarget(cwd, gitReader);
+}
+
+/**
+ * Detect the caller's current LOCAL branch for integration operations that land/push the branch the
+ * caller is standing on. Detached HEAD is refused loud; returning literal `HEAD` would let publish
+ * tools create detached merges or push pseudo-refs.
+ */
+export function detectCurrentBranchTarget(
+  cwd: string,
+  gitReader: GitReader = defaultGitReader,
+): string {
+  const branch = gitReader(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  if (branch != null && branch.trim().length > 0) return branch.trim();
+  throw new Error(
+    `co publish: cannot default the integration target in '${cwd}' because HEAD is detached. ` +
+      'Pass `into` explicitly.',
+  );
 }
 
 /**

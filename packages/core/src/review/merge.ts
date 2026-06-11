@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { escalate, type ParentResolver } from '../mail/escalation.js';
+import { OPERATOR } from '../mail/events.js';
 import type { MailStore } from '../mail/mail-store.js';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
 import {
@@ -9,7 +10,7 @@ import {
 } from '../dispatch/balancer.js';
 import { runDispatchPolicy } from '../dispatch/cli-render.js';
 import type { DispatchStore } from '../dispatch/dispatch-store.js';
-import type { PlacementDecided } from '../dispatch/events.js';
+import type { PlacementDecided, PlacementRecord } from '../dispatch/events.js';
 import type { DispatchResolution } from '../dispatch/throttle.js';
 import type { ReasoningBudget, WorkSize } from '../dispatch/tier.js';
 import { renderMergeMessage, renderPrMessage, type PrIntent } from '../worktrees/messages.js';
@@ -29,14 +30,17 @@ import type {
   ReviewTriggerRequest,
   ReviewTriggerResult,
 } from '../worktrees/review-trigger.js';
+import type { FinishRecord } from '../worktrees/events.js';
 import type { GitExec } from '../worktrees/sling.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
+import { findSubRole, parseSubRoleId } from '../roles/sub-roles.js';
 import { classifyPass, honestVerify } from './honest-verify.js';
 import { resolveReviewerKind, reviewRequestEnvelope } from './human-review.js';
+import type { ReviewRequestRecord, ReviewRequested, ReviewVerdictRecord } from './events.js';
 import type { ReviewScope } from './ladder.js';
 import type { ReviewStore } from './review-store.js';
-import { acquireMergeSlot, releaseMergeSlot } from './serialize.js';
-import { resolveReviewSpecRef } from './spec-ref.js';
+import { acquireMergeSlot, releaseMergeSlot, type MergeSlotResult } from './serialize.js';
+import { resolveReviewSpecRef, type ReviewSpecRef } from './spec-ref.js';
 
 /**
  * Injectable seams for {@link CoReviewGate}. `reviews` + `worktrees` are REQUIRED (the gate uses
@@ -73,8 +77,9 @@ export interface ReviewGateDeps {
    */
   readonly parentResolver?: ParentResolver;
   /**
-   * The agent id of the entity triggering the merge — used as the escalation `from` address. Injected
-   * by the tool (`ctx.agent`); optional in headless tests (defaults to 'co.review-gate').
+   * The agent id of the entity triggering the merge — used as the escalation `from` address and to
+   * authorize audited operator overrides. Injected by the tool (`ctx.agent`); optional only for
+   * non-override headless tests.
    */
   readonly agentId?: string;
   /**
@@ -178,6 +183,74 @@ export const DEFAULT_REVIEWER_PROFILES: Record<ReviewScope, string> = {
 const REVIEWER_WORK_SIZE: WorkSize = 'technical';
 const REVIEWER_REASONING_BUDGET: ReasoningBudget = 'standard';
 
+function reviewTriggerResultFromRecord(rec: {
+  readonly reviewId: string;
+  readonly target: string;
+  readonly branch: string;
+  readonly requestedTs: number;
+}): ReviewTriggerResult {
+  return {
+    reviewId: rec.reviewId,
+    target: rec.target,
+    branch: rec.branch,
+    requestedTs: rec.requestedTs,
+  };
+}
+
+function specRefEquals(
+  actual: ReviewSpecRef,
+  expected: { readonly kind: ReviewSpecRef['kind']; readonly ref?: string },
+): boolean {
+  if (actual.kind !== expected.kind) return false;
+  return actual.kind !== 'criteria' || actual.ref === expected.ref;
+}
+
+function reviewerSeat(role: string, reviewId: string): string {
+  return `${role}@${reviewId}`;
+}
+
+function isReviewerPlacementForReview(agent: string, role: string, reviewId: string): boolean {
+  return (
+    agent === reviewerSeat(role, reviewId) && (role === 'reviewer' || role.startsWith('reviewer:'))
+  );
+}
+
+function placementMatchesReview(
+  placement: PlacementRecord,
+  req: Pick<ReviewTriggerRequest, 'reviewId' | 'target' | 'branch'>,
+  scope: ReviewScope,
+): boolean {
+  return (
+    (placement.reviewId == null || placement.reviewId === req.reviewId) &&
+    (placement.reviewTarget == null || placement.reviewTarget === req.target) &&
+    (placement.reviewBranch == null || placement.reviewBranch === req.branch) &&
+    (placement.reviewScope == null || placement.reviewScope === scope)
+  );
+}
+
+function assertValidReviewerProfileRole(scope: string, role: string): void {
+  const trimmed = role.trim();
+  if (trimmed !== role || trimmed.length === 0) {
+    throw new Error(
+      `co review: malformed '${REVIEWER_PROFILES_CONFIG_KEY}' config: scope '${scope}' ` +
+        `must map to a non-empty reviewer role without surrounding whitespace.`,
+    );
+  }
+  const parsed = parseSubRoleId(trimmed);
+  if (parsed.baseRole !== 'reviewer') {
+    throw new Error(
+      `co review: malformed '${REVIEWER_PROFILES_CONFIG_KEY}' config: scope '${scope}' ` +
+        `maps to '${role}', but reviewer profiles must use the 'reviewer' role.`,
+    );
+  }
+  if (parsed.name != null && findSubRole('reviewer', parsed.name) == null) {
+    throw new Error(
+      `co review: malformed '${REVIEWER_PROFILES_CONFIG_KEY}' config: unknown reviewer ` +
+        `sub-role '${role}' for scope '${scope}'.`,
+    );
+  }
+}
+
 /**
  * Resolve the effective scope→reviewer-role map for a project (AC-L5-11): the
  * {@link REVIEWER_PROFILES_CONFIG_KEY} config value merged OVER {@link DEFAULT_REVIEWER_PROFILES}
@@ -202,7 +275,21 @@ export function resolveReviewerProfiles(
         cause,
       });
     }
-    return { ...DEFAULT_REVIEWER_PROFILES, ...parsed };
+    for (const scope of Object.keys(parsed)) {
+      if (!(scope in DEFAULT_REVIEWER_PROFILES)) {
+        throw new Error(
+          `co review: malformed '${REVIEWER_PROFILES_CONFIG_KEY}' config: unknown ` +
+            `reviewer_profiles scope '${scope}'. Expected one of: ${Object.keys(
+              DEFAULT_REVIEWER_PROFILES,
+            ).join(', ')}.`,
+        );
+      }
+    }
+    const profiles = { ...DEFAULT_REVIEWER_PROFILES, ...parsed };
+    for (const [scope, role] of Object.entries(profiles)) {
+      assertValidReviewerProfileRole(scope, role);
+    }
+    return profiles;
   } finally {
     if (ownsConfig) cfg.close();
   }
@@ -231,10 +318,14 @@ export interface ReviewPushResult {
   readonly pushed: boolean;
   readonly remote: string;
   readonly mode: RepoMode;
-  /** Present when the PASS carried pre-existing baseline failures (flag — never silent, AC-L5-3). */
+  /** Present when honest-verification found pre-existing baseline failures (flag — never silent). */
   readonly baselineFailures?: readonly string[];
+  /** Present on operator overrides when honest-verification found any failure, including regressions. */
+  readonly verificationFailures?: readonly string[];
   /** True when a baseline-failure escalation mail was emitted (requires mail + parentResolver seam). */
   readonly escalated?: boolean;
+  /** True when a post-enactment escalation mail failed to persist; the push still succeeded. */
+  readonly escalationFailed?: boolean;
   /** True when the PASS gate was bypassed by an audited operator override (AC-L5-6). */
   readonly overridden?: boolean;
   /** The recorded override reason, present when {@link overridden}. */
@@ -261,10 +352,14 @@ export interface ReviewPrMergeResult {
   readonly prUrl: string;
   readonly prDescription: string;
   readonly mode: RepoMode;
-  /** Present when the PASS carried pre-existing baseline failures (flag — never silent, AC-L5-3). */
+  /** Present when honest-verification found pre-existing baseline failures (flag — never silent). */
   readonly baselineFailures?: readonly string[];
+  /** Present on operator overrides when honest-verification found any failure, including regressions. */
+  readonly verificationFailures?: readonly string[];
   /** True when a baseline-failure escalation mail was emitted (requires mail + parentResolver seam). */
   readonly escalated?: boolean;
+  /** True when a post-enactment escalation mail failed to persist; the PR was still created. */
+  readonly escalationFailed?: boolean;
   /** True when the PASS gate was bypassed by an audited operator override (AC-L5-6). */
   readonly overridden?: boolean;
   /** The recorded override reason, present when {@link overridden}. */
@@ -281,9 +376,35 @@ interface GateOutcome {
   readonly mode: RepoMode;
   readonly reviewVerdict: string;
   readonly baselineFailures?: readonly string[];
+  readonly verificationFailures?: readonly string[];
   readonly escalated?: boolean;
   readonly overridden?: boolean;
   readonly overrideReason?: string;
+  readonly overrideBy?: string;
+  readonly pendingEscalation?: {
+    readonly from: string;
+    readonly subject: string;
+    readonly body: string;
+    readonly idempotencyKey?: string;
+  };
+}
+
+function assertFinishNotNewerThanVerdict(
+  toolName: string,
+  branch: string,
+  into: string,
+  finish: FinishRecord,
+  verdict: ReviewVerdictRecord,
+): void {
+  if (finish.recordedSeq != null && verdict.recordedSeq != null) {
+    if (finish.recordedSeq < verdict.recordedSeq) return;
+  } else if (finish.recordedTs <= verdict.recordedTs) {
+    return;
+  }
+  throw new Error(
+    `${toolName}: refused — branch '${branch}' was finished after review '${verdict.reviewId}' ` +
+      `for '${into}'. Re-run review on the latest finish before publishing.`,
+  );
 }
 
 /**
@@ -353,6 +474,7 @@ export class CoReviewGate implements FinishReviewGate {
           'honest-verification (AC-L5-3, Principle 9).',
       );
     }
+    assertFinishNotNewerThanVerdict('co', branch, into, finish, verdict);
     const verifyOutcome = honestVerify(baseline.tests, finish.tests);
     const classification = classifyPass(verifyOutcome, verdict.verification);
     if (!classification.allow) {
@@ -362,41 +484,42 @@ export class CoReviewGate implements FinishReviewGate {
       );
     }
 
-    // Baseline failures: flag + escalate (never silent — AC-L5-3). Mirrors merge() step 6.
+    // Baseline failures: flag + prepare the post-enactment escalation (never silent — AC-L5-3).
     const baselineFailures =
       verifyOutcome.baselineFailures.length > 0
         ? (verifyOutcome.baselineFailures as readonly string[])
         : undefined;
-    let escalated = false;
+    let pendingEscalation: GateOutcome['pendingEscalation'];
     if (classification.mustEscalate && this.deps.mail && this.deps.parentResolver) {
       const from = this.deps.agentId ?? 'co.review-gate';
-      escalate(this.deps.mail, this.deps.parentResolver, {
+      pendingEscalation = {
         from,
         subject: `baseline failure(s) in PASS for '${branch}'`,
+        idempotencyKey: `baseline-escalation:${into}:${branch}:${verdict.reviewId}`,
         body:
           `The PASS for '${branch}' into '${into}' carries pre-existing baseline ` +
           `failure(s): ${verifyOutcome.baselineFailures.join(', ')}. The publish was allowed ` +
           'but these failures require attention — they pre-existed the branch-off baseline.',
-      });
-      escalated = true;
+      };
     }
 
     return {
       mode,
       reviewVerdict: 'PASS',
       ...(baselineFailures != null ? { baselineFailures } : {}),
-      ...(escalated ? { escalated } : {}),
+      ...(pendingEscalation != null ? { pendingEscalation } : {}),
     };
   }
 
   /**
    * The audited operator-override path (AC-L5-6) — the explicit, recorded human escape hatch that
    * bypasses the recorded-PASS gate. A missing/blank reason is refused LOUD (Principle 9 — an
-   * unexplained override is not an audited override). It records a `review.override` event so the
-   * bypass is durably audited, then runs honest-verify FOR THE RECORD ONLY when baseline + finish
-   * exist — surfacing + escalating any regression / baseline failure (never silent), but NEVER refusing
-   * (the override is the explicit decision to proceed). Returns the mode + the
-   * `[reviewed: override — <reason>]` marker + the override/baseline-failure signal.
+   * unexplained override is not an audited override). It prepares the override marker and audit facts;
+   * callers record the `review.override` event after serialization succeeds and BEFORE any repo/host
+   * side effect, so an override action cannot land without a durable audit. It still runs
+   * honest-verify FOR THE RECORD ONLY when baseline + finish exist — preparing an escalation for any
+   * regression / baseline failure (never silent), but NEVER refusing (the override is the explicit
+   * decision to proceed).
    */
   private overrideGate(
     branch: string,
@@ -412,34 +535,39 @@ export class CoReviewGate implements FinishReviewGate {
           'an unexplained override is not an audited override).',
       );
     }
+    if (this.deps.agentId !== OPERATOR) {
+      throw new Error(
+        `${verb}: refused — operator_override is reserved for ${OPERATOR}; caller ` +
+          `'${this.deps.agentId ?? '<unknown>'}' must use the recorded-PASS gate.`,
+      );
+    }
     const trimmed = reason.trim();
     const mode = (this.deps.resolveMode ?? resolveRepoMode)(projectId, repoCwd);
-    const overriddenBy = this.deps.agentId ?? 'co.review-gate';
-
-    // Record the audited override — the bypass is durably logged, never silent (Principle 9).
-    this.deps.reviews.recordOverride({ target: into, branch, reason: trimmed, overriddenBy });
+    const overriddenBy = this.deps.agentId;
 
     // Honest-verify still runs FOR THE RECORD when its inputs exist (AC-L5-6): surface + escalate any
     // failure so an overridden merge over a regression / baseline failure is audited — but NEVER refuse.
     let baselineFailures: readonly string[] | undefined;
-    let escalated = false;
+    let verificationFailures: readonly string[] | undefined;
+    let pendingEscalation: GateOutcome['pendingEscalation'];
     const baseline = this.deps.worktrees.getBaseline(branch);
     const finish = this.deps.worktrees.getFinish(branch);
     if (baseline && finish) {
       const outcome = honestVerify(baseline.tests, finish.tests);
       if (outcome.baselineFailures.length > 0) baselineFailures = outcome.baselineFailures;
       const failing = [...outcome.regressions, ...outcome.baselineFailures];
+      if (failing.length > 0) verificationFailures = failing;
       if (failing.length > 0 && this.deps.mail && this.deps.parentResolver) {
-        escalate(this.deps.mail, this.deps.parentResolver, {
+        pendingEscalation = {
           from: overriddenBy,
           subject: `operator override of '${branch}' into '${into}' over verification failure(s)`,
+          idempotencyKey: `override-escalation:${into}:${branch}:${overriddenBy}:${trimmed}`,
           body:
             `'${branch}' was published into '${into}' via an AUDITED operator override (reason: ` +
             `${trimmed}). honest-verification still found failing test(s): ${failing.join(', ')}. ` +
             'The override proceeded by explicit human decision; these failures are recorded for ' +
             'attention.',
-        });
-        escalated = true;
+        };
       }
     }
 
@@ -448,57 +576,134 @@ export class CoReviewGate implements FinishReviewGate {
       reviewVerdict: `override — ${trimmed}`,
       overridden: true,
       overrideReason: trimmed,
+      overrideBy: overriddenBy,
       ...(baselineFailures != null ? { baselineFailures } : {}),
-      ...(escalated ? { escalated } : {}),
+      ...(verificationFailures != null ? { verificationFailures } : {}),
+      ...(pendingEscalation != null ? { pendingEscalation } : {}),
     };
+  }
+
+  private recordSuccessfulOverride(branch: string, into: string, gate: GateOutcome): void {
+    if (!gate.overridden || gate.overrideReason == null || gate.overrideBy == null) return;
+    this.deps.reviews.recordOverride({
+      target: into,
+      branch,
+      reason: gate.overrideReason,
+      overriddenBy: gate.overrideBy,
+      ...(gate.verificationFailures != null
+        ? { verificationFailures: [...gate.verificationFailures] }
+        : {}),
+    });
+  }
+
+  private acquirePublishSlot(target: string, branch: string, verb: string): MergeSlotResult {
+    const slot = acquireMergeSlot(this.deps.reviews, target, branch);
+    if (!slot.acquired) {
+      throw new Error(
+        `${verb}: refused — '${slot.active}' is the active reviewer/merge for '${target}'. ` +
+          'Reviews and publishes into a target serialize (AC-L5-7) — wait for it to resolve, ' +
+          'then re-review against the new target base.',
+      );
+    }
+    return slot;
+  }
+
+  private releaseOwnSlot(target: string, branch: string): void {
+    if (this.deps.reviews.activeSerialized(target) === branch) {
+      releaseMergeSlot(this.deps.reviews, target, branch);
+    }
+  }
+
+  private firePendingEscalation(gate: GateOutcome): {
+    readonly escalated: boolean;
+    readonly failed: boolean;
+  } {
+    if (gate.pendingEscalation == null || !this.deps.mail || !this.deps.parentResolver) {
+      return { escalated: false, failed: false };
+    }
+    try {
+      escalate(this.deps.mail, this.deps.parentResolver, gate.pendingEscalation);
+      return { escalated: true, failed: false };
+    } catch {
+      return { escalated: false, failed: true };
+    }
+  }
+
+  private preflightPendingEscalation(gate: GateOutcome): void {
+    if (gate.pendingEscalation == null || this.deps.parentResolver == null) return;
+    this.deps.parentResolver.parentOf(gate.pendingEscalation.from);
   }
 
   triggerReview(req: ReviewTriggerRequest): ReviewTriggerResult {
     const scope = req.scope ?? 'worker_merge';
     // Resolve the spec reference (AC-L5-8): criteria ref when provided, else explicit no-spec marker.
     const specRef = resolveReviewSpecRef(req.specRef);
-    // Resolve the reviewer kind before mutating the request row. The human path cannot be requested
-    // without mail; failing that precondition must not clear a prior verdict or leave a phantom request.
     const projectId = req.projectId;
-    let reviewerKind: 'agent' | 'human' = 'agent';
-    if (projectId != null) {
+    const resolveKind = (): 'agent' | 'human' => {
+      if (projectId == null) return 'agent';
       const config = this.deps.config ?? openConfigStore();
       const ownsConfig = this.deps.config === undefined;
       try {
-        reviewerKind = resolveReviewerKind(config, projectId, scope);
+        return resolveReviewerKind(config, projectId, scope);
       } finally {
         if (ownsConfig) config.close();
       }
-    }
-    if (reviewerKind === 'human' && !this.deps.mail) {
-      throw new Error(
-        `co review: refused — a human review of '${req.branch}' into '${req.target}' was ` +
-          'requested but no mail store is wired. The human path delivers an actionable ' +
-          'review_request to @operator; without mail it cannot be requested (Principle 9 — ' +
-          'no silent drop).',
-      );
-    }
-
-    // Record the review request in the store after all preconditions that can fail before request
-    // creation have passed.
-    const rec = this.deps.reviews.recordReviewRequested({
-      reviewId: req.reviewId,
-      target: req.target,
-      branch: req.branch,
-      scope,
-      requestedBy: req.requestedBy,
-      specRefKind: specRef.kind,
-      specRefRef: specRef.kind === 'criteria' ? specRef.ref : undefined,
-    });
-    const result: ReviewTriggerResult = {
-      reviewId: rec.reviewId,
-      target: rec.target,
-      branch: rec.branch,
-      requestedTs: rec.requestedTs,
     };
-
-    if (projectId != null) {
-      if (reviewerKind === 'human') {
+    const existing = this.deps.reviews.getReviewRequest(req.target, req.branch);
+    if (existing != null && existing.reviewId === req.reviewId) {
+      if (existing.scope !== scope) {
+        throw new Error(
+          `co review: duplicate reviewId '${req.reviewId}' for '${req.branch}' into ` +
+            `'${req.target}' conflicts on scope: stored '${existing.scope}', requested '${scope}'.`,
+        );
+      }
+      if (existing.requestedBy !== req.requestedBy) {
+        throw new Error(
+          `co review: duplicate reviewId '${req.reviewId}' for '${req.branch}' into ` +
+            `'${req.target}' conflicts on requestedBy: stored '${existing.requestedBy}', ` +
+            `requested '${req.requestedBy}'.`,
+        );
+      }
+      if (
+        !specRefEquals(existing.specRef, {
+          kind: specRef.kind,
+          ...(specRef.kind === 'criteria' ? { ref: specRef.ref } : {}),
+        })
+      ) {
+        const stored =
+          existing.specRef.kind === 'criteria'
+            ? `criteria:${existing.specRef.ref}`
+            : existing.specRef.kind;
+        const incoming = specRef.kind === 'criteria' ? `criteria:${specRef.ref}` : specRef.kind;
+        throw new Error(
+          `co review: duplicate reviewId '${req.reviewId}' for '${req.branch}' into ` +
+            `'${req.target}' conflicts on specRef: stored '${stored}', requested '${incoming}'.`,
+        );
+      }
+      const existingReviewerKind = existing.reviewerKind;
+      const existingVerdict = this.deps.reviews.getVerdict(req.target, req.branch, existing.scope);
+      if (existingVerdict?.reviewId === existing.reviewId) {
+        return reviewTriggerResultFromRecord(existing);
+      }
+      if (projectId != null && existingReviewerKind === 'human') {
+        if (!this.deps.mail) {
+          throw new Error(
+            `co review: refused — a human review of '${req.branch}' into '${req.target}' was ` +
+              'requested but no mail store is wired. The human path delivers an actionable ' +
+              'review_request to @operator; without mail it cannot be requested (Principle 9 — ' +
+              'no silent drop).',
+          );
+        }
+        const requested: ReviewRequested = {
+          reviewId: req.reviewId,
+          target: req.target,
+          branch: req.branch,
+          scope,
+          reviewerKind: existingReviewerKind,
+          requestedBy: req.requestedBy,
+          specRefKind: specRef.kind,
+          specRefRef: specRef.kind === 'criteria' ? specRef.ref : undefined,
+        };
         const envelope = reviewRequestEnvelope({
           from: req.requestedBy,
           subject: `review requested: '${req.branch}' into '${req.target}'`,
@@ -508,25 +713,112 @@ export class CoReviewGate implements FinishReviewGate {
             `(review_verdict: PASS or ISSUES) to re-enter the gate.`,
           idempotencyKey: `review-request:${req.reviewId}`,
         });
-        this.deps.mail!.send(envelope);
-        return result;
+        const rec = this.deps.mail.requestHumanReview(envelope, requested).request;
+        return reviewTriggerResultFromRecord(rec);
       }
-
-      const config = this.deps.config ?? openConfigStore();
-      const ownsConfig = this.deps.config === undefined;
-      try {
-        // Agent path: RESOLVE + RECORD the reviewer placement via the L4 balancer (AC-L5-11). The live
-        // reviewer SPAWN is the one L7 stub (ReviewerSpawnGateStub) — we record the decision, never
-        // launch. The decision is pure over injected inputs (config pins + dispatch usage + nowMs):
-        // identical inputs ⇒ identical placement.decided.
-        this.recordReviewerPlacement(req, scope, projectId, config);
-      } finally {
-        if (ownsConfig) config.close();
+      if (projectId != null && existingReviewerKind === 'agent') {
+        const active = this.deps.reviews.activeSerialized(req.target);
+        if (active !== req.branch) {
+          throw new Error(
+            `co review: refused — existing review request '${existing.reviewId}' for ` +
+              `'${req.branch}' into '${req.target}' is stale; active reviewer/merge is ` +
+              `'${active ?? '<none>'}'.`,
+          );
+        }
+        const config = this.deps.config ?? openConfigStore();
+        const ownsConfig = this.deps.config === undefined;
+        try {
+          this.recordReviewerPlacement(req, scope, projectId, config);
+        } finally {
+          if (ownsConfig) config.close();
+        }
+      }
+      return reviewTriggerResultFromRecord(existing);
+    }
+    if (existing != null) {
+      const existingVerdict = this.deps.reviews.getVerdict(req.target, req.branch, existing.scope);
+      if (existingVerdict?.reviewId !== existing.reviewId) {
+        throw new Error(
+          `co review: refused — '${req.branch}' into '${req.target}' already has pending ` +
+            `active review request '${existing.reviewId}'. Resolve it before requesting ` +
+            `new reviewId '${req.reviewId}'.`,
+        );
       }
     }
+    // Resolve the reviewer kind before mutating the request row. The human path cannot be requested
+    // without mail; failing that precondition must not clear a prior verdict or leave a phantom request.
+    const reviewerKind = resolveKind();
+    const requested: ReviewRequested = {
+      reviewId: req.reviewId,
+      target: req.target,
+      branch: req.branch,
+      scope,
+      reviewerKind,
+      requestedBy: req.requestedBy,
+      specRefKind: specRef.kind,
+      specRefRef: specRef.kind === 'criteria' ? specRef.ref : undefined,
+    };
+    if (reviewerKind === 'human' && !this.deps.mail) {
+      throw new Error(
+        `co review: refused — a human review of '${req.branch}' into '${req.target}' was ` +
+          'requested but no mail store is wired. The human path delivers an actionable ' +
+          'review_request to @operator; without mail it cannot be requested (Principle 9 — ' +
+          'no silent drop).',
+      );
+    }
+    this.deps.reviews.assertReviewIdAvailable(req.reviewId, req.target, req.branch);
 
-    // Default agent path: review.requested recorded above; no mail, no placement when no projectId.
-    return result;
+    if (projectId != null && reviewerKind === 'human') {
+      const envelope = reviewRequestEnvelope({
+        from: req.requestedBy,
+        subject: `review requested: '${req.branch}' into '${req.target}'`,
+        body:
+          `A human review has been requested for '${req.branch}' into '${req.target}' ` +
+          `(scope: ${scope}, reviewId: ${req.reviewId}). Reply with a review_response ` +
+          `(review_verdict: PASS or ISSUES) to re-enter the gate.`,
+        idempotencyKey: `review-request:${req.reviewId}`,
+      });
+      const rec = this.deps.mail!.requestHumanReview(envelope, requested).request;
+      return reviewTriggerResultFromRecord(rec);
+    }
+
+    const slot = acquireMergeSlot(this.deps.reviews, req.target, req.branch);
+    const acquiredByThisCall = slot.fresh === true;
+    if (!slot.acquired) {
+      throw new Error(
+        `co review: refused — '${slot.active}' is the active reviewer/merge for '${req.target}'. ` +
+          'Reviews into a target serialize (AC-L5-7) — wait for it to resolve, then re-review ' +
+          'against the new target base.',
+      );
+    }
+
+    try {
+      if (projectId != null && reviewerKind === 'agent') {
+        const config = this.deps.config ?? openConfigStore();
+        const ownsConfig = this.deps.config === undefined;
+        try {
+          const recorded = this.recordReviewerPlacement(req, scope, projectId, config, requested);
+          if (recorded?.request != null) return reviewTriggerResultFromRecord(recorded.request);
+        } finally {
+          if (ownsConfig) config.close();
+        }
+      }
+
+      // Record the review request in the store after all preconditions that can fail before request
+      // creation have passed. For human reviews this intentionally happens after mail delivery; for
+      // agent reviews it happens after reviewer placement. Either failure cannot clear an existing
+      // verdict with a phantom review.requested row.
+      const rec = this.deps.reviews.recordReviewRequested(requested);
+      const result = reviewTriggerResultFromRecord(rec);
+
+      // Default agent path: review.requested recorded above; no mail, no placement when no projectId.
+      return result;
+    } catch (cause) {
+      if (acquiredByThisCall && this.deps.reviews.activeSerialized(req.target) === req.branch) {
+        releaseMergeSlot(this.deps.reviews, req.target, req.branch);
+      }
+      throw cause;
+    }
   }
 
   /**
@@ -540,12 +832,34 @@ export class CoReviewGate implements FinishReviewGate {
     scope: ReviewScope,
     projectId: string,
     config: ConfigStore,
-  ): void {
-    if (!this.deps.dispatch) return;
-    const role = reviewerRoleForScope(scope, resolveReviewerProfiles(projectId, config));
+    request?: ReviewRequested,
+  ): { readonly request?: ReviewRequestRecord } | undefined {
+    if (!this.deps.dispatch) return undefined;
+    const existingReviewerPlacements = this.deps.dispatch
+      .readPlacements()
+      .filter((placement) =>
+        isReviewerPlacementForReview(placement.agent, placement.role, req.reviewId),
+      );
+    const compatibleReviewerPlacements = existingReviewerPlacements.filter((placement) =>
+      placementMatchesReview(placement, req, scope),
+    );
+    if (compatibleReviewerPlacements.some((placement) => placement.kind === 'placed')) {
+      return undefined;
+    }
+    const existingWaitingPlacement = compatibleReviewerPlacements
+      .filter((placement) => placement.kind === 'waiting')
+      .at(-1);
+    const role =
+      existingWaitingPlacement?.role ??
+      reviewerRoleForScope(scope, resolveReviewerProfiles(projectId, config));
+    const seat = reviewerSeat(role, req.reviewId);
+    const seatPlacements = this.deps.dispatch
+      .readPlacements(seat)
+      .filter((placement) => placementMatchesReview(placement, req, scope));
+    if (seatPlacements.some((placement) => placement.kind === 'placed')) return undefined;
     const accounts = this.deps.reviewerAccounts ?? defaultProviderAccounts();
     const nowMs = this.deps.nowMs ?? 0;
-    const seat = `${role}@${req.reviewId}`; // the reviewer seat this decision is for (L7 owns the real id).
+    // The reviewer seat this decision is for (L7 owns the live launch under this deterministic id).
     const resolution = runDispatchPolicy(
       this.deps.dispatch,
       projectId,
@@ -556,7 +870,25 @@ export class CoReviewGate implements FinishReviewGate {
       nowMs,
       seat,
     );
-    this.deps.dispatch.recordPlacement(seat, toReviewerPlacementDecided(role, resolution));
+    const placement = {
+      ...toReviewerPlacementDecided(role, resolution),
+      review_id: req.reviewId,
+      review_target: req.target,
+      review_branch: req.branch,
+      review_scope: scope,
+    };
+    if (
+      placement.kind === 'waiting' &&
+      compatibleReviewerPlacements.some((existing) => existing.kind === 'waiting')
+    ) {
+      return undefined;
+    }
+    if (request != null) {
+      const result = this.deps.dispatch.recordPlacementWithReviewRequest(seat, placement, request);
+      return { request: result.request };
+    }
+    this.deps.dispatch.recordPlacement(seat, placement);
+    return undefined;
   }
 
   merge(req: ReviewMergeRequest): ReviewMergeResult {
@@ -577,7 +909,6 @@ export class CoReviewGate implements FinishReviewGate {
     //    The non-override path runs inline (not gateOnPass) to keep the co_merge-specific error
     //    messages + the post-enact baseline-failure escalation.
     let gate: GateOutcome;
-    let pendingEscalation: { readonly subject: string; readonly body: string } | undefined;
     if (req.operatorOverride) {
       gate = this.overrideGate(
         req.branch,
@@ -611,6 +942,7 @@ export class CoReviewGate implements FinishReviewGate {
             'honest-verification (AC-L5-3, Principle 9 — never paper over a missing input).',
         );
       }
+      assertFinishNotNewerThanVerdict('co_merge', req.branch, req.into, finish, verdict);
       const verifyOutcome = honestVerify(baseline.tests, finish.tests);
       const classification = classifyPass(verifyOutcome, verdict.verification);
       if (!classification.allow) {
@@ -626,16 +958,23 @@ export class CoReviewGate implements FinishReviewGate {
           ? { baselineFailures: verifyOutcome.baselineFailures }
           : {}),
       };
-      if (classification.mustEscalate) {
-        pendingEscalation = {
-          subject: `baseline failure(s) in PASS for '${req.branch}'`,
-          body:
-            `The PASS for '${req.branch}' into '${req.into}' carries pre-existing baseline ` +
-            `failure(s): ${verifyOutcome.baselineFailures.join(', ')}. The merge was allowed ` +
-            'but these failures require attention — they pre-existed the branch-off baseline.',
+      if (classification.mustEscalate && this.deps.mail && this.deps.parentResolver) {
+        gate = {
+          ...gate,
+          pendingEscalation: {
+            from: this.deps.agentId ?? 'co.review-gate',
+            subject: `baseline failure(s) in PASS for '${req.branch}'`,
+            idempotencyKey: `baseline-escalation:${req.into}:${req.branch}:${verdict.reviewId}`,
+            body:
+              `The PASS for '${req.branch}' into '${req.into}' carries pre-existing baseline ` +
+              `failure(s): ${verifyOutcome.baselineFailures.join(', ')}. The merge was allowed ` +
+              'but these failures require attention — they pre-existed the branch-off baseline.',
+          },
         };
       }
     }
+
+    this.preflightPendingEscalation(gate);
 
     // 4) Render the house-style merge message — `[reviewed: PASS]`, or `[reviewed: override — <reason>]`
     //    for the audited override (renderMergeMessage renders the verdict verbatim — Principle 3).
@@ -665,13 +1004,14 @@ export class CoReviewGate implements FinishReviewGate {
     };
     let result;
     try {
+      this.recordSuccessfulOverride(req.branch, req.into, gate);
       result = repoModeGate.enactPublish(
         { branch: req.branch, into: req.into, message, repoCwd: req.repoCwd },
         mode,
         enactDeps,
       );
     } catch (cause) {
-      releaseMergeSlot(this.deps.reviews, req.into, req.branch);
+      if (slot.fresh) releaseMergeSlot(this.deps.reviews, req.into, req.branch);
       throw cause;
     }
 
@@ -681,16 +1021,7 @@ export class CoReviewGate implements FinishReviewGate {
     //    never a finalizer exit code.
     releaseMergeSlot(this.deps.reviews, req.into, req.branch);
 
-    // Non-override baseline-failure escalation fires AFTER the merge lands (unchanged ordering).
-    let escalated = gate.escalated ?? false;
-    if (pendingEscalation && this.deps.mail && this.deps.parentResolver) {
-      escalate(this.deps.mail, this.deps.parentResolver, {
-        from: this.deps.agentId ?? 'co.review-gate',
-        subject: pendingEscalation.subject,
-        body: pendingEscalation.body,
-      });
-      escalated = true;
-    }
+    const escalation = this.firePendingEscalation(gate);
 
     // 8) Fire the merge-time teardown LAST. A failure is surfaced (toreDown stays false) but never
     //    thrown — it cannot unwind the already-recorded merge (Principle 9 ordering).
@@ -710,7 +1041,11 @@ export class CoReviewGate implements FinishReviewGate {
       commitMessage: message,
       mode: result.mode,
       ...(gate.baselineFailures != null ? { baselineFailures: gate.baselineFailures } : {}),
-      ...(escalated ? { escalated } : {}),
+      ...(gate.verificationFailures != null
+        ? { verificationFailures: gate.verificationFailures }
+        : {}),
+      ...(escalation.escalated ? { escalated: true } : {}),
+      ...(escalation.failed ? { escalationFailed: true } : {}),
       ...(gate.overridden ? { overridden: true } : {}),
       ...(gate.overrideReason != null ? { overrideReason: gate.overrideReason } : {}),
       ...(this.deps.teardown ? { toreDown } : {}),
@@ -720,23 +1055,38 @@ export class CoReviewGate implements FinishReviewGate {
   /**
    * Gated push (AC-L5-6): gate on a recorded PASS + honest-verify (or the audited operator override),
    * escalate on baseline failures (never silent — AC-L5-3), then push the reviewed work to the remote.
-   * Owner pushes the integration branch (`into`) to origin; contributor pushes the feature branch
-   * (`branch`) to origin (the fork). Offline refuses loud (Principle 9).
+   * Owner pushes the integration branch (`into`) to origin and releases the target slot. Contributor
+   * pushes the feature branch (`branch`) to origin (the fork) but keeps the target slot held until the
+   * paired `co_pr_merge` creates the PR, so the reviewed PASS cannot go stale between the two steps.
+   * Offline refuses loud (Principle 9).
    */
   push(req: ReviewPushRequest): ReviewPushResult {
     const repoModeGate = this.deps.repoModeGate ?? new CoRepoModeGate();
     const gateResult = req.operatorOverride
       ? this.overrideGate(req.branch, req.into, req.projectId, req.repoCwd, req.reason, 'co_push')
       : this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd, 'pr_merge');
+    this.preflightPendingEscalation(gateResult);
+    const slot = this.acquirePublishSlot(req.into, req.branch, 'co_push');
 
     const enactDeps: EnactPushDeps = {
       ...(this.deps.gitExec != null ? { gitExec: this.deps.gitExec } : {}),
     };
-    const result = repoModeGate.enactPush(
-      { branch: req.branch, into: req.into, repoCwd: req.repoCwd, remote: req.remote },
-      gateResult.mode,
-      enactDeps,
-    );
+    let result;
+    try {
+      this.recordSuccessfulOverride(req.branch, req.into, gateResult);
+      result = repoModeGate.enactPush(
+        { branch: req.branch, into: req.into, repoCwd: req.repoCwd, remote: req.remote },
+        gateResult.mode,
+        enactDeps,
+      );
+    } catch (cause) {
+      if (slot.fresh) this.releaseOwnSlot(req.into, req.branch);
+      throw cause;
+    }
+    if (result.mode !== 'contributor') {
+      this.releaseOwnSlot(req.into, req.branch);
+    }
+    const escalation = this.firePendingEscalation(gateResult);
     return {
       pushed: result.pushed,
       remote: result.remote,
@@ -744,7 +1094,11 @@ export class CoReviewGate implements FinishReviewGate {
       ...(gateResult.baselineFailures != null
         ? { baselineFailures: gateResult.baselineFailures }
         : {}),
-      ...(gateResult.escalated ? { escalated: gateResult.escalated } : {}),
+      ...(gateResult.verificationFailures != null
+        ? { verificationFailures: gateResult.verificationFailures }
+        : {}),
+      ...(gateResult.escalated || escalation.escalated ? { escalated: true } : {}),
+      ...(escalation.failed ? { escalationFailed: true } : {}),
       ...(gateResult.overridden ? { overridden: true } : {}),
       ...(gateResult.overrideReason != null ? { overrideReason: gateResult.overrideReason } : {}),
     };
@@ -768,22 +1122,33 @@ export class CoReviewGate implements FinishReviewGate {
           'co_pr_merge',
         )
       : this.gateOnPass(req.branch, req.into, req.projectId, req.repoCwd, 'pr_merge');
+    this.preflightPendingEscalation(gateResult);
+    const slot = this.acquirePublishSlot(req.into, req.branch, 'co_pr_merge');
 
     // Render the house-style PR description from the structured intent (Principle 3 — co owns the
     // contract; provider voice cannot reach the artifact by construction).
     const prDescription = renderPrMessage(req.intent);
 
-    const result = repoModeGate.enactPrMerge(
-      {
-        branch: req.branch,
-        into: req.into,
-        title: req.title,
-        description: prDescription,
-        repoCwd: req.repoCwd,
-      },
-      gateResult.mode,
-      { ghExec: this.deps.ghExec },
-    );
+    let result;
+    try {
+      this.recordSuccessfulOverride(req.branch, req.into, gateResult);
+      result = repoModeGate.enactPrMerge(
+        {
+          branch: req.branch,
+          into: req.into,
+          title: req.title,
+          description: prDescription,
+          repoCwd: req.repoCwd,
+        },
+        gateResult.mode,
+        { ghExec: this.deps.ghExec },
+      );
+    } catch (cause) {
+      if (slot.fresh) this.releaseOwnSlot(req.into, req.branch);
+      throw cause;
+    }
+    this.releaseOwnSlot(req.into, req.branch);
+    const escalation = this.firePendingEscalation(gateResult);
     return {
       prUrl: result.prUrl,
       prDescription,
@@ -791,7 +1156,11 @@ export class CoReviewGate implements FinishReviewGate {
       ...(gateResult.baselineFailures != null
         ? { baselineFailures: gateResult.baselineFailures }
         : {}),
-      ...(gateResult.escalated ? { escalated: gateResult.escalated } : {}),
+      ...(gateResult.verificationFailures != null
+        ? { verificationFailures: gateResult.verificationFailures }
+        : {}),
+      ...(gateResult.escalated || escalation.escalated ? { escalated: true } : {}),
+      ...(escalation.failed ? { escalationFailed: true } : {}),
       ...(gateResult.overridden ? { overridden: true } : {}),
       ...(gateResult.overrideReason != null ? { overrideReason: gateResult.overrideReason } : {}),
     };

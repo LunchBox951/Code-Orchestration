@@ -4,7 +4,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertRepoPristine } from '../config/pristine.js';
-import { detectBaseRef, resolveRefSha, type GitReader } from './detect-base.js';
+import {
+  detectBaseRef,
+  detectCurrentBranchTarget,
+  detectIntegrationTarget,
+  resolveRefSha,
+  type GitReader,
+} from './detect-base.js';
 
 // AC-L3-1 (the #1 frozen invariant): base auto-detect is a read-only, injectable chain —
 // origin/HEAD → main → master → local HEAD — with NO hard-coded `master` default. The cured
@@ -20,6 +26,7 @@ function cannedReader(responses: Record<string, string | null>): GitReader {
 const ORIGIN_HEAD = 'symbolic-ref --quiet refs/remotes/origin/HEAD';
 const LOCAL_MAIN = 'rev-parse --verify --quiet refs/heads/main';
 const LOCAL_MASTER = 'rev-parse --verify --quiet refs/heads/master';
+const SHORT_HEAD = 'symbolic-ref --quiet --short HEAD';
 const SHA = 'a'.repeat(40);
 
 describe('AC-L3-1 — detectBaseRef chain (origin/HEAD → main → master → local HEAD)', () => {
@@ -70,6 +77,35 @@ describe('resolveRefSha — fail loud (Principle 9) on an unresolvable ref', () 
     expect(() => resolveRefSha('/x', 'origin/main', cannedReader({}))).toThrow(
       /cannot resolve base ref/i,
     );
+  });
+});
+
+describe('detectIntegrationTarget — publish tools use local branch targets', () => {
+  it('normalizes origin/HEAD remote defaults to the matching local branch', () => {
+    const ref = detectIntegrationTarget(
+      '/x',
+      cannedReader({ [ORIGIN_HEAD]: 'refs/remotes/origin/main', [LOCAL_MAIN]: SHA }),
+    );
+
+    expect(ref).toBe('main');
+  });
+
+  it('fails loud when origin/HEAD names a remote default without a local branch', () => {
+    expect(() =>
+      detectIntegrationTarget('/x', cannedReader({ [ORIGIN_HEAD]: 'refs/remotes/origin/main' })),
+    ).toThrow(/no local 'main' branch/i);
+  });
+});
+
+describe('detectCurrentBranchTarget — local integration work lands on current branch', () => {
+  it('returns the current local branch for merge/push integration defaults', () => {
+    expect(detectCurrentBranchTarget('/x', cannedReader({ [SHORT_HEAD]: 'co/phase' }))).toBe(
+      'co/phase',
+    );
+  });
+
+  it('fails loud instead of returning HEAD when the checkout is detached', () => {
+    expect(() => detectCurrentBranchTarget('/x', cannedReader({}))).toThrow(/HEAD is detached/i);
   });
 });
 

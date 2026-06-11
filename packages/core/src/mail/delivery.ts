@@ -5,6 +5,8 @@ import type { Store } from '../store/types.js';
 import {
   MAIL_CLARIFY_REQUEST,
   MAIL_ESCALATION,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
   makeMailForwardEvent,
   makeMailEvent,
   makeMailReadEvent,
@@ -269,6 +271,12 @@ export class InProcessDelivery implements Delivery {
       const existing = selectMailBySeq(db, seq);
       if (!existing || existing.sender !== sender) {
         throw new Error(`InProcessDelivery.retract: no mail seq=${seq} sent by '${sender}'`);
+      }
+      if (existing.type === MAIL_REVIEW_REQUEST || existing.type === MAIL_REVIEW_RESPONSE) {
+        throw new Error(
+          `InProcessDelivery.retract: cannot retract review mail '${existing.type}' seq=${seq}; ` +
+            'review request/response mail is tied to review-store side effects.',
+        );
       }
 
       const [stored] = tx.append([makeMailRetractEvent(this.projectId, sender, seq)]);

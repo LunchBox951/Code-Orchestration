@@ -7,7 +7,8 @@ import { assertNever } from '../assert-never.js';
  *
  *   - `worker_merge`  — a worker's phase branch merges into the lead's integration branch.
  *   - `phase_merge`   — a lead's integration branch merges into main/master (sits between).
- *   - `pr_merge`      — a pull request merging into an upstream default branch (strictest).
+ *   - `pr_merge`      — outward PR creation / remote-publish handoff into an upstream target
+ *                       (strictest).
  */
 export type ReviewScope = 'worker_merge' | 'phase_merge' | 'pr_merge';
 

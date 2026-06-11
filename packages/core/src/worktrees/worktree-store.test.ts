@@ -75,6 +75,7 @@ const finish = (over: Partial<FinishRecorded> = {}): FinishRecorded => ({
   branch: 'co/feature',
   baseSha: 'a'.repeat(40),
   commitSha: 'f'.repeat(40),
+  agent: 'impl-1',
   tests: [
     { name: 'suite/a', passed: true },
     { name: 'suite/b', passed: true },
@@ -204,6 +205,32 @@ describe('WorktreeStore — record + read worktrees and baselines', () => {
       store.close();
     }
   });
+
+  it('backfills legacy recorded_seq values from finish.recorded events', () => {
+    const first = openWorktreeStore('p-legacy-finish-seq');
+    let expectedSeq: number;
+    try {
+      const saved = first.recordFinish(finish());
+      expectedSeq = saved.recordedSeq!;
+    } finally {
+      first.close();
+    }
+    const raw = openProjectStore('p-legacy-finish-seq');
+    try {
+      raw.transaction((tx) => {
+        (tx.raw as DatabaseSync).exec('UPDATE finishes SET recorded_seq = NULL');
+      });
+    } finally {
+      raw.close();
+    }
+
+    const reopened = openWorktreeStore('p-legacy-finish-seq');
+    try {
+      expect(reopened.getFinish('co/feature')?.recordedSeq).toBe(expectedSeq);
+    } finally {
+      reopened.close();
+    }
+  });
 });
 
 // ── AC-L0-2 preserved: the L3 read-model replays byte-equal (the brief's invariant #3) ──────────
@@ -212,7 +239,7 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
     return JSON.stringify({
       worktrees: db
         .prepare(
-          'SELECT branch, base_ref, base_sha, path, parent, created_ts, removed, provisioned FROM worktrees ORDER BY branch',
+          'SELECT branch, base_ref, base_sha, path, parent, agent, role, sub_role, created_ts, removed, provisioned FROM worktrees ORDER BY branch',
         )
         .all(),
       baselines: db
@@ -222,7 +249,7 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
         .all(),
       finishes: db
         .prepare(
-          'SELECT branch, base_sha, commit_sha, tests, recorded_ts FROM finishes ORDER BY branch',
+          'SELECT branch, base_sha, commit_sha, tests, recorded_ts, recorded_seq, agent FROM finishes ORDER BY branch',
         )
         .all(),
     });
@@ -240,6 +267,8 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
           branch: 'co/b',
           path: '/d/b',
           parent: 'coord-1',
+          role: 'reviewer',
+          subRole: 'pr',
           provisioned: [{ path: '.npmrc', mechanism: 'copy' }],
         }),
       ),
@@ -265,6 +294,8 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
       // Guard against a vacuous pass (two empty snapshots are also "equal").
       expect(live).toContain('"branch":"co/a"');
       expect(live).toContain('"parent":"coord-1"');
+      expect(live).toContain('"role":"reviewer"');
+      expect(live).toContain('"sub_role":"pr"');
       expect(live).toContain('.npmrc');
       expect(live).toContain('suite/a');
       // The finishes read-model is in the snapshot and reflects the LATEST finish per branch.

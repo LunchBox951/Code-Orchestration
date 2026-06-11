@@ -30,10 +30,9 @@ import {
  * The event types are DOTTED (`review.requested`, `review.verdict`, `merge.serialized`, …) to mark them
  * as L0-style infrastructure events, mirroring `worktree.created` / `config.set`.
  *
- * **ALL FIVE** L5 event types are defined now even though this phase only WRITES `review.verdict` (and
- * a minimal `review.requested`): defining the schemas + folding them now keeps the projector stable and
- * replay-deterministic across phases B–F, which add only the WRITERS for the events they own
- * (`review.strike` = D, `merge.serialized` + `review.override` = F).
+ * **ALL FIVE** L5 event types are active now: review request/verdict, strikes, merge serialization,
+ * and audited overrides. The schemas + projector stay stable and replay-deterministic as higher
+ * layers add live dispatch/UI around these recorded facts.
  */
 
 /** Current payload schema version — v1; no upcasters yet (an empty chain is the identity upcast). */
@@ -47,7 +46,7 @@ export const EVENT_REVIEW_VERDICT = 'review.verdict' as const;
 export const EVENT_REVIEW_STRIKE = 'review.strike' as const;
 /** A merge into a target was serialized (the merge mutex/ordering is Phase F — writer is F's). */
 export const EVENT_MERGE_SERIALIZED = 'merge.serialized' as const;
-/** A recorded PASS-gate override (the human/lead override is Phase F — writer is F's). */
+/** A recorded PASS-gate override (operator-only, audited with a non-empty reason). */
 export const EVENT_REVIEW_OVERRIDE = 'review.override' as const;
 
 /** Valid review verdict scopes. Optional on old events; readers default absent scope to worker_merge. */
@@ -90,6 +89,8 @@ export const reviewRequestedSchema = z.object({
   branch: z.string().min(1),
   /** The strictness scope this request asks the reviewer to apply. Optional for replay compatibility. */
   scope: reviewScopeValueSchema.optional(),
+  /** The durable route chosen for this request. Optional for replay compatibility; absent means agent. */
+  reviewerKind: z.enum(['agent', 'human']).optional(),
   requestedBy: z.string().min(1),
   /** `'criteria'` when a locked spec was provided; `'no-locked-spec'` when absent. Optional for replay compat. */
   specRefKind: z.enum(['criteria', 'no-locked-spec']).optional(),
@@ -151,6 +152,7 @@ export const reviewOverrideSchema = z.object({
   branch: z.string().min(1),
   reason: z.string().min(1),
   overriddenBy: z.string().min(1),
+  verificationFailures: z.string().array().optional(),
 });
 export type ReviewOverride = z.infer<typeof reviewOverrideSchema>;
 
@@ -253,6 +255,8 @@ export interface ReviewVerdictRecord {
   readonly suggestions: readonly Suggestion[];
   readonly verification?: VerificationMarker;
   readonly recordedTs: number;
+  /** The persisted event seq for ordering against finish records. Absent only for legacy rows. */
+  readonly recordedSeq?: number;
 }
 
 /**
@@ -266,6 +270,7 @@ export interface ReviewRequestRecord {
   readonly target: string;
   readonly branch: string;
   readonly scope: ReviewScope;
+  readonly reviewerKind: 'agent' | 'human';
   readonly requestedBy: string;
   readonly requestedTs: number;
   /** The resolved spec reference — criteria ref or explicit `no-locked-spec` marker (AC-L5-8). */

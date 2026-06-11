@@ -7,6 +7,7 @@ import { openMailStore, type MailStore } from '../../mail/mail-store.js';
 import { openRegistry, type ProjectRegistry } from '../../registry/registry.js';
 import { openWorktreeStore, type WorktreeStore } from '../../worktrees/worktree-store.js';
 import { openDispatchStore, type DispatchStore } from '../../dispatch/dispatch-store.js';
+import { openRosterStore, type RosterStore } from '../../roles/roster-store.js';
 import { accountForProvider } from '../../dispatch/provider-source.js';
 import {
   FakeUsageSource,
@@ -27,6 +28,7 @@ let tmpDirs: string[] = [];
 let mails: MailStore[] = [];
 let worktreeStores: WorktreeStore[] = [];
 let dispatchStores: DispatchStore[] = [];
+let rosterStores: RosterStore[] = [];
 let regs: ProjectRegistry[] = [];
 
 beforeEach(() => {
@@ -35,6 +37,7 @@ beforeEach(() => {
   mails = [];
   worktreeStores = [];
   dispatchStores = [];
+  rosterStores = [];
   regs = [];
   const data = mkdtempSync(join(tmpdir(), 'co-sling-tool-data-'));
   tmpDirs.push(data);
@@ -45,6 +48,7 @@ afterEach(() => {
   for (const m of mails) m.close();
   for (const w of worktreeStores) w.close();
   for (const d of dispatchStores) d.close();
+  for (const r of rosterStores) r.close();
   for (const r of regs) r.close();
   process.env = ORIGINAL_ENV;
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
@@ -52,6 +56,7 @@ afterEach(() => {
   mails = [];
   worktreeStores = [];
   dispatchStores = [];
+  rosterStores = [];
   regs = [];
 });
 
@@ -85,7 +90,11 @@ function makeMainRepo(): string {
 function makeContext(
   agent: string,
   repo: string,
-  opts: { withWorktrees?: boolean } = {},
+  opts: {
+    withWorktrees?: boolean;
+    registerCaller?: boolean;
+    role?: 'coordinator' | 'lead' | 'implementer';
+  } = {},
 ): ToolContext {
   const registry = openRegistry();
   regs.push(registry);
@@ -97,7 +106,19 @@ function makeContext(
   }
   const worktrees = openWorktreeStore(projectId);
   worktreeStores.push(worktrees);
-  return { agent, projectId, cwd: repo, mail, registry, worktrees };
+  const roster = openRosterStore(projectId);
+  rosterStores.push(roster);
+  if (opts.registerCaller !== false) {
+    if (opts.role !== 'coordinator' && agent !== 'coord-1') {
+      roster.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+    }
+    roster.recordAgent({
+      agentId: agent,
+      role: opts.role ?? 'lead',
+      parent: opts.role === 'coordinator' ? '@operator' : 'coord-1',
+    });
+  }
+  return { agent, projectId, cwd: repo, mail, registry, worktrees, roster };
 }
 
 describe('co_sling — via invokeTool', () => {
@@ -122,6 +143,7 @@ describe('co_sling — via invokeTool', () => {
 
     const out = (await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/feature',
     })) as {
       status: 'placed';
@@ -143,7 +165,11 @@ describe('co_sling — via invokeTool', () => {
     expect(out.placement.provider).toBe('claude');
 
     // Recorded per project + branch, with the explicit parent (no @operator default).
-    expect(ctx.worktrees?.getWorktree('co/feature')?.parent).toBe('lead-7');
+    expect(ctx.worktrees?.getWorktree('co/feature')).toMatchObject({
+      parent: 'lead-7',
+      agent: 'impl-1',
+      role: 'implementer',
+    });
     expect(ctx.worktrees?.getBaseline('co/feature')).toBeDefined();
     expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(1);
   });
@@ -152,7 +178,11 @@ describe('co_sling — via invokeTool', () => {
     const repo = makeMainRepo();
     const ctx = makeContext('lead-7', repo);
     await expect(
-      invokeTool(buildCoreRegistry(), ctx, 'co_sling', { parent: 'lead-7', branch: 'feature' }),
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-1',
+        branch: 'feature',
+      }),
     ).rejects.toThrow(/input failed schema validation/i);
   });
 
@@ -164,11 +194,84 @@ describe('co_sling — via invokeTool', () => {
     ).rejects.toThrow(/input failed schema validation/i);
   });
 
+  it('requires an assigned child agent before creating a mountable sandbox', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContext('lead-7', repo);
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', { parent: 'lead-7', branch: 'co/x' }),
+    ).rejects.toThrow(/input failed schema validation/i);
+  });
+
+  it('rejects a parent that does not match the mounted caller before creating a worktree', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'other-lead',
+        agent: 'impl-1',
+        branch: 'co/wrong-parent',
+      }),
+    ).rejects.toThrow(/parent.*mounted caller/i);
+
+    expect(ctx.worktrees?.getWorktree('co/wrong-parent')).toBeUndefined();
+    expect(ctx.worktrees?.getBaseline('co/wrong-parent')).toBeUndefined();
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/wrong-parent')).toThrow();
+  });
+
+  it('rejects an unregistered caller before creating a worktree', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot, {
+      registerCaller: false,
+    });
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-1',
+        branch: 'co/unregistered-caller',
+      }),
+    ).rejects.toThrow(/not registered in the roster/i);
+
+    expect(ctx.worktrees?.getWorktree('co/unregistered-caller')).toBeUndefined();
+    expect(ctx.worktrees?.getBaseline('co/unregistered-caller')).toBeUndefined();
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/unregistered-caller')).toThrow();
+  });
+
+  it('rejects unknown and illegal child roles before dispatch or worktree creation', async () => {
+    const repo = makeMainRepo();
+    const unknownCtx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    await expect(
+      invokeTool(buildCoreRegistry(), unknownCtx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-1',
+        branch: 'co/unknown-role',
+        role: 'wizard',
+      }),
+    ).rejects.toThrow(/unknown role/i);
+    expect(unknownCtx.dispatch?.readPlacements('lead-7')).toHaveLength(0);
+    expect(unknownCtx.worktrees?.getWorktree('co/unknown-role')).toBeUndefined();
+
+    const illegalCtx = makeContextWithDispatch('lead-8', repo, healthySnapshot);
+    await expect(
+      invokeTool(buildCoreRegistry(), illegalCtx, 'co_sling', {
+        parent: 'lead-8',
+        agent: 'lead-child-1',
+        branch: 'co/lead-child',
+        role: 'lead',
+      }),
+    ).rejects.toThrow(/lead never spawns a lead/i);
+    expect(illegalCtx.dispatch?.readPlacements('lead-8')).toHaveLength(0);
+    expect(illegalCtx.worktrees?.getWorktree('co/lead-child')).toBeUndefined();
+  });
+
   it('loud-fails when the mount did not inject a worktree store (Principle 9)', async () => {
     const repo = makeMainRepo();
     const ctx = makeContext('lead-7', repo, { withWorktrees: false });
     await expect(
-      invokeTool(buildCoreRegistry(), ctx, 'co_sling', { parent: 'lead-7', branch: 'co/x' }),
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-1',
+        branch: 'co/x',
+      }),
     ).rejects.toThrow(/did not inject a worktree store/i);
   });
 });
@@ -209,6 +312,7 @@ function makeContextWithDispatch(
   agent: string,
   repo: string,
   snapshots: UsageSnapshot | readonly UsageSnapshot[],
+  opts: { registerCaller?: boolean; role?: 'coordinator' | 'lead' | 'implementer' } = {},
 ): ToolContext {
   const registry = openRegistry();
   regs.push(registry);
@@ -219,10 +323,22 @@ function makeContextWithDispatch(
   worktreeStores.push(worktrees);
   const dispatch = openDispatchStore(projectId);
   dispatchStores.push(dispatch);
+  const roster = openRosterStore(projectId);
+  rosterStores.push(roster);
+  if (opts.registerCaller !== false) {
+    if (opts.role !== 'coordinator' && agent !== 'coord-1') {
+      roster.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+    }
+    roster.recordAgent({
+      agentId: agent,
+      role: opts.role ?? 'lead',
+      parent: opts.role === 'coordinator' ? '@operator' : 'coord-1',
+    });
+  }
   for (const snapshot of Array.isArray(snapshots) ? snapshots : [snapshots]) {
     dispatch.recordSnapshot(snapshot);
   }
-  return { agent, projectId, cwd: repo, mail, registry, worktrees, dispatch };
+  return { agent, projectId, cwd: repo, mail, registry, worktrees, dispatch, roster };
 }
 
 describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () => {
@@ -233,6 +349,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/routed-placed',
       role: 'implementer',
       work_size: 'average',
@@ -262,6 +379,45 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     expect(out['waiting']).toBeUndefined();
   });
 
+  it('canonicalizes child role strings before dispatch placement recording', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'reviewer-1',
+      branch: 'co/canonical-role',
+      role: ' Reviewer:PR ',
+      work_size: 'average',
+      reasoning_budget: 'standard',
+    });
+
+    const placements = ctx.dispatch!.readPlacements('lead-7');
+    expect(placements).toHaveLength(1);
+    expect(placements[0]!.role).toBe('reviewer:pr');
+    expect(ctx.worktrees!.getWorktree('co/canonical-role')).toMatchObject({
+      role: 'reviewer',
+      subRole: 'pr',
+    });
+  });
+
+  it('lets an implementer sling a researcher child, matching spawn rules and role profile', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('impl-1', repo, healthySnapshot, { role: 'implementer' });
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'impl-1',
+      agent: 'researcher-1',
+      branch: 'co/research-child',
+      role: 'researcher',
+    })) as Record<string, unknown>;
+
+    expect(out['status']).toBe('placed');
+    expect(ctx.dispatch!.readPlacements('impl-1')[0]?.role).toBe('researcher');
+  });
+
   it('waiting: records placement.decided(waiting) and returns loud message; does NOT create sandbox', async () => {
     const repo = makeMainRepo();
     const ctx = makeContextWithDispatch('lead-7', repo, maxedSnapshot);
@@ -269,6 +425,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/routed-waiting',
       role: 'implementer',
       work_size: 'average',
@@ -303,6 +460,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/no-routing',
     })) as Record<string, unknown>;
 
@@ -323,6 +481,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     await expect(
       invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
         parent: 'lead-7',
+        agent: 'impl-1',
         branch: 'co/accounts-only',
         accounts: [{ provider: 'codex', account: accountForProvider('codex') }],
       }),
@@ -347,6 +506,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/diagnostic-placed',
     })) as Record<string, unknown>;
 
@@ -381,6 +541,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
       parent: 'lead-7',
+      agent: 'impl-1',
       branch: 'co/diagnostic-waiting',
     })) as Record<string, unknown>;
 
@@ -429,6 +590,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     await expect(
       invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
         parent: 'lead-7',
+        agent: 'impl-1',
         branch: 'co/existing',
       }),
     ).rejects.toThrow(/git worktree add/i);
@@ -442,6 +604,7 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     await expect(
       invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
         parent: 'lead-7',
+        agent: 'impl-1',
         branch: 'co/needs-dispatch',
         role: 'implementer',
         work_size: 'average',

@@ -56,7 +56,9 @@ export function finishScope(branch: string): string {
  * The `worktree.created` payload (camelCase, like `DeliveredMail`): the created sandbox's facts.
  * `baseRef` is the resolved base (auto-detected or overridden), `baseSha` its commit at branch-off,
  * `path` the program-data sandbox dir (NEVER in the repo), `parent` the spawner the sandbox is for,
- * and `provisioned` is the gitignored working-essential set actually placed into this sandbox.
+ * `agent` is the assigned child agent allowed to mount the sandbox, `role`/`subRole` are the intended
+ * child role binding, and `provisioned` is the gitignored working-essential set actually placed into
+ * this sandbox.
  */
 export const worktreeProvisionedEntrySchema = z.object({
   path: z.string().min(1),
@@ -70,6 +72,9 @@ export const worktreeCreatedSchema = z.object({
   baseSha: z.string().min(1),
   path: z.string().min(1),
   parent: z.string().min(1),
+  agent: z.string().min(1).optional(),
+  role: z.string().min(1).optional(),
+  subRole: z.string().min(1).optional(),
   provisioned: z.array(worktreeProvisionedEntrySchema).optional(),
 });
 export type WorktreeCreated = z.infer<typeof worktreeCreatedSchema>;
@@ -107,6 +112,7 @@ export const finishRecordedSchema = z.object({
   baseSha: z.string().min(1),
   commitSha: z.string().min(1),
   tests: z.array(testOutcomeSchema),
+  agent: z.string().min(1).optional(),
 });
 export type FinishRecorded = z.infer<typeof finishRecordedSchema>;
 
@@ -171,6 +177,7 @@ export function makeFinishRecordedEvent(projectId: string, f: FinishRecorded): N
     type: EVENT_FINISH_RECORDED,
     v: WORKTREE_EVENT_V,
     payload,
+    ...(payload.agent != null ? { actor: payload.agent } : {}),
   };
 }
 
@@ -201,6 +208,10 @@ export interface WorktreeRecord {
   readonly baseSha: string;
   readonly path: string;
   readonly parent: string;
+  /** The assigned child agent allowed to mount this sandbox. Absent only for legacy records. */
+  readonly agent?: string;
+  readonly role?: string;
+  readonly subRole?: string;
   readonly createdTs: number;
   readonly removed: boolean;
   /** The working essentials actually placed at sling time; absent for older records. */
@@ -227,4 +238,8 @@ export interface FinishRecord {
   readonly commitSha: string;
   readonly tests: readonly TestOutcome[];
   readonly recordedTs: number;
+  /** The persisted event seq for ordering against review verdicts. Absent only for legacy rows. */
+  readonly recordedSeq?: number;
+  /** The agent that recorded the latest finish. Absent only for legacy finish records. */
+  readonly agent?: string;
 }

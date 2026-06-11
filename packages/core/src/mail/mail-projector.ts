@@ -8,6 +8,7 @@ import {
   MAIL_APPROVAL_RESPONSE,
   MAIL_CLARIFY_REQUEST,
   MAIL_ESCALATION,
+  MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   completionPredicate,
@@ -381,7 +382,26 @@ export class MailProjector implements Projector {
   private applyRetractReceipt(db: DatabaseSync, event: StoredEvent): void {
     const sender = mailRecipientForScope(event.scope);
     const { seq } = event.payload as MailRetract;
+    if (event.actor !== sender) {
+      throw new Error(
+        `mail projector: retract receipt seq=${event.seq} actor '${event.actor ?? '<none>'}' ` +
+          `does not match sender '${sender}'`,
+      );
+    }
+    const retracted = selectMailBySeq(db, seq);
+    if (retracted == null || retracted.sender !== sender) {
+      throw new Error(
+        `mail projector: cannot retract mail seq=${seq}; original sender is not '${sender}'`,
+      );
+    }
+    if (retracted?.type === MAIL_REVIEW_REQUEST || retracted?.type === MAIL_REVIEW_RESPONSE) {
+      throw new Error(
+        `mail projector: cannot retract review mail '${retracted.type}' seq=${seq}; review mail ` +
+          'is tied to review-store side effects.',
+      );
+    }
     db.prepare('UPDATE inbox SET retracted = 1 WHERE seq = ? AND sender = ?').run(seq, sender);
+    recomputeResolvedAfterRetractingCloser(db, retracted);
   }
 
   /**
@@ -444,4 +464,34 @@ export class MailProjector implements Projector {
        VALUES (?, ?, ?, ?)`,
     ).run(Number(forwarded.seq), seq, holder, forwardedTo);
   }
+}
+
+function recomputeResolvedAfterRetractingCloser(db: DatabaseSync, closer: DeliveredMail): void {
+  db.prepare('DELETE FROM inbox_forward_links WHERE forwarded_seq = ?').run(closer.seq);
+  if (closer.causationId == null) return;
+  const itemSeq = Number(closer.causationId);
+  if (!Number.isSafeInteger(itemSeq)) return;
+  const item = selectMailBySeq(db, itemSeq);
+  if (item == null || item.kind !== 'actionable' || item.retracted) return;
+  const activeForward = db
+    .prepare('SELECT forwarded_seq FROM inbox_forward_links WHERE held_seq = ? LIMIT 1')
+    .get(item.seq);
+  if (activeForward != null) {
+    db.prepare('UPDATE inbox SET resolved = 1 WHERE seq = ?').run(item.seq);
+    return;
+  }
+  const predicate = completionPredicate(item.type);
+  if (predicate == null) return;
+  const threadId = item.correlationId ?? String(item.seq);
+  const rows = db
+    .prepare(
+      `SELECT ${INBOX_COLUMNS} FROM inbox
+       WHERE thread_id = ? AND seq != ? AND retracted = 0
+       ORDER BY seq`,
+    )
+    .all(threadId, item.seq);
+  const stillResolved = rows
+    .map(rowToDeliveredMail)
+    .some((candidate) => predicate(item, candidate));
+  db.prepare('UPDATE inbox SET resolved = ? WHERE seq = ?').run(stillResolved ? 1 : 0, item.seq);
 }

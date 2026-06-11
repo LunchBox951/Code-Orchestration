@@ -10,8 +10,9 @@ deliberately **thin**. Two levers do the work instead of a big lockdown:
 
 1. **Make the sanctioned path the easy path.** The `co` MCP tools do the heavy lifting
    so the agent never has to reason about the mechanics — `co_sling` creates the
-   worktree, branch, and base; `co_finish` commits, records test results, and triggers
-   review; `co_merge` performs the gated merge. The agent calls one tool and the system
+   worktree, branch, and base; `co_finish` commits and records test results; the
+   coordinator-or-lead review and merge path consumes that recorded finish/PASS state.
+   The agent calls one tool and the system
    handles the rest. An agent with an easy front door rarely goes looking for a window.
 2. **Block only the workarounds** — the specific actions that would let an agent *bypass
    a gated or sanctioned path*. Everything else is a nudge (prompt), not a wall.
@@ -31,8 +32,11 @@ inside the boundary. What counts as destructive:
 - **`rm -rf /` | `~`**, **`sudo`**, invoking the daemon directly.
 
 *Bypasses the gate (destructive to the codebase — lets unreviewed code into master):*
-- **Raw `git merge` / `git push` / `gh pr merge`** → forces `co_merge` / `co_push` /
-  `co_pr_merge`, which require a PASS verdict.
+- **Raw `git merge` / `git push`** → forces `co_merge` / `co_push`, which require a PASS
+  verdict or the explicit audited `@operator` override with a recorded reason.
+- **Raw `gh pr create` / `gh pr merge`** → blocks direct GitHub PR mutation. Opening a PR goes
+  through gated `co_pr_merge`; merging an existing GitHub PR is outside the sanctioned v1 agent
+  surface.
 
 *Breaks the single surface:*
 - **Agents invoking `co` in the shell** → forces the MCP surface; enforces the
@@ -70,13 +74,13 @@ ride on the runtime-substrate research; the model is substrate-independent.)*
 - **Sub-role focus is prompt-shaped, not hard-cut.** `implementer:docs` is *nudged* to
   focus on docs; `implementer:polish` is *nudged* toward behavior-preserving cleanup.
   These are approach specializations ([AGENT-ROLES](agent-roles.md)) guided by prompt — not a permission
-  matrix to police. Where a sub-role carries a *real* permission delta (e.g. Reviewer
-  read-only-for-code), the narrow-only invariant still holds and is checked; but most
-  specialization is soft.
+  matrix to police. Where a sub-role carries a *real* permission delta (for example a
+  researcher web-search specialization versus a general researcher), the narrow-only invariant
+  still holds and is checked; but most specialization is soft.
 - **A role's MCP toolset is scoped to relevance, not restriction.** Each agent is offered
-  the tools its job needs; irrelevant tools simply aren't in its list (an Implementer has
-  no `co_sling` to misuse). Lightweight, and it gently discourages out-of-role
-  workarounds.
+  the tools its job needs; irrelevant tools simply aren't in its list. Implementers get a
+  narrow `co_sling` path for scoped researcher dispatch, but not owner-tier controls.
+  Lightweight, and it gently discourages out-of-role workarounds.
 - **Reviewer stays out of the code it reviews — by prompt, not a wall.** It reads, runs
   tests, and stamps verdicts via MCP; not editing code under review is a nudge (the
   reactive monitor catches a slip). Prototype reviewers already behaved this way — the
@@ -88,10 +92,10 @@ ride on the runtime-substrate research; the model is substrate-independent.)*
 
 ### Defense in depth + drift
 
-The block list is enforced at two layers — the declared registry *and* harness gate hooks
-(publishing-verb gate, dangerous-shell gate), Claude and Codex variants — so a single
-failure doesn't open a bypass. A drift check (heir to `co permissions check`) verifies the
-enforced config matches the registry.
+The block list is declared in core now and is designed to be enforced by L7 harness gate hooks
+(publishing-verb gate, dangerous-shell gate), across Claude and Codex variants, so a single
+failure does not open a bypass once the hosted hooks are wired. A drift check (heir to
+`co permissions check`) verifies the enforced config matches the registry.
 
 > **Substrate dependency:** *how* the blocks are enforced (host harness permission system
 > vs. our PreToolUse hooks) depends partly on the parked runtime-substrate research; the

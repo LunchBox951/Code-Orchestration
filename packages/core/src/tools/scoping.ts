@@ -1,3 +1,4 @@
+import { ROLE_PROFILES } from '../roles/profile.js';
 import { buildCoreRegistry } from './core-registry.js';
 import type { ToolRegistry, ToolSpec } from './registry.js';
 
@@ -6,6 +7,10 @@ import type { ToolRegistry, ToolSpec } from './registry.js';
  * role is the expensive, safety-bearing unit: a distinct mandate + permission profile. Sub-roles
  * (e.g. `implementer:test`) specialize a base role's *approach* and are an L6/L7 concern — NOT this
  * layer (permissions.md: most specialization is a prompt nudge, not a toolset cut).
+ *
+ * `Role` and `BASE_ROLES` are the single Role-vocabulary owner; `ROLE_PROFILES` in roles/profile.ts
+ * is the single permission-data owner. `roleToolsets` below is DERIVED from the authoritative
+ * profiles so the two sources never drift.
  */
 export type Role = 'coordinator' | 'lead' | 'implementer' | 'reviewer' | 'researcher';
 
@@ -19,70 +24,16 @@ export const BASE_ROLES: readonly Role[] = [
 ] as const;
 
 /**
- * The UNIVERSAL coordination toolset every base role is offered: orientation, its own status, the
- * read mail verbs (inbox / get one / read a thread), sending mail, and acknowledging mail. Every
- * orchestrated agent reads its inbox, answers in-thread, reports status, and orients — so these are
- * never scoped away. The edges below differentiate the rest.
- */
-const UNIVERSAL_TOOLSET: readonly string[] = [
-  'co_orient',
-  'co_status',
-  'co_mail_inbox',
-  'co_mail_get',
-  'co_mail_thread',
-  'co_mail_send',
-  'co_mail_ack',
-];
-
-/**
- * SEED per-role toolsets over the CURRENT eleven `co_*` tools — the mechanism plus a defensible
- * starting membership, NOT the authoritative rosters. The concrete, authoritative per-role rosters
- * (and the later gated tools they will gain — `co_merge`, … — which are L5/L6) are not locked here;
- * this seed exists to prove the per-role scoping hook works today (AC-L2-5).
- * Memberships are kept defensible against each role's mandate in agent-roles.md:
- *
- *   - everyone gets {@link UNIVERSAL_TOOLSET};
- *   - `co_mail_retract` (withdraw a message you sent) goes to the roles that actively dispatch /
- *     coordinate — coordinator, lead, implementer — not to the leaf-ish reviewer / researcher;
- *   - `co_worktree_info` (read-only worktree facts) goes to the roles that work over a code
- *     worktree — lead (integrates reviewed branches), implementer (works in one), reviewer
- *     (inspects the target) — not to the coordinator (delegates) or the read-only researcher;
- *   - `co_sling` (create + record an isolated worktree sandbox) goes to the roles that DISPATCH
- *     work into fresh sandboxes — coordinator and lead — not to a leaf implementer / reviewer /
- *     researcher, which work inside a sandbox they were given;
- *   - `co_finish` (commit + record a finish + emit `worker_done`) goes to the IMPLEMENTER — the
- *     role that finishes through the gate — not to a lead (which integrates reviewed branches, it
- *     does not finish through the gate), nor to the leaf reviewer / researcher;
- *   - `co_merge` (the gated integration of a reviewed branch) goes to the LEAD — the role that
- *     integrates reviewed branches (fulfilling the L5 reservation noted above) — not to a leaf
- *     implementer / reviewer / researcher, nor to the coordinator (which delegates);
- *   - `co_push` (push reviewed work to the remote) goes to the LEAD — the gated remote-publish verb,
- *     consistent with co_merge in scope and audience (AC-L5-6);
- *   - `co_pr_merge` (open a pull request for reviewed work) goes to the LEAD — the gated PR verb,
- *     consistent with co_merge and co_push (AC-L5-6);
- *   - `co_review_finalize` (record a PASS/ISSUES verdict) goes to the REVIEWER — the role that
- *     finalizes a review — not to the roles that request or integrate it.
+ * Per-role toolsets, DERIVED from the authoritative {@link ROLE_PROFILES} in roles/profile.ts.
+ * The toolset for each role is exactly `ROLE_PROFILES[role].toolset` — the profiles are the source
+ * of truth; this map is a convenience alias so all existing callers (MCP mount, tests, orient) keep
+ * working without change. Membership rationale is documented in roles/profile.ts.
  *
  * Scoping is RELEVANCE, not a wall (permissions.md): an irrelevant tool simply isn't offered.
  */
-export const roleToolsets: ReadonlyMap<Role, readonly string[]> = new Map<Role, readonly string[]>([
-  ['coordinator', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_sling']],
-  [
-    'lead',
-    [
-      ...UNIVERSAL_TOOLSET,
-      'co_mail_retract',
-      'co_worktree_info',
-      'co_sling',
-      'co_merge',
-      'co_push',
-      'co_pr_merge',
-    ],
-  ],
-  ['implementer', [...UNIVERSAL_TOOLSET, 'co_mail_retract', 'co_worktree_info', 'co_finish']],
-  ['reviewer', [...UNIVERSAL_TOOLSET, 'co_worktree_info', 'co_review_finalize']],
-  ['researcher', [...UNIVERSAL_TOOLSET]],
-]);
+export const roleToolsets: ReadonlyMap<Role, readonly string[]> = new Map<Role, readonly string[]>(
+  BASE_ROLES.map((r) => [r, ROLE_PROFILES[r].toolset]),
+);
 
 /**
  * The tools offered to `role`, filtered from `registry` (default {@link buildCoreRegistry}) IN

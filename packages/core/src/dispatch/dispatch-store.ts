@@ -1,6 +1,18 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { decode } from '../replay/decode.js';
 import { applyEvent, type Projector } from '../replay/projector.js';
+import {
+  makeReviewRequestedEvent,
+  reviewSchemas,
+  reviewUpcasters,
+  type ReviewRequestRecord,
+  type ReviewRequested,
+} from '../review/events.js';
+import {
+  ensureReviewTables,
+  ReviewProjector,
+  selectReviewRequest,
+} from '../review/review-projector.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
 import {
@@ -144,6 +156,12 @@ export interface DispatchStore {
   readNearBudget(task?: string): readonly NearBudgetRecord[];
   /** Record a placement decision (append `placement.decided` + fold); returns the stored record. */
   recordPlacement(agent: string, payload: PlacementDecided): PlacementRecord;
+  /** Record a placement decision and its review request atomically. */
+  recordPlacementWithReviewRequest(
+    agent: string,
+    payload: PlacementDecided,
+    request: ReviewRequested,
+  ): { readonly placement: PlacementRecord; readonly request: ReviewRequestRecord };
   /** All recorded placement decisions in seq order; optionally filtered to one agent. */
   readPlacements(agent?: string): readonly PlacementRecord[];
   /** Close the underlying project store. */
@@ -161,12 +179,24 @@ export function openDispatchStore(projectId: string): DispatchStore {
     new CostProjector(),
     new PlacementProjector(),
   ];
+  const reviewProjectors: readonly Projector[] = [new ReviewProjector()];
 
   /** Ensure all read-model table sets exist before a read/record path touches them. */
   const ensureTables = (db: DatabaseSync): void => {
     ensureUsageTables(db);
     ensureCostTables(db);
     ensurePlacementTable(db);
+  };
+
+  const applyStored = (
+    tx: Parameters<typeof applyEvent>[0],
+    event: Parameters<typeof decode>[0],
+  ) => {
+    if (projectors.some((projector) => projector.handles(event.type))) {
+      applyEvent(tx, decode(event, dispatchUpcasters, dispatchSchemas), projectors);
+      return;
+    }
+    applyEvent(tx, decode(event, reviewUpcasters, reviewSchemas), reviewProjectors);
   };
 
   return {
@@ -389,6 +419,38 @@ export function openDispatchStore(projectId: string): DispatchStore {
           );
         }
         return record;
+      });
+    },
+
+    recordPlacementWithReviewRequest(
+      agent: string,
+      payload: PlacementDecided,
+      request: ReviewRequested,
+    ): { readonly placement: PlacementRecord; readonly request: ReviewRequestRecord } {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureTables(db);
+        ensureReviewTables(db);
+        const stored = tx.append([
+          makePlacementDecidedEvent(projectId, agent, payload),
+          makeReviewRequestedEvent(projectId, request),
+        ]);
+        for (const event of stored) applyStored(tx, event);
+        const placement = selectPlacementBySeq(db, stored[0]!.seq);
+        if (!placement) {
+          throw new Error(
+            `openDispatchStore.recordPlacementWithReviewRequest: placement row missing after ` +
+              `projection (agent='${agent}', kind='${payload.kind}')`,
+          );
+        }
+        const record = selectReviewRequest(db, request.target, request.branch);
+        if (!record) {
+          throw new Error(
+            `openDispatchStore.recordPlacementWithReviewRequest: review request row missing after ` +
+              `projection (target='${request.target}', branch='${request.branch}')`,
+          );
+        }
+        return { placement, request: record };
       });
     },
 

@@ -93,9 +93,11 @@ const IMPLEMENTER_GUIDANCE = [
 ].join('\n');
 
 const REVIEWER_GUIDANCE = [
-  'As a reviewer you are the gate. Inspect the target, run its tests, and return a verdict — pass or',
-  'issues — by mail. Hold the strict line: the failure mode to avoid is leniency, not thoroughness,',
-  'so when you flag issues name them specifically enough that the maker can fix and resubmit.',
+  'As a reviewer you are the gate. Inspect the target, run its tests, and record your verdict — pass',
+  'or issues — through co_review_finalize. Hold the strict line: the failure mode to avoid is',
+  'leniency, not thoroughness, so when you flag issues name them specifically enough that the maker',
+  'can fix and resubmit. Review-response mail is for operator-routed human review, not agent',
+  'review verdicts.',
   '',
   'Stay out of the code you review: read it, run it, judge it — but do not edit it; a reviewer who',
   'fixes the work cannot impartially gate it. Once you have returned your verdict, end your turn —',
@@ -152,7 +154,7 @@ function asRole(input: string | undefined): Role | undefined {
 function topicFocus(topic: string): string {
   switch (topic.trim().toLowerCase()) {
     case 'finish':
-      return 'Focus — finishing: commit your work, then hand off to the finisher, which dispatches review; do not publish or merge yourself.';
+      return 'Focus — finishing: commit your work through co_finish; it records the finish, notifies your parent, and stops before review or publish.';
     case 'mail':
       return 'Focus — mail: every message is typed and threaded; reply within the thread you are answering so the conversation stays linked, and never invent a new mail type.';
     case 'review':

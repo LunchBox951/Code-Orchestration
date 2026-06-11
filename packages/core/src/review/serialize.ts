@@ -1,5 +1,5 @@
 import { resolveRefSha, type GitReader } from '../worktrees/detect-base.js';
-import type { MergeSerialized } from './events.js';
+import type { MergeSerialized, ReviewVerdictRecorded } from './events.js';
 
 /**
  * L5 Phase F — per-target merge SERIALIZATION + the re-review base (AC-L5-7). The cure for the
@@ -57,6 +57,9 @@ export function foldActiveSlot(entries: readonly MergeSlotEntry[]): string | und
 export interface MergeSlotStore {
   recordSerialized(m: MergeSerialized): void;
   activeSerialized(target: string): string | undefined;
+  acquireSerialized?(m: MergeSerialized): MergeSlotResult;
+  releaseSerialized?(m: MergeSerialized): void;
+  recordVerdictAndRelease?(verdict: ReviewVerdictRecorded): void;
 }
 
 /** The outcome of an {@link acquireMergeSlot} attempt — never a throw (the queued case is first-class). */
@@ -67,6 +70,8 @@ export interface MergeSlotResult {
   readonly queued: boolean;
   /** The branch currently holding the slot after the attempt (this branch when acquired). */
   readonly active: string;
+  /** True only when this acquire call appended the slot-holding event. */
+  readonly fresh: boolean;
 }
 
 /**
@@ -81,15 +86,18 @@ export function acquireMergeSlot(
   target: string,
   branch: string,
 ): MergeSlotResult {
+  if (store.acquireSerialized != null) {
+    return store.acquireSerialized({ target, branch });
+  }
   const active = store.activeSerialized(target);
   if (active === undefined) {
     store.recordSerialized({ target, branch });
-    return { acquired: true, queued: false, active: branch };
+    return { acquired: true, queued: false, active: branch, fresh: true };
   }
   if (active === branch) {
-    return { acquired: true, queued: false, active: branch }; // idempotent — already the holder.
+    return { acquired: true, queued: false, active: branch, fresh: false }; // already the holder.
   }
-  return { acquired: false, queued: true, active };
+  return { acquired: false, queued: true, active, fresh: false };
 }
 
 /**
@@ -99,7 +107,12 @@ export function acquireMergeSlot(
  * a programming error, never a silent no-op.
  */
 export function releaseMergeSlot(store: MergeSlotStore, target: string, branch: string): void {
+  if (store.releaseSerialized != null) {
+    store.releaseSerialized({ target, branch });
+    return;
+  }
   const active = store.activeSerialized(target);
+  if (active === undefined) return;
   if (active !== branch) {
     throw new Error(
       `releaseMergeSlot: '${branch}' does not hold the merge slot for '${target}' ` +

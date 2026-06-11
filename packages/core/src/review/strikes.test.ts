@@ -122,8 +122,9 @@ describe('nextReviewAction — pure budget decision', () => {
     expect(nextReviewAction(4, 3)).toBe('escalate');
   });
 
-  it('count=5, budget=5 (default) → escalate (at default budget)', () => {
-    expect(nextReviewAction(5, REVIEW_ROUND_BUDGET_DEFAULT)).toBe('escalate');
+  it('count=3, budget=3 (default) → escalate (at default budget)', () => {
+    expect(REVIEW_ROUND_BUDGET_DEFAULT).toBe(3);
+    expect(nextReviewAction(3, REVIEW_ROUND_BUDGET_DEFAULT)).toBe('escalate');
   });
 });
 
@@ -133,8 +134,8 @@ describe('constants', () => {
     expect(REVIEW_ROUND_BUDGET_KEY).toBe('review_round_budget');
   });
 
-  it('REVIEW_ROUND_BUDGET_DEFAULT is 5', () => {
-    expect(REVIEW_ROUND_BUDGET_DEFAULT).toBe(5);
+  it('REVIEW_ROUND_BUDGET_DEFAULT is 3', () => {
+    expect(REVIEW_ROUND_BUDGET_DEFAULT).toBe(3);
   });
 });
 
@@ -199,6 +200,33 @@ describe('applyStrikePolicy — 3-strike escalation enforcement (AC-L5-4)', () =
     expect(escalations).toHaveLength(1);
     expect(escalations[0]!.subject).toContain(BRANCH);
     expect(escalations[0]!.subject).toContain('3/3');
+  });
+
+  it('does not consume the threshold strike when escalation delivery fails', () => {
+    const { reviews, mail } = openStores('p-strike-escalation-fails-before-strike');
+    applyStrikePolicy(makeDeps(reviews, mail), makeCtx(1));
+    applyStrikePolicy(makeDeps(reviews, mail), makeCtx(2));
+
+    expect(() =>
+      applyStrikePolicy(
+        {
+          ...makeDeps(reviews, mail),
+          resolver: {
+            parentOf: () => {
+              throw new Error('parent lookup failed');
+            },
+          },
+        },
+        makeCtx(3),
+      ),
+    ).toThrow(/parent lookup failed/);
+    expect(reviews.getStrikeCount(TARGET, BRANCH)).toBe(2);
+    expect(reviews.hasStrike(TARGET, BRANCH, 'rev-3')).toBe(false);
+
+    const action = applyStrikePolicy(makeDeps(reviews, mail), makeCtx(3));
+    expect(action).toBe('escalate');
+    expect(reviews.getStrikeCount(TARGET, BRANCH)).toBe(3);
+    expect(mail.inbox('coordinator-1').filter((m) => m.type === MAIL_ESCALATION)).toHaveLength(1);
   });
 
   it('fourth ISSUES after escalation → still escalate, NO second escalation mail (idempotent)', () => {

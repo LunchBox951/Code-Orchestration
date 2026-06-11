@@ -75,6 +75,19 @@ describe('foldActiveSlot — the pure toggle over the merge.serialized log (AC-L
     );
   });
 
+  it('duplicate release attempts cannot reactivate a slot', () => {
+    const store = fakeSlotStore();
+    acquireMergeSlot(store, 'main', 'co/a');
+    releaseMergeSlot(store, 'main', 'co/a');
+    releaseMergeSlot(store, 'main', 'co/a');
+
+    expect(store.activeSerialized('main')).toBeUndefined();
+    expect(store.log).toEqual([
+      { target: 'main', branch: 'co/a' },
+      { target: 'main', branch: 'co/a' },
+    ]);
+  });
+
   it('is a pure left-to-right fold — identical input ⇒ identical output (clock-free, AC-L5-11)', () => {
     const log = [{ branch: 'co/a' }, { branch: 'co/a' }, { branch: 'co/b' }, { branch: 'co/c' }];
     expect(foldActiveSlot(log)).toBe(foldActiveSlot([...log]));
@@ -86,11 +99,11 @@ describe('acquire / release the merge slot (AC-L5-7)', () => {
   it('two pending merges to one target ⇒ exactly ONE active; the second WAITS', () => {
     const store = fakeSlotStore();
     const first = acquireMergeSlot(store, 'co/target', 'co/x');
-    expect(first).toEqual({ acquired: true, queued: false, active: 'co/x' });
+    expect(first).toEqual({ acquired: true, queued: false, active: 'co/x', fresh: true });
 
     // The second branch into the SAME target cannot acquire while x holds it — it queues (waits).
     const second = acquireMergeSlot(store, 'co/target', 'co/y');
-    expect(second).toEqual({ acquired: false, queued: true, active: 'co/x' });
+    expect(second).toEqual({ acquired: false, queued: true, active: 'co/x', fresh: false });
 
     // Exactly one active reviewer/merge: x holds it; the queued y recorded NOTHING (one log entry).
     expect(store.activeSerialized('co/target')).toBe('co/x');
@@ -104,7 +117,7 @@ describe('acquire / release the merge slot (AC-L5-7)', () => {
     expect(store.activeSerialized('co/target')).toBeUndefined();
 
     const y = acquireMergeSlot(store, 'co/target', 'co/y');
-    expect(y).toEqual({ acquired: true, queued: false, active: 'co/y' });
+    expect(y).toEqual({ acquired: true, queued: false, active: 'co/y', fresh: true });
     expect(store.activeSerialized('co/target')).toBe('co/y');
   });
 
@@ -112,7 +125,7 @@ describe('acquire / release the merge slot (AC-L5-7)', () => {
     const store = fakeSlotStore();
     acquireMergeSlot(store, 'co/target', 'co/x');
     const again = acquireMergeSlot(store, 'co/target', 'co/x');
-    expect(again).toEqual({ acquired: true, queued: false, active: 'co/x' });
+    expect(again).toEqual({ acquired: true, queued: false, active: 'co/x', fresh: false });
     expect(store.log).toHaveLength(1); // idempotent — did NOT toggle the slot free.
     expect(store.activeSerialized('co/target')).toBe('co/x');
   });
@@ -143,7 +156,7 @@ describe('acquire / release over the real ReviewStore (event-sourced, AC-L5-7 / 
     expect(acquireMergeSlot(reviews, 'co/target', 'co/x').acquired).toBe(true);
     // A second pending merge into the same target waits — exactly one active.
     const second = acquireMergeSlot(reviews, 'co/target', 'co/y');
-    expect(second).toEqual({ acquired: false, queued: true, active: 'co/x' });
+    expect(second).toEqual({ acquired: false, queued: true, active: 'co/x', fresh: false });
     expect(reviews.activeSerialized('co/target')).toBe('co/x');
 
     // x lands → release → y acquires (durably persisted across calls).
@@ -154,6 +167,25 @@ describe('acquire / release over the real ReviewStore (event-sourced, AC-L5-7 / 
 
     // Both branches show up in the serialized list (the read-model `serialized` flag).
     expect(reviews.serializedBranches('co/target')).toEqual(['co/x', 'co/y']);
+  });
+
+  it('exposes a store-level atomic acquire primitive for the real ReviewStore', () => {
+    const reviews = openReviewStore('p-serialize-atomic');
+    reviewStores.push(reviews);
+
+    expect(reviews.acquireSerialized({ target: 'co/target', branch: 'co/x' })).toEqual({
+      acquired: true,
+      queued: false,
+      active: 'co/x',
+      fresh: true,
+    });
+    expect(reviews.acquireSerialized({ target: 'co/target', branch: 'co/y' })).toEqual({
+      acquired: false,
+      queued: true,
+      active: 'co/x',
+      fresh: false,
+    });
+    expect(reviews.activeSerialized('co/target')).toBe('co/x');
   });
 
   it('a second connection sees the same persisted active slot (durable, event-sourced)', () => {
