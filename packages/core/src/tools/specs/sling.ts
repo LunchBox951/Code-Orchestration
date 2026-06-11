@@ -297,7 +297,9 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
         role: a.role,
         branch: resolveAgentBranch(worktrees, a.agentId),
       }));
-    if (children.some((c) => c.role !== 'reviewer')) {
+    // Reviewers are exempt from the cap (AC-L6b-8): they never occupy a slot, so a reviewer
+    // dispatched while at-cap must not be queued → WAITING.
+    if (childRole !== 'reviewer' && children.some((c) => c.role !== 'reviewer')) {
       const cap = resolveMaxActiveChildren(ctx.projectId);
       const target = reviews != null ? readWorktreeInfo(ctx.cwd).branch : undefined;
       const disposition = childCapDisposition(
