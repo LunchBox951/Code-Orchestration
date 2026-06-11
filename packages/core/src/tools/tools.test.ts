@@ -116,6 +116,7 @@ const ALL_TOOLS = [
   'co_push',
   'co_pr_merge',
   'co_kickback',
+  'co_spec_get',
 ];
 
 describe('buildCoreRegistry — the canonical single source of truth', () => {

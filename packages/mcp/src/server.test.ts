@@ -38,6 +38,7 @@ const EXPECTED_TOOLS = [
   'co_push',
   'co_pr_merge',
   'co_kickback',
+  'co_spec_get',
 ];
 
 // ── Per-test program-data dir + live stores (mirrors the CO_DATA_DIR idiom in mail.test.ts) ──
