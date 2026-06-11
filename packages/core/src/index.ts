@@ -975,5 +975,85 @@ export {
   childCapDisposition,
 } from './plans/child-cap.js';
 
+// ── L6b G — ISSUES: bottom-up agent friction as durable records (specs-and-issues.md) ──────────
+// Events + record: the `detect → diagnose → dedup → file → (opt-in) self-assign` pipeline, one
+// stream per issue (`issue:<id>`), replay-equal.
+export type {
+  IssueCaptured,
+  IssueDiagnosed,
+  IssueFiled,
+  IssueSelfAssigned,
+  IssueRecord,
+  IssueState,
+  IssueDestination,
+} from './issues/events.js';
+export {
+  EVENT_ISSUE_CAPTURED,
+  EVENT_ISSUE_DIAGNOSED,
+  EVENT_ISSUE_FILED,
+  EVENT_ISSUE_SELF_ASSIGNED,
+  ISSUE_DESTINATIONS,
+  issueScope,
+  makeIssueCapturedEvent,
+  makeIssueDiagnosedEvent,
+  makeIssueFiledEvent,
+  makeIssueSelfAssignedEvent,
+  issuesSchemas,
+  issuesUpcasters,
+} from './issues/events.js';
+export { IssuesProjector, findDuplicateIssue } from './issues/issues-projector.js';
+export type { IssueStore } from './issues/issues-store.js';
+export { openIssueStore } from './issues/issues-store.js';
+// Layered opt-in (capture → publish → self-assign, all OFF by default) + the scrub pass + the
+// per-post-approval outward filing gate (the first real consumer of mail/approval.ts).
+export type { IssueOptIns } from './issues/opt-in.js';
+export {
+  ISSUE_CAPTURE_KEY,
+  ISSUE_PUBLISH_KEY,
+  ISSUE_SELF_ASSIGN_KEY,
+  layerIssueOptIns,
+  resolveIssueOptIns,
+} from './issues/opt-in.js';
+export { scrubIssueText } from './issues/scrub.js';
+export {
+  ISSUE_CO_REPO_KEY,
+  issueFilingApprovalKey,
+  buildIssueFilingApproval,
+  findIssueFilingApproval,
+  assertIssueDestinationAllowed,
+  ghIssueCreateArgs,
+  renderIssueBody,
+  fileIssueOutward,
+} from './issues/filing.js';
+
+// ── L6b H — RESEARCH: the locator map contract + durable finalize records (research.md) ────────
+// The STATIC half of the codebase locator: the map output contract (files + one-line whys + key
+// symbols + read order; pointers, not a dump) and the replay-safe finalize record. Research
+// DISPATCH (spawning the researcher) is L7's Conductor.
+export type {
+  LocatorMap,
+  LocatorMapEntry,
+  LocatorMapViolation,
+  CitedAnswer,
+} from './research/map-contract.js';
+export {
+  locatorMapSchema,
+  locatorMapEntrySchema,
+  citedAnswerSchema,
+  checkLocatorMap,
+} from './research/map-contract.js';
+export type { ResearchFinalized, ResearchRecord, ResearchKind } from './research/events.js';
+export {
+  EVENT_RESEARCH_FINALIZED,
+  RESEARCH_KINDS,
+  researchScope,
+  makeResearchFinalizedEvent,
+  researchSchemas,
+  researchUpcasters,
+} from './research/events.js';
+export { ResearchProjector } from './research/research-projector.js';
+export type { ResearchStore } from './research/research-store.js';
+export { openResearchStore } from './research/research-store.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

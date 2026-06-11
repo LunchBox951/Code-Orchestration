@@ -33,6 +33,11 @@ const UNIVERSAL: readonly string[] = [
   'co_mail_send',
   'co_mail_ack',
   'co_spec_get',
+  // L6b G/H — friction can hit ANY agent (capture + the dedup read), and any agent may read a
+  // finalized research record instead of re-searching (context economy, research.md).
+  'co_issue_capture',
+  'co_issue_list',
+  'co_research_get',
 ];
 
 /**
@@ -57,6 +62,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
       'co_merge',
       'co_push',
       'co_pr_merge',
+      'co_issue_file',
     ],
     capabilities: new Set<Capability>(),
   },
@@ -76,6 +82,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
       'co_kickback',
       'co_push',
       'co_pr_merge',
+      'co_issue_file',
     ],
     capabilities: new Set<Capability>(),
   },
@@ -98,7 +105,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
     baseRole: 'researcher',
     mandate: 'read-only; answers a scoped question with cited evidence; stays warm for follow-ups.',
     writeScope: 'nothing',
-    toolset: [...UNIVERSAL],
+    toolset: [...UNIVERSAL, 'co_issue_diagnose', 'co_research_finalize'],
     capabilities: new Set<Capability>(['web-search']),
   },
 };
