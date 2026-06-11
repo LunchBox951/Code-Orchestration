@@ -50,6 +50,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
       ...UNIVERSAL,
       'co_mail_retract',
       'co_spec_draft',
+      'co_plan_ingest',
       'co_sling',
       'co_kickback',
       'co_merge',

@@ -904,5 +904,45 @@ export { openSpecStore } from './specs/specs-store.js';
 export type { CriterionViolation } from './plans/criteria.js';
 export { validateCriteria, VACUOUS_PHRASES } from './plans/criteria.js';
 
+// L6b E1 — durable plan record store + co_plan_ingest (validator-gated).
+// Plan events: `plan.drafted` / `phase.status.changed` / `phase.verified` / `plan.replanned`.
+export type {
+  PhaseNode,
+  PhaseStatus,
+  PhaseRecord,
+  PlanRecord,
+  PlanDrafted,
+  PhaseStatusChanged,
+  PhaseVerified,
+  PlanReplanned,
+} from './plans/events.js';
+export {
+  PLANS_EVENT_V,
+  EVENT_PLAN_DRAFTED,
+  EVENT_PHASE_STATUS_CHANGED,
+  EVENT_PHASE_VERIFIED,
+  EVENT_PLAN_REPLANNED,
+  PLAN_SCOPE_PREFIX,
+  PHASE_STATUSES,
+  phaseStatusSchema,
+  phaseNodeSchema,
+  planDraftedSchema,
+  phaseStatusChangedSchema,
+  phaseVerifiedSchema,
+  planReplannedSchema,
+  plansSchemas,
+  plansUpcasters,
+  planScope,
+  makePlanDraftedEvent,
+  makePhaseStatusChangedEvent,
+  makePhaseVerifiedEvent,
+  makePlanReplannedEvent,
+} from './plans/events.js';
+// Plan projection: the `PlansProjector` folds plan events into `plans` and `plan_phases` read-model tables.
+export { PlansProjector } from './plans/plans-projector.js';
+// Plan store facade: `openPlanStore` is the typed facade (record + read-back + replay-equal).
+export type { PlanStore } from './plans/plans-store.js';
+export { openPlanStore } from './plans/plans-store.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
