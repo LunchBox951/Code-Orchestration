@@ -30,6 +30,7 @@ const EXPECTED_TOOLS = [
   'co_spec_get',
   'co_spec_draft',
   'co_spec_lock',
+  'co_plan_ingest',
 ] as const;
 
 const BOGUS = 'co_bogus';

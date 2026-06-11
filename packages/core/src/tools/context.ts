@@ -9,6 +9,7 @@ import type { DispatchStore } from '../dispatch/dispatch-store.js';
 import type { ReviewStore } from '../review/review-store.js';
 import type { RosterStore } from '../roles/roster-store.js';
 import type { SpecStore } from '../specs/specs-store.js';
+import type { PlanStore } from '../plans/plans-store.js';
 import type { UsageSourceFactory } from '../dispatch/cli-render.js';
 import type { GhExec } from '../worktrees/repo-mode.js';
 
@@ -66,6 +67,13 @@ export interface ToolContext {
    * that need it (`co_spec_get`) loud-fail when absent (Principle 9), mirroring the roster seam.
    */
   readonly specs?: SpecStore;
+  /**
+   * OPTIONAL L6b E1 program-data handle: the plan record store (plan draft/phase-status/replan
+   * records), opened + injected by the mount alongside {@link specs}. Optional + additive so every
+   * existing ToolContext construction site keeps compiling; L6b E1 tools that need it
+   * (`co_plan_ingest`) loud-fail when absent (Principle 9), mirroring the specs seam.
+   */
+  readonly plans?: PlanStore;
   /**
    * OPTIONAL L4 passive/live usage-source factory. When the mount supplies it, dispatching tools refresh
    * stale/missing usage buckets through {@link import('../dispatch/provider-source.js').readProviderUsageCached}

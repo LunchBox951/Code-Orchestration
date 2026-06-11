@@ -6,6 +6,7 @@ import {
   findSubRole,
   openDispatchStore,
   openMailStore,
+  openPlanStore,
   openRegistry,
   openReviewStore,
   openRosterStore,
@@ -194,6 +195,11 @@ export function defaultContextFactory(): () => ToolContext {
     // same store.db is safe. A tool never opens its own store; the mount resolves and injects it.
     const specs = openSpecStore(projectId);
     closeOnFailure.push(() => specs.close());
+    // L6b E1: open + inject the plan store (plan draft/phase-status/replan projection). PlansProjector
+    // owns distinct scopes (`plan:`) and read-model tables (`plans`, `plan_phases`) from the other
+    // stores, so sharing the same store.db is safe. A tool never opens its own store.
+    const plans = openPlanStore(projectId);
+    closeOnFailure.push(() => plans.close());
     let scopedSandbox: ReturnType<typeof worktrees.listWorktrees>[number] | undefined;
     if (explicitProjectId != null && resolvedFromCwd == null) {
       const normalizedCwd = resolve(cwd);
@@ -302,6 +308,7 @@ export function defaultContextFactory(): () => ToolContext {
       reviews,
       roster,
       specs,
+      plans,
       usageSourceFactory: defaultUsageSourceFactory,
     };
     return () => ctx;

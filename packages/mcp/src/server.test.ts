@@ -41,6 +41,7 @@ const EXPECTED_TOOLS = [
   'co_spec_get',
   'co_spec_draft',
   'co_spec_lock',
+  'co_plan_ingest',
 ];
 
 // ── Per-test program-data dir + live stores (mirrors the CO_DATA_DIR idiom in mail.test.ts) ──
