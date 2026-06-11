@@ -31,7 +31,7 @@ export const CO_PARENT_ENV = 'CO_PARENT';
 /** The launch-environment variable the mount may use when cwd is a slung, unregistered sandbox. */
 export const CO_PROJECT_ID_ENV = 'CO_PROJECT_ID';
 
-const OPERATOR_TOOL_NAMES = new Set(['co_merge', 'co_push', 'co_pr_merge']);
+const OPERATOR_TOOL_NAMES = new Set(['co_merge', 'co_push', 'co_pr_merge', 'co_spec_lock']);
 
 function toolsForOperator(): readonly ToolSpec[] {
   return buildCoreRegistry()

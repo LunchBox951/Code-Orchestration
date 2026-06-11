@@ -49,6 +49,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
     toolset: [
       ...UNIVERSAL,
       'co_mail_retract',
+      'co_spec_draft',
       'co_sling',
       'co_kickback',
       'co_merge',

@@ -489,6 +489,7 @@ export {
   NO_LOCKED_SPEC_MARKER,
   resolveReviewSpecRef,
   renderReviewSpecRef,
+  resolveSpecRefFromStore,
 } from './review/spec-ref.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
@@ -894,6 +895,14 @@ export { SpecsProjector } from './specs/specs-projector.js';
 // Spec store facade: `openSpecStore` is the typed facade (record + read-back + replay-equal).
 export type { SpecStore } from './specs/specs-store.js';
 export { openSpecStore } from './specs/specs-store.js';
+
+// L6b F2 — the PURE criterion validator (D2): the structural acceptance-criteria gate. `validateCriteria`
+// returns one violation per failed criterion (`[]` ⇒ all valid); the PRIMARY check is a wired `verify`
+// command present (it never hard-codes a project command), the SECONDARY is a conservative `VACUOUS_PHRASES`
+// nudge. The plans task imports it; `co_spec_lock` runs it as the lock-time RG-4 join (fuzzy criteria
+// cannot be locked).
+export type { CriterionViolation } from './plans/criteria.js';
+export { validateCriteria, VACUOUS_PHRASES } from './plans/criteria.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
