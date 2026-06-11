@@ -744,3 +744,44 @@ describe('co_sling — output schema shape', () => {
     ).toThrow();
   });
 });
+
+describe('co_sling — L6b E4 child-cap (queue-as-WAITING for excess dispatches)', () => {
+  it('queues to WAITING when the parent is already at its active-children cap (default 2)', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    // Two active (non-reviewer, unmerged) children already under lead-7 → at the default cap of 2.
+    ctx.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/over-cap',
+    })) as { status: string; waiting?: { reason: string; message: string } };
+
+    expect(out.status).toBe('waiting');
+    expect(out.waiting?.reason).toMatch(/max active children reached \(2\/2\)/);
+    // No sandbox is created for the queued dispatch.
+    expect(ctx.worktrees?.getWorktree('co/over-cap')).toBeUndefined();
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/over-cap')).toThrow();
+    // The cap gate fires before placement, so no placement decision is recorded for the queued sling.
+    expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(0);
+  });
+
+  it('reviewer children do NOT occupy a slot — a parent with only reviewer children still places', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    ctx.roster!.recordAgent({ agentId: 'rev-a', role: 'reviewer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'rev-b', role: 'reviewer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'rev-c', role: 'reviewer', parent: 'lead-7' });
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-1',
+      branch: 'co/reviewers-dont-count',
+    })) as { status: string };
+
+    expect(out.status).toBe('placed');
+    expect(ctx.worktrees?.getWorktree('co/reviewers-dont-count')).toBeDefined();
+  });
+});

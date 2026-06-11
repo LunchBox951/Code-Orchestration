@@ -30,6 +30,7 @@ const ALL_TOOLS = [
   'co_spec_draft',
   'co_spec_lock',
   'co_plan_ingest',
+  'co_phase_status',
 ];
 
 describe('AC-L2-5 — the seed map covers every base role', () => {
