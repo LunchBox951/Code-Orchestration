@@ -17,6 +17,11 @@ import { reviewFinalizeTool } from './specs/review-finalize.js';
 import { pushTool } from './specs/push.js';
 import { prMergeTool } from './specs/pr-merge.js';
 import { kickbackTool } from './specs/kickback.js';
+import { specGetTool } from './specs/spec-get.js';
+import { specDraftTool } from './specs/spec-draft.js';
+import { specLockTool } from './specs/spec-lock.js';
+import { planIngestTool } from './specs/plan-ingest.js';
+import { phaseStatusTool } from './specs/phase-status.js';
 
 /**
  * Build the canonical core registry: a fresh {@link ToolRegistry} with every real core tool
@@ -48,5 +53,10 @@ export function buildCoreRegistry(): ToolRegistry {
   registry.register(pushTool);
   registry.register(prMergeTool);
   registry.register(kickbackTool);
+  registry.register(specGetTool);
+  registry.register(specDraftTool);
+  registry.register(specLockTool);
+  registry.register(planIngestTool);
+  registry.register(phaseStatusTool);
   return registry;
 }

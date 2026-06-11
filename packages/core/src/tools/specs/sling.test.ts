@@ -744,3 +744,79 @@ describe('co_sling — output schema shape', () => {
     ).toThrow();
   });
 });
+
+describe('co_sling — L6b E4 child-cap (queue-as-WAITING for excess dispatches)', () => {
+  it('queues to WAITING when the parent is already at its active-children cap (default 2)', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    // Two active (non-reviewer, unmerged) children already under lead-7 → at the default cap of 2.
+    ctx.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/over-cap',
+    })) as { status: string; waiting?: { reason: string; message: string } };
+
+    expect(out.status).toBe('waiting');
+    expect(out.waiting?.reason).toMatch(/max active children reached \(2\/2\)/);
+    // No sandbox is created for the queued dispatch.
+    expect(ctx.worktrees?.getWorktree('co/over-cap')).toBeUndefined();
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/over-cap')).toThrow();
+    // The cap gate fires before placement, so no placement decision is recorded for the queued sling.
+    expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(0);
+  });
+
+  it('reviewer children do NOT occupy a slot — a parent with only reviewer children still places', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    ctx.roster!.recordAgent({ agentId: 'rev-a', role: 'reviewer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'rev-b', role: 'reviewer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'rev-c', role: 'reviewer', parent: 'lead-7' });
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-1',
+      branch: 'co/reviewers-dont-count',
+    })) as { status: string };
+
+    expect(out.status).toBe('placed');
+    expect(ctx.worktrees?.getWorktree('co/reviewers-dont-count')).toBeDefined();
+  });
+
+  // AC-L6b-8 reviewer-exemption regression: a reviewer dispatched while at-cap must NOT queue.
+  it('a reviewer dispatched while at-cap is NOT queued (AC-L6b-8 exemption)', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    // Two active (non-reviewer) children → parent is at the default cap of 2.
+    ctx.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'rev-1',
+      branch: 'co/reviewer-exempt-at-cap',
+      role: 'reviewer',
+    })) as { status: string };
+
+    expect(out.status).toBe('placed');
+    expect(ctx.worktrees?.getWorktree('co/reviewer-exempt-at-cap')).toBeDefined();
+  });
+
+  it('a non-reviewer dispatched while at-cap still queues → WAITING (AC-L6b-8 non-reviewer side)', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    ctx.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/non-reviewer-at-cap',
+    })) as { status: string };
+
+    expect(out.status).toBe('waiting');
+    expect(ctx.worktrees?.getWorktree('co/non-reviewer-at-cap')).toBeUndefined();
+  });
+});

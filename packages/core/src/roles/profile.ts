@@ -32,6 +32,7 @@ const UNIVERSAL: readonly string[] = [
   'co_mail_thread',
   'co_mail_send',
   'co_mail_ack',
+  'co_spec_get',
 ];
 
 /**
@@ -48,6 +49,9 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
     toolset: [
       ...UNIVERSAL,
       'co_mail_retract',
+      'co_spec_draft',
+      'co_plan_ingest',
+      'co_phase_status',
       'co_sling',
       'co_kickback',
       'co_merge',
@@ -65,6 +69,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
       ...UNIVERSAL,
       'co_mail_retract',
       'co_worktree_info',
+      'co_phase_status',
       'co_sling',
       'co_finish',
       'co_merge',
