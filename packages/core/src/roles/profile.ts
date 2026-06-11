@@ -32,6 +32,7 @@ const UNIVERSAL: readonly string[] = [
   'co_mail_thread',
   'co_mail_send',
   'co_mail_ack',
+  'co_spec_get',
 ];
 
 /**

@@ -26,6 +26,7 @@ const ALL_TOOLS = [
   'co_push',
   'co_pr_merge',
   'co_kickback',
+  'co_spec_get',
 ];
 
 describe('AC-L2-5 — the seed map covers every base role', () => {

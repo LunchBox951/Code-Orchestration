@@ -867,5 +867,33 @@ export {
   defaultGitConfigIdentityReader,
 } from './permissions/identity-guard.js';
 
+// L6b F1 — durable spec record store + co_spec_get (broad spec visibility, F4 fix).
+// `criterionSchema`/`Criterion`: the shared acceptance-criterion type (plans task imports it too).
+export type { Criterion } from './specs/criteria-schema.js';
+export { criterionSchema } from './specs/criteria-schema.js';
+// Spec events: `spec.drafted` / `spec.locked` / `spec.archived` — event-sourced over L0.
+export type { SpecDrafted, SpecLocked, SpecArchived, SpecRecord } from './specs/events.js';
+export {
+  SPECS_EVENT_V,
+  EVENT_SPEC_DRAFTED,
+  EVENT_SPEC_LOCKED,
+  EVENT_SPEC_ARCHIVED,
+  SPEC_SCOPE_PREFIX,
+  specScope,
+  specDraftedSchema,
+  specLockedSchema,
+  specArchivedSchema,
+  specsSchemas,
+  specsUpcasters,
+  makeSpecDraftedEvent,
+  makeSpecLockedEvent,
+  makeSpecArchivedEvent,
+} from './specs/events.js';
+// Spec projection: the `SpecsProjector` folds spec events into a `specs` read-model table.
+export { SpecsProjector } from './specs/specs-projector.js';
+// Spec store facade: `openSpecStore` is the typed facade (record + read-back + replay-equal).
+export type { SpecStore } from './specs/specs-store.js';
+export { openSpecStore } from './specs/specs-store.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

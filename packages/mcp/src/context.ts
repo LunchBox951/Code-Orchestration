@@ -9,6 +9,7 @@ import {
   openRegistry,
   openReviewStore,
   openRosterStore,
+  openSpecStore,
   openWorktreeStore,
   parseSubRoleId,
   toolsForRole,
@@ -188,6 +189,11 @@ export function defaultContextFactory(): () => ToolContext {
     // same store.db is safe. A tool never opens its own store; the mount resolves and injects it.
     const roster = openRosterStore(projectId);
     closeOnFailure.push(() => roster.close());
+    // L6b: open + inject the spec store (spec draft/lock/archive projection). SpecsProjector owns a
+    // distinct scope (`spec:`) and read-model table (`specs`) from the other stores, so sharing the
+    // same store.db is safe. A tool never opens its own store; the mount resolves and injects it.
+    const specs = openSpecStore(projectId);
+    closeOnFailure.push(() => specs.close());
     let scopedSandbox: ReturnType<typeof worktrees.listWorktrees>[number] | undefined;
     if (explicitProjectId != null && resolvedFromCwd == null) {
       const normalizedCwd = resolve(cwd);
@@ -295,6 +301,7 @@ export function defaultContextFactory(): () => ToolContext {
       dispatch,
       reviews,
       roster,
+      specs,
       usageSourceFactory: defaultUsageSourceFactory,
     };
     return () => ctx;
