@@ -9,38 +9,46 @@ const specGetInput = z
   .strict();
 type SpecGetInput = z.infer<typeof specGetInput>;
 
-const criterionOutputSchema = z.object({
-  text: z.string().describe('The concrete, checkable outcome.'),
-  verify: z.string().optional().describe('The wired verification command, if set.'),
-});
+const criterionOutputSchema = z
+  .object({
+    text: z.string().describe('The concrete, checkable outcome.'),
+    verify: z.string().optional().describe('The wired verification command, if set.'),
+  })
+  .strict();
 
-const specGetOutput = z.object({
-  found: z.boolean().describe('True when a spec record exists for the requested task id.'),
-  task_id: z.string().describe('The queried task id.'),
-  title: z.string().optional().describe('The spec title (present when found=true).'),
-  goal: z.string().optional().describe('The spec goal statement (present when found=true).'),
-  criteria: z
-    .array(criterionOutputSchema)
-    .optional()
-    .describe('The acceptance criteria (present when found=true).'),
-  body: z.string().optional().describe('The full spec body text (present when found=true).'),
-  state: z
-    .enum(['draft', 'locked', 'archived'])
-    .optional()
-    .describe('The lifecycle state of the spec (present when found=true).'),
-  locked_by: z.string().optional().describe('Who locked this spec (present when state=locked).'),
-  drafted_ts: z
-    .number()
-    .int()
-    .optional()
-    .describe('The event timestamp when this spec was drafted (present when found=true).'),
-  locked_ts: z.number().int().optional().describe('The event timestamp when this spec was locked.'),
-  archived_ts: z
-    .number()
-    .int()
-    .optional()
-    .describe('The event timestamp when this spec was archived.'),
-});
+const specGetOutput = z
+  .object({
+    found: z.boolean().describe('True when a spec record exists for the requested task id.'),
+    task_id: z.string().describe('The queried task id.'),
+    title: z.string().optional().describe('The spec title (present when found=true).'),
+    goal: z.string().optional().describe('The spec goal statement (present when found=true).'),
+    criteria: z
+      .array(criterionOutputSchema)
+      .optional()
+      .describe('The acceptance criteria (present when found=true).'),
+    body: z.string().optional().describe('The full spec body text (present when found=true).'),
+    state: z
+      .enum(['draft', 'locked', 'archived'])
+      .optional()
+      .describe('The lifecycle state of the spec (present when found=true).'),
+    locked_by: z.string().optional().describe('Who locked this spec (present when state=locked).'),
+    drafted_ts: z
+      .number()
+      .int()
+      .optional()
+      .describe('The event timestamp when this spec was drafted (present when found=true).'),
+    locked_ts: z
+      .number()
+      .int()
+      .optional()
+      .describe('The event timestamp when this spec was locked.'),
+    archived_ts: z
+      .number()
+      .int()
+      .optional()
+      .describe('The event timestamp when this spec was archived.'),
+  })
+  .strict();
 type SpecGetOutput = z.infer<typeof specGetOutput>;
 
 function recordToOutput(rec: SpecRecord): SpecGetOutput {
