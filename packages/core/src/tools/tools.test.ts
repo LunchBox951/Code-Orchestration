@@ -120,6 +120,7 @@ const ALL_TOOLS = [
   'co_spec_draft',
   'co_spec_lock',
   'co_plan_ingest',
+  'co_phase_status',
 ];
 
 describe('buildCoreRegistry — the canonical single source of truth', () => {

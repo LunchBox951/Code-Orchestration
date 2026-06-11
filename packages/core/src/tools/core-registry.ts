@@ -21,6 +21,7 @@ import { specGetTool } from './specs/spec-get.js';
 import { specDraftTool } from './specs/spec-draft.js';
 import { specLockTool } from './specs/spec-lock.js';
 import { planIngestTool } from './specs/plan-ingest.js';
+import { phaseStatusTool } from './specs/phase-status.js';
 
 /**
  * Build the canonical core registry: a fresh {@link ToolRegistry} with every real core tool
@@ -56,5 +57,6 @@ export function buildCoreRegistry(): ToolRegistry {
   registry.register(specDraftTool);
   registry.register(specLockTool);
   registry.register(planIngestTool);
+  registry.register(phaseStatusTool);
   return registry;
 }

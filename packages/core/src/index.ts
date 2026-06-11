@@ -944,5 +944,36 @@ export { PlansProjector } from './plans/plans-projector.js';
 export type { PlanStore } from './plans/plans-store.js';
 export { openPlanStore } from './plans/plans-store.js';
 
+// L6b E3/D5 — the PHASE-READINESS FOLD (the riskiest unit): a pure, clock-free, deterministic
+// decision computing whether a phase (and the task) is ready = workersComplete ∧ phaseVerifiedPass.
+// Reviewers are EXCLUDED from completion accounting; a worker is complete iff its BRANCH is merged
+// (never by process-state) — the prototype's two named bugs, each with a regression test. The fold
+// READS `verifiedPass` (the single green phase.verified); it does NOT re-run criteria or call
+// validateCriteria. `co_phase_status` (coordinator+lead, read-only) assembles the inputs from the
+// stores via the shared branch-resolution convention (`resolveAgentBranch`/`branchMerged`).
+export type {
+  PhaseWorkerInput,
+  PhaseReadinessInput,
+  PhaseReadiness,
+  TaskReadiness,
+} from './plans/readiness.js';
+export { foldPhaseReadiness, foldTaskReadiness } from './plans/readiness.js';
+export { resolveAgentBranch, branchMerged } from './plans/worker-branch.js';
+
+// L6b E4 — the MAX-ACTIVE-CHILDREN cap (distinct from review/serialize.ts's per-target merge lock,
+// the other E4 primitive). `resolveMaxActiveChildren` is the config-cascade reader (default 2, clones
+// `resolveReviewRoundBudget`); `activeChildCount`/`childCapDisposition` are the PURE policy — active
+// children are non-reviewer children whose branch is not yet merged; at/over the cap a new dispatch
+// QUEUES → WAITING (a first-class `{queued:true}`, never a throw). Enforced at the co_sling dispatch
+// decision so excess dispatches WAIT.
+export type { CapChild, ChildCapDisposition } from './plans/child-cap.js';
+export {
+  MAX_ACTIVE_CHILDREN_KEY,
+  MAX_ACTIVE_CHILDREN_DEFAULT,
+  resolveMaxActiveChildren,
+  activeChildCount,
+  childCapDisposition,
+} from './plans/child-cap.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

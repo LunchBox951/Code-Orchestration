@@ -18,6 +18,13 @@ import { checkSpawnPlan } from '../../roles/spawn-rules.js';
 import { findSubRole, parseSubRoleId } from '../../roles/sub-roles.js';
 import { BASE_ROLES, type Role } from '../scoping.js';
 import { assertToolCallerRole } from '../caller-auth.js';
+import { readWorktreeInfo } from '../worktree.js';
+import {
+  childCapDisposition,
+  resolveMaxActiveChildren,
+  type CapChild,
+} from '../../plans/child-cap.js';
+import { branchMerged, resolveAgentBranch } from '../../plans/worker-branch.js';
 
 // Every input field carries a .describe() (Principle 5 — the schemas are the single syntax source).
 // The caller never supplies its own identity; `parent` is the SPAWNER this sandbox is for, a
@@ -272,6 +279,47 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     if (violation != null) {
       throw new Error(`co_sling: illegal spawn plan — ${violation.reason}.`);
     }
+
+    // ── L6b E4 child-cap: queue-as-WAITING when the parent is at its active-children cap ──
+    // Active children are this parent's NON-REVIEWER children whose branch is NOT yet merged
+    // (reviewers never occupy a slot; a merged child has freed its slot). The merged check uses the
+    // same `(parent integration branch, child branch)` PASS-verdict convention as co_phase_status.
+    // An absent review store conservatively counts every non-reviewer child as still-active. This
+    // gate fires BEFORE dispatch placement, so an over-cap dispatch records no placement decision —
+    // there is no placement to decide, just a queued WAITING (Principle 9 — never a silent overrun).
+    const worktrees = ctx.worktrees;
+    const reviews = ctx.reviews;
+    const children: CapChild[] = ctx.roster
+      .listAgents()
+      .filter((a) => a.parent === ctx.agent)
+      .map((a) => ({
+        childId: a.agentId,
+        role: a.role,
+        branch: resolveAgentBranch(worktrees, a.agentId),
+      }));
+    if (children.some((c) => c.role !== 'reviewer')) {
+      const cap = resolveMaxActiveChildren(ctx.projectId);
+      const target = reviews != null ? readWorktreeInfo(ctx.cwd).branch : undefined;
+      const disposition = childCapDisposition(
+        children,
+        (child) => branchMerged(reviews, target, child.branch),
+        cap,
+      );
+      if (disposition.queued) {
+        return {
+          status: 'waiting',
+          waiting: {
+            message:
+              `dispatch queued: parent '${ctx.agent}' already has ${disposition.activeCount} active ` +
+              `child(ren) at the cap of ${cap}. Wait for a child branch to merge before slinging another.`,
+            reason: `max active children reached (${disposition.activeCount}/${cap})`,
+            maxed_providers: [],
+            unavailable_providers: [],
+          },
+        };
+      }
+    }
+
     const workSize: WorkSize = (input.work_size ?? 'average') as WorkSize;
     const reasoningBudget: ReasoningBudget = (input.reasoning_budget ??
       'standard') as ReasoningBudget;
