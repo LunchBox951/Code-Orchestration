@@ -5,9 +5,11 @@ import {
   defaultUsageSourceFactory,
   findSubRole,
   openDispatchStore,
+  openIssueStore,
   openMailStore,
   openPlanStore,
   openRegistry,
+  openResearchStore,
   openReviewStore,
   openRosterStore,
   openSpecStore,
@@ -200,6 +202,15 @@ export function defaultContextFactory(): () => ToolContext {
     // stores, so sharing the same store.db is safe. A tool never opens its own store.
     const plans = openPlanStore(projectId);
     closeOnFailure.push(() => plans.close());
+    // L6b G: open + inject the issue store (capture/diagnose/file projection). IssuesProjector owns
+    // a distinct scope (`issue:`) and read-model table (`issues`) from the other stores, so sharing
+    // the same store.db is safe. A tool never opens its own store.
+    const issues = openIssueStore(projectId);
+    closeOnFailure.push(() => issues.close());
+    // L6b H: open + inject the research store (finalized maps/answers). ResearchProjector owns a
+    // distinct scope (`research:`) and read-model table (`research_reports`), so sharing is safe.
+    const research = openResearchStore(projectId);
+    closeOnFailure.push(() => research.close());
     let scopedSandbox: ReturnType<typeof worktrees.listWorktrees>[number] | undefined;
     if (explicitProjectId != null && resolvedFromCwd == null) {
       const normalizedCwd = resolve(cwd);
@@ -309,6 +320,8 @@ export function defaultContextFactory(): () => ToolContext {
       roster,
       specs,
       plans,
+      issues,
+      research,
       usageSourceFactory: defaultUsageSourceFactory,
     };
     return () => ctx;

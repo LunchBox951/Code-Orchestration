@@ -22,6 +22,12 @@ import { specDraftTool } from './specs/spec-draft.js';
 import { specLockTool } from './specs/spec-lock.js';
 import { planIngestTool } from './specs/plan-ingest.js';
 import { phaseStatusTool } from './specs/phase-status.js';
+import { issueCaptureTool } from './specs/issue-capture.js';
+import { issueListTool } from './specs/issue-list.js';
+import { issueDiagnoseTool } from './specs/issue-diagnose.js';
+import { issueFileTool } from './specs/issue-file.js';
+import { researchFinalizeTool } from './specs/research-finalize.js';
+import { researchGetTool } from './specs/research-get.js';
 
 /**
  * Build the canonical core registry: a fresh {@link ToolRegistry} with every real core tool
@@ -58,5 +64,11 @@ export function buildCoreRegistry(): ToolRegistry {
   registry.register(specLockTool);
   registry.register(planIngestTool);
   registry.register(phaseStatusTool);
+  registry.register(issueCaptureTool);
+  registry.register(issueListTool);
+  registry.register(issueDiagnoseTool);
+  registry.register(issueFileTool);
+  registry.register(researchFinalizeTool);
+  registry.register(researchGetTool);
   return registry;
 }

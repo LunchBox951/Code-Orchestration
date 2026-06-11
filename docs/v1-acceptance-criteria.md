@@ -147,9 +147,12 @@ These are the top-level conditions that, all met, *are* v1.
   projector replay coverage and scope/payload identity guards. L6b adds **specs, plans, and phase
   lifecycle** as events (`spec.drafted/locked/archived`, `plan.drafted`, `phase.status.changed`,
   `phase.verified`, `plan.replanned`), replay-equal (see
-  [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md), AC-L6b-1/5). Remaining: agents/turns/reviews
+  [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md), AC-L6b-1/5). L6b G/H add **issues and
+  research records** as events (`issue.captured/diagnosed/filed/self_assigned`,
+  `research.finalized`), replay-equal (AC-L6b-G1/H1). Remaining: agents/turns/reviews
   as events in later layers. Evidence: L0 on `main` (PR #11); L1 on `dev`; L4 dispatch/cost in
-  `co/l4-dispatch-cost`; L6b specs/plans in `co/l6b-core`.
+  `co/l4-dispatch-cost`; L6b specs/plans in `co/l6b-core`; L6b issues/locator in
+  `co/l6b-issues-locator`.
 - `ST-2` ☐ The system can be **reconstructed and recovered** from its record after a crash/restart;
   stuck/zombie agents are reconciled back to WAITING (Principle 14, `STATE-and-RECOVERY`).
 - `ST-3` ☐ **No silent failures** — pre-flight (the doctor), in-flight (live stream monitoring),
@@ -169,8 +172,11 @@ These are the top-level conditions that, all met, *are* v1.
 - `MC-3` ◐ The protocol is **self-describing**: `orient` teaches workflow, schemas teach syntax,
   native project memory teaches the repo, the locator maps unfamiliar code (Principle 5). L2 ships
   workflow-only, role-scoped `co_orient` and schema-publication through MCP, with drift tests
-  proving orient does not restate tool field lists. Remaining: locator behavior and the `SH-4`
-  stranger-repo proof.
+  proving orient does not restate tool field lists. L6b-H lands the locator's **static half**: the
+  map output contract (files + one-line whys + key symbols + read order; dumps mechanically
+  rejected) and the durable `co_research_finalize`/`co_research_get` record surface
+  ([`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md), AC-L6b-H1). Remaining: live locator
+  behavior (research dispatch is the L7 Conductor) and the `SH-4` stranger-repo proof.
 
 ## H. Providers (P13)
 
