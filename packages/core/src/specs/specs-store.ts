@@ -2,9 +2,9 @@
  * The L6b F1 durable spec record store. Opens the PROJECT store, wires the
  * {@link SpecsProjector}, and exposes a typed {@link SpecStore} facade.
  *
- * L6b note: the production MCP WRITE verbs (draft/lock) are a later task. This layer builds the
- * record + projection + store only. Tests populate via `recordDraft` / `recordLock` / `recordArchive`
- * directly.
+ * L6b note: this layer builds the record + projection + store only; the production MCP write gates
+ * live in `tools/specs/` and call this facade after their role/operator and criteria checks pass.
+ * Tests may still populate directly via `recordDraft` / `recordLock` / `recordArchive`.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { decode } from '../replay/decode.js';

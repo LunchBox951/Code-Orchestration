@@ -11,8 +11,9 @@ import { checkToolCompleteness } from '../completeness.js';
 import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
 
-// L6b F2 — co_spec_draft: a coordinator drafts a spec record; non-coordinators are rejected (named);
-// ctx.specs/ctx.roster guards. Draft does NOT run the criterion validator.
+// L6b F2 — co_spec_draft: a coordinator drafts a lockable spec record; non-coordinators are rejected
+// (named); ctx.specs/ctx.roster guards. Draft runs the criterion validator so fuzzy drafts do not
+// dead-end before lock.
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -84,7 +85,7 @@ const DRAFT_INPUT = {
   goal: 'Refresh tokens are rejected after expiry',
   criteria: [
     { text: 'expired tokens rejected (401)', verify: 'pnpm vitest run packages/core/x' },
-    { text: 'criterion without a wired command yet' }, // draft allows partial criteria
+    { text: 'format check passes', verify: 'pnpm format:check' },
   ],
   body: 'Full spec body.',
 };
@@ -111,7 +112,7 @@ describe('co_spec_draft — a coordinator drafts a spec', () => {
     const criteria = result['criteria'] as Array<{ text: string; verify?: string }>;
     expect(criteria).toHaveLength(2);
     expect(criteria[0]?.verify).toBe('pnpm vitest run packages/core/x');
-    expect(criteria[1]?.verify).toBeUndefined();
+    expect(criteria[1]?.verify).toBe('pnpm format:check');
 
     // The durable record is queryable and the actor is the drafting coordinator.
     const stored = ctx.specs!.getSpec('task-draft-1');
@@ -119,20 +120,38 @@ describe('co_spec_draft — a coordinator drafts a spec', () => {
     expect(stored?.criteria).toHaveLength(2);
   });
 
-  it('draft does NOT validate criteria — a partial/fuzzy criterion is accepted', async () => {
+  it('rejects fuzzy criteria at draft time so lock cannot dead-end', async () => {
     const ctx = makeCtx('p-spec-draft-fuzzy', 'coord-1');
     ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
 
-    const result = (await invokeTool(registry, ctx, 'co_spec_draft', {
-      task_id: 'task-fuzzy',
-      title: 'T',
-      goal: 'G',
-      criteria: [{ text: 'works' }], // vacuous AND no command — still draftable
-      body: '',
-    })) as Record<string, unknown>;
+    await expect(
+      invokeTool(registry, ctx, 'co_spec_draft', {
+        task_id: 'task-fuzzy',
+        title: 'T',
+        goal: 'G',
+        criteria: [{ text: 'works' }], // vacuous AND no command
+        body: '',
+      }),
+    ).rejects.toThrow(/co_spec_draft.*no wired verification command/is);
 
-    expect(result['state']).toBe('draft');
-    expect(ctx.specs!.getSpec('task-fuzzy')?.state).toBe('draft');
+    expect(ctx.specs!.getSpec('task-fuzzy')).toBeUndefined();
+  });
+
+  it('rejects an empty criteria list', async () => {
+    const ctx = makeCtx('p-spec-draft-empty', 'coord-1');
+    ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+
+    await expect(
+      invokeTool(registry, ctx, 'co_spec_draft', {
+        task_id: 'task-empty',
+        title: 'T',
+        goal: 'G',
+        criteria: [],
+        body: '',
+      }),
+    ).rejects.toThrow(/at least one acceptance criterion/i);
+
+    expect(ctx.specs!.getSpec('task-empty')).toBeUndefined();
   });
 });
 

@@ -32,6 +32,7 @@ const CREATE_PLAN_PHASES_TABLE = `
   CREATE TABLE IF NOT EXISTS plan_phases (
     task_id      TEXT NOT NULL,
     phase_id     TEXT NOT NULL,
+    ordinal      INTEGER NOT NULL,
     name         TEXT NOT NULL,
     owner        TEXT,
     deps         TEXT NOT NULL,
@@ -47,11 +48,17 @@ const CREATE_PLAN_PHASES_TABLE = `
 export function ensurePlansTables(db: DatabaseSync): void {
   db.exec(CREATE_PLANS_TABLE);
   db.exec(CREATE_PLAN_PHASES_TABLE);
+  const columns = db.prepare(`PRAGMA table_info(plan_phases)`).all() as Array<{
+    name: string;
+  }>;
+  if (!columns.some((c) => c.name === 'ordinal')) {
+    db.exec(`ALTER TABLE plan_phases ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0`);
+  }
 }
 
 const PLAN_COLUMNS = 'task_id, goal, task_criteria, drafted_ts, replan_count';
 const PHASE_COLUMNS =
-  'task_id, phase_id, name, owner, deps, criteria, status, verified_pass, baseline_sha';
+  'task_id, phase_id, ordinal, name, owner, deps, criteria, status, verified_pass, baseline_sha';
 
 function rowToPhaseRecord(row: Record<string, unknown>): PhaseRecord {
   return {
@@ -68,7 +75,9 @@ function rowToPhaseRecord(row: Record<string, unknown>): PhaseRecord {
 
 function selectPhases(db: DatabaseSync, taskId: string): PhaseRecord[] {
   const rows = db
-    .prepare(`SELECT ${PHASE_COLUMNS} FROM plan_phases WHERE task_id = ? ORDER BY phase_id`)
+    .prepare(
+      `SELECT ${PHASE_COLUMNS} FROM plan_phases WHERE task_id = ? ORDER BY ordinal, phase_id`,
+    )
     .all(taskId);
   return rows.map((r) => rowToPhaseRecord(r as Record<string, unknown>));
 }
@@ -125,19 +134,20 @@ function sameDraft(existing: PlanRecord, rec: PlanDrafted): boolean {
 
 function upsertPhases(db: DatabaseSync, taskId: string, phases: readonly PhaseNode[]): void {
   db.prepare(`DELETE FROM plan_phases WHERE task_id = ?`).run(taskId);
-  for (const phase of phases) {
+  phases.forEach((phase, ordinal) => {
     db.prepare(
-      `INSERT INTO plan_phases (task_id, phase_id, name, owner, deps, criteria, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'planned')`,
+      `INSERT INTO plan_phases (task_id, phase_id, ordinal, name, owner, deps, criteria, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'planned')`,
     ).run(
       taskId,
       phase.phaseId,
+      ordinal,
       phase.name,
       phase.owner ?? null,
       JSON.stringify(phase.deps),
       JSON.stringify(phase.criteria),
     );
-  }
+  });
 }
 
 interface PlanDraftedEvent extends StoredEvent {

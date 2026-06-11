@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolSpec } from '../registry.js';
 import { assertToolCallerRole } from '../caller-auth.js';
+import { validateCriteria } from '../../plans/criteria.js';
 import type { Criterion } from '../../specs/criteria-schema.js';
 import {
   specRecordOutputSchema,
@@ -21,7 +22,7 @@ const criterionInputSchema = z
       .optional()
       .describe(
         'The wired verification command that proves this criterion, e.g. "pnpm vitest run packages/core/x". ' +
-          'Optional at draft time; the lock gate requires it.',
+          'Required by the draft validator.',
       ),
   })
   .strict();
@@ -37,8 +38,8 @@ const specDraftInput = z
     criteria: z
       .array(criterionInputSchema)
       .describe(
-        'The acceptance criteria — each a checkable outcome with an optional wired verification command. ' +
-          'May be empty or partial in a draft; the lock gate enforces wired, non-vacuous criteria.',
+        'The acceptance criteria — each a checkable outcome with a wired verification command. ' +
+          'Drafting requires lockable criteria so a spec cannot enter a dead-end fuzzy draft state.',
       ),
     body: z.string().describe('The full spec body text.'),
   })
@@ -47,8 +48,8 @@ type SpecDraftInput = z.infer<typeof specDraftInput>;
 
 /**
  * `co_spec_draft` (L6b F2): the coordinator verb that drafts a spec record into the durable spec store
- * (program-data only, Principle 12 — never the repo). Draft does NOT run the criterion validator —
- * drafts may be in-progress; the validator gate is at lock (`co_spec_lock`). Loud-fails when
+ * (program-data only, Principle 12 — never the repo). Draft runs the same criterion validator as
+ * lock so a spec cannot enter a dead-end fuzzy draft state. Loud-fails when
  * `ctx.specs`/`ctx.roster` are absent (Principle 9 — the mount assembles the context).
  *
  * Scoped to: coordinator (the spec owner). The drafting agent is recorded as the record's actor.
@@ -58,8 +59,8 @@ export const specDraftTool: ToolSpec<SpecDraftInput, SpecRecordOutput> = {
   title: 'Draft a spec',
   description:
     'Draft a spec record (title, goal, acceptance criteria, body) into the durable spec store under a ' +
-    'task id. Drafting does NOT validate the criteria — a draft may be in progress; the lock verb ' +
-    '(co_spec_lock) enforces wired, non-vacuous criteria. Only a coordinator may draft a spec.',
+    'task id. Drafting requires wired, non-vacuous criteria so the record can be locked later. ' +
+    'Only a coordinator may draft a spec.',
   inputSchema: specDraftInput,
   outputSchema: specRecordOutputSchema,
   handler: (ctx, input): SpecRecordOutput => {
@@ -76,6 +77,16 @@ export const specDraftTool: ToolSpec<SpecDraftInput, SpecRecordOutput> = {
     const criteria: Criterion[] = input.criteria.map((c) =>
       c.verify != null ? { text: c.text, verify: c.verify } : { text: c.text },
     );
+    const violations = validateCriteria(criteria);
+    if (violations.length > 0) {
+      const enumerated = violations
+        .map((v) => `  - criterion ${v.index} ("${v.text}"): ${v.reason}`)
+        .join('\n');
+      throw new Error(
+        `co_spec_draft: refusing to draft '${input.task_id}' — ${violations.length} criterion ` +
+          `violation(s); draft criteria must be lockable:\n${enumerated}`,
+      );
+    }
     const rec = ctx.specs.recordDraft({
       taskId: input.task_id,
       title: input.title,

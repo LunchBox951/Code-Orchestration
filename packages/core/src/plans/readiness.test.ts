@@ -142,8 +142,8 @@ describe('foldTaskReadiness — the task is ready iff EVERY phase is ready', () 
     ]);
   });
 
-  it('a task with no phases is vacuously ready', () => {
-    expect(foldTaskReadiness([])).toEqual({ ready: true, phases: [] });
+  it('a task with no phases is not ready', () => {
+    expect(foldTaskReadiness([])).toEqual({ ready: false, phases: [] });
   });
 });
 

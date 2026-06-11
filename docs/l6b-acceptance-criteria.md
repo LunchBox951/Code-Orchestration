@@ -2,8 +2,9 @@
 
 L6b is the specs-and-plans slice: it turns specs and plans into durable, event-sourced
 program-data records, adds an operator-only spec-lock gate and a plan validator that mechanically
-rejects fuzzy acceptance criteria, and re-wires the review gate to resolve acceptance criteria from
-the locked spec record. These IDs are cited in code/tests as local implementation criteria; each
+rejects fuzzy acceptance criteria, and adds the record-aware resolver the review gate will use to
+resolve acceptance criteria from the locked spec record. The live `triggerReview` call-site swap stays
+an L7 conductor wiring step. These IDs are cited in code/tests as local implementation criteria; each
 ladder points back to the project-wide v1 acceptance criteria. Evidence cites `file:line` on the
 integration branch plus the test that proves it.
 
@@ -36,16 +37,18 @@ integration branch plus the test that proves it.
 - `AC-L6b-5` — Durable plan record: a plan is event-sourced (`plan.drafted` + `phase.status.changed`
   + `phase.verified` + `plan.replanned`), replay-equal, program-data only. Evidence:
   `packages/core/src/plans/events.ts`, `plans-projector.ts`, `plans-store.ts:65` (`openPlanStore`);
-  proven replay-equal by `plans-store.test.ts`. Ladders to `ST-1`.
+  proven replay-equal, phase-order-stable, and actor-audited by `plans-store.test.ts`. Ladders to
+  `ST-1`.
 - `AC-L6b-6` — The plan validator rejects fuzzy criteria: a criterion with no wired verification
-  command (or a vacuous phrase) fails ingestion with a named violation; concrete+wired criteria pass —
-  proven green-on-real / red-on-fuzzy. The validator is pure and **never hard-codes a project command**
-  (it accepts any non-empty `verify`). Evidence:
+  command, a vacuous phrase, or an empty criteria list fails draft/lock/ingestion with a named
+  violation; concrete+wired criteria pass — proven green-on-real / red-on-fuzzy. The validator is pure
+  and **never hard-codes a project command** (it accepts any non-empty `verify`). Evidence:
   `packages/core/src/plans/criteria.ts:114` (`validateCriteria` — structural command-present is the
   primary bite; `VACUOUS_PHRASES` deny-list is the secondary nudge) and the ingestion gate at
   `packages/core/src/tools/specs/plan-ingest.ts:211`; proven by `criteria.test.ts` (green/red) and
-  `plan-ingest.test.ts` (fuzzy-rejected). This is also the lock-time join in `AC-L6b-2`
-  (`spec-lock.ts` runs `validateCriteria` before recording a lock). Ladders to `RG-4`.
+  `plan-ingest.test.ts` (fuzzy-rejected, locked-spec-required, spec-drift-rejected). This is also the
+  draft/lock-time join in `AC-L6b-2` (`spec-draft.ts` and `spec-lock.ts` run `validateCriteria`).
+  Ladders to `RG-4`.
 - `AC-L6b-7` — Phase-ready is mechanically derived: `workersComplete ∧ phaseVerified`, where reviewers
   are excluded from worker-completion accounting and a terminal-WAITING worker whose branch is merged
   counts as complete (readiness reachable through normal completion). Evidence:
@@ -65,8 +68,8 @@ integration branch plus the test that proves it.
   `child-cap.test.ts` and `sling.test.ts`. Ladders to `ST-1`.
 - `AC-L6b-9` — Re-planning on escalation amends the plan with an event-sourced audit trail. Evidence:
   the `plan.replanned` event in `packages/core/src/plans/events.ts` and
-  `packages/core/src/plans/plans-store.ts:50` (`recordReplan`); proven by `plans-store.test.ts`.
-  Ladders to `ST-1`.
+  `packages/core/src/plans/plans-store.ts:50` (`recordReplan` with caller actor); proven by
+  `plans-store.test.ts` asserting persisted actor + reason. Ladders to `ST-1`.
 
 ## Completeness
 

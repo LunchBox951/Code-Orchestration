@@ -4,8 +4,8 @@
  * pristine-repo).
  *
  * One stream per spec, keyed by the `spec:<taskId>` scope pattern. Three event types model the
- * `draft → locked → archived` lifecycle. This layer defines the events + projection + store only
- * — the drafting/locking MCP verbs are a later task.
+ * `draft → locked → archived` lifecycle. This layer defines the durable event payloads; the public
+ * draft/lock gates live in `tools/specs/`.
  */
 import { z } from 'zod';
 import type { NewEvent } from '../store/types.js';

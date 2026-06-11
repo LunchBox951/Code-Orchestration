@@ -34,8 +34,14 @@ describe('validateCriteria — valid (green) criteria → []', () => {
     expect(validateCriteria(criteria)).toEqual([]);
   });
 
-  it('an empty criteria list is trivially valid', () => {
-    expect(validateCriteria([])).toEqual([]);
+  it('an empty criteria list is invalid', () => {
+    expect(validateCriteria([])).toEqual([
+      {
+        index: 0,
+        text: '<criteria>',
+        reason: 'at least one acceptance criterion is required',
+      },
+    ]);
   });
 });
 

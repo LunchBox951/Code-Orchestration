@@ -109,10 +109,11 @@ These are the top-level conditions that, all met, *are* v1.
   structures them, the implementer targets them, tests encode them, the reviewer enforces them
   (Principle 10) — and they trace to this document. L6b lands the mechanism: the spec produces criteria
   (`co_spec_draft` → operator `co_spec_lock`, **lock-gated by the validator**), the plan structures and
-  validates them (`co_plan_ingest` mechanically rejects fuzzy criteria — no wired command / vacuous
-  text), and the review gate resolves them from the **locked spec record** (`resolveSpecRefFromStore`,
-  never a `<TODO>`); see [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md) (AC-L6b-2/3/6).
-  Remaining: the live merge-gate call-site swap (the L7 conductor seam) and the full
+  validates them (`co_plan_ingest` requires a locked spec, rejects spec/plan criteria drift, and
+  mechanically rejects fuzzy criteria — no wired command / vacuous text), and the review-gate resolver
+  can resolve them from the **locked spec record** (`resolveSpecRefFromStore`, never a `<TODO>`);
+  see [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md) (AC-L6b-2/3/6). Remaining: the live
+  merge-gate call-site swap (the L7 conductor seam) and the full
   implementer→tests→reviewer loop under self-hosting.
 - `RG-5` ◐ Only the **destructive boundary** is hard-blocked; protocol adherence is reactive nudges
   (Principle 6, `PERMISSIONS`). L6a lands the declared hard-block registry, drift check, and

@@ -113,6 +113,14 @@ function isVacuousText(text: string): boolean {
  */
 export function validateCriteria(criteria: readonly Criterion[]): CriterionViolation[] {
   const violations: CriterionViolation[] = [];
+  if (criteria.length === 0) {
+    violations.push({
+      index: 0,
+      text: '<criteria>',
+      reason: 'at least one acceptance criterion is required',
+    });
+    return violations;
+  }
   criteria.forEach((criterion, index) => {
     if (typeof criterion.verify !== 'string' || criterion.verify.trim().length === 0) {
       violations.push({ index, text: criterion.text, reason: 'no wired verification command' });

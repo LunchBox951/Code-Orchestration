@@ -59,14 +59,14 @@ const planIngestInput = z
     task_criteria: z
       .array(criterionInputSchema)
       .describe(
-        'Task-level acceptance criteria. Every criterion must carry a wired verification command; ' +
-          'fuzzy criteria cause ingestion to fail (P9 loud-fail, the E2 validator gate).',
+        'Task-level acceptance criteria. Must exactly match the locked spec criteria; every criterion ' +
+          'must carry a wired verification command. Fuzzy or drifted criteria cause ingestion to fail.',
       ),
     phases: z
       .array(phaseInputSchema)
       .describe(
-        'The phase DAG nodes. Every phase_id must be unique; every deps entry must reference a ' +
-          'declared phase_id (no dangling deps). Fuzzy phase criteria cause ingestion to fail.',
+        'The non-empty phase DAG nodes. Every phase_id must be unique; every deps entry must reference ' +
+          'a declared phase_id (no dangling deps). Fuzzy phase criteria cause ingestion to fail.',
       ),
   })
   .strict();
@@ -115,27 +115,32 @@ function detectCycle(
 /**
  * `co_plan_ingest` (L6b E1): the coordinator verb that ingests a plan record into the durable
  * plan store (program-data only, Principle 12 — never the repo). The ingestion gate:
- * 1. Requires ctx.plans + ctx.roster (loud-fail when absent).
+ * 1. Requires ctx.plans + ctx.specs + ctx.roster (loud-fail when absent).
  * 2. Coordinator-only (assertToolCallerRole).
- * 3. Structural DAG checks: unique phase_ids; no dangling deps; cycle detection.
- * 4. Validator gate: every criterion in task_criteria AND in each phase must have a wired
+ * 3. Requires a locked spec record whose criteria exactly match task_criteria.
+ * 4. Structural DAG checks: at least one phase; unique phase_ids; no dangling deps; cycle detection.
+ * 5. Validator gate: every criterion in task_criteria AND in each phase must have a wired
  *    `verify` command (the E2 red-on-fuzzy proof — a plan with fuzzy criteria FAILS ingestion).
- * 5. Records the plan via ctx.plans.recordDraft and returns the PlanRecord.
+ * 6. Records the plan via ctx.plans.recordDraft and returns the PlanRecord.
  */
 export const planIngestTool: ToolSpec<PlanIngestInput, PlanRecordOutput> = {
   name: 'co_plan_ingest',
   title: 'Ingest a plan',
   description:
     'Ingest a plan record (goal, task-level and per-phase acceptance criteria, phase DAG) into ' +
-    'the durable plan store under a task id. Refuses ingestion when: (a) any criterion is missing ' +
-    'its wired verification command (fuzzy criteria are rejected — the E2 validator gate); ' +
-    '(b) the phase DAG contains dangling deps or duplicate phase ids; ' +
-    '(c) the caller is not a coordinator. Only a coordinator may ingest a plan.',
+    'the durable plan store under a task id. Refuses ingestion when: (a) there is no locked spec ' +
+    'or task_criteria drift from that spec; (b) any criterion is missing its wired verification ' +
+    'command (fuzzy criteria are rejected — the E2 validator gate); (c) the phase DAG is empty, ' +
+    'contains dangling deps, duplicate phase ids, or a cycle; (d) the caller is not a coordinator. ' +
+    'Only a coordinator may ingest a plan.',
   inputSchema: planIngestInput,
   outputSchema: planRecordOutputSchema,
   handler: (ctx, input): PlanRecordOutput => {
     if (!ctx.plans) {
       throw new Error('co_plan_ingest: the mount did not inject a plan store (ctx.plans absent).');
+    }
+    if (!ctx.specs) {
+      throw new Error('co_plan_ingest: the mount did not inject a spec store (ctx.specs absent).');
     }
     if (!ctx.roster) {
       throw new Error(
@@ -144,7 +149,29 @@ export const planIngestTool: ToolSpec<PlanIngestInput, PlanRecordOutput> = {
     }
     assertToolCallerRole('co_plan_ingest', ctx.roster, ctx.agent, ['coordinator']);
 
+    const taskCriteriaInput: Criterion[] = input.task_criteria.map((c) =>
+      c.verify != null ? { text: c.text, verify: c.verify } : { text: c.text },
+    );
+    const spec = ctx.specs.getSpec(input.task_id);
+    if (spec == null || spec.state !== 'locked') {
+      throw new Error(
+        `co_plan_ingest: refusing to ingest plan '${input.task_id}' — no locked spec record exists ` +
+          'for this task.',
+      );
+    }
+    if (JSON.stringify(taskCriteriaInput) !== JSON.stringify(spec.criteria)) {
+      throw new Error(
+        `co_plan_ingest: refusing to ingest plan '${input.task_id}' — task_criteria must exactly ` +
+          'match the locked spec criteria.',
+      );
+    }
+
     // Structural DAG checks (P9 loud-fail).
+    if (input.phases.length === 0) {
+      throw new Error(
+        `co_plan_ingest: refusing to ingest plan '${input.task_id}' — at least one phase is required.`,
+      );
+    }
     const phaseIds = new Set<string>();
     for (const phase of input.phases) {
       if (phaseIds.has(phase.phase_id)) {
@@ -172,9 +199,6 @@ export const planIngestTool: ToolSpec<PlanIngestInput, PlanRecordOutput> = {
     }
 
     // Validator gate: run validateCriteria on task_criteria and each phase's criteria.
-    const taskCriteriaInput: Criterion[] = input.task_criteria.map((c) =>
-      c.verify != null ? { text: c.text, verify: c.verify } : { text: c.text },
-    );
     const taskViolations = validateCriteria(taskCriteriaInput);
 
     const phaseViolationParts: string[] = [];
@@ -232,6 +256,7 @@ export const planIngestTool: ToolSpec<PlanIngestInput, PlanRecordOutput> = {
       goal: input.goal,
       taskCriteria,
       phases,
+      actor: ctx.agent,
     });
     return planRecordToOutput(rec);
   },

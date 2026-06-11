@@ -129,6 +129,16 @@ describe('co_spec_lock — the RG-4 join: fuzzy criteria are REFUSED', () => {
     ).rejects.toThrow(/refusing to lock.*vacuous acceptance text/is);
     expect(ctx.specs!.getSpec('task-lock-4')?.state).toBe('draft');
   });
+
+  it('refuses to lock an empty criteria list', async () => {
+    const ctx = makeCtx('p-spec-lock-empty', OPERATOR);
+    seedDraft(ctx.specs!, 'task-lock-empty', []);
+
+    await expect(
+      invokeTool(registry, ctx, 'co_spec_lock', { task_id: 'task-lock-empty' }),
+    ).rejects.toThrow(/at least one acceptance criterion/i);
+    expect(ctx.specs!.getSpec('task-lock-empty')?.state).toBe('draft');
+  });
 });
 
 describe('co_spec_lock — lifecycle guards', () => {

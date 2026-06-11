@@ -22,6 +22,7 @@ import type { ToolContext } from '../context.js';
 const PID = 'p-phase-status';
 const TASK = 'task-1';
 const OWNER_BRANCH = 'co/phase-a-integration'; // the Lead/owner's integration branch (merge target)
+const ACTOR = 'lead-1';
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -149,6 +150,7 @@ function seedTree(stores: Stores): void {
     goal: 'ship phase A',
     taskCriteria: crit,
     phases: [{ phaseId: 'pA', name: 'Phase A', owner: 'lead-1', deps: [], criteria: crit }],
+    actor: ACTOR,
   });
 }
 
@@ -216,7 +218,7 @@ describe('co_phase_status — read-only (records NOTHING)', () => {
     seedTree(stores);
     seedPass(stores, OWNER_BRANCH, 'co/w1', 'rev-w1');
     seedPass(stores, OWNER_BRANCH, 'co/w2', 'rev-w2');
-    stores.plans.recordPhaseVerified(TASK, 'pA', 'b'.repeat(40), true);
+    stores.plans.recordPhaseVerified(TASK, 'pA', 'b'.repeat(40), true, ACTOR);
 
     const probe = openProjectStore(PID);
     try {
@@ -237,10 +239,10 @@ describe('co_phase_status — correct rollup from seeded stores', () => {
     seedPass(stores, OWNER_BRANCH, 'co/w1', 'rev-w1');
     seedPass(stores, OWNER_BRANCH, 'co/w2', 'rev-w2');
     // rev-1 stays unmerged — it must be excluded from completion accounting.
-    stores.plans.recordPhaseVerified(TASK, 'pA', 'b'.repeat(40), true);
+    stores.plans.recordPhaseVerified(TASK, 'pA', 'b'.repeat(40), true, ACTOR);
     // The lifecycle status is independent of the verified outcome; advance it as a Lead would, and
     // assert it passes through to the output (the readiness flag is driven by verifiedPass, not status).
-    stores.plans.changePhaseStatus(TASK, 'pA', 'verified');
+    stores.plans.changePhaseStatus(TASK, 'pA', 'verified', ACTOR);
 
     const out = (await invokeTool(registry, makeCtx('coord-1', stores), 'co_phase_status', {
       task_id: TASK,
@@ -259,7 +261,7 @@ describe('co_phase_status — correct rollup from seeded stores', () => {
     const stores = openStores();
     seedTree(stores);
     seedPass(stores, OWNER_BRANCH, 'co/w1', 'rev-w1'); // impl-1 merged; impl-2 NOT merged
-    stores.plans.recordPhaseVerified(TASK, 'pA', 'b'.repeat(40), true);
+    stores.plans.recordPhaseVerified(TASK, 'pA', 'b'.repeat(40), true, ACTOR);
 
     const out = (await invokeTool(registry, makeCtx('lead-1', stores), 'co_phase_status', {
       task_id: TASK,

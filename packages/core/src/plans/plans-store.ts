@@ -36,18 +36,30 @@ export interface PlanStore {
     goal: string;
     taskCriteria: readonly Criterion[];
     phases: readonly PhaseNode[];
+    actor: string;
   }): PlanRecord;
   /** Record a phase status change (append `phase.status.changed` + fold); returns the plan. */
-  changePhaseStatus(taskId: string, phaseId: string, status: PhaseStatus): PlanRecord;
+  changePhaseStatus(
+    taskId: string,
+    phaseId: string,
+    status: PhaseStatus,
+    actor: string,
+  ): PlanRecord;
   /** Record a phase verified outcome (append `phase.verified` + fold); returns the plan. */
   recordPhaseVerified(
     taskId: string,
     phaseId: string,
     baselineSha: string,
     pass: boolean,
+    actor: string,
   ): PlanRecord;
   /** Record a replan (append `plan.replanned` + fold); returns the amended plan. */
-  recordReplan(taskId: string, reason: string, phases: readonly PhaseNode[]): PlanRecord;
+  recordReplan(
+    taskId: string,
+    reason: string,
+    phases: readonly PhaseNode[],
+    actor: string,
+  ): PlanRecord;
   /** The plan record for `taskId`, or undefined. */
   getPlan(taskId: string): PlanRecord | undefined;
   /** Every recorded plan, in stable order (by drafted_ts then task_id). */
@@ -129,7 +141,7 @@ export function openPlanStore(projectId: string): PlanStore {
                 criteria: [...p.criteria],
               })),
             },
-            'system',
+            rec.actor,
           ),
         ]);
         applyEvent(tx, decode(stored!, plansUpcasters, plansSchemas), projectors);
@@ -143,12 +155,17 @@ export function openPlanStore(projectId: string): PlanStore {
       });
     },
 
-    changePhaseStatus(taskId: string, phaseId: string, status: PhaseStatus): PlanRecord {
+    changePhaseStatus(
+      taskId: string,
+      phaseId: string,
+      status: PhaseStatus,
+      actor: string,
+    ): PlanRecord {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
         const [stored] = tx.append([
-          makePhaseStatusChangedEvent(projectId, { taskId, phaseId, status }, 'system'),
+          makePhaseStatusChangedEvent(projectId, { taskId, phaseId, status }, actor),
         ]);
         applyEvent(tx, decode(stored!, plansUpcasters, plansSchemas), projectors);
         const row = selectPlan(db, taskId);
@@ -166,12 +183,13 @@ export function openPlanStore(projectId: string): PlanStore {
       phaseId: string,
       baselineSha: string,
       pass: boolean,
+      actor: string,
     ): PlanRecord {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
         const [stored] = tx.append([
-          makePhaseVerifiedEvent(projectId, { taskId, phaseId, baselineSha, pass }, 'system'),
+          makePhaseVerifiedEvent(projectId, { taskId, phaseId, baselineSha, pass }, actor),
         ]);
         applyEvent(tx, decode(stored!, plansUpcasters, plansSchemas), projectors);
         const row = selectPlan(db, taskId);
@@ -184,7 +202,12 @@ export function openPlanStore(projectId: string): PlanStore {
       });
     },
 
-    recordReplan(taskId: string, reason: string, phases: readonly PhaseNode[]): PlanRecord {
+    recordReplan(
+      taskId: string,
+      reason: string,
+      phases: readonly PhaseNode[],
+      actor: string,
+    ): PlanRecord {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
@@ -202,7 +225,7 @@ export function openPlanStore(projectId: string): PlanStore {
                 criteria: [...p.criteria],
               })),
             },
-            'system',
+            actor,
           ),
         ]);
         applyEvent(tx, decode(stored!, plansUpcasters, plansSchemas), projectors);

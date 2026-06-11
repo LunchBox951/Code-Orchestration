@@ -8,10 +8,15 @@ import { applyEvent, rebuildAll } from '../replay/projector.js';
 import { decode } from '../replay/decode.js';
 import { assertRepoPristine } from '../config/pristine.js';
 import {
+  EVENT_PHASE_STATUS_CHANGED,
+  EVENT_PHASE_VERIFIED,
+  EVENT_PLAN_DRAFTED,
+  EVENT_PLAN_REPLANNED,
   makePlanDraftedEvent,
   makePhaseStatusChangedEvent,
   makePhaseVerifiedEvent,
   makePlanReplannedEvent,
+  planScope,
   plansSchemas,
   plansUpcasters,
 } from './events.js';
@@ -68,6 +73,7 @@ const SAMPLE_PHASES = [
     criteria: [{ text: 'phase two passes', verify: 'pnpm test' }],
   },
 ];
+const ACTOR = 'coord-1';
 
 function snapshot(db: DatabaseSync): string {
   const plans = db
@@ -77,7 +83,7 @@ function snapshot(db: DatabaseSync): string {
     .all();
   const phases = db
     .prepare(
-      'SELECT task_id, phase_id, name, status, verified_pass, baseline_sha FROM plan_phases ORDER BY task_id, phase_id',
+      'SELECT task_id, phase_id, ordinal, name, status, verified_pass, baseline_sha FROM plan_phases ORDER BY task_id, ordinal',
     )
     .all();
   return JSON.stringify({ plans, phases });
@@ -92,6 +98,7 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
         goal: 'Achieve something',
         taskCriteria: [WIRED_CRITERION],
         phases: SAMPLE_PHASES,
+        actor: ACTOR,
       });
 
       expect(drafted.taskId).toBe('task-1');
@@ -109,11 +116,44 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
     }
   });
 
+  it('preserves declared phase order instead of sorting lexicographically', () => {
+    const store = openPlanStore('p-plans-phase-order');
+    const phases = [
+      { phaseId: 'ph-2', name: 'Second', deps: [], criteria: [WIRED_CRITERION] },
+      { phaseId: 'ph-10', name: 'Tenth', deps: ['ph-2'], criteria: [WIRED_CRITERION] },
+      { phaseId: 'ph-1', name: 'First', deps: [], criteria: [WIRED_CRITERION] },
+    ];
+    try {
+      const drafted = store.recordDraft({
+        taskId: 'task-order',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases,
+        actor: ACTOR,
+      });
+
+      expect(drafted.phases.map((p) => p.phaseId)).toEqual(['ph-2', 'ph-10', 'ph-1']);
+      expect(store.getPlan('task-order')?.phases.map((p) => p.phaseId)).toEqual([
+        'ph-2',
+        'ph-10',
+        'ph-1',
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it('changes phase status', () => {
     const store = openPlanStore('p-plans-status');
     try {
-      store.recordDraft({ taskId: 'task-1', goal: 'G', taskCriteria: [], phases: SAMPLE_PHASES });
-      const after = store.changePhaseStatus('task-1', 'ph-1', 'building');
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      const after = store.changePhaseStatus('task-1', 'ph-1', 'building', ACTOR);
       expect(after.phases.find((p) => p.phaseId === 'ph-1')?.status).toBe('building');
       expect(after.phases.find((p) => p.phaseId === 'ph-2')?.status).toBe('planned');
     } finally {
@@ -124,8 +164,14 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
   it('records phase.verified', () => {
     const store = openPlanStore('p-plans-verified');
     try {
-      store.recordDraft({ taskId: 'task-1', goal: 'G', taskCriteria: [], phases: SAMPLE_PHASES });
-      const after = store.recordPhaseVerified('task-1', 'ph-1', 'abc123', true);
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      const after = store.recordPhaseVerified('task-1', 'ph-1', 'abc123', true, ACTOR);
       const ph1 = after.phases.find((p) => p.phaseId === 'ph-1')!;
       expect(ph1.verifiedPass).toBe(true);
       expect(ph1.baselineSha).toBe('abc123');
@@ -137,9 +183,17 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
   it('records a replan and increments replanCount', () => {
     const store = openPlanStore('p-plans-replan');
     try {
-      store.recordDraft({ taskId: 'task-1', goal: 'G', taskCriteria: [], phases: SAMPLE_PHASES });
-      const newPhases = [{ phaseId: 'ph-new', name: 'New Phase', deps: [], criteria: [] }];
-      const after = store.recordReplan('task-1', 'scope changed', newPhases);
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      const newPhases = [
+        { phaseId: 'ph-new', name: 'New Phase', deps: [], criteria: [WIRED_CRITERION] },
+      ];
+      const after = store.recordReplan('task-1', 'scope changed', newPhases, ACTOR);
       expect(after.replanCount).toBe(1);
       expect(after.phases).toHaveLength(1);
       expect(after.phases[0]?.phaseId).toBe('ph-new');
@@ -151,10 +205,49 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
   it('multiple replans accumulate replanCount', () => {
     const store = openPlanStore('p-plans-replan-multi');
     try {
-      store.recordDraft({ taskId: 'task-1', goal: 'G', taskCriteria: [], phases: [] });
-      store.recordReplan('task-1', 'reason 1', []);
-      const after = store.recordReplan('task-1', 'reason 2', []);
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      store.recordReplan('task-1', 'reason 1', SAMPLE_PHASES, ACTOR);
+      const after = store.recordReplan('task-1', 'reason 2', SAMPLE_PHASES, ACTOR);
       expect(after.replanCount).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('records the caller actor and replan reason in the event audit trail', () => {
+    const projectId = 'p-plans-actor-audit';
+    const store = openPlanStore(projectId);
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: 'coord-1',
+      });
+      store.changePhaseStatus('task-1', 'ph-1', 'building', 'lead-1');
+      store.recordPhaseVerified('task-1', 'ph-1', 'abc123', true, 'tester-1');
+      store.recordReplan('task-1', 'scope changed after review', SAMPLE_PHASES, 'lead-1');
+
+      const audit = openProjectStore(projectId);
+      try {
+        const events = audit.readStream(planScope('task-1'));
+        expect(events.map((e) => [e.type, e.actor])).toEqual([
+          [EVENT_PLAN_DRAFTED, 'coord-1'],
+          [EVENT_PHASE_STATUS_CHANGED, 'lead-1'],
+          [EVENT_PHASE_VERIFIED, 'tester-1'],
+          [EVENT_PLAN_REPLANNED, 'lead-1'],
+        ]);
+        expect(events.at(-1)?.payload).toMatchObject({ reason: 'scope changed after review' });
+      } finally {
+        audit.close();
+      }
     } finally {
       store.close();
     }
@@ -165,7 +258,13 @@ describe('PlanStore — getPlan / listPlans', () => {
   it('getPlan returns the record and undefined for absent', () => {
     const store = openPlanStore('p-plans-get');
     try {
-      store.recordDraft({ taskId: 'task-get-1', goal: 'G', taskCriteria: [], phases: [] });
+      store.recordDraft({
+        taskId: 'task-get-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
       const rec = store.getPlan('task-get-1');
       expect(rec).not.toBeUndefined();
       expect(rec?.taskId).toBe('task-get-1');
@@ -178,8 +277,20 @@ describe('PlanStore — getPlan / listPlans', () => {
   it('listPlans returns all plans in drafted_ts order', () => {
     const store = openPlanStore('p-plans-list');
     try {
-      store.recordDraft({ taskId: 'task-a', goal: 'G', taskCriteria: [], phases: [] });
-      store.recordDraft({ taskId: 'task-b', goal: 'G', taskCriteria: [], phases: [] });
+      store.recordDraft({
+        taskId: 'task-a',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      store.recordDraft({
+        taskId: 'task-b',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
       const list = store.listPlans();
       expect(list).toHaveLength(2);
       expect(list[0]?.taskId).toBe('task-a');
@@ -199,12 +310,14 @@ describe('PlanStore — idempotent re-assert', () => {
         goal: 'G',
         taskCriteria: [WIRED_CRITERION],
         phases: SAMPLE_PHASES,
+        actor: ACTOR,
       });
       const second = store.recordDraft({
         taskId: 'task-idem',
         goal: 'G',
         taskCriteria: [WIRED_CRITERION],
         phases: SAMPLE_PHASES,
+        actor: ACTOR,
       });
       expect(second.taskId).toBe(first.taskId);
       expect(second.draftedTs).toBe(first.draftedTs);
@@ -219,9 +332,21 @@ describe('PlanStore — loud-fail on illegal transitions', () => {
   it('conflicting re-draft throws', () => {
     const store = openPlanStore('p-plans-conflict-draft');
     try {
-      store.recordDraft({ taskId: 'task-1', goal: 'original', taskCriteria: [], phases: [] });
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'original',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
       expect(() =>
-        store.recordDraft({ taskId: 'task-1', goal: 'different', taskCriteria: [], phases: [] }),
+        store.recordDraft({
+          taskId: 'task-1',
+          goal: 'different',
+          taskCriteria: [WIRED_CRITERION],
+          phases: SAMPLE_PHASES,
+          actor: ACTOR,
+        }),
       ).toThrow(/conflicting re-draft/i);
     } finally {
       store.close();
@@ -231,8 +356,14 @@ describe('PlanStore — loud-fail on illegal transitions', () => {
   it('phase.status.changed for unknown phaseId throws', () => {
     const store = openPlanStore('p-plans-unknown-phase-status');
     try {
-      store.recordDraft({ taskId: 'task-1', goal: 'G', taskCriteria: [], phases: SAMPLE_PHASES });
-      expect(() => store.changePhaseStatus('task-1', 'ghost-phase', 'building')).toThrow(
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      expect(() => store.changePhaseStatus('task-1', 'ghost-phase', 'building', ACTOR)).toThrow(
         /unknown phaseId/i,
       );
     } finally {
@@ -243,10 +374,16 @@ describe('PlanStore — loud-fail on illegal transitions', () => {
   it('phase.verified for unknown phaseId throws', () => {
     const store = openPlanStore('p-plans-unknown-phase-verified');
     try {
-      store.recordDraft({ taskId: 'task-1', goal: 'G', taskCriteria: [], phases: SAMPLE_PHASES });
-      expect(() => store.recordPhaseVerified('task-1', 'ghost-phase', 'sha123', true)).toThrow(
-        /unknown phaseId/i,
-      );
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      expect(() =>
+        store.recordPhaseVerified('task-1', 'ghost-phase', 'sha123', true, ACTOR),
+      ).toThrow(/unknown phaseId/i);
     } finally {
       store.close();
     }
@@ -255,7 +392,7 @@ describe('PlanStore — loud-fail on illegal transitions', () => {
   it('phase.status.changed for unknown plan throws', () => {
     const store = openPlanStore('p-plans-no-plan-status');
     try {
-      expect(() => store.changePhaseStatus('ghost-plan', 'ph-1', 'building')).toThrow(
+      expect(() => store.changePhaseStatus('ghost-plan', 'ph-1', 'building', ACTOR)).toThrow(
         /unknown plan/i,
       );
     } finally {
@@ -266,7 +403,9 @@ describe('PlanStore — loud-fail on illegal transitions', () => {
   it('replan for unknown plan throws', () => {
     const store = openPlanStore('p-plans-no-plan-replan');
     try {
-      expect(() => store.recordReplan('ghost-plan', 'reason', [])).toThrow(/unknown plan/i);
+      expect(() => store.recordReplan('ghost-plan', 'reason', SAMPLE_PHASES, ACTOR)).toThrow(
+        /unknown plan/i,
+      );
     } finally {
       store.close();
     }
@@ -366,8 +505,9 @@ describe('PlanStore — replay-equal: live fold → rebuildAll → byte-equal', 
       const plan = store.recordDraft({
         taskId: 'task-ts',
         goal: 'G',
-        taskCriteria: [],
-        phases: [],
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
       });
       expect(plan.draftedTs).toBeGreaterThan(0);
       expect(typeof plan.draftedTs).toBe('number');
@@ -383,8 +523,14 @@ describe('PlanStore — pristine-repo round-trip', () => {
     assertRepoPristine(repoDir, () => {
       const store = openPlanStore('p-plans-pristine');
       try {
-        store.recordDraft({ taskId: 'task-1', goal: 'G', taskCriteria: [], phases: SAMPLE_PHASES });
-        store.changePhaseStatus('task-1', 'ph-1', 'building');
+        store.recordDraft({
+          taskId: 'task-1',
+          goal: 'G',
+          taskCriteria: [WIRED_CRITERION],
+          phases: SAMPLE_PHASES,
+          actor: ACTOR,
+        });
+        store.changePhaseStatus('task-1', 'ph-1', 'building', ACTOR);
         expect(store.getPlan('task-1')).not.toBeUndefined();
         expect(store.listPlans()).toHaveLength(1);
       } finally {

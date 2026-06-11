@@ -2,11 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { OPERATOR } from '../../mail/events.js';
 import { openMailStore, type MailStore } from '../../mail/mail-store.js';
 import { openRegistry, type ProjectRegistry } from '../../registry/registry.js';
 import { openRosterStore, type RosterStore } from '../../roles/roster-store.js';
 import { ROLE_PROFILES } from '../../roles/profile.js';
 import { openPlanStore, type PlanStore } from '../../plans/plans-store.js';
+import { openSpecStore, type SpecStore } from '../../specs/specs-store.js';
 import { buildCoreRegistry } from '../core-registry.js';
 import { checkToolCompleteness } from '../completeness.js';
 import { invokeTool } from '../invoke.js';
@@ -14,12 +16,13 @@ import type { ToolContext } from '../context.js';
 
 // L6b E1 — co_plan_ingest: coordinator ingests a wired plan (green-on-real); non-coordinators
 // rejected; fuzzy criterion (no verify) rejected (red-on-fuzzy, E2 validator gate);
-// dangling-dep rejected; ctx.plans/ctx.roster guards.
+// dangling-dep rejected; locked-spec cohesion and ctx.plans/ctx.specs/ctx.roster guards.
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
 let mailStores: MailStore[] = [];
 let planStores: PlanStore[] = [];
+let specStores: SpecStore[] = [];
 let rosterStores: RosterStore[] = [];
 let registries: ProjectRegistry[] = [];
 
@@ -28,6 +31,7 @@ beforeEach(() => {
   dataDirs = [];
   mailStores = [];
   planStores = [];
+  specStores = [];
   rosterStores = [];
   registries = [];
   const dir = mkdtempSync(join(tmpdir(), 'co-plan-ingest-'));
@@ -39,12 +43,14 @@ afterEach(() => {
   process.env = ORIGINAL_ENV;
   for (const m of mailStores) m.close();
   for (const p of planStores) p.close();
+  for (const s of specStores) s.close();
   for (const r of rosterStores) r.close();
   for (const r of registries) r.close();
   for (const dir of dataDirs) rmSync(dir, { recursive: true, force: true });
   dataDirs = [];
   mailStores = [];
   planStores = [];
+  specStores = [];
   rosterStores = [];
   registries = [];
 });
@@ -52,6 +58,7 @@ afterEach(() => {
 function openStores(id: string): {
   mail: MailStore;
   plans: PlanStore;
+  specs: SpecStore;
   roster: RosterStore;
   registry: ProjectRegistry;
 } {
@@ -59,15 +66,17 @@ function openStores(id: string): {
   mailStores.push(mail);
   const plans = openPlanStore(id);
   planStores.push(plans);
+  const specs = openSpecStore(id);
+  specStores.push(specs);
   const roster = openRosterStore(id);
   rosterStores.push(roster);
   const registry = openRegistry();
   registries.push(registry);
-  return { mail, plans, roster, registry };
+  return { mail, plans, specs, roster, registry };
 }
 
 function makeCtx(id: string, agent: string, overrides: Partial<ToolContext> = {}): ToolContext {
-  const { mail, plans, roster, registry } = openStores(id);
+  const { mail, plans, specs, roster, registry } = openStores(id);
   return {
     agent,
     projectId: id,
@@ -75,6 +84,7 @@ function makeCtx(id: string, agent: string, overrides: Partial<ToolContext> = {}
     mail,
     registry,
     plans,
+    specs,
     roster,
     ...overrides,
   };
@@ -107,10 +117,30 @@ const WIRED_INGEST_INPUT = {
 
 const registry = buildCoreRegistry();
 
+function seedLockedSpec(
+  ctx: ToolContext,
+  input: {
+    task_id: string;
+    goal: string;
+    task_criteria: readonly { text: string; verify?: string }[];
+  },
+): void {
+  ctx.specs!.recordDraft({
+    taskId: input.task_id,
+    title: input.goal,
+    goal: input.goal,
+    criteria: input.task_criteria,
+    body: input.goal,
+    actor: 'coord-1',
+  });
+  ctx.specs!.recordLock(input.task_id, OPERATOR);
+}
+
 describe('co_plan_ingest — coordinator ingests a concrete+wired plan (green-on-real)', () => {
   it('records the plan and returns the PlanRecord', async () => {
     const ctx = makeCtx('p-ingest-coord', 'coord-1');
     ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+    seedLockedSpec(ctx, WIRED_INGEST_INPUT);
 
     const result = (await invokeTool(
       registry,
@@ -153,6 +183,7 @@ describe('co_plan_ingest — caller must be a coordinator', () => {
     const ctx = makeCtx('p-ingest-noncoord', 'impl-1');
     ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
     ctx.roster!.recordAgent({ agentId: 'impl-1', role: 'implementer', parent: 'coord-1' });
+    seedLockedSpec(ctx, WIRED_INGEST_INPUT);
 
     await expect(invokeTool(registry, ctx, 'co_plan_ingest', WIRED_INGEST_INPUT)).rejects.toThrow(
       /co_plan_ingest.*requires coordinator/i,
@@ -162,6 +193,7 @@ describe('co_plan_ingest — caller must be a coordinator', () => {
 
   it('rejects an unregistered caller', async () => {
     const ctx = makeCtx('p-ingest-ghost', 'ghost-1');
+    seedLockedSpec(ctx, WIRED_INGEST_INPUT);
 
     await expect(invokeTool(registry, ctx, 'co_plan_ingest', WIRED_INGEST_INPUT)).rejects.toThrow(
       /co_plan_ingest.*not registered/i,
@@ -183,6 +215,7 @@ describe('co_plan_ingest — red-on-fuzzy: fuzzy criterion causes rejection (E2 
         { text: 'the feature works' }, // fuzzy — missing verify
       ],
     };
+    seedLockedSpec(ctx, fuzzyInput);
 
     await expect(invokeTool(registry, ctx, 'co_plan_ingest', fuzzyInput)).rejects.toThrow(
       /criterion violation/i,
@@ -199,6 +232,7 @@ describe('co_plan_ingest — red-on-fuzzy: fuzzy criterion causes rejection (E2 
     const fuzzyInput = {
       ...WIRED_INGEST_INPUT,
       task_id: 'task-fuzzy-phase',
+      task_criteria: WIRED_INGEST_INPUT.task_criteria,
       phases: [
         {
           phase_id: 'ph-1',
@@ -210,6 +244,7 @@ describe('co_plan_ingest — red-on-fuzzy: fuzzy criterion causes rejection (E2 
         },
       ],
     };
+    seedLockedSpec(ctx, fuzzyInput);
 
     await expect(invokeTool(registry, ctx, 'co_plan_ingest', fuzzyInput)).rejects.toThrow(
       /criterion violation/i,
@@ -225,7 +260,7 @@ describe('co_plan_ingest — red-on-fuzzy: fuzzy criterion causes rejection (E2 
     const fuzzyInput = {
       task_id: 'task-fuzzy-named',
       goal: 'G',
-      task_criteria: [],
+      task_criteria: WIRED_INGEST_INPUT.task_criteria,
       phases: [
         {
           phase_id: 'ph-fuzzy',
@@ -235,6 +270,7 @@ describe('co_plan_ingest — red-on-fuzzy: fuzzy criterion causes rejection (E2 
         },
       ],
     };
+    seedLockedSpec(ctx, fuzzyInput);
 
     let errorMessage = '';
     try {
@@ -257,7 +293,7 @@ describe('co_plan_ingest — structural DAG checks', () => {
     const danglingInput = {
       task_id: 'task-dangling',
       goal: 'G',
-      task_criteria: [],
+      task_criteria: WIRED_INGEST_INPUT.task_criteria,
       phases: [
         {
           phase_id: 'ph-1',
@@ -267,6 +303,7 @@ describe('co_plan_ingest — structural DAG checks', () => {
         },
       ],
     };
+    seedLockedSpec(ctx, danglingInput);
 
     await expect(invokeTool(registry, ctx, 'co_plan_ingest', danglingInput)).rejects.toThrow(
       /dangling dep/i,
@@ -281,7 +318,7 @@ describe('co_plan_ingest — structural DAG checks', () => {
     const dupInput = {
       task_id: 'task-dup-phase',
       goal: 'G',
-      task_criteria: [],
+      task_criteria: WIRED_INGEST_INPUT.task_criteria,
       phases: [
         { phase_id: 'ph-1', name: 'Phase 1', deps: [], criteria: [{ text: 't', verify: 'v' }] },
         {
@@ -292,6 +329,7 @@ describe('co_plan_ingest — structural DAG checks', () => {
         },
       ],
     };
+    seedLockedSpec(ctx, dupInput);
 
     await expect(invokeTool(registry, ctx, 'co_plan_ingest', dupInput)).rejects.toThrow(
       /duplicate phase_id/i,
@@ -306,15 +344,60 @@ describe('co_plan_ingest — structural DAG checks', () => {
     const cycleInput = {
       task_id: 'task-cycle',
       goal: 'G',
-      task_criteria: [],
+      task_criteria: WIRED_INGEST_INPUT.task_criteria,
       phases: [
         { phase_id: 'ph-a', name: 'A', deps: ['ph-b'], criteria: [{ text: 't', verify: 'v' }] },
         { phase_id: 'ph-b', name: 'B', deps: ['ph-a'], criteria: [{ text: 't', verify: 'v' }] },
       ],
     };
+    seedLockedSpec(ctx, cycleInput);
 
     await expect(invokeTool(registry, ctx, 'co_plan_ingest', cycleInput)).rejects.toThrow(/cycle/i);
     expect(ctx.plans!.getPlan('task-cycle')).toBeUndefined();
+  });
+
+  it('rejects a plan with no phases', async () => {
+    const ctx = makeCtx('p-ingest-empty-phases', 'coord-1');
+    ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+    const emptyInput = {
+      task_id: 'task-empty-phases',
+      goal: 'G',
+      task_criteria: WIRED_INGEST_INPUT.task_criteria,
+      phases: [],
+    };
+    seedLockedSpec(ctx, emptyInput);
+
+    await expect(invokeTool(registry, ctx, 'co_plan_ingest', emptyInput)).rejects.toThrow(
+      /at least one phase/i,
+    );
+    expect(ctx.plans!.getPlan('task-empty-phases')).toBeUndefined();
+  });
+});
+
+describe('co_plan_ingest — locked spec cohesion gate', () => {
+  it('rejects when there is no locked spec for the task', async () => {
+    const ctx = makeCtx('p-ingest-no-locked-spec', 'coord-1');
+    ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+
+    await expect(invokeTool(registry, ctx, 'co_plan_ingest', WIRED_INGEST_INPUT)).rejects.toThrow(
+      /no locked spec record/i,
+    );
+    expect(ctx.plans!.getPlan('task-ingest-1')).toBeUndefined();
+  });
+
+  it('rejects when task_criteria drift from the locked spec criteria', async () => {
+    const ctx = makeCtx('p-ingest-spec-drift', 'coord-1');
+    ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+    seedLockedSpec(ctx, WIRED_INGEST_INPUT);
+    const driftedInput = {
+      ...WIRED_INGEST_INPUT,
+      task_criteria: [{ text: 'different criterion', verify: 'pnpm test' }],
+    };
+
+    await expect(invokeTool(registry, ctx, 'co_plan_ingest', driftedInput)).rejects.toThrow(
+      /task_criteria must exactly match/i,
+    );
+    expect(ctx.plans!.getPlan('task-ingest-1')).toBeUndefined();
   });
 });
 
@@ -331,6 +414,13 @@ describe('co_plan_ingest — absent stores → loud-fail (Principle 9)', () => {
     await expect(
       invokeTool(registry, ctx as ToolContext, 'co_plan_ingest', WIRED_INGEST_INPUT),
     ).rejects.toThrow(/ctx\.roster absent/i);
+  });
+
+  it('missing ctx.specs → throws', async () => {
+    const ctx = { ...makeCtx('p-ingest-nospecs', 'coord-1'), specs: undefined };
+    await expect(
+      invokeTool(registry, ctx as ToolContext, 'co_plan_ingest', WIRED_INGEST_INPUT),
+    ).rejects.toThrow(/ctx\.specs absent/i);
   });
 });
 

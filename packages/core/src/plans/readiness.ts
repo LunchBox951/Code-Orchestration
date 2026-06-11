@@ -82,10 +82,13 @@ export function foldPhaseReadiness(input: PhaseReadinessInput): PhaseReadiness {
 }
 
 /**
- * Roll a task's phases up: fold each phase, then the task is ready iff EVERY phase is ready (vacuously
- * true for a plan with no phases — the literal "every phase is ready"). Pure + deterministic.
+ * Roll a task's phases up: fold each phase, then the task is ready iff EVERY phase is ready.
+ * An empty phase list is not a runnable plan, so it is never ready.
  */
 export function foldTaskReadiness(phases: readonly PhaseReadinessInput[]): TaskReadiness {
   const phaseResults = phases.map(foldPhaseReadiness);
-  return { ready: phaseResults.every((p) => p.ready), phases: phaseResults };
+  return {
+    ready: phaseResults.length > 0 && phaseResults.every((p) => p.ready),
+    phases: phaseResults,
+  };
 }
