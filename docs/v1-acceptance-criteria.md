@@ -38,7 +38,11 @@ These are the top-level conditions that, all met, *are* v1.
 - `SH-1` ☐ `co` runs a real multi-phase change on the **`co` repo itself** start to finish
   (spec-lock → phases → worktrees → review gate → gated merge) with zero prototype involvement.
 - `SH-2` ☐ `co` reads all of its own state/specs/plans from its **own program-data** — no `.co/`
-  dependency remains (Principle 12 — `pristine-repo`; Principle 14 — `recoverable`).
+  dependency remains (Principle 12 — `pristine-repo`; Principle 14 — `recoverable`). L6b lands the
+  **records half**: specs (`draft→locked→archived`, queryable via `co_spec_get`) and plans
+  (`co_plan_ingest`) are durable event-sourced program-data records with no `.co/specs` dependency
+  (see [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md), AC-L6b-1/4/5). Remaining: removing
+  the live `.co/`-read paths + the migration (SH-3).
 - `SH-3` ☐ The prototype footprint (`.co/`, `.claude/`, `.codex/`) is removed and the migration PR
   has landed on `main` ([`migration.md`](migration.md)).
 - `SH-4` ☐ `co` successfully operates on **at least one stranger repo**, including a **local-only
@@ -101,9 +105,15 @@ These are the top-level conditions that, all met, *are* v1.
 - `RG-3` ◐ Operator override exists, is **audited, and records its reason** (Principle 7). L6a
   lands the headless `co_merge`/`co_push`/`co_pr_merge` override path with operator-only reasoned
   audit records. Remaining: L7 hosted-surface enforcement/UX around invoking the override.
-- `RG-4` ☐ Acceptance criteria are the **cohesion contract**: the spec produces them, the plan
+- `RG-4` ◐ Acceptance criteria are the **cohesion contract**: the spec produces them, the plan
   structures them, the implementer targets them, tests encode them, the reviewer enforces them
-  (Principle 10) — and they trace to this document.
+  (Principle 10) — and they trace to this document. L6b lands the mechanism: the spec produces criteria
+  (`co_spec_draft` → operator `co_spec_lock`, **lock-gated by the validator**), the plan structures and
+  validates them (`co_plan_ingest` mechanically rejects fuzzy criteria — no wired command / vacuous
+  text), and the review gate resolves them from the **locked spec record** (`resolveSpecRefFromStore`,
+  never a `<TODO>`); see [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md) (AC-L6b-2/3/6).
+  Remaining: the live merge-gate call-site swap (the L7 conductor seam) and the full
+  implementer→tests→reviewer loop under self-hosting.
 - `RG-5` ◐ Only the **destructive boundary** is hard-blocked; protocol adherence is reactive nudges
   (Principle 6, `PERMISSIONS`). L6a lands the declared hard-block registry, drift check, and
   non-blocking nudges. Remaining: L7 runtime hook enforcement in the hosted agent surfaces.
@@ -133,9 +143,12 @@ These are the top-level conditions that, all met, *are* v1.
   replayable (Principle 14). L0 landed the append-only event log + projections/replay (config &
   registry are events; replay byte-equality tested); L1 is fully event-sourced over the L0 log (mail
   send/read + actionable state are events). L4 adds usage/cost/near-budget/placement events with
-  projector replay coverage and scope/payload identity guards. Remaining: agents/turns/reviews/phases
+  projector replay coverage and scope/payload identity guards. L6b adds **specs, plans, and phase
+  lifecycle** as events (`spec.drafted/locked/archived`, `plan.drafted`, `phase.status.changed`,
+  `phase.verified`, `plan.replanned`), replay-equal (see
+  [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md), AC-L6b-1/5). Remaining: agents/turns/reviews
   as events in later layers. Evidence: L0 on `main` (PR #11); L1 on `dev`; L4 dispatch/cost in
-  `co/l4-dispatch-cost`.
+  `co/l4-dispatch-cost`; L6b specs/plans in `co/l6b-core`.
 - `ST-2` ☐ The system can be **reconstructed and recovered** from its record after a crash/restart;
   stuck/zombie agents are reconciled back to WAITING (Principle 14, `STATE-and-RECOVERY`).
 - `ST-3` ☐ **No silent failures** — pre-flight (the doctor), in-flight (live stream monitoring),

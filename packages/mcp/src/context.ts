@@ -6,9 +6,11 @@ import {
   findSubRole,
   openDispatchStore,
   openMailStore,
+  openPlanStore,
   openRegistry,
   openReviewStore,
   openRosterStore,
+  openSpecStore,
   openWorktreeStore,
   parseSubRoleId,
   toolsForRole,
@@ -30,7 +32,7 @@ export const CO_PARENT_ENV = 'CO_PARENT';
 /** The launch-environment variable the mount may use when cwd is a slung, unregistered sandbox. */
 export const CO_PROJECT_ID_ENV = 'CO_PROJECT_ID';
 
-const OPERATOR_TOOL_NAMES = new Set(['co_merge', 'co_push', 'co_pr_merge']);
+const OPERATOR_TOOL_NAMES = new Set(['co_merge', 'co_push', 'co_pr_merge', 'co_spec_lock']);
 
 function toolsForOperator(): readonly ToolSpec[] {
   return buildCoreRegistry()
@@ -188,6 +190,16 @@ export function defaultContextFactory(): () => ToolContext {
     // same store.db is safe. A tool never opens its own store; the mount resolves and injects it.
     const roster = openRosterStore(projectId);
     closeOnFailure.push(() => roster.close());
+    // L6b: open + inject the spec store (spec draft/lock/archive projection). SpecsProjector owns a
+    // distinct scope (`spec:`) and read-model table (`specs`) from the other stores, so sharing the
+    // same store.db is safe. A tool never opens its own store; the mount resolves and injects it.
+    const specs = openSpecStore(projectId);
+    closeOnFailure.push(() => specs.close());
+    // L6b E1: open + inject the plan store (plan draft/phase-status/replan projection). PlansProjector
+    // owns distinct scopes (`plan:`) and read-model tables (`plans`, `plan_phases`) from the other
+    // stores, so sharing the same store.db is safe. A tool never opens its own store.
+    const plans = openPlanStore(projectId);
+    closeOnFailure.push(() => plans.close());
     let scopedSandbox: ReturnType<typeof worktrees.listWorktrees>[number] | undefined;
     if (explicitProjectId != null && resolvedFromCwd == null) {
       const normalizedCwd = resolve(cwd);
@@ -295,6 +307,8 @@ export function defaultContextFactory(): () => ToolContext {
       dispatch,
       reviews,
       roster,
+      specs,
+      plans,
       usageSourceFactory: defaultUsageSourceFactory,
     };
     return () => ctx;

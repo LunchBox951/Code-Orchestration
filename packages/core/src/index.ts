@@ -489,6 +489,7 @@ export {
   NO_LOCKED_SPEC_MARKER,
   resolveReviewSpecRef,
   renderReviewSpecRef,
+  resolveSpecRefFromStore,
 } from './review/spec-ref.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource
@@ -866,6 +867,113 @@ export {
   defaultCommitIdentityReader,
   defaultGitConfigIdentityReader,
 } from './permissions/identity-guard.js';
+
+// L6b F1 — durable spec record store + co_spec_get (broad spec visibility, F4 fix).
+// `criterionSchema`/`Criterion`: the shared acceptance-criterion type (plans task imports it too).
+export type { Criterion } from './specs/criteria-schema.js';
+export { criterionSchema } from './specs/criteria-schema.js';
+// Spec events: `spec.drafted` / `spec.locked` / `spec.archived` — event-sourced over L0.
+export type { SpecDrafted, SpecLocked, SpecArchived, SpecRecord } from './specs/events.js';
+export {
+  SPECS_EVENT_V,
+  EVENT_SPEC_DRAFTED,
+  EVENT_SPEC_LOCKED,
+  EVENT_SPEC_ARCHIVED,
+  SPEC_SCOPE_PREFIX,
+  specScope,
+  specDraftedSchema,
+  specLockedSchema,
+  specArchivedSchema,
+  specsSchemas,
+  specsUpcasters,
+  makeSpecDraftedEvent,
+  makeSpecLockedEvent,
+  makeSpecArchivedEvent,
+} from './specs/events.js';
+// Spec projection: the `SpecsProjector` folds spec events into a `specs` read-model table.
+export { SpecsProjector } from './specs/specs-projector.js';
+// Spec store facade: `openSpecStore` is the typed facade (record + read-back + replay-equal).
+export type { SpecStore } from './specs/specs-store.js';
+export { openSpecStore } from './specs/specs-store.js';
+
+// L6b F2 — the PURE criterion validator (D2): the structural acceptance-criteria gate. `validateCriteria`
+// returns one violation per failed criterion (`[]` ⇒ all valid); the PRIMARY check is a wired `verify`
+// command present (it never hard-codes a project command), the SECONDARY is a conservative `VACUOUS_PHRASES`
+// nudge. The plans task imports it; `co_spec_lock` runs it as the lock-time RG-4 join (fuzzy criteria
+// cannot be locked).
+export type { CriterionViolation } from './plans/criteria.js';
+export { validateCriteria, VACUOUS_PHRASES } from './plans/criteria.js';
+
+// L6b E1 — durable plan record store + co_plan_ingest (validator-gated).
+// Plan events: `plan.drafted` / `phase.status.changed` / `phase.verified` / `plan.replanned`.
+export type {
+  PhaseNode,
+  PhaseStatus,
+  PhaseRecord,
+  PlanRecord,
+  PlanDrafted,
+  PhaseStatusChanged,
+  PhaseVerified,
+  PlanReplanned,
+} from './plans/events.js';
+export {
+  PLANS_EVENT_V,
+  EVENT_PLAN_DRAFTED,
+  EVENT_PHASE_STATUS_CHANGED,
+  EVENT_PHASE_VERIFIED,
+  EVENT_PLAN_REPLANNED,
+  PLAN_SCOPE_PREFIX,
+  PHASE_STATUSES,
+  phaseStatusSchema,
+  phaseNodeSchema,
+  planDraftedSchema,
+  phaseStatusChangedSchema,
+  phaseVerifiedSchema,
+  planReplannedSchema,
+  plansSchemas,
+  plansUpcasters,
+  planScope,
+  makePlanDraftedEvent,
+  makePhaseStatusChangedEvent,
+  makePhaseVerifiedEvent,
+  makePlanReplannedEvent,
+} from './plans/events.js';
+// Plan projection: the `PlansProjector` folds plan events into `plans` and `plan_phases` read-model tables.
+export { PlansProjector } from './plans/plans-projector.js';
+// Plan store facade: `openPlanStore` is the typed facade (record + read-back + replay-equal).
+export type { PlanStore } from './plans/plans-store.js';
+export { openPlanStore } from './plans/plans-store.js';
+
+// L6b E3/D5 — the PHASE-READINESS FOLD (the riskiest unit): a pure, clock-free, deterministic
+// decision computing whether a phase (and the task) is ready = workersComplete ∧ phaseVerifiedPass.
+// Reviewers are EXCLUDED from completion accounting; a worker is complete iff its BRANCH is merged
+// (never by process-state) — the prototype's two named bugs, each with a regression test. The fold
+// READS `verifiedPass` (the single green phase.verified); it does NOT re-run criteria or call
+// validateCriteria. `co_phase_status` (coordinator+lead, read-only) assembles the inputs from the
+// stores via the shared branch-resolution convention (`resolveAgentBranch`/`branchMerged`).
+export type {
+  PhaseWorkerInput,
+  PhaseReadinessInput,
+  PhaseReadiness,
+  TaskReadiness,
+} from './plans/readiness.js';
+export { foldPhaseReadiness, foldTaskReadiness } from './plans/readiness.js';
+export { resolveAgentBranch, branchMerged } from './plans/worker-branch.js';
+
+// L6b E4 — the MAX-ACTIVE-CHILDREN cap (distinct from review/serialize.ts's per-target merge lock,
+// the other E4 primitive). `resolveMaxActiveChildren` is the config-cascade reader (default 2, clones
+// `resolveReviewRoundBudget`); `activeChildCount`/`childCapDisposition` are the PURE policy — active
+// children are non-reviewer children whose branch is not yet merged; at/over the cap a new dispatch
+// QUEUES → WAITING (a first-class `{queued:true}`, never a throw). Enforced at the co_sling dispatch
+// decision so excess dispatches WAIT.
+export type { CapChild, ChildCapDisposition } from './plans/child-cap.js';
+export {
+  MAX_ACTIVE_CHILDREN_KEY,
+  MAX_ACTIVE_CHILDREN_DEFAULT,
+  resolveMaxActiveChildren,
+  activeChildCount,
+  childCapDisposition,
+} from './plans/child-cap.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
