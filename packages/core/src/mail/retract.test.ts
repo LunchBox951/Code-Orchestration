@@ -23,7 +23,6 @@ import {
   mailUpcasters,
 } from './events.js';
 import { MailProjector } from './mail-projector.js';
-import { LiveDeliveryStub } from './delivery.js';
 import { openMailStore } from './mail-store.js';
 
 // ── temp program-data dir + repo fixtures per test (mirrors mail.test.ts) ─────
@@ -428,9 +427,8 @@ describe('mail.retracted — the sender withdraws a message (tombstone)', () => 
     }
   });
 
-  it('LiveDeliveryStub.retract fails loud with the documented L7 plug-point error', () => {
-    expect(() => new LiveDeliveryStub().retract()).toThrow(/not implemented|L7 plug-point/i);
-  });
+  // L7 C2 removed the throwing `LiveDeliveryStub`; the real `LiveDelivery.retract` delegates to
+  // `InProcessDelivery` (persist-only, no wake/inject) and is covered in live-delivery.test.ts.
 });
 
 describe('AC-L1-9 preserved — a log with a mail.retracted event replays byte-identical', () => {
