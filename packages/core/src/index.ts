@@ -1055,5 +1055,30 @@ export { ResearchProjector } from './research/research-projector.js';
 export type { ResearchStore } from './research/research-store.js';
 export { openResearchStore } from './research/research-store.js';
 
+// L7 B0 — durable session record: event + projector + store (AC-L7-7 sandbox).
+// One `session.created` per agent per pane; a second event for the same agent REPLACES the row
+// (current-session semantics). Replay-equal over L0 (INSERT OR REPLACE, no history table).
+export type { ResumeHandle, SessionCreated, SessionRecord } from './session/events.js';
+export {
+  SESSION_EVENT_V,
+  EVENT_SESSION_CREATED,
+  SESSION_SCOPE_PREFIX,
+  sessionScope,
+  sessionCreatedSchema,
+  sessionSchemas,
+  sessionUpcasters,
+  makeSessionCreatedEvent,
+} from './session/events.js';
+export { SessionProjector } from './session/session-projector.js';
+export type { SessionStore } from './session/session-store.js';
+export { openSessionStore } from './session/session-store.js';
+
+// L7 B0 — PtyHost / FakePty contract (FROZEN cross-phase interface — B1/C1/C2/E1/P1 all import).
+// PtyHost.spawn() returns a Pane; NodePtyHost (B1) wraps a real node-pty IPty over this interface.
+// FakePty is the in-sandbox test double: no real binaries, no timers, deterministic CI.
+export type { SpawnSpec, PtyExit, Pane, PtyHost } from './pty/pty-host.js';
+export type { FakePtyPane } from './pty/fake-pty.js';
+export { FakePty } from './pty/fake-pty.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
