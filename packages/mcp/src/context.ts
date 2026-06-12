@@ -16,6 +16,7 @@ import {
   openWorktreeStore,
   parseSubRoleId,
   toolsForRole,
+  type DeliveryFactory,
   type ProjectId,
   type Role,
   type ToolContext,
@@ -113,6 +114,17 @@ export interface ExplicitIdentity {
   readonly cwd: string;
 }
 
+/** Optional wiring for {@link openContextStores}. */
+export interface OpenContextStoresOptions {
+  /**
+   * Thread a delivery seam into the assembled mail store (the L7 routing seam). When present, the
+   * per-pane mail bus routes its writes through the factory's {@link DeliveryFactory} — e.g. a
+   * `LiveDelivery` whose wake/inject callbacks the Conductor binds to live panes — instead of the
+   * default in-process writer. Absent ⇒ the in-process default (the stdio mount path is unchanged).
+   */
+  readonly deliveryFactory?: DeliveryFactory;
+}
+
 /**
  * Open all per-project stores for `identity` and assemble a {@link ToolContext}. This is the
  * shared store-open + context assembly used by BOTH {@link defaultContextFactory} (env-sourced
@@ -120,10 +132,16 @@ export interface ExplicitIdentity {
  * Mount-specific env cross-checks (CO_PROJECT_ID vs cwd, CO_AGENT vs recorded worktree, roster
  * registration) belong to the calling mount, not here.
  *
+ * `opts.deliveryFactory` is the optional L7 routing seam: when set, the assembled mail bus delivers
+ * through it (a `LiveDelivery` bound to live panes) rather than the in-process default.
+ *
  * Returns a { ctx, close } pair; the caller is responsible for calling `close()` on error or
  * session end to release all opened stores.
  */
-export function openContextStores(identity: ExplicitIdentity): {
+export function openContextStores(
+  identity: ExplicitIdentity,
+  opts?: OpenContextStoresOptions,
+): {
   ctx: ToolContext;
   close: () => void;
 } {
@@ -141,7 +159,10 @@ export function openContextStores(identity: ExplicitIdentity): {
 
   try {
     const { agent, projectId, cwd } = identity;
-    const mail = openMailStore(projectId);
+    const mail = openMailStore(
+      projectId,
+      opts?.deliveryFactory != null ? { deliveryFactory: opts.deliveryFactory } : undefined,
+    );
     closeOnFailure.push(() => mail.close());
     const worktrees = openWorktreeStore(projectId);
     closeOnFailure.push(() => worktrees.close());

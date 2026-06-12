@@ -54,9 +54,11 @@ These are the top-level conditions that, all met, *are* v1.
 
 ## B. The two surfaces (P1, P2, P3, P15)
 
-- `SF-1` ⏸ `co` hosts the **authentic interactive `claude`/`codex`** in a real terminal emulator
-  (pty), not a headless reconstruction, not tmux (Principle 2). *Parked on the runtime-substrate
-  research — on the v1 critical path.*
+- `SF-1` ◐ `co` hosts the **authentic interactive `claude`/`codex`** in a real terminal emulator
+  (pty), not a headless reconstruction, not tmux (Principle 2). Substrate decided (Option C); L7 lands
+  the sandbox-tested pty host (`PtyHost`/`FakePty`) + the Conductor engine that drives it (spawn →
+  drive → bind → inject → route → classify liveness). Remaining: the host-side live proof against the
+  real `claude`/`codex` binaries.
 - `SF-2` ☐ The operator can **steer any agent mid-turn** from its terminal pane (answer, redirect,
   interrupt) without tearing it down (Principle 1).
 - `SF-3` ◐ Agents coordinate **only** via the typed, persisted **mail bus**; the operator is a
@@ -185,8 +187,9 @@ These are the top-level conditions that, all met, *are* v1.
   policy, default Claude+Codex account candidates, passive usage sources, and shared CLI/MCP core
   routing. Remaining: full live-session execution/monitoring behind the same abstraction and the
   self-host proof that both providers can run real worker turns.
-- `PV-2` ⏸ Interactive (non-headless) **subscription auth** works for both providers. *Couples to
-  the substrate research (spawn/transport).*
+- `PV-2` ◐ Interactive (non-headless) **subscription auth** works for both providers. Substrate
+  decided (Option C); L7 lands the spawn/transport seam, proven in-sandbox. Remaining: the host-side
+  live proof that interactive subscription auth works for both providers.
 
 ---
 
