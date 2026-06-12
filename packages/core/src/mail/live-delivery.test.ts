@@ -45,17 +45,33 @@ afterEach(() => {
 interface Seams extends LiveDeliveryOptions {
   readonly wakeCalls: string[];
   readonly injectCalls: Array<{ recipient: string; mail: DeliveredMail }>;
+  readonly wakeFailures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }>;
+  readonly injectFailures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }>;
 }
 function makeSeams(): Seams {
   const wakeCalls: string[] = [];
   const injectCalls: Array<{ recipient: string; mail: DeliveredMail }> = [];
+  const wakeFailures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
+  const injectFailures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
   return {
     wakeCalls,
     injectCalls,
+    wakeFailures,
+    injectFailures,
     wake: (recipient) => wakeCalls.push(recipient),
-    injectToRecipient: (recipient, mail) => injectCalls.push({ recipient, mail }),
+    injectToRecipient: (recipient, mail) => {
+      injectCalls.push({ recipient, mail });
+    },
+    onWakeFailure: (recipient, mail, error) => wakeFailures.push({ recipient, mail, error }),
+    onInjectFailure: (recipient, mail, error) => injectFailures.push({ recipient, mail, error }),
   };
 }
+
+const tick = (): Promise<void> => new Promise((resolve) => queueMicrotask(resolve));
+const flush = async (): Promise<void> => {
+  await tick();
+  await tick();
+};
 
 const ACTIONABLE: MailEnvelope = {
   type: MAIL_CLARIFY_REQUEST, // actionable in the kind registry
@@ -119,6 +135,215 @@ describe('LiveDelivery — deliver persists (delegation) + wakes + injects actio
       expect(mail.inbox('bob')[0]!.kind).toBe('informational');
       expect(seams.wakeCalls).toEqual(['bob']); // still woken
       expect(seams.injectCalls).toEqual([]); // informational is never injected
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('does not wake or inject again when an idempotent retry returns the existing row', () => {
+    const store = openProjectStore('p-live-idempotent-retry');
+    const seams = makeSeams();
+    const delivery = new LiveDelivery(
+      'p-live-idempotent-retry',
+      store,
+      [new MailProjector()],
+      seams,
+    );
+    const mail = openMailStore('p-live-idempotent-retry', { delivery });
+    try {
+      const envelope = { ...ACTIONABLE, idempotencyKey: 'clarify:once' };
+
+      const first = mail.send(envelope);
+      const second = mail.send(envelope);
+
+      expect(second.seq).toBe(first.seq);
+      expect(mail.inbox('bob')).toHaveLength(1);
+      expect(seams.wakeCalls).toEqual(['bob']);
+      expect(seams.injectCalls).toHaveLength(1);
+      expect(seams.injectCalls[0]!.mail).toEqual(first);
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('retries wake and injection on an idempotent retry after wake failed post-persist', () => {
+    const store = openProjectStore('p-live-idempotent-wake-retry');
+    const wakeFailures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
+    const injectCalls: Array<{ recipient: string; mail: DeliveredMail }> = [];
+    let wakeAttempts = 0;
+    const delivery = new LiveDelivery(
+      'p-live-idempotent-wake-retry',
+      store,
+      [new MailProjector()],
+      {
+        wake: () => {
+          wakeAttempts += 1;
+          if (wakeAttempts === 1) throw new Error('wake failed');
+        },
+        injectToRecipient: (recipient, mail) => {
+          injectCalls.push({ recipient, mail });
+        },
+        onWakeFailure: (recipient, mail, error) => wakeFailures.push({ recipient, mail, error }),
+        onInjectFailure: () => {},
+      },
+    );
+    const mail = openMailStore('p-live-idempotent-wake-retry', { delivery });
+    try {
+      const envelope = { ...ACTIONABLE, idempotencyKey: 'clarify:wake-once' };
+
+      const first = mail.send(envelope);
+      expect(wakeAttempts).toBe(1);
+      expect(wakeFailures).toHaveLength(1);
+      expect(injectCalls).toEqual([]);
+
+      const second = mail.send(envelope);
+      expect(second.seq).toBe(first.seq);
+      expect(wakeAttempts).toBe(2);
+      expect(wakeFailures).toHaveLength(1);
+      expect(injectCalls).toHaveLength(1);
+      expect(injectCalls[0]).toMatchObject({ recipient: 'bob', mail: first });
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('recovers live side effects for an existing idempotent mail in a new LiveDelivery instance', () => {
+    const projectId = 'p-live-idempotent-new-instance';
+    const seedStore = openProjectStore(projectId);
+    const envelope = { ...ACTIONABLE, idempotencyKey: 'clarify:after-restart' };
+    let seeded: DeliveredMail;
+    try {
+      seeded = new InProcessDelivery(projectId, seedStore, [new MailProjector()]).deliver(envelope);
+    } finally {
+      seedStore.close();
+    }
+
+    const liveStore = openProjectStore(projectId);
+    const seams = makeSeams();
+    const delivery = new LiveDelivery(projectId, liveStore, [new MailProjector()], seams);
+    try {
+      const delivered = delivery.deliver(envelope);
+
+      expect(delivered.seq).toBe(seeded!.seq);
+      expect(seams.wakeCalls).toEqual(['bob']);
+      expect(seams.injectCalls).toHaveLength(1);
+      expect(seams.injectCalls[0]!.mail).toEqual(seeded!);
+    } finally {
+      liveStore.close();
+    }
+  });
+
+  it('does not repeat live side effects in a new LiveDelivery instance after durable ack', () => {
+    const projectId = 'p-live-idempotent-new-instance-acked';
+    const envelope = { ...ACTIONABLE, idempotencyKey: 'clarify:after-success' };
+    let first: DeliveredMail;
+    const firstStore = openProjectStore(projectId);
+    const firstSeams = makeSeams();
+    try {
+      const firstDelivery = new LiveDelivery(
+        projectId,
+        firstStore,
+        [new MailProjector()],
+        firstSeams,
+      );
+      first = firstDelivery.deliver(envelope);
+      expect(firstSeams.wakeCalls).toEqual(['bob']);
+      expect(firstSeams.injectCalls).toHaveLength(1);
+    } finally {
+      firstStore.close();
+    }
+
+    const secondStore = openProjectStore(projectId);
+    const secondSeams = makeSeams();
+    try {
+      const secondDelivery = new LiveDelivery(
+        projectId,
+        secondStore,
+        [new MailProjector()],
+        secondSeams,
+      );
+      const second = secondDelivery.deliver(envelope);
+
+      expect(second.seq).toBe(first!.seq);
+      expect(secondSeams.wakeCalls).toEqual([]);
+      expect(secondSeams.injectCalls).toEqual([]);
+    } finally {
+      secondStore.close();
+    }
+  });
+
+  it('reports async injection rejection instead of dropping it after wake', async () => {
+    const store = openProjectStore('p-live-inject-fail');
+    const failures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
+    const delivery = new LiveDelivery('p-live-inject-fail', store, [new MailProjector()], {
+      wake: () => {},
+      injectToRecipient: async () => {
+        throw new Error('inject failed');
+      },
+      onWakeFailure: () => {},
+      onInjectFailure: (recipient, mail, error) => failures.push({ recipient, mail, error }),
+    });
+    const mail = openMailStore('p-live-inject-fail', { delivery });
+    try {
+      const delivered = mail.send(ACTIONABLE);
+      await tick();
+
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({ recipient: 'bob', mail: delivered });
+      expect(failures[0]!.error).toBeInstanceOf(Error);
+      expect((failures[0]!.error as Error).message).toBe('inject failed');
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('serializes async injections per recipient and continues after a rejection', async () => {
+    const store = openProjectStore('p-live-inject-serial');
+    const calls: Array<{ recipient: string; mail: DeliveredMail }> = [];
+    const failures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
+    let rejectFirst!: (error: unknown) => void;
+    let resolveSecond!: () => void;
+    const delivery = new LiveDelivery('p-live-inject-serial', store, [new MailProjector()], {
+      wake: () => {},
+      injectToRecipient: (recipient, mail) => {
+        calls.push({ recipient, mail });
+        if (calls.length === 1) {
+          return new Promise<void>((_resolve, reject) => {
+            rejectFirst = reject;
+          });
+        }
+        return new Promise<void>((resolve) => {
+          resolveSecond = resolve;
+        });
+      },
+      onWakeFailure: () => {},
+      onInjectFailure: (recipient, mail, error) => failures.push({ recipient, mail, error }),
+    });
+    const mail = openMailStore('p-live-inject-serial', { delivery });
+    try {
+      const first = mail.send(ACTIONABLE);
+      await flush();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ recipient: 'bob', mail: first });
+
+      const second = mail.send({ ...ACTIONABLE, subject: 'second question' });
+      await flush();
+      expect(calls).toHaveLength(1);
+
+      rejectFirst(new Error('first inject failed'));
+      await flush();
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({ recipient: 'bob', mail: first });
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toMatchObject({ recipient: 'bob', mail: second });
+
+      resolveSecond();
+      await flush();
+      expect(failures).toHaveLength(1);
     } finally {
       mail.close();
       store.close();

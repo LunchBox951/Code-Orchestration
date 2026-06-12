@@ -16,10 +16,14 @@ import {
   checkToolCompleteness,
   openMailStore,
   openRegistry,
+  openRosterStore,
+  openSessionStore,
   toolsForRole,
   type MailStore,
   type ProjectRegistry,
   type Role,
+  type RosterStore,
+  type SessionStore,
 } from '@co/core';
 import {
   LiveSessionHostImpl,
@@ -33,6 +37,8 @@ let dataDirs: string[] = [];
 let openedSessions: HostedSession[] = [];
 let openedRegistries: ProjectRegistry[] = [];
 let openedMailStores: MailStore[] = [];
+let openedRosterStores: RosterStore[] = [];
+let openedSessionStores: SessionStore[] = [];
 
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
@@ -40,12 +46,14 @@ beforeEach(() => {
   openedSessions = [];
   openedRegistries = [];
   openedMailStores = [];
+  openedRosterStores = [];
+  openedSessionStores = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const s of openedSessions) {
     try {
-      s.close();
+      await s.close();
     } catch {
       /* best-effort */
     }
@@ -64,6 +72,20 @@ afterEach(() => {
       /* best-effort */
     }
   }
+  for (const r of openedRosterStores) {
+    try {
+      r.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+  for (const s of openedSessionStores) {
+    try {
+      s.close();
+    } catch {
+      /* best-effort */
+    }
+  }
   process.env = ORIGINAL_ENV;
   for (const dir of dataDirs) {
     try {
@@ -76,6 +98,8 @@ afterEach(() => {
   openedSessions = [];
   openedMailStores = [];
   openedRegistries = [];
+  openedRosterStores = [];
+  openedSessionStores = [];
 });
 
 /**
@@ -92,6 +116,40 @@ function makeProject(): { projectId: string; cwd: string } {
   const cwd = join(dataDir, 'repo');
   const projectId = registry.register(cwd);
   return { projectId, cwd };
+}
+
+function makeHostedIdentity(
+  identity: Omit<HostedIdentity, 'pane' | 'provider' | 'resume'> &
+    Partial<Pick<HostedIdentity, 'pane' | 'provider' | 'resume'>>,
+): HostedIdentity {
+  const provider = identity.provider ?? 'claude';
+  return {
+    ...identity,
+    pane: identity.pane ?? `pane-${identity.agent}`,
+    provider,
+    resume:
+      identity.resume ??
+      (provider === 'claude'
+        ? { provider: 'claude', sessionId: `session-${identity.agent}` }
+        : { provider: 'codex', codexHome: `/tmp/codex-${identity.agent}` }),
+  };
+}
+
+/** Seed the already-existing parent chain that a real Conductor spawn would have recorded earlier. */
+function seedParentChain(projectId: string, parent: string): void {
+  const roster = openRosterStore(projectId);
+  try {
+    if (parent === '@operator') return;
+    roster.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+    if (parent === 'coord-1') return;
+    if (parent === 'lead-1') {
+      roster.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
+      return;
+    }
+  } finally {
+    roster.close();
+  }
+  throw new Error(`test fixture does not know how to seed parent '${parent}'`);
 }
 
 /**
@@ -116,13 +174,14 @@ async function hostAndConnect(
 describe('LiveSessionHostImpl — handshake + role-scoped surface', () => {
   it('completes initialize→initialized and exposes exactly the implementer toolset', async () => {
     const { projectId, cwd } = makeProject();
-    const identity: HostedIdentity = {
+    const identity = makeHostedIdentity({
       agent: 'impl-x',
       role: 'implementer',
       parent: 'lead-1',
       projectId,
       cwd,
-    };
+    });
+    seedParentChain(projectId, identity.parent);
 
     const { client } = await hostAndConnect(identity);
     const { tools } = await client.listTools();
@@ -140,13 +199,14 @@ describe('LiveSessionHostImpl — handshake + role-scoped surface', () => {
   it('scopes each base role to exactly its own toolset', async () => {
     for (const role of BASE_ROLES as readonly Role[]) {
       const { projectId, cwd } = makeProject();
-      const identity: HostedIdentity = {
+      const identity = makeHostedIdentity({
         agent: `agent-${role}`,
         role,
-        parent: '@operator',
+        parent: role === 'coordinator' ? '@operator' : 'coord-1',
         projectId,
         cwd,
-      };
+      });
+      seedParentChain(projectId, identity.parent);
       const { client } = await hostAndConnect(identity);
       const { tools } = await client.listTools();
       const exposed = tools.map((t) => t.name).sort();
@@ -163,13 +223,14 @@ describe('LiveSessionHostImpl — handshake + role-scoped surface', () => {
 describe('LiveSessionHostImpl — authoritative identity injection (AC-L7-2)', () => {
   it('acts as the conductor-supplied agent, not any identity the client could claim', async () => {
     const { projectId, cwd } = makeProject();
-    const identity: HostedIdentity = {
+    const identity = makeHostedIdentity({
       agent: 'impl-x',
       role: 'implementer',
       parent: 'lead-1',
       projectId,
       cwd,
-    };
+    });
+    seedParentChain(projectId, identity.parent);
 
     const { client } = await hostAndConnect(identity);
 
@@ -183,15 +244,88 @@ describe('LiveSessionHostImpl — authoritative identity injection (AC-L7-2)', (
     expect(status.project_id).toBe(projectId);
   });
 
-  it('mail sent from the hosted session is stamped with the conductor-supplied agent', async () => {
+  it('records the hosted agent in the roster before serving role-gated tools', async () => {
     const { projectId, cwd } = makeProject();
-    const identity: HostedIdentity = {
+    const identity = makeHostedIdentity({
       agent: 'impl-x',
       role: 'implementer',
       parent: 'lead-1',
       projectId,
       cwd,
-    };
+    });
+    seedParentChain(projectId, identity.parent);
+
+    const { client } = await hostAndConnect(identity);
+
+    const issues = await client.callTool({ name: 'co_issue_list', arguments: {} });
+    expect(issues.isError).toBeFalsy();
+    const roster = openRosterStore(projectId);
+    openedRosterStores.push(roster);
+    expect(roster.getAgent('impl-x')).toMatchObject({
+      agentId: 'impl-x',
+      role: 'implementer',
+      parent: 'lead-1',
+    });
+  });
+
+  it('preserves a hosted sub-role in the roster record', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-code',
+      role: 'implementer',
+      subRole: 'code',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+
+    await hostAndConnect(identity);
+
+    const roster = openRosterStore(projectId);
+    openedRosterStores.push(roster);
+    expect(roster.getAgent('impl-code')).toMatchObject({
+      agentId: 'impl-code',
+      role: 'implementer',
+      subRole: 'code',
+      parent: 'lead-1',
+    });
+  });
+
+  it('accepts an already-registered hosted sub-role when the identity matches', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const roster = openRosterStore(projectId);
+    openedRosterStores.push(roster);
+    roster.recordAgent({
+      agentId: 'impl-code',
+      role: 'implementer',
+      subRole: 'code',
+      parent: 'lead-1',
+    });
+    const identity = makeHostedIdentity({
+      agent: 'impl-code',
+      role: 'implementer',
+      subRole: 'code',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+
+    await expect(hostAndConnect(identity)).resolves.toBeDefined();
+    expect(roster.getAgent('impl-code')?.subRole).toBe('code');
+  });
+
+  it('mail sent from the hosted session is stamped with the conductor-supplied agent', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-x',
+      role: 'implementer',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
 
     const { client } = await hostAndConnect(identity);
 
@@ -224,13 +358,14 @@ describe('LiveSessionHostImpl — authoritative identity injection (AC-L7-2)', (
     seedMail.close();
     openedMailStores.splice(openedMailStores.indexOf(seedMail), 1);
 
-    const identity: HostedIdentity = {
+    const identity = makeHostedIdentity({
       agent: 'impl-x',
       role: 'implementer',
       parent: 'lead-1',
       projectId,
       cwd,
-    };
+    });
+    seedParentChain(projectId, identity.parent);
     const { client } = await hostAndConnect(identity);
 
     const inboxRes = await client.callTool({ name: 'co_mail_inbox', arguments: {} });
@@ -251,7 +386,13 @@ describe('LiveSessionHostImpl — fail-loud on missing identity (Principle 9)', 
     const [, serverTransport] = InMemoryTransport.createLinkedPair();
     await expect(
       host.hostSession(
-        { agent: '', role: 'implementer', parent: 'lead-1', projectId: 'proj-1', cwd: '/tmp' },
+        makeHostedIdentity({
+          agent: '',
+          role: 'implementer',
+          parent: 'lead-1',
+          projectId: 'proj-1',
+          cwd: '/tmp',
+        }),
         serverTransport,
       ),
     ).rejects.toThrow(/authoritative agent.*missing or blank/);
@@ -262,7 +403,13 @@ describe('LiveSessionHostImpl — fail-loud on missing identity (Principle 9)', 
     const [, serverTransport] = InMemoryTransport.createLinkedPair();
     await expect(
       host.hostSession(
-        { agent: '   ', role: 'implementer', parent: 'lead-1', projectId: 'proj-1', cwd: '/tmp' },
+        makeHostedIdentity({
+          agent: '   ',
+          role: 'implementer',
+          parent: 'lead-1',
+          projectId: 'proj-1',
+          cwd: '/tmp',
+        }),
         serverTransport,
       ),
     ).rejects.toThrow(/authoritative agent.*missing or blank/);
@@ -276,20 +423,22 @@ describe('LiveSessionHostImpl — two-pane identity isolation', () => {
     const p1 = makeProject();
     const p2 = makeProject();
 
-    const id1: HostedIdentity = {
+    const id1 = makeHostedIdentity({
       agent: 'impl-x',
       role: 'implementer',
       parent: 'lead-1',
       projectId: p1.projectId,
       cwd: p1.cwd,
-    };
-    const id2: HostedIdentity = {
+    });
+    const id2 = makeHostedIdentity({
       agent: 'impl-y',
       role: 'implementer',
       parent: 'lead-1',
       projectId: p2.projectId,
       cwd: p2.cwd,
-    };
+    });
+    seedParentChain(p1.projectId, id1.parent);
+    seedParentChain(p2.projectId, id2.parent);
 
     const { client: client1 } = await hostAndConnect(id1);
     const { client: client2 } = await hostAndConnect(id2);
@@ -307,6 +456,217 @@ describe('LiveSessionHostImpl — two-pane identity isolation', () => {
     expect(s1.project_id).toBe(p1.projectId);
     expect(s2.project_id).toBe(p2.projectId);
     expect(s1.project_id).not.toBe(s2.project_id);
+  });
+
+  it('refuses a second simultaneous host for the same project agent until the first closes', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-x',
+      role: 'implementer',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+
+    const host = new LiveSessionHostImpl();
+    const [, firstServerTransport] = InMemoryTransport.createLinkedPair();
+    const first = await host.hostSession(identity, firstServerTransport);
+    openedSessions.push(first);
+
+    const [, duplicateServerTransport] = InMemoryTransport.createLinkedPair();
+    await expect(host.hostSession(identity, duplicateServerTransport)).rejects.toThrow(
+      /already has an active hosted MCP session/i,
+    );
+
+    await first.close();
+
+    const [, nextServerTransport] = InMemoryTransport.createLinkedPair();
+    const next = await host.hostSession(identity, nextServerTransport);
+    openedSessions.push(next);
+  });
+
+  it('refuses a second simultaneous host for the same project agent across host instances', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-x',
+      role: 'implementer',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+
+    const firstHost = new LiveSessionHostImpl();
+    const secondHost = new LiveSessionHostImpl();
+    const [, firstServerTransport] = InMemoryTransport.createLinkedPair();
+    const first = await firstHost.hostSession(identity, firstServerTransport);
+    openedSessions.push(first);
+
+    const [, duplicateServerTransport] = InMemoryTransport.createLinkedPair();
+    await expect(secondHost.hostSession(identity, duplicateServerTransport)).rejects.toThrow(
+      /already has an active hosted MCP session/i,
+    );
+  });
+
+  it('refuses a second simultaneous host for the same project pane with a different agent', async () => {
+    const { projectId, cwd } = makeProject();
+    const firstIdentity = makeHostedIdentity({
+      agent: 'impl-x',
+      role: 'implementer',
+      parent: 'lead-1',
+      pane: 'pane-shared',
+      projectId,
+      cwd,
+    });
+    const secondIdentity = makeHostedIdentity({
+      agent: 'impl-y',
+      role: 'implementer',
+      parent: 'lead-1',
+      pane: 'pane-shared',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, firstIdentity.parent);
+
+    const firstHost = new LiveSessionHostImpl();
+    const secondHost = new LiveSessionHostImpl();
+    const [, firstServerTransport] = InMemoryTransport.createLinkedPair();
+    const first = await firstHost.hostSession(firstIdentity, firstServerTransport);
+    openedSessions.push(first);
+
+    const [, duplicateServerTransport] = InMemoryTransport.createLinkedPair();
+    await expect(secondHost.hostSession(secondIdentity, duplicateServerTransport)).rejects.toThrow(
+      /pane 'pane-shared' already has an active hosted MCP session/i,
+    );
+  });
+
+  it('does not poison active guards when opening the session store throws', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-x',
+      role: 'implementer',
+      parent: 'lead-1',
+      pane: 'pane-x',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+
+    const throwingHost = new LiveSessionHostImpl(() => {
+      throw new Error('open session store failed');
+    });
+    const [, failedTransport] = InMemoryTransport.createLinkedPair();
+    await expect(throwingHost.hostSession(identity, failedTransport)).rejects.toThrow(
+      /open session store failed/,
+    );
+
+    const normalHost = new LiveSessionHostImpl();
+    const [, nextTransport] = InMemoryTransport.createLinkedPair();
+    const session = await normalHost.hostSession(identity, nextTransport);
+    openedSessions.push(session);
+  });
+
+  it('rolls back and allows re-host when MCP transport connection throws', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-x',
+      role: 'implementer',
+      parent: 'lead-1',
+      pane: 'pane-x',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+
+    const host = new LiveSessionHostImpl();
+    const [, failingTransport] = InMemoryTransport.createLinkedPair();
+    failingTransport.start = async () => {
+      throw new Error('transport start failed');
+    };
+    await expect(host.hostSession(identity, failingTransport)).rejects.toThrow(
+      /transport start failed/,
+    );
+
+    const sessions = openSessionStore(projectId);
+    openedSessionStores.push(sessions);
+    expect(sessions.getSession(identity.agent)).toBeUndefined();
+
+    const [, nextTransport] = InMemoryTransport.createLinkedPair();
+    const session = await host.hostSession(identity, nextTransport);
+    openedSessions.push(session);
+  });
+
+  it('refuses a host when the B0 session store already has the pane active for another agent', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-y',
+      role: 'implementer',
+      parent: 'lead-1',
+      pane: 'pane-shared',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+    const sessions = openSessionStore(projectId);
+    openedSessionStores.push(sessions);
+    sessions.recordSession({
+      agentId: 'impl-x',
+      pane: 'pane-shared',
+      cwd,
+      provider: identity.provider,
+      resume: identity.resume,
+    });
+
+    const host = new LiveSessionHostImpl();
+    const [, serverTransport] = InMemoryTransport.createLinkedPair();
+    await expect(host.hostSession(identity, serverTransport)).rejects.toThrow(
+      /pane.*already hosted|duplicate pane/i,
+    );
+  });
+
+  it('refuses a host when the B0 session store already has an active record', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-x',
+      role: 'implementer',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+    const sessions = openSessionStore(projectId);
+    openedSessionStores.push(sessions);
+    sessions.recordSession({
+      agentId: identity.agent,
+      pane: identity.pane,
+      cwd,
+      provider: identity.provider,
+      resume: identity.resume,
+    });
+
+    const host = new LiveSessionHostImpl();
+    const [, serverTransport] = InMemoryTransport.createLinkedPair();
+    await expect(host.hostSession(identity, serverTransport)).rejects.toThrow(
+      /already has an active session|duplicate host/i,
+    );
+  });
+
+  it('close tears down the owned MCP transport, so later client calls fail loud', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-x',
+      role: 'implementer',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+    const { client, session } = await hostAndConnect(identity);
+
+    await session.close();
+
+    await expect(client.listTools()).rejects.toThrow(/not connected|closed/i);
   });
 });
 

@@ -11,18 +11,19 @@
  *     call pre-exec; isolated `CLAUDE_CONFIG_DIR` prevents user allow-rules/hooks from leaking.
  *   Codex  — isolated `CODEX_HOME` carries a config.toml whose `sandbox_mode` and
  *     `approval_policy = "never"` enforce at the syscall boundary; the `[projects] trust_level`
- *     pre-seeds trust to skip the interstitial.
+ *     pre-seeds trust to skip the interstitial, `[mcp_servers.co]` points at the co MCP command,
+ *     and inline Codex hooks run the hard-block gate with `matchBlock`.
  *
- * The builder records every {@link BlockRule} id it enforces in {@link PaneLaunchConfig.enforcedIds}.
- * {@link readEnforcedConfig} reads them back; {@link checkBlockListDrift} then verifies that the
- * declared registry and the enforced set are identical. Dropping a rule from `enforcedIds` causes
- * drift to flag `declared-not-enforced` — the check is real, not a tautology.
+ * {@link readEnforcedConfig} reads concrete provider artifacts back (Claude deny patterns / Codex
+ * isolated hooks), then {@link checkBlockListDrift} verifies declared vs enforced ids.
  */
 
 import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
+import type { PrelaunchFile } from '../pty/pty-host.js';
 import type { BlockRule } from './block-list.js';
 import { BLOCK_LIST } from './block-list.js';
+import { basename, isAbsolute } from 'node:path';
 
 /** Per-launch context the builder needs from the pane. */
 export interface PaneIdentity {
@@ -35,6 +36,12 @@ export interface PaneIdentity {
   readonly isolatedHomeDir: string;
   /** Path to the co MCP JSON config; forwarded to Claude `--mcp-config` when set. */
   readonly coMcpConfig?: string;
+  /** Codex MCP server command. Must be a host-injected trusted absolute path. */
+  readonly coMcpCommand: string;
+  /** Codex MCP server args. Defaults to none. */
+  readonly coMcpArgs?: readonly string[];
+  /** Codex hook CLI command. Must be a host-injected trusted absolute path. */
+  readonly coCliCommand: string;
 }
 
 /**
@@ -43,12 +50,6 @@ export interface PaneIdentity {
  */
 export interface PaneLaunchConfig {
   readonly provider: Provider;
-  /**
-   * Block-rule ids this config enforces. Consumed by {@link readEnforcedConfig} to produce an
-   * {@link EnforcedConfig} for the drift check. Dropping an id here causes drift to flag it as
-   * `declared-not-enforced` — the builder MUST list every rule it handles.
-   */
-  readonly enforcedIds: readonly string[];
   /** CLI args to append to `SpawnSpec.args` (provider-specific flags). */
   readonly args: readonly string[];
   /**
@@ -61,6 +62,20 @@ export interface PaneLaunchConfig {
    * The caller (host-side) performs the actual write; this builder is pure.
    */
   readonly codexConfigToml?: string;
+  /** Codex only: destination path for {@link codexConfigToml} under isolated CODEX_HOME. */
+  readonly codexConfigTomlPath?: string;
+  /** Codex only: rule-id sidecar consumed by the generated hook command. */
+  readonly codexBlockListRulesJson?: string;
+  /** Codex only: destination path for {@link codexBlockListRulesJson} under isolated CODEX_HOME. */
+  readonly codexBlockListRulesPath?: string;
+  /** Codex only: trusted host-injected MCP command expected in `config.toml`. */
+  readonly codexMcpCommand?: string;
+  /** Codex only: trusted host-injected MCP args expected in `config.toml`. */
+  readonly codexMcpArgs?: readonly string[];
+  /** Codex only: trusted hook command expected in `config.toml`. */
+  readonly codexHookCommand?: string;
+  /** Files the real host must materialize before spawning the pane. */
+  readonly prelaunchFiles?: readonly PrelaunchFile[];
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +108,10 @@ const CLAUDE_RULE_PATTERNS: ReadonlyMap<string, readonly string[]> = new Map([
   ['co-in-shell', ['Bash(co *)']],
 ]);
 
+export function claudeDisallowedPatternsForRule(ruleId: string): readonly string[] | undefined {
+  return CLAUDE_RULE_PATTERNS.get(ruleId);
+}
+
 function claudeDisallowedPatterns(blockList: readonly BlockRule[]): string[] {
   const patterns: string[] = [];
   for (const rule of blockList) {
@@ -124,21 +143,127 @@ function tomlStringEscape(value: string): string {
     .replace(/\r/g, '\\r');
 }
 
-function buildCodexConfigToml(identity: PaneIdentity): string {
+function tomlArray(values: readonly string[]): string {
+  return `[${values.map((value) => `"${tomlStringEscape(value)}"`).join(', ')}]`;
+}
+
+function shellDoubleQuote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`')}"`;
+}
+
+function requireAbsoluteCommand(name: string, command: string): string {
+  if (!isAbsolute(command)) {
+    throw new Error(
+      `buildPaneLaunchConfig(codex): ${name} must be an absolute path, got '${command}'.`,
+    );
+  }
+  if (command.endsWith('/env')) {
+    throw new Error(
+      `buildPaneLaunchConfig(codex): ${name} must not delegate through /usr/bin/env.`,
+    );
+  }
+  return command;
+}
+
+const CODEX_MCP_DELEGATING_COMMANDS = new Set([
+  'bash',
+  'bun',
+  'deno',
+  'node',
+  'nodejs',
+  'python',
+  'python3',
+  'sh',
+  'ts-node',
+  'tsx',
+]);
+
+function requireTrustedMcpExecutableArgs(command: string, args: readonly string[]): void {
+  const executable = basename(command).replace(/\.exe$/iu, '');
+  if (!CODEX_MCP_DELEGATING_COMMANDS.has(executable)) return;
+  const delegatedExecutable = args.find((arg) => arg !== '--' && !arg.startsWith('-'));
+  if (delegatedExecutable == null || !isAbsolute(delegatedExecutable)) {
+    throw new Error(
+      'buildPaneLaunchConfig(codex): coMcpArgs must include an absolute path when ' +
+        `coMcpCommand delegates through '${command}'.`,
+    );
+  }
+  if (delegatedExecutable.endsWith('/env')) {
+    throw new Error(
+      'buildPaneLaunchConfig(codex): coMcpArgs must not delegate through /usr/bin/env.',
+    );
+  }
+}
+
+interface CodexConfigArtifacts {
+  readonly codexConfigToml: string;
+  readonly codexMcpCommand: string;
+  readonly codexMcpArgs: readonly string[];
+  readonly codexHookCommand: string;
+}
+
+function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts {
+  const command = requireAbsoluteCommand('coMcpCommand', identity.coMcpCommand);
+  const args = [...(identity.coMcpArgs ?? [])];
+  requireTrustedMcpExecutableArgs(command, args);
+  const rulesPath = buildCodexBlockListRulesPath(identity);
+  const hookCli = requireAbsoluteCommand('coCliCommand', identity.coCliCommand);
+  const hookCommand = `${shellDoubleQuote(hookCli)} hook codex-block-list --rules ${shellDoubleQuote(rulesPath)}`;
   const lines: string[] = [
     'sandbox_mode = "workspace-write"',
     'approval_policy = "never"',
+    '',
+    '[features]',
+    'hooks = true',
     '',
     `[projects."${tomlStringEscape(identity.cwd)}"]`,
     'trust_level = "trusted"',
     '',
     '[mcp_servers.co]',
     'type = "stdio"',
+    `command = "${tomlStringEscape(command)}"`,
+    `args = ${tomlArray(args)}`,
+    '',
+    '[[hooks.PreToolUse]]',
+    'matcher = "Bash"',
+    '',
+    '[[hooks.PreToolUse.hooks]]',
+    'type = "command"',
+    `command = "${tomlStringEscape(hookCommand)}"`,
   ];
-  if (identity.coMcpConfig != null) {
-    lines.push(`config_path = "${tomlStringEscape(identity.coMcpConfig)}"`);
-  }
-  return lines.join('\n') + '\n';
+  return {
+    codexConfigToml: lines.join('\n') + '\n',
+    codexMcpCommand: command,
+    codexMcpArgs: args,
+    codexHookCommand: hookCommand,
+  };
+}
+
+function buildCodexBlockListRulesJson(blockList: readonly BlockRule[]): string {
+  return (
+    JSON.stringify(
+      {
+        version: 1,
+        tool: 'shell',
+        matcher: '@co/core/permissions/matchBlock',
+        rules: blockList.map((rule) => ({
+          id: rule.id,
+          category: rule.category,
+          description: rule.description,
+        })),
+      },
+      null,
+      2,
+    ) + '\n'
+  );
+}
+
+function buildCodexBlockListRulesPath(identity: PaneIdentity): string {
+  return `${identity.isolatedHomeDir.replace(/\/+$/u, '')}/hooks/co-block-list-rules.json`;
+}
+
+function buildCodexConfigTomlPath(identity: PaneIdentity): string {
+  return `${identity.isolatedHomeDir.replace(/\/+$/u, '')}/config.toml`;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +284,6 @@ function buildClaudeLaunchConfig(
   }
   return {
     provider: 'claude',
-    enforcedIds: blockList.map((r) => r.id),
     args,
     env: { CLAUDE_CONFIG_DIR: identity.isolatedHomeDir },
   };
@@ -169,12 +293,26 @@ function buildCodexLaunchConfig(
   identity: PaneIdentity,
   blockList: readonly BlockRule[],
 ): PaneLaunchConfig {
+  const { codexConfigToml, codexMcpCommand, codexMcpArgs, codexHookCommand } =
+    buildCodexConfigArtifacts(identity);
+  const codexConfigTomlPath = buildCodexConfigTomlPath(identity);
+  const codexBlockListRulesJson = buildCodexBlockListRulesJson(blockList);
+  const codexBlockListRulesPath = buildCodexBlockListRulesPath(identity);
   return {
     provider: 'codex',
-    enforcedIds: blockList.map((r) => r.id),
     args: [],
     env: { CODEX_HOME: identity.isolatedHomeDir },
-    codexConfigToml: buildCodexConfigToml(identity),
+    codexConfigToml,
+    codexConfigTomlPath,
+    codexBlockListRulesJson,
+    codexBlockListRulesPath,
+    codexMcpCommand,
+    codexMcpArgs,
+    codexHookCommand,
+    prelaunchFiles: [
+      { path: codexConfigTomlPath, contents: codexConfigToml },
+      { path: codexBlockListRulesPath, contents: codexBlockListRulesJson },
+    ],
   };
 }
 
@@ -186,9 +324,8 @@ function buildCodexLaunchConfig(
  * Build the per-pane isolated launch config for `provider`.
  *
  * Pure — no I/O. The returned `.env` and `.args` compose directly into a `SpawnSpec`.
- * The returned `.enforcedIds` lists every block rule this config enforces; the L7 drift
- * check ({@link readEnforcedConfig} + {@link checkBlockListDrift}) verifies the set matches
- * the declared registry.
+ * The L7 drift check ({@link readEnforcedConfig} + {@link checkBlockListDrift}) reads the concrete
+ * provider artifacts back and verifies that they cover the declared registry.
  *
  * @param provider - 'claude' or 'codex'
  * @param identity - Pane-specific context: cwd, isolated home dir, optional co MCP config path

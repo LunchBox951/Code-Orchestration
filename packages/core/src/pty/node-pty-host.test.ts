@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { NodePtyHost } from './node-pty-host.js';
 import type {
   IDisposableLike,
@@ -86,12 +89,29 @@ describe('NodePtyHost — spec → node-pty.spawn arg mapping', () => {
     expect(call.file).toBe('claude');
     expect(call.args).toEqual(['--disallowedTools', 'Bash']);
     expect(call.options.cwd).toBe('/work/agent-1');
-    expect(call.options.env).toEqual({
+    expect(call.options.env).toMatchObject({
       HOME: '/home/agent',
       CLAUDE_CONFIG_DIR: '/data/config/agent-1',
     });
+    expect(call.options.env?.PATH).toBeTruthy();
     expect(call.options.cols).toBe(220);
     expect(call.options.rows).toBe(50);
+  });
+
+  it('preserves a sanitized PATH while only using provider config homes from the spec', () => {
+    const mod = new FakeNodePty();
+    new NodePtyHost(mod).spawn({
+      command: 'codex',
+      args: [],
+      cwd: '/work/agent-1',
+      env: { CODEX_HOME: '/data/codex/agent-1' },
+    });
+
+    const env = mod.calls[0]!.options.env!;
+    expect(env.PATH).toBeTruthy();
+    expect(env.CODEX_HOME).toBe('/data/codex/agent-1');
+    expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(env.HOME).toBeUndefined();
   });
 
   it('defaults cols/rows when the spec omits them', () => {
@@ -109,6 +129,55 @@ describe('NodePtyHost — spec → node-pty.spawn arg mapping', () => {
     const call = mod.calls[0]!;
     expect(call.args).not.toBe(FULL_SPEC.args);
     expect(call.options.env).not.toBe(FULL_SPEC.env);
+  });
+});
+
+describe('NodePtyHost — prelaunch artifacts', () => {
+  it('materializes and verifies prelaunch files before spawning', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'co-node-pty-prelaunch-'));
+    const mod = new FakeNodePty();
+    const configPath = join(dir, 'codex', 'config.toml');
+    const rulesPath = join(dir, 'codex', 'hooks', 'co-block-list-rules.json');
+    try {
+      new NodePtyHost(mod).spawn({
+        command: 'codex',
+        args: [],
+        cwd: '/work/agent-1',
+        env: { CODEX_HOME: join(dir, 'codex') },
+        prelaunchFiles: [
+          { path: configPath, contents: 'sandbox_mode = "workspace-write"\n' },
+          { path: rulesPath, contents: '{"version":1}\n' },
+        ],
+      });
+
+      expect(readFileSync(configPath, 'utf8')).toBe('sandbox_mode = "workspace-write"\n');
+      expect(readFileSync(rulesPath, 'utf8')).toBe('{"version":1}\n');
+      expect(mod.calls).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed before spawn when a prelaunch file cannot be installed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'co-node-pty-prelaunch-fail-'));
+    const mod = new FakeNodePty();
+    const blocker = join(dir, 'not-a-directory');
+    writeFileSync(blocker, 'file blocks mkdir');
+    try {
+      expect(() =>
+        new NodePtyHost(mod).spawn({
+          command: 'codex',
+          args: [],
+          cwd: '/work/agent-1',
+          env: { CODEX_HOME: join(dir, 'codex') },
+          prelaunchFiles: [{ path: join(blocker, 'config.toml'), contents: 'x' }],
+        }),
+      ).toThrow();
+
+      expect(mod.calls).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

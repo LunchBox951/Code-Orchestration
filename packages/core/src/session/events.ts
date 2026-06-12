@@ -1,8 +1,8 @@
 /**
  * L7 session event definitions: the durable record of which pty session backs a given agent pane.
  * Stored in the PROJECT store (program-data only — Principle 12 pristine-repo). One stream per
- * agent, keyed by `session:<agentId>`. A new `session.created` for the same agent REPLACES the
- * current entry — current-session semantics, not a history log.
+ * agent, keyed by `session:<agentId>`. A second `session.created` for the same active agent fails
+ * loud until a later explicit `session.ended` event exists, so duplicate hosts cannot hide each other.
  */
 import { z } from 'zod';
 import type { NewEvent } from '../store/types.js';
@@ -12,8 +12,11 @@ import type { UpcasterRegistry } from '../replay/upcaster.js';
 /** Current payload schema version — v1; no upcasters yet. */
 export const SESSION_EVENT_V = 1;
 
-/** A pty session was created (or replaced) for an agent pane. */
+/** A pty session was created for an agent pane. */
 export const EVENT_SESSION_CREATED = 'session.created' as const;
+
+/** A pty session ended for an agent pane, clearing the active read-model row. */
+export const EVENT_SESSION_ENDED = 'session.ended' as const;
 
 /** Scope prefix for the per-agent session stream; suffix is the agent id. */
 export const SESSION_SCOPE_PREFIX = 'session:';
@@ -48,9 +51,17 @@ export const sessionCreatedSchema = z
   });
 export type SessionCreated = z.infer<typeof sessionCreatedSchema>;
 
+/** The `session.ended` payload — closes one active agent↔pane binding. */
+export const sessionEndedSchema = z.object({
+  agentId: z.string().min(1),
+  pane: z.string().min(1),
+});
+export type SessionEnded = z.infer<typeof sessionEndedSchema>;
+
 /** Current-version schema map for session events — validated on append AND on read (decode). */
 export const sessionSchemas: SchemaMap = new Map<string, z.ZodType>([
   [EVENT_SESSION_CREATED, sessionCreatedSchema],
+  [EVENT_SESSION_ENDED, sessionEndedSchema],
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -67,6 +78,22 @@ export function makeSessionCreatedEvent(projectId: string, rec: SessionCreated):
     projectId,
     scope: sessionScope(payload.agentId),
     type: EVENT_SESSION_CREATED,
+    v: SESSION_EVENT_V,
+    payload,
+    actor: payload.agentId,
+  };
+}
+
+/**
+ * Build + validate a `session.ended` NewEvent. The pane is included so stale pane teardown cannot
+ * accidentally clear a newer active session for the same agent.
+ */
+export function makeSessionEndedEvent(projectId: string, rec: SessionEnded): NewEvent {
+  const payload = sessionEndedSchema.parse(rec);
+  return {
+    projectId,
+    scope: sessionScope(payload.agentId),
+    type: EVENT_SESSION_ENDED,
     v: SESSION_EVENT_V,
     payload,
     actor: payload.agentId,

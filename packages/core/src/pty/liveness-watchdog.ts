@@ -81,6 +81,11 @@ export interface LivenessInput {
    * byte-quiescence — this is what separates a frozen (still-active) turn from a yielded silent-stop.
    */
   readonly turnActive: boolean;
+  /**
+   * Optional monotonic timestamp for the current turn start. When present, liveness ignores prior
+   * turn activity; zero bytes since this timestamp for the wedge window is a wedge.
+   */
+  readonly turnStartedAt?: number;
 }
 
 /** Classifier config. Extends the C2 detector config (provider/quiet window) with the wedge window. */
@@ -119,9 +124,17 @@ export function classifyLiveness(
   // to have gone quiet FROM — we do not synthesize a wedge from absence alone (mirrors detectTurnEnd).
   let lastByteAt: number | undefined;
   for (const ev of input.trace) {
-    if (ev.kind === 'bytes' && (lastByteAt === undefined || ev.at > lastByteAt)) lastByteAt = ev.at;
+    if (
+      ev.kind === 'bytes' &&
+      (input.turnStartedAt == null || ev.at >= input.turnStartedAt) &&
+      (lastByteAt === undefined || ev.at > lastByteAt)
+    ) {
+      lastByteAt = ev.at;
+    }
   }
-  const byteSilentForWedge = lastByteAt !== undefined && observedAt - lastByteAt >= wedgeMs;
+  const silenceStartedAt = lastByteAt ?? input.turnStartedAt;
+  const byteSilentForWedge =
+    silenceStartedAt !== undefined && observedAt - silenceStartedAt >= wedgeMs;
 
   // wedged — pid alive ∧ ACTIVE turn ∧ zero pty bytes ≥ WEDGE_MS. The process is frozen mid-turn: it
   // never yielded (turnActive) yet renders nothing (byte-silent) while the pid still exists (pidAlive).
@@ -139,7 +152,11 @@ export function classifyLiveness(
   // silent-stop — the agent YIELDED its turn (no longer active) but went idle with NO completion verb
   // and a quiet pty: it stopped without finishing. Reuse C2's detector for the idle + no-verb gate.
   if (!input.turnActive) {
-    const turnEnd = detectTurnEnd(input.trace, observedAt, config);
+    const trace =
+      input.turnStartedAt == null
+        ? input.trace
+        : input.trace.filter((ev) => ev.at >= input.turnStartedAt!);
+    const turnEnd = detectTurnEnd(trace, observedAt, config);
     if (turnEnd.idle && !turnEnd.sawCompletionVerb) {
       return {
         liveness: 'alive',
@@ -226,13 +243,14 @@ export class LivenessWatchdog {
       return verdict;
     }
 
-    // wedged | silent_stop — gentle-corrective-first, then STUCK if it persists.
+    // wedged | silent_stop — break-signal first (never lose the diagnosis), then gentle corrective,
+    // then STUCK if it persists.
     if (this.signaled === detected.kind) {
       this.markStuck(agent); // the break survived the corrective ⇒ escalate
     } else {
       this.signaled = detected.kind;
-      if (detected.triggerId !== undefined) await this.injectNudge(this.pane, detected.triggerId);
       this.onBreak(agent, detected);
+      if (detected.triggerId !== undefined) await this.injectNudge(this.pane, detected.triggerId);
     }
     return verdict;
   }

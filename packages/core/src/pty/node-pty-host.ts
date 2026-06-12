@@ -16,7 +16,9 @@
  * The real authed claude/codex reaching `ready` in a real node-pty is the operator's host-side proof
  * (AC-L7-1 `[host-live]`), not a sandbox job.
  */
-import type { Pane, PtyExit, PtyHost, SpawnSpec } from './pty-host.js';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute } from 'node:path';
+import type { Pane, PrelaunchFile, PtyExit, PtyHost, SpawnSpec } from './pty-host.js';
 
 /** node-pty `IDisposable`: returned by `onData`/`onExit`, cancels the subscription. */
 export interface IDisposableLike {
@@ -58,6 +60,7 @@ export type NodePtyModuleLoader = () => Promise<NodePtyModule>;
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 30;
 const PTY_NAME = 'xterm-256color';
+const DEFAULT_PATH = '/usr/local/bin:/usr/bin:/bin';
 
 let nodePaneCounter = 0;
 
@@ -124,13 +127,38 @@ export class NodePtyHost implements PtyHost {
   }
 
   spawn(spec: SpawnSpec): Pane {
+    materializePrelaunchFiles(spec.prelaunchFiles ?? []);
     const pty = this.#mod.spawn(spec.command, [...spec.args], {
       cwd: spec.cwd,
-      env: { ...spec.env },
+      env: sanitizedSpawnEnv(spec.env),
       cols: spec.cols ?? DEFAULT_COLS,
       rows: spec.rows ?? DEFAULT_ROWS,
       name: PTY_NAME,
     });
     return new NodePtyPane(`node-pane-${nodePaneCounter++}`, pty);
+  }
+}
+
+function sanitizedSpawnEnv(env: Readonly<Record<string, string>>): Record<string, string> {
+  return {
+    PATH: env['PATH'] ?? process.env.PATH ?? DEFAULT_PATH,
+    ...env,
+  };
+}
+
+function materializePrelaunchFiles(files: readonly PrelaunchFile[]): void {
+  for (const file of files) {
+    if (!isAbsolute(file.path)) {
+      throw new Error(`NodePtyHost.spawn: prelaunch file path must be absolute: '${file.path}'`);
+    }
+    mkdirSync(dirname(file.path), { recursive: true });
+    writeFileSync(file.path, file.contents, {
+      encoding: 'utf8',
+      mode: file.mode ?? 0o600,
+    });
+    const installed = readFileSync(file.path, 'utf8');
+    if (installed !== file.contents) {
+      throw new Error(`NodePtyHost.spawn: prelaunch file verification failed for '${file.path}'`);
+    }
   }
 }

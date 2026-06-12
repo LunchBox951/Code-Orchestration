@@ -361,7 +361,16 @@ describe('LiveSessionHostImpl — fail-loud on missing identity (Principle 9)', 
     // A blank/missing agent must throw (Principle 9 — never fabricate who is calling).
     await expect(
       host.hostSession(
-        { agent: '', role: 'implementer', parent: 'lead-1', projectId: 'proj-1', cwd: '/tmp' },
+        {
+          agent: '',
+          role: 'implementer',
+          parent: 'lead-1',
+          pane: 'pane-blank',
+          projectId: 'proj-1',
+          cwd: '/tmp',
+          provider: 'claude',
+          resume: { provider: 'claude', sessionId: 'session-blank' },
+        },
         {} as import('@modelcontextprotocol/sdk/shared/transport.js').Transport,
       ),
     ).rejects.toThrow(/authoritative agent.*missing or blank/);

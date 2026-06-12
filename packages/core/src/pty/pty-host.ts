@@ -8,6 +8,16 @@
  * callers can express "stop, don't kill" (e.g. SIGSTOP vs SIGKILL for the E1 liveness watchdog).
  */
 
+/** A file the real host must install and verify before launching the pane. */
+export interface PrelaunchFile {
+  /** Absolute destination path. */
+  readonly path: string;
+  /** Complete UTF-8 file contents. */
+  readonly contents: string;
+  /** Optional file mode for newly-created files. */
+  readonly mode?: number;
+}
+
 /** What a pane needs to launch. */
 export interface SpawnSpec {
   /** 'claude' | 'codex' | absolute path */
@@ -17,6 +27,8 @@ export interface SpawnSpec {
   readonly cwd: string;
   /** Per-pane isolated env (carries CODEX_HOME / CLAUDE_CONFIG_DIR for P1 isolation). */
   readonly env: Readonly<Record<string, string>>;
+  /** Host-side launch artifacts to write and verify before spawn (e.g. Codex config.toml/hooks). */
+  readonly prelaunchFiles?: readonly PrelaunchFile[];
   readonly cols?: number;
   readonly rows?: number;
 }

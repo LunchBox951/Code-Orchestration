@@ -6,6 +6,7 @@ import { injectMail } from './mail-injector.js';
 const ESC = '\u001B';
 const PASTE_START = ESC + '[200~';
 const PASTE_END = ESC + '[201~';
+const CLEAR_COMPOSER = '\u0015';
 
 const CLAUDE_SPEC: SpawnSpec = {
   command: 'claude',
@@ -64,6 +65,22 @@ describe('injectMail — multi-line: bracketed paste + one submit', () => {
 
     expect(pane.written).toEqual([PASTE_START + text + PASTE_END, '\r']);
   });
+
+  it('fails loud instead of retrying an uncertain delayed multiline echo', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const { delay, release } = controllableDelay();
+    const text = 'first line\nsecond line';
+    const p = injectMail(pane, text, { provider: 'claude', retryDelay: delay });
+    const rejection = expect(p).rejects.toThrow(/uncertain multiline retry/i);
+
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END]);
+    release();
+    await rejection;
+
+    pane.emit(text); // delayed echo after failure must not submit a turn
+    await tick();
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END]);
+  });
 });
 
 describe('injectMail — echo-verify retry (never blind-fire Enter)', () => {
@@ -75,12 +92,30 @@ describe('injectMail — echo-verify retry (never blind-fire Enter)', () => {
     expect(pane.written).toEqual(['ping']); // attempt 0: text written, no echo yet
     release(); // the settle window elapses with no echo → retry
     await tick();
-    expect(pane.written).toEqual(['ping', 'ping']); // attempt 1: re-written
+    expect(pane.written).toEqual(['ping', CLEAR_COMPOSER + 'ping']); // retry clears first
     expect(pane.written).not.toContain('\r'); // still no submit — the echo was never seen
 
     pane.emit('ping'); // NOW the composer echoes
     await p;
-    expect(pane.written).toEqual(['ping', 'ping', '\r']); // submit fires only after the echo
+    expect(pane.written).toEqual(['ping', CLEAR_COMPOSER + 'ping', '\r']); // submit only after echo
+  });
+
+  it('clears before retry so a delayed first echo cannot duplicate composer text', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const { delay, release } = controllableDelay();
+    const p = injectMail(pane, 'ping', { provider: 'claude', retryDelay: delay });
+
+    expect(pane.written).toEqual(['ping']);
+    release(); // attempt 0 timed out, but its echo may still arrive later
+    await tick();
+    expect(pane.written).toEqual(['ping', CLEAR_COMPOSER + 'ping']);
+
+    pane.emit('ping'); // delayed echo from the first accepted write
+    await p;
+
+    expect(pane.written).toEqual(['ping', CLEAR_COMPOSER + 'ping', '\r']);
+    expect(pane.written.filter((w) => w === 'ping')).toHaveLength(1);
+    expect(pane.written.filter((w) => w === CLEAR_COMPOSER + 'ping')).toHaveLength(1);
   });
 
   it('fails loud (never submits) when the composer never echoes within maxEchoAttempts', async () => {
@@ -99,11 +134,23 @@ describe('injectMail — echo-verify retry (never blind-fire Enter)', () => {
     }
     await rejection;
 
-    expect(pane.written).toEqual(['ping', 'ping', 'ping']); // 3 attempts, and NO submit Enter
+    expect(pane.written).toEqual(['ping', CLEAR_COMPOSER + 'ping', CLEAR_COMPOSER + 'ping']); // 3 attempts, and NO submit Enter
   });
 });
 
 describe('injectMail — continuous dialog-watcher', () => {
+  it('does not answer ordinary echoed mail text that contains a dialog anchor phrase', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const { delay } = controllableDelay();
+    const text = 'Question: do you want to proceed with option A?';
+    const p = injectMail(pane, text, { provider: 'claude', retryDelay: delay });
+
+    pane.emit(text);
+    await p;
+
+    expect(pane.written).toEqual([text, '\r']);
+  });
+
   it('answers an interleaving permission dialog without re-submitting the mail', async () => {
     const pane = new FakePty().spawn(CLAUDE_SPEC);
     const { delay } = controllableDelay();

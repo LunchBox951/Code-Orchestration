@@ -40,7 +40,9 @@ export const COMPLETION_VERBS: readonly string[] = ['co_finish', 'worker_done'];
 export type DetectorEvent =
   | { readonly kind: 'bytes'; readonly at: number; readonly bytes?: number }
   | { readonly kind: 'osc0'; readonly at: number; readonly title: string }
-  | { readonly kind: 'mcp'; readonly at: number; readonly verb: string };
+  | { readonly kind: 'mcp'; readonly at: number; readonly verb: string }
+  | { readonly kind: 'mcp_start'; readonly at: number; readonly verb: string }
+  | { readonly kind: 'mcp_end'; readonly at: number; readonly verb: string };
 
 /** Why the detector believes the turn is idle (diagnostics for E1; reporting only — triggers nothing). */
 export type IdleSignal = 'byte-quiescence' | 'codex-osc0' | 'mcp-quiescence';
@@ -76,6 +78,7 @@ export function detectTurnEnd(
 
   let lastByteAt: number | undefined;
   let lastMcpAt: number | undefined;
+  let activeMcpCalls = 0;
   let latestOsc0: { at: number; title: string } | undefined;
   let sawCompletionVerb = false;
 
@@ -85,6 +88,16 @@ export function detectTurnEnd(
         if (lastByteAt === undefined || ev.at > lastByteAt) lastByteAt = ev.at;
         break;
       case 'mcp':
+        if (lastMcpAt === undefined || ev.at > lastMcpAt) lastMcpAt = ev.at;
+        if (COMPLETION_VERBS.includes(ev.verb)) sawCompletionVerb = true;
+        break;
+      case 'mcp_start':
+        activeMcpCalls += 1;
+        if (lastMcpAt === undefined || ev.at > lastMcpAt) lastMcpAt = ev.at;
+        if (COMPLETION_VERBS.includes(ev.verb)) sawCompletionVerb = true;
+        break;
+      case 'mcp_end':
+        activeMcpCalls = Math.max(0, activeMcpCalls - 1);
         if (lastMcpAt === undefined || ev.at > lastMcpAt) lastMcpAt = ev.at;
         if (COMPLETION_VERBS.includes(ev.verb)) sawCompletionVerb = true;
         break;
@@ -103,19 +116,21 @@ export function detectTurnEnd(
   // alive no matter what a stale OSC0/MCP signal says. A session that never rendered any byte is NOT
   // declared idle by absence alone (we have nothing to have gone quiet FROM).
   const byteQuiet = lastByteAt !== undefined && observedAt - lastByteAt >= quietWindow;
-  // MCP quiescence: no calls, or the last call is older than the window. Corroborates only.
-  const mcpQuiet = lastMcpAt === undefined || observedAt - lastMcpAt >= quietWindow;
+  // MCP quiescence: no active calls, and the last point/span edge is older than the window.
+  // Corroborates only, but an in-flight call blocks idle even if it started before the quiet window.
+  const mcpQuiet =
+    activeMcpCalls === 0 && (lastMcpAt === undefined || observedAt - lastMcpAt >= quietWindow);
   // Codex's OSC0 idle edge corroborates (codex only). Claude's `✳`-prefixed title is NOT an edge and
   // is deliberately ignored here, so a persistent `✳` can never hang detection.
   const codexOsc0IdleEdge =
     config.provider === 'codex' && latestOsc0 !== undefined && isCodexIdleTitle(latestOsc0.title);
 
-  const idle = byteQuiet;
+  const idle = byteQuiet && mcpQuiet;
   const idleSignals: IdleSignal[] = [];
   if (idle) {
     idleSignals.push('byte-quiescence');
     if (codexOsc0IdleEdge) idleSignals.push('codex-osc0');
-    if (mcpQuiet) idleSignals.push('mcp-quiescence');
+    idleSignals.push('mcp-quiescence');
   }
 
   return { idle, sawCompletionVerb, idleSignals };

@@ -24,6 +24,7 @@ export type DialogName = 'claude_permission' | 'codex_approval';
 export interface DialogMatch {
   readonly name: DialogName;
   readonly answer: string;
+  readonly signature: string;
 }
 
 interface DialogSig {
@@ -38,13 +39,21 @@ const DIALOG_SIGNATURES: Readonly<Record<Provider, readonly DialogSig[]>> = {
   claude: [
     // [synthesized] Claude's MCP-tool permission prompt ("Do you want to proceed?" + a Yes/No menu).
     // The highlighted default is the affirmative option, so a single Enter answers it.
-    { name: 'claude_permission', answer: '\r', anchors: ['do you want to proceed'] },
+    {
+      name: 'claude_permission',
+      answer: '\r',
+      anchors: ['do you want to proceed', '1. yes', '2. no'],
+    },
   ],
   codex: [
     // [synthesized] Codex's MCP approval dialog, e.g. `Allow the co_probe MCP server to run tool …?`
     // with a numbered Yes/No menu. Policy for co's own (trusted) MCP server is approve-once → select
     // option 1 (Yes) explicitly (number + Enter), mirroring B1's codex `2\r` answer style.
-    { name: 'codex_approval', answer: '1\r', anchors: ['mcp server to run tool'] },
+    {
+      name: 'codex_approval',
+      answer: '1\r',
+      anchors: ['mcp server to run tool', '1. yes', '2. no'],
+    },
   ],
 };
 
@@ -62,7 +71,11 @@ export function classifyDialog(
   for (const p of providers) {
     for (const sig of DIALOG_SIGNATURES[p]) {
       if (sig.anchors.every((a) => hay.includes(a))) {
-        return { name: sig.name, answer: sig.answer };
+        return {
+          name: sig.name,
+          answer: sig.answer,
+          signature: `${sig.name}:${sig.anchors.join('|')}`,
+        };
       }
     }
   }
@@ -74,6 +87,9 @@ export function classifyDialog(
  * within the recent tail; keeping only the tail bounds memory + per-chunk re-normalization cost.
  */
 const MAX_DIALOG_BUFFER_CHARS = 64 * 1024;
+const SCREEN_RESET_PATTERNS: readonly string[] = ['\u001B[2J', '\u001Bc'];
+const SCREEN_RESET_TAIL_CHARS =
+  Math.max(...SCREEN_RESET_PATTERNS.map((pattern) => pattern.length)) - 1;
 
 export interface WatchDialogsOptions {
   /** The provider whose dialogs we know how to answer (narrows {@link classifyDialog}). */
@@ -94,14 +110,44 @@ export interface WatchDialogsOptions {
  */
 export function watchDialogs(pane: Pane, opts: WatchDialogsOptions = {}): () => void {
   let buffer = '';
+  let activeDialogSignature: string | undefined;
+  let resetScanTail = '';
   return pane.onData((chunk) => {
+    const resetScanInput = resetScanTail + chunk;
+    resetScanTail = resetScanInput.slice(-SCREEN_RESET_TAIL_CHARS);
+    const postResetChunk = suffixAfterLastScreenReset(resetScanInput);
+    if (postResetChunk != null) {
+      activeDialogSignature = undefined;
+      buffer = '';
+      chunk = postResetChunk;
+    }
     buffer += chunk;
     if (buffer.length > MAX_DIALOG_BUFFER_CHARS) buffer = buffer.slice(-MAX_DIALOG_BUFFER_CHARS);
     const match = classifyDialog(opts.provider, normalizeStartupOutput(buffer));
+    if (activeDialogSignature != null) {
+      if (match?.signature === activeDialogSignature) {
+        buffer = '';
+        return;
+      }
+      if (match == null) {
+        buffer = '';
+        return;
+      }
+    }
     if (match) {
       pane.write(match.answer);
+      activeDialogSignature = match.signature;
       buffer = '';
       opts.onAnswered?.(match.name, match.answer);
     }
   });
+}
+
+function suffixAfterLastScreenReset(chunk: string): string | undefined {
+  let lastResetEnd = -1;
+  for (const pattern of SCREEN_RESET_PATTERNS) {
+    const start = chunk.lastIndexOf(pattern);
+    if (start >= 0) lastResetEnd = Math.max(lastResetEnd, start + pattern.length);
+  }
+  return lastResetEnd >= 0 ? chunk.slice(lastResetEnd) : undefined;
 }

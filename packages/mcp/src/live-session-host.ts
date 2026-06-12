@@ -9,7 +9,14 @@
  * identity-injecting surface itself is real here and sandbox-tested over an in-memory transport.
  */
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { toolsForRole, type ProjectId, type Role } from '@co/core';
+import {
+  openSessionStore,
+  toolsForRole,
+  type ProjectId,
+  type ResumeHandle,
+  type Role,
+  type SessionStore,
+} from '@co/core';
 import { createCoMcpServer } from './server.js';
 import { openContextStores } from './context.js';
 
@@ -24,12 +31,20 @@ export interface HostedIdentity {
   readonly agent: string;
   /** The base role to scope the offered toolset. */
   readonly role: Role;
+  /** Optional sub-role specialization to preserve in the roster record. */
+  readonly subRole?: string;
   /** The parent agent id (used for roster context). */
   readonly parent: string;
+  /** The live pane id backing this hosted session. */
+  readonly pane: string;
   /** The resolved project id for this session. */
   readonly projectId: ProjectId;
   /** Absolute path of the worktree/cwd the agent operates in. */
   readonly cwd: string;
+  /** Provider backing this pane. */
+  readonly provider: 'claude' | 'codex';
+  /** Provider-specific resume handle persisted for recovery. */
+  readonly resume: ResumeHandle;
 }
 
 /**
@@ -38,10 +53,10 @@ export interface HostedIdentity {
  */
 export interface HostedSession {
   /**
-   * Release all per-session resources (opened stores). Called by the Conductor when the
-   * pane's session ends. The connected transport handles its own lifecycle.
+   * Release all per-session resources (MCP server/transport + opened stores). Called by the
+   * Conductor when the pane's session ends.
    */
-  close(): void;
+  close(): Promise<void>;
 }
 
 /**
@@ -68,12 +83,19 @@ export interface LiveSessionHost {
   hostSession(identity: HostedIdentity, transport: Transport): Promise<HostedSession>;
 }
 
+type SessionStoreOpener = (projectId: ProjectId) => SessionStore;
+
 /**
  * Production implementation of {@link LiveSessionHost}. Builds a role-scoped co MCP server for
  * each hosted pane and connects it to the supplied transport. Identity comes from the Conductor's
  * session record — never re-derived from, or overridable by, the live provider.
  */
 export class LiveSessionHostImpl implements LiveSessionHost {
+  private static readonly activeHostedAgents = new Set<string>();
+  private static readonly activeHostedPanes = new Set<string>();
+
+  constructor(private readonly openSessions: SessionStoreOpener = openSessionStore) {}
+
   async hostSession(identity: HostedIdentity, transport: Transport): Promise<HostedSession> {
     const agent = identity.agent?.trim();
     if (agent == null || agent.length === 0) {
@@ -83,25 +105,117 @@ export class LiveSessionHostImpl implements LiveSessionHost {
       );
     }
 
-    const { ctx, close } = openContextStores({
-      agent,
-      projectId: identity.projectId,
-      cwd: identity.cwd,
-    });
+    const parent = identity.parent?.trim();
+    if (parent == null || parent.length === 0) {
+      throw new Error(
+        'LiveSessionHost.hostSession: authoritative parent identity is missing or blank — ' +
+          'the Conductor must supply the recorded spawn parent.',
+      );
+    }
+    const pane = identity.pane?.trim();
+    if (pane == null || pane.length === 0) {
+      throw new Error(
+        'LiveSessionHost.hostSession: authoritative pane identity is missing or blank — ' +
+          'the Conductor must supply the session record pane.',
+      );
+    }
 
+    const activeKey = `${identity.projectId}:${agent}`;
+    const paneKey = `${identity.projectId}:${pane}`;
+    if (LiveSessionHostImpl.activeHostedAgents.has(activeKey)) {
+      throw new Error(
+        `LiveSessionHost.hostSession: agent '${agent}' already has an active hosted MCP session ` +
+          `in project '${identity.projectId}'.`,
+      );
+    }
+    if (LiveSessionHostImpl.activeHostedPanes.has(paneKey)) {
+      throw new Error(
+        `LiveSessionHost.hostSession: pane '${pane}' already has an active hosted MCP session ` +
+          `in project '${identity.projectId}'.`,
+      );
+    }
+    let sessionStore: SessionStore | undefined;
+    let activeClaimed = false;
+    let sessionClaimed = false;
+    let opened: ReturnType<typeof openContextStores> | undefined;
     let server;
     try {
+      sessionStore = this.openSessions(identity.projectId);
+      LiveSessionHostImpl.activeHostedAgents.add(activeKey);
+      LiveSessionHostImpl.activeHostedPanes.add(paneKey);
+      activeClaimed = true;
+      sessionStore.recordSession({
+        agentId: agent,
+        pane,
+        cwd: identity.cwd,
+        provider: identity.provider,
+        resume: identity.resume,
+      });
+      sessionClaimed = true;
+      opened = openContextStores({
+        agent,
+        projectId: identity.projectId,
+        cwd: identity.cwd,
+      });
+      opened.ctx.roster!.recordAgent({
+        agentId: agent,
+        role: identity.role,
+        ...(identity.subRole != null ? { subRole: identity.subRole } : {}),
+        parent,
+      });
       const scopedTools = toolsForRole(identity.role);
       server = createCoMcpServer({
         tools: scopedTools,
-        contextFactory: () => ctx,
+        contextFactory: () => opened!.ctx,
       });
       await server.connect(transport);
     } catch (e) {
-      close();
+      try {
+        await server?.close();
+      } catch {
+        /* best-effort close of a partially connected MCP server */
+      }
+      if (activeClaimed) {
+        LiveSessionHostImpl.activeHostedAgents.delete(activeKey);
+        LiveSessionHostImpl.activeHostedPanes.delete(paneKey);
+      }
+      if (sessionClaimed) {
+        try {
+          sessionStore?.endSession(agent, pane);
+        } catch {
+          /* best-effort rollback of a failed host setup */
+        }
+      }
+      sessionStore?.close();
+      opened?.close();
       throw e;
     }
 
-    return { close };
+    let closed = false;
+    const hostedSessionStore = sessionStore;
+    const hostedServer = server;
+    if (hostedSessionStore == null || hostedServer == null) {
+      throw new Error('LiveSessionHost.hostSession: setup completed without required handles.');
+    }
+    const activeHostedAgents = LiveSessionHostImpl.activeHostedAgents;
+    const activeHostedPanes = LiveSessionHostImpl.activeHostedPanes;
+    return {
+      async close(): Promise<void> {
+        if (closed) return;
+        closed = true;
+        try {
+          await hostedServer.close();
+        } finally {
+          try {
+            hostedSessionStore.endSession(agent, pane);
+          } finally {
+            hostedSessionStore.close();
+            activeHostedAgents.delete(activeKey);
+            activeHostedPanes.delete(paneKey);
+            opened?.close();
+          }
+        }
+      },
+    };
   }
 }

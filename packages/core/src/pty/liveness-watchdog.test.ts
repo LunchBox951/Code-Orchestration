@@ -93,6 +93,24 @@ describe('classifyLiveness — alive vs wedged (the 8 s boundary)', () => {
     expect(resumed.break).toBeUndefined();
   });
 
+  it('an active turn with zero bytes since turn start wedges at the 8 s boundary', () => {
+    const input: LivenessInput = {
+      trace: [],
+      exited: false,
+      pidAlive: true,
+      turnActive: true,
+      turnStartedAt: 1000,
+    };
+
+    const before = classifyLiveness(input, 1000 + WEDGE_MS - 1);
+    expect(before.liveness).toBe('alive');
+    expect(before.break).toBeUndefined();
+
+    const atBoundary = classifyLiveness(input, 1000 + WEDGE_MS);
+    expect(atBoundary.liveness).toBe('wedged');
+    expect(atBoundary.break?.kind).toBe('wedged');
+  });
+
   it('long command-silent but spinner-rendering turn ⇒ stays alive past 8 s (bytes flowing)', () => {
     const pane = new FakePty().spawn(SPEC);
     const rec = record(pane);
@@ -173,6 +191,29 @@ describe('classifyLiveness — silent-stop (must-not-regress: NOT a reap, NOT mi
     expect(v.liveness).toBe('alive');
     expect(v.break).toBeUndefined(); // saw the completion verb ⇒ no silent-stop
   });
+
+  it("a previous turn's co_finish does not mask a later yielded turn with no completion", () => {
+    const trace: DetectorEvent[] = [
+      { kind: 'bytes', at: 0, bytes: 12 },
+      { kind: 'mcp', at: 500, verb: 'co_finish' },
+      { kind: 'bytes', at: 9000, bytes: 12 },
+    ];
+
+    const v = classifyLiveness(
+      {
+        trace,
+        exited: false,
+        pidAlive: true,
+        turnActive: false,
+        turnStartedAt: 9000,
+      },
+      9000 + QUIET_WINDOW_MS + 1,
+      { provider: 'claude' },
+    );
+
+    expect(v.liveness).toBe('alive');
+    expect(v.break?.kind).toBe('silent_stop');
+  });
 });
 
 /** A fake L6 monitor capturing the injected seams (break-signal, STUCK, nudge). */
@@ -222,6 +263,27 @@ describe('LivenessWatchdog — break ⇒ nudge ⇒ break-signal ⇒ STUCK on per
     expect(mon.nudges).toHaveLength(1); // not nudged again
     expect(mon.breaks).toHaveLength(1); // break-signal already emitted
     expect(mon.stuck).toEqual(['impl-7']); // escalated
+  });
+
+  it('silent-stop still emits the break-signal when the corrective nudge injection fails', async () => {
+    const pane = new FakePty().spawn(SPEC);
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const watchdog = new LivenessWatchdog({
+      pane,
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: () => {},
+      injectNudge: async () => {
+        throw new Error('pty write failed');
+      },
+    });
+
+    await expect(
+      watchdog.assess('impl-7', silentStopInput(), 1000 + QUIET_WINDOW_MS + 1, {
+        provider: 'claude',
+      }),
+    ).rejects.toThrow(/pty write failed/);
+    expect(breaks).toHaveLength(1);
+    expect(breaks[0]).toMatchObject({ agent: 'impl-7', info: { kind: 'silent_stop' } });
   });
 
   it('wedged is bounded (~8 s, not a multi-hour wait): break-signal at the boundary, STUCK on persistence', async () => {

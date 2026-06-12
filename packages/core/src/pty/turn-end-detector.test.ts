@@ -132,7 +132,7 @@ describe('detectTurnEnd — OSC0 corroboration (codex edge; claude ✳ is not an
 });
 
 describe('detectTurnEnd — MCP-sentinel corroborates only alongside byte-quiet', () => {
-  it('a recent MCP call does not block the byte-governed idle, and is not reported as quiescent', () => {
+  it('a recent MCP call blocks idle until the MCP quiescence window also elapses', () => {
     const trace: DetectorEvent[] = [
       { kind: 'bytes', at: 0 },
       { kind: 'bytes', at: 100 },
@@ -141,9 +141,41 @@ describe('detectTurnEnd — MCP-sentinel corroborates only alongside byte-quiet'
 
     const r = detectTurnEnd(trace, 3100, { provider: 'claude' }); // bytes quiet since t=100 (3.0 s)
 
-    expect(r.idle).toBe(true); // byte-quiescence governs
-    expect(r.idleSignals).toContain('byte-quiescence');
-    expect(r.idleSignals).not.toContain('mcp-quiescence'); // the MCP call was only 100 ms ago
+    expect(r.idle).toBe(false); // MCP activity was only 100 ms ago
+    expect(r.idleSignals).toEqual([]);
+
+    const afterMcpQuiet = detectTurnEnd(trace, 3000 + QUIET_WINDOW_MS + 1, { provider: 'claude' });
+    expect(afterMcpQuiet.idle).toBe(true);
+    expect(afterMcpQuiet.idleSignals).toEqual(['byte-quiescence', 'mcp-quiescence']);
+  });
+
+  it('an in-flight MCP call blocks idle even when it started before the quiet window', () => {
+    const trace: DetectorEvent[] = [
+      { kind: 'bytes', at: 0 },
+      { kind: 'bytes', at: 100 },
+      { kind: 'mcp_start', at: 500, verb: 'co_status' },
+    ];
+
+    const whileInFlight = detectTurnEnd(trace, 500 + QUIET_WINDOW_MS + 1, { provider: 'claude' });
+    expect(whileInFlight.idle).toBe(false);
+    expect(whileInFlight.idleSignals).toEqual([]);
+
+    const endedTrace: DetectorEvent[] = [
+      ...trace,
+      { kind: 'mcp_end', at: 500 + QUIET_WINDOW_MS + 100, verb: 'co_status' },
+    ];
+    const afterEndButRecent = detectTurnEnd(endedTrace, 500 + QUIET_WINDOW_MS + 101, {
+      provider: 'claude',
+    });
+    expect(afterEndButRecent.idle).toBe(false);
+
+    const afterMcpQuiet = detectTurnEnd(
+      endedTrace,
+      500 + QUIET_WINDOW_MS + 100 + QUIET_WINDOW_MS + 1,
+      { provider: 'claude' },
+    );
+    expect(afterMcpQuiet.idle).toBe(true);
+    expect(afterMcpQuiet.idleSignals).toEqual(['byte-quiescence', 'mcp-quiescence']);
   });
 });
 

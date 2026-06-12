@@ -27,20 +27,21 @@ const CLAUDE_PERMISSION =
   'Claude wants to use co_probe.\nDo you want to proceed?\n' +
   ESC +
   '[1m❯ 1. Yes\n  2. No\n';
-const CODEX_APPROVAL =
-  CLEAR + 'Allow the co_probe MCP server to run tool "ping"?\n❯ 1. Yes\n  2. No\n';
+const CODEX_APPROVAL_BODY =
+  'Allow the co_probe MCP server to run tool "ping"?\n❯ 1. Yes\n  2. No\n';
+const CODEX_APPROVAL = CLEAR + CODEX_APPROVAL_BODY;
 const NON_DIALOG = CLEAR + ' ⠋ working… rendering output ' + ESC + '[0m\n';
 
 describe('classifyDialog — pure prompt-text classification (whitespace-normalized)', () => {
   it('matches the Claude MCP-tool permission prompt → one Enter answers it', () => {
-    expect(classifyDialog('claude', normalizeStartupOutput(CLAUDE_PERMISSION))).toEqual({
+    expect(classifyDialog('claude', normalizeStartupOutput(CLAUDE_PERMISSION))).toMatchObject({
       name: 'claude_permission',
       answer: '\r',
     });
   });
 
   it('matches the Codex MCP approval dialog → selects Yes (1 + Enter)', () => {
-    expect(classifyDialog('codex', normalizeStartupOutput(CODEX_APPROVAL))).toEqual({
+    expect(classifyDialog('codex', normalizeStartupOutput(CODEX_APPROVAL))).toMatchObject({
       name: 'codex_approval',
       answer: '1\r',
     });
@@ -54,7 +55,7 @@ describe('classifyDialog — pure prompt-text classification (whitespace-normali
   it('narrows by provider: the claude pane does not answer a codex dialog', () => {
     expect(classifyDialog('claude', normalizeStartupOutput(CODEX_APPROVAL))).toBeNull();
     // …but provider-agnostic classification (no provider given) still finds it.
-    expect(classifyDialog(undefined, normalizeStartupOutput(CODEX_APPROVAL))).toEqual({
+    expect(classifyDialog(undefined, normalizeStartupOutput(CODEX_APPROVAL))).toMatchObject({
       name: 'codex_approval',
       answer: '1\r',
     });
@@ -83,9 +84,101 @@ describe('watchDialogs — continuous answer over a live Pane', () => {
     try {
       pane.emit(CODEX_APPROVAL); // answered once
       expect(pane.written).toEqual(['1\r']);
-      // A subsequent unrelated repaint (the anchor is gone after the answer) does not re-answer.
-      pane.emit(' ⠋ running the tool…\n');
+      // The same on-screen modal anchor before a new prompt frame must not approve a second time.
+      pane.emit(CODEX_APPROVAL_BODY);
       expect(pane.written).toEqual(['1\r']);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('does not re-answer a split repaint of the same already-answered dialog', () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const unsub = watchDialogs(pane, { provider: 'codex' });
+    try {
+      pane.emit(CODEX_APPROVAL);
+      expect(pane.written).toEqual(['1\r']);
+      pane.emit(ESC + '[1;1H' + ESC + '[0m');
+      pane.emit(CODEX_APPROVAL_BODY);
+      expect(pane.written).toEqual(['1\r']);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('dedupes the same modal even when non-dialog output preceded its first frame', () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const unsub = watchDialogs(pane, { provider: 'codex' });
+    try {
+      pane.emit('ordinary tool output before the modal\n');
+      pane.emit(CODEX_APPROVAL);
+      expect(pane.written).toEqual(['1\r']);
+      pane.emit(CODEX_APPROVAL_BODY);
+      expect(pane.written).toEqual(['1\r']);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('does not treat cursor-home alone as a fresh dialog instance', () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const unsub = watchDialogs(pane, { provider: 'codex' });
+    try {
+      pane.emit(CODEX_APPROVAL);
+      expect(pane.written).toEqual(['1\r']);
+      pane.emit(ESC + '[H');
+      pane.emit(CODEX_APPROVAL_BODY);
+      expect(pane.written).toEqual(['1\r']);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('does not rescan stale dialog text before a reset in the same chunk', () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const unsub = watchDialogs(pane, { provider: 'codex' });
+    try {
+      pane.emit(CODEX_APPROVAL);
+      expect(pane.written).toEqual(['1\r']);
+      pane.emit(CODEX_APPROVAL_BODY + CLEAR + 'ordinary output after clear\n');
+      expect(pane.written).toEqual(['1\r']);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('still answers a fresh dialog that appears after a reset in the same chunk', () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const unsub = watchDialogs(pane, { provider: 'codex' });
+    try {
+      pane.emit(CODEX_APPROVAL);
+      pane.emit(CODEX_APPROVAL_BODY + CLEAR + CODEX_APPROVAL_BODY);
+      expect(pane.written).toEqual(['1\r', '1\r']);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('answers a fresh dialog after a reset sequence split across chunks', () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const unsub = watchDialogs(pane, { provider: 'codex' });
+    try {
+      pane.emit(CODEX_APPROVAL);
+      pane.emit(ESC + '[2');
+      pane.emit('J' + ESC + '[H' + CODEX_APPROVAL_BODY);
+      expect(pane.written).toEqual(['1\r', '1\r']);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('answers a fresh identical dialog after a screen reset marks a new prompt instance', () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const unsub = watchDialogs(pane, { provider: 'codex' });
+    try {
+      pane.emit(CODEX_APPROVAL);
+      pane.emit(CODEX_APPROVAL);
+      expect(pane.written).toEqual(['1\r', '1\r']);
     } finally {
       unsub();
     }
@@ -98,6 +191,20 @@ describe('watchDialogs — continuous answer over a live Pane', () => {
       pane.emit(CODEX_APPROVAL);
       pane.emit(' ⠙ first tool ran…\n');
       pane.emit(CODEX_APPROVAL); // a second, fresh approval later in the turn
+      expect(pane.written).toEqual(['1\r', '1\r']);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('answers back-to-back same-type dialogs when the prompt content changes', () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const unsub = watchDialogs(pane, { provider: 'codex' });
+    const secondApproval =
+      CLEAR + 'Allow the co_probe MCP server to run tool "status"?\n❯ 1. Yes\n  2. No\n';
+    try {
+      pane.emit(CODEX_APPROVAL);
+      pane.emit(secondApproval);
       expect(pane.written).toEqual(['1\r', '1\r']);
     } finally {
       unsub();

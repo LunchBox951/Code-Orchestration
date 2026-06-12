@@ -12,6 +12,7 @@ import { applyEvent, type Projector } from '../replay/projector.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import {
   makeSessionCreatedEvent,
+  makeSessionEndedEvent,
   sessionSchemas,
   sessionUpcasters,
   type SessionCreated,
@@ -22,13 +23,18 @@ import {
   ensureSessionTable,
   selectSession,
   selectAllSessions,
+  selectSessionByPane,
 } from './session-projector.js';
 
 export interface SessionStore {
-  /** Record (or replace) a session for an agent (appends `session.created` + folds); returns the read-back record. */
+  /** Record a session for an agent (appends `session.created` + folds); returns the read-back record. */
   recordSession(rec: SessionCreated): SessionRecord;
+  /** End an active session (appends `session.ended` + folds); returns the closed record. */
+  endSession(agentId: string, pane: string): SessionRecord;
   /** The current session for `agentId`, or undefined. */
   getSession(agentId: string): SessionRecord | undefined;
+  /** The current session for `pane`, or undefined. */
+  getSessionByPane(pane: string): SessionRecord | undefined;
   /** Every recorded session, in creation order. */
   listSessions(): readonly SessionRecord[];
   /** Close the underlying project store. */
@@ -48,6 +54,20 @@ export function openSessionStore(projectId: string): SessionStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensureSessionTable(db);
+        const existing = selectSession(db, rec.agentId);
+        if (existing != null) {
+          throw new Error(
+            `openSessionStore.recordSession: agent '${rec.agentId}' already has an active ` +
+              `session '${existing.pane}' — refusing duplicate host without an explicit session.ended event.`,
+          );
+        }
+        const existingPane = selectSessionByPane(db, rec.pane);
+        if (existingPane != null) {
+          throw new Error(
+            `openSessionStore.recordSession: pane '${rec.pane}' is already hosted by agent ` +
+              `'${existingPane.agentId}' — refusing duplicate pane claim by '${rec.agentId}'.`,
+          );
+        }
         const [stored] = tx.append([makeSessionCreatedEvent(projectId, rec)]);
         applyEvent(tx, decode(stored!, sessionUpcasters, sessionSchemas), projectors);
         const row = selectSession(db, rec.agentId);
@@ -60,8 +80,38 @@ export function openSessionStore(projectId: string): SessionStore {
       });
     },
 
+    endSession(agentId: string, pane: string): SessionRecord {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureSessionTable(db);
+        const existing = selectSession(db, agentId);
+        if (existing == null) {
+          throw new Error(`openSessionStore.endSession: agent '${agentId}' has no active session.`);
+        }
+        if (existing.pane !== pane) {
+          throw new Error(
+            `openSessionStore.endSession: pane '${pane}' does not match active session ` +
+              `'${existing.pane}' for agent '${agentId}'.`,
+          );
+        }
+        const [stored] = tx.append([makeSessionEndedEvent(projectId, { agentId, pane })]);
+        applyEvent(tx, decode(stored!, sessionUpcasters, sessionSchemas), projectors);
+        const row = selectSession(db, agentId);
+        if (row != null) {
+          throw new Error(
+            `openSessionStore.endSession: row still active after projection (agentId='${agentId}')`,
+          );
+        }
+        return existing;
+      });
+    },
+
     getSession(agentId: string): SessionRecord | undefined {
       return store.transaction((tx) => selectSession(tx.raw as DatabaseSync, agentId));
+    },
+
+    getSessionByPane(pane: string): SessionRecord | undefined {
+      return store.transaction((tx) => selectSessionByPane(tx.raw as DatabaseSync, pane));
     },
 
     listSessions(): readonly SessionRecord[] {

@@ -31,6 +31,7 @@ import { watchDialogs } from './dialog-watcher.js';
 const PASTE_START = '\u001B[200~';
 const PASTE_END = '\u001B[201~';
 const SUBMIT = '\r';
+const CLEAR_COMPOSER = '\u0015'; // Ctrl-U: clear the current input line before an uncertain retry.
 
 const DEFAULT_MAX_ECHO_ATTEMPTS = 5;
 /** Production-only fallback settle window (ms). The TESTABLE path injects `retryDelay` instead. */
@@ -96,7 +97,8 @@ export async function injectMail(
   try {
     let submitted = false;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      pane.write(payload);
+      if (attempt > 0) echoBuffer = '';
+      pane.write(attempt === 0 ? payload : CLEAR_COMPOSER + payload);
       if (echoed()) {
         submitted = true;
         break;
@@ -115,6 +117,12 @@ export async function injectMail(
       if (outcome === 'echo' || echoed()) {
         submitted = true;
         break;
+      }
+      if (multiline) {
+        throw new Error(
+          'injectMail: multiline composer did not echo before the retry window; refusing an ' +
+            'uncertain multiline retry',
+        );
       }
       // else: the settle window elapsed with no echo — loop and re-write (retry).
     }
