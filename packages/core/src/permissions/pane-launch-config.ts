@@ -89,9 +89,16 @@ function claudeDisallowedPatterns(blockList: readonly BlockRule[]): string[] {
   const patterns: string[] = [];
   for (const rule of blockList) {
     const rulePatterns = CLAUDE_RULE_PATTERNS.get(rule.id);
-    if (rulePatterns != null) {
-      patterns.push(...rulePatterns);
+    // Fail-loud (Principle 9): a rule without a corresponding pattern would produce a
+    // drift-clean but under-enforced Claude config. Throw immediately so the developer
+    // knows to add an entry to CLAUDE_RULE_PATTERNS.
+    if (rulePatterns == null) {
+      throw new Error(
+        `buildPaneLaunchConfig(claude): no --disallowedTools pattern for block rule '${rule.id}'. ` +
+          `Add an entry to CLAUDE_RULE_PATTERNS to keep the config fully enforced (Principle 9).`,
+      );
     }
+    patterns.push(...rulePatterns);
   }
   return patterns;
 }
@@ -100,19 +107,28 @@ function claudeDisallowedPatterns(blockList: readonly BlockRule[]): string[] {
 // Codex config.toml builder
 // ---------------------------------------------------------------------------
 
+/** Escape a value for interpolation into a TOML double-quoted string. */
+function tomlStringEscape(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+}
+
 function buildCodexConfigToml(identity: PaneIdentity): string {
   const lines: string[] = [
     'sandbox_mode = "workspace-write"',
     'approval_policy = "never"',
     '',
-    `[projects."${identity.cwd}"]`,
+    `[projects."${tomlStringEscape(identity.cwd)}"]`,
     'trust_level = "trusted"',
     '',
     '[mcp_servers.co]',
     'type = "stdio"',
   ];
   if (identity.coMcpConfig != null) {
-    lines.push(`config_path = "${identity.coMcpConfig}"`);
+    lines.push(`config_path = "${tomlStringEscape(identity.coMcpConfig)}"`);
   }
   return lines.join('\n') + '\n';
 }

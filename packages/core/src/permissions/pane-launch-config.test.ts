@@ -155,3 +155,52 @@ describe('SpawnSpec composition (AC-L7-6)', () => {
     expect(spec.args).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5. Completeness guard — CLAUDE_RULE_PATTERNS must cover every BLOCK_LIST rule
+// ---------------------------------------------------------------------------
+
+describe('CLAUDE_RULE_PATTERNS completeness (Principle 9 guard)', () => {
+  it('throws if a block rule has no --disallowedTools pattern', () => {
+    const orphanRule = {
+      id: 'orphan-rule-no-pattern',
+      category: 'bypasses-gate' as const,
+      description: 'A synthetic rule without a CLAUDE_RULE_PATTERNS entry.',
+      matches: () => false,
+    };
+    expect(() => buildPaneLaunchConfig('claude', BASE_IDENTITY, [orphanRule])).toThrow(
+      /orphan-rule-no-pattern/,
+    );
+  });
+
+  it('all BLOCK_LIST rules have a CLAUDE_RULE_PATTERNS entry (no silent gaps)', () => {
+    // If this test throws, a rule was added to BLOCK_LIST without a corresponding pattern.
+    expect(() => buildPaneLaunchConfig('claude', BASE_IDENTITY)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. TOML string escaping — special chars in cwd / coMcpConfig
+// ---------------------------------------------------------------------------
+
+describe('Codex config.toml string escaping', () => {
+  it('escapes double-quotes and backslashes in cwd', () => {
+    const identity = {
+      cwd: '/tmp/path with "quotes" and \\backslash',
+      isolatedHomeDir: ISOLATED_HOME,
+    };
+    const config = buildPaneLaunchConfig('codex', identity);
+    expect(config.codexConfigToml).not.toContain('"/tmp/path with "quotes"');
+    expect(config.codexConfigToml).toContain('\\"quotes\\"');
+  });
+
+  it('escapes double-quotes in coMcpConfig path', () => {
+    const identity = {
+      cwd: PANE_CWD,
+      isolatedHomeDir: ISOLATED_HOME,
+      coMcpConfig: '/tmp/co-mcp-"config".json',
+    };
+    const config = buildPaneLaunchConfig('codex', identity);
+    expect(config.codexConfigToml).toContain('\\"config\\"');
+  });
+});
