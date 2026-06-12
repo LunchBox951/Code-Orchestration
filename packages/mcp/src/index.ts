@@ -6,9 +6,16 @@ export { createCoMcpServer, type CoMcpServerOptions } from './server.js';
 export { serve } from './serve.js';
 export {
   defaultContextFactory,
+  openContextStores,
+  type ExplicitIdentity,
   CO_AGENT_ENV,
   CO_ROLE_ENV,
   CO_PARENT_ENV,
   CO_PROJECT_ID_ENV,
 } from './context.js';
-export { type LiveSessionHost, LiveSessionHostStub } from './live-session-host.js';
+export {
+  type LiveSessionHost,
+  type HostedIdentity,
+  type HostedSession,
+  LiveSessionHostImpl,
+} from './live-session-host.js';

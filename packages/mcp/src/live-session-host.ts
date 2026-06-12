@@ -7,30 +7,100 @@
  * transport-agnostic server (stdio) + this typed stub; it does NOT host live sessions, and the
  * stdio server works WITHOUT it (that is what "transport-agnostic" means).
  */
-export interface LiveSessionHost {
-  /**
-   * Host a live pty session for `agent` and serve the co MCP surface to it. Returns `never`: the
-   * exact parameters and lifecycle are L7's to finalize; this signature only marks the seam.
-   */
-  hostSession(agent: string): never;
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { toolsForRole, type ProjectId, type Role } from '@co/core';
+import { createCoMcpServer } from './server.js';
+import { openContextStores } from './context.js';
+
+/**
+ * The authoritative per-pane identity the Conductor supplies when hosting a session. All fields
+ * come from the Conductor's session record (B0 SessionRecord) — never from the client (live
+ * provider). The Conductor assigned this identity; the host trusts it and injects it into every
+ * ToolContext without re-deriving or allowing client override (AC-L7-2; Principle 9).
+ */
+export interface HostedIdentity {
+  /** The pane's authoritative agent id (from the session record). Never client-supplied. */
+  readonly agent: string;
+  /** The base role to scope the offered toolset. */
+  readonly role: Role;
+  /** The parent agent id (used for roster context). */
+  readonly parent: string;
+  /** The resolved project id for this session. */
+  readonly projectId: ProjectId;
+  /** Absolute path of the worktree/cwd the agent operates in. */
+  readonly cwd: string;
 }
 
 /**
- * The L7 STUB host. Fails loud (Principle 9) until the Conductor owns live session-hosting — never
- * a silent no-op (a silent stub is exactly the fallback that hid the prototype's gaps).
+ * A handle to a live-hosted session. Returned by {@link LiveSessionHost.hostSession}.
+ * Closing frees all stores opened for the session.
  */
-export class LiveSessionHostStub implements LiveSessionHost {
-  // L7 PLUG-POINT (Conductor → runtime substrate). The production host must:
-  //  (1) spawn + host the real interactive claude/codex in a pty (Principle 2; never headless -p/exec);
-  //  (2) inject the session's agent identity into each tool call's ToolContext (never trust client input);
-  //  (3) wake/route the session on inbound mail (turn lifecycle is L6/L7).
-  // Until then this stub fails loud (Principle 9). The signature omits the params the interface
-  // declares (TS allows a method to ignore trailing parameters) — it always throws regardless.
-  hostSession(): never {
-    throw new Error(
-      'LiveSessionHostStub.hostSession: live pty session-hosting is not implemented at L2. ' +
-        'This is the L7 plug-point: host the real claude/codex in a pty, inject per-session identity ' +
-        'into the ToolContext, and wake/route on mail. Use the stdio server for headless flows.',
-    );
+export interface HostedSession {
+  /**
+   * Release all per-session resources (opened stores). Called by the Conductor when the
+   * pane's session ends. The connected transport handles its own lifecycle.
+   */
+  close(): void;
+}
+
+/**
+ * The live MCP session host. Serves the co MCP surface to one pane/session at a time, stamping
+ * the Conductor's authoritative agent identity into every ToolContext — server-side, never
+ * trusting what the live provider (client) claims (AC-L7-2; Principle 9).
+ *
+ * This is the L7 C1 implementation; pty hosting (B1) and mail injection (C2) are separate phases.
+ */
+export interface LiveSessionHost {
+  /**
+   * Host the co MCP surface for a single pane. Connects the co MCP server to `transport`,
+   * injecting `identity.agent` (and project + store context) into every tool call's ToolContext.
+   * The offered toolset is role-scoped to `identity.role` — matching the stdio mount's behaviour
+   * but with identity injected from the session record rather than from env.
+   *
+   * Fails loud (Principle 9) if `identity.agent` is missing or blank — never fabricates an
+   * identity or falls back to a client-claimed one.
+   *
+   * @param identity  The Conductor's authoritative session identity (from the session record).
+   * @param transport The server-side transport to connect the MCP server to.
+   * @returns A handle to close per-session resources when the pane ends.
+   */
+  hostSession(identity: HostedIdentity, transport: Transport): Promise<HostedSession>;
+}
+
+/**
+ * Production implementation of {@link LiveSessionHost}. Builds a role-scoped co MCP server for
+ * each hosted pane and connects it to the supplied transport. Identity comes from the Conductor's
+ * session record — never re-derived from, or overridable by, the live provider.
+ */
+export class LiveSessionHostImpl implements LiveSessionHost {
+  async hostSession(identity: HostedIdentity, transport: Transport): Promise<HostedSession> {
+    const agent = identity.agent?.trim();
+    if (agent == null || agent.length === 0) {
+      throw new Error(
+        'LiveSessionHost.hostSession: authoritative agent identity is missing or blank — ' +
+          'the Conductor must supply the session record identity (Principle 9: never fabricate).',
+      );
+    }
+
+    const { ctx, close } = openContextStores({
+      agent,
+      projectId: identity.projectId,
+      cwd: identity.cwd,
+    });
+
+    let server;
+    try {
+      const scopedTools = toolsForRole(identity.role);
+      server = createCoMcpServer({
+        tools: scopedTools,
+        contextFactory: () => ctx,
+      });
+      await server.connect(transport);
+    } catch (e) {
+      close();
+      throw e;
+    }
+
+    return { close };
   }
 }
