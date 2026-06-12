@@ -98,8 +98,16 @@ export {
   countOutstanding,
   sentByForSender,
 } from './mail/mail-projector.js';
-export type { Delivery } from './mail/delivery.js';
-export { InProcessDelivery, LiveDeliveryStub } from './mail/delivery.js';
+export type {
+  Delivery,
+  LiveDeliveryOptions,
+  WakeRecipient,
+  InjectToRecipient,
+} from './mail/delivery.js';
+// L7 C2 — `LiveDelivery` is the real Conductor-side delivery (replaces the former throwing
+// `LiveDeliveryStub`): it DELEGATES persistence to a composed `InProcessDelivery`, then wakes the
+// recipient + injects unread actionable mail into its live pty via injected seams.
+export { InProcessDelivery, LiveDelivery } from './mail/delivery.js';
 export type { MailStore, MailStoreOptions, ReplyDraft } from './mail/mail-store.js';
 export { openMailStore } from './mail/mail-store.js';
 // L1 W4 outward-action approval gate + operator-terminal addressing (AC-L1-5).
@@ -1102,6 +1110,29 @@ export type {
   NodePtyModuleLoader,
 } from './pty/node-pty-host.js';
 export { NodePtyHost } from './pty/node-pty-host.js';
+
+// L7 C2 — mail-injection protocol (PURE over a Pane): drive a live session to act on ONE mail exactly
+// once (bracketed-paste for multi-line + settle + echo-verify + continuous dialog-watcher). Plus the
+// reusable continuous permission/approval dialog-watcher it composes. Sandbox-tested over FakePty.
+export type { InjectMailOptions } from './pty/mail-injector.js';
+export { injectMail } from './pty/mail-injector.js';
+export type { DialogName, DialogMatch, WatchDialogsOptions } from './pty/dialog-watcher.js';
+export { classifyDialog, watchDialogs } from './pty/dialog-watcher.js';
+
+// L7 C2 — turn-end detector (PURE): emits an IDLE / turn-boundary signal ONLY. turn-end ≠ work-end —
+// it corroborates completion (which stays keyed to co_finish/worker_done) but NEVER emits it.
+export type {
+  DetectorEvent,
+  IdleSignal,
+  TurnEndConfig,
+  TurnEndResult,
+} from './pty/turn-end-detector.js';
+export {
+  detectTurnEnd,
+  parseOsc0Titles,
+  QUIET_WINDOW_MS,
+  COMPLETION_VERBS,
+} from './pty/turn-end-detector.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

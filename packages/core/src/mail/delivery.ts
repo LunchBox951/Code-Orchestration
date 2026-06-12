@@ -294,54 +294,97 @@ export class InProcessDelivery implements Delivery {
 }
 
 /**
- * The L7 STUB delivery (spec §2 STUB). Fails loud (Principle 9) until the
- * Conductor owns delivery.
+ * Wake a WAITING recipient so it takes a turn on its newly-delivered mail. The turn lifecycle is L6
+ * and the real wake is host-side integration, so it is an INJECTED seam here — sandbox-testable, and
+ * `delivery.ts` stays decoupled from L6/pty. Synchronous: it only signals; it does not await a turn.
  */
-export class LiveDeliveryStub implements Delivery {
-  // L7 PLUG-POINT (Conductor → runtime substrate). The production Delivery must:
-  //  (1) persist the mail event Conductor-side — NOT from inside a worker sandbox (freeze #3);
-  //  (2) wake the WAITING recipient (turn lifecycle is L6);
-  //  (3) inject unread *actionable* mail into the recipient's live pty session; the
-  //      mail-vs-session-injection choice for deferred types is the canonical L7 question
-  //      (mail-bus.md:68-72). Until then this stub fails loud (Principle 9).
-  deliver(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.deliver: live (Conductor-side) delivery is not implemented at L1. ' +
-        'This is the L7 plug-point: persist the mail Conductor-side (never from a worker sandbox), ' +
-        'wake the WAITING recipient, and inject unread actionable mail into its live pty session. ' +
-        'Use InProcessDelivery for headless flows.',
-    );
+export type WakeRecipient = (recipient: string) => void;
+
+/**
+ * Inject an unread *actionable* mail into the recipient's LIVE pty session. Wired in production to
+ * `injectMail` on the recipient's `Pane` (resolved via the B0 session record's pane↔agent map); an
+ * INJECTED seam here so `delivery.ts` never statically imports `pty/` and stays sandbox-testable.
+ */
+export type InjectToRecipient = (recipient: string, mail: DeliveredMail) => void;
+
+export interface LiveDeliveryOptions {
+  readonly wake: WakeRecipient;
+  readonly injectToRecipient: InjectToRecipient;
+}
+
+/**
+ * Whether a just-delivered mail is the kind that must be PUSHED into a live session: an `actionable`
+ * item that is still outstanding (not already read / resolved / retracted). Informational mail is
+ * persisted + the recipient is woken, but never injected (it demands no response).
+ */
+function isInjectableActionable(mail: DeliveredMail): boolean {
+  return mail.kind === 'actionable' && !mail.read && !mail.resolved && !mail.retracted;
+}
+
+/**
+ * The L7 Conductor-side delivery (replaces the former `LiveDeliveryStub`). Its three duties:
+ *   1. **Persist Conductor-side** — the store-write half is IDENTICAL to {@link InProcessDelivery}, so
+ *      we DELEGATE to a composed instance (same projectId/store/projectors) rather than re-implement
+ *      the transaction logic (freeze #3 — one writer). "Conductor-side" just means this runs in the
+ *      Conductor process, never a worker sandbox; composition satisfies that.
+ *   2. **Wake the WAITING recipient** — via the injected {@link WakeRecipient} seam, on every operation
+ *      that delivers a NEW item to a recipient (`deliver`/`forward`/`resolve`). Receipts
+ *      (`markRead`/`retract`) deliver nothing new, so they persist only — no wake.
+ *   3. **Inject unread actionable mail into the recipient's live pty** — via the injected
+ *      {@link InjectToRecipient} seam, when the delivered item is an outstanding `actionable`
+ *      ({@link isInjectableActionable}). Informational mail and receipts are never injected.
+ *
+ * Decoupling: `wake` and `injectToRecipient` are constructor-injected callbacks; this module does NOT
+ * import `pty/`. Wiring the seams to real panes is host-side integration, not this sandbox's job.
+ */
+export class LiveDelivery implements Delivery {
+  private readonly inner: InProcessDelivery;
+
+  constructor(
+    projectId: string,
+    store: Store,
+    projectors: readonly Projector[],
+    private readonly opts: LiveDeliveryOptions,
+  ) {
+    this.inner = new InProcessDelivery(projectId, store, projectors);
   }
 
-  forward(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.forward: live (Conductor-side) forwarding is not implemented at L1. ' +
-        'This is the L7 plug-point: persist the forwarded mail and its forward receipt ' +
-        'Conductor-side in one durable operation. Use InProcessDelivery for headless flows.',
-    );
+  deliver(envelope: MailEnvelope): DeliveredMail {
+    const delivered = this.inner.deliver(envelope);
+    this.wakeAndMaybeInject(delivered);
+    return delivered;
   }
 
-  resolve(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.resolve: live (Conductor-side) resolution is not implemented at L1. ' +
-        'This is the L7 plug-point: persist the resolution and any required relay ' +
-        'Conductor-side in one durable operation. Use InProcessDelivery for headless flows.',
-    );
+  forward(held: DeliveredMail, envelope: MailEnvelope): DeliveredMail {
+    const delivered = this.inner.forward(held, envelope);
+    this.wakeAndMaybeInject(delivered);
+    return delivered;
   }
 
-  markRead(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.markRead: live (Conductor-side) read-receipts are not implemented at L1. ' +
-        'This is the L7 plug-point: append the read-receipt Conductor-side (never from a worker ' +
-        'sandbox). Use InProcessDelivery for headless flows.',
-    );
+  resolve(
+    held: DeliveredMail,
+    envelope: MailEnvelope,
+    relays: readonly MailEnvelope[] = [],
+  ): DeliveredMail {
+    const delivered = this.inner.resolve(held, envelope, relays);
+    this.wakeAndMaybeInject(delivered);
+    return delivered;
   }
 
-  retract(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.retract: live (Conductor-side) retraction is not implemented at L1. ' +
-        'This is the L7 plug-point: append the retract-receipt tombstone Conductor-side (never ' +
-        'from a worker sandbox). Use InProcessDelivery for headless flows.',
-    );
+  markRead(recipient: string, seq: number): DeliveredMail {
+    // A read-receipt delivers nothing new — persist only (no wake, no injection).
+    return this.inner.markRead(recipient, seq);
+  }
+
+  retract(sender: string, seq: number): DeliveredMail {
+    // A retract-receipt is a tombstone — persist only (no wake, no injection).
+    return this.inner.retract(sender, seq);
+  }
+
+  private wakeAndMaybeInject(delivered: DeliveredMail): void {
+    this.opts.wake(delivered.recipient);
+    if (isInjectableActionable(delivered)) {
+      this.opts.injectToRecipient(delivered.recipient, delivered);
+    }
   }
 }
