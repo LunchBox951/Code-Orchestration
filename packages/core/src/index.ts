@@ -30,7 +30,7 @@ export { assertRepoPristine } from './config/pristine.js';
 
 // L1 mail bus: a typed, schema-validated, idempotent envelope over the L0 log that
 // activates the four reserved fields, plus send/inbox and the in-process Delivery
-// seam (the L7 plug-point is a typed stub). W3 adds actionable/informational
+// seam (whose L7 Conductor-side plug-point is now the real `LiveDelivery`). W3 adds actionable/informational
 // classification, log-derived sticky resolution, an event-sourced read-receipt, the
 // completion-predicate registry, and the outstanding-action projection. W4 adds the
 // first-class `approval` type + `approval_response` decision and the log-derived
@@ -98,8 +98,16 @@ export {
   countOutstanding,
   sentByForSender,
 } from './mail/mail-projector.js';
-export type { Delivery } from './mail/delivery.js';
-export { InProcessDelivery, LiveDeliveryStub } from './mail/delivery.js';
+export type {
+  Delivery,
+  LiveDeliveryOptions,
+  WakeRecipient,
+  InjectToRecipient,
+} from './mail/delivery.js';
+// L7 C2 — `LiveDelivery` is the real Conductor-side delivery (replaces the former throwing
+// `LiveDeliveryStub`): it DELEGATES persistence to a composed `InProcessDelivery`, then wakes the
+// recipient + injects unread actionable mail into its live pty via injected seams.
+export { InProcessDelivery, LiveDelivery } from './mail/delivery.js';
 export type { MailStore, MailStoreOptions, ReplyDraft } from './mail/mail-store.js';
 export { openMailStore } from './mail/mail-store.js';
 // L1 W4 outward-action approval gate + operator-terminal addressing (AC-L1-5).
@@ -831,13 +839,18 @@ export type { SubRoleViolation } from './roles/sub-role-completeness.js';
 export { checkSubRoleCompleteness } from './roles/sub-role-completeness.js';
 
 // L6a Phase D1 — non-destructive block-list registry + drift check + reactive-nudge catalog.
+// L7 Phase P1 — per-pane isolated launch-config builder + real readEnforcedConfig.
 // The declared LIST and DATA only (Principle 6 — block only the workarounds, everything else
-// is a nudge). Enforcement hooks (PreToolUse, Claude/Codex variants) and nudge injection are
-// L7 typed stubs here; the production wiring lands in L7 (permissions.md:90-98 / :64-66).
+// is a nudge). This slice (L7) makes the enforcement CONFIG and `injectNudge` real —
+// `buildPaneLaunchConfig` emits the isolated per-pane `--disallowedTools`/`CODEX_HOME` config and
+// `readEnforcedConfig` reads it back drift-clean; the LIVE host-side block-enforcement E2E is the
+// operator's proof (AC-L7-6 [host-live], permissions.md:90-98 / :64-66).
 export type { BlockCategory, BlockRule, MatchBlockOptions } from './permissions/block-list.js';
 export { BLOCK_LIST, matchBlock } from './permissions/block-list.js';
 export type { EnforcedConfig, DriftViolation } from './permissions/drift.js';
 export { checkBlockListDrift, readEnforcedConfig } from './permissions/drift.js';
+export type { PaneIdentity, PaneLaunchConfig } from './permissions/pane-launch-config.js';
+export { buildPaneLaunchConfig } from './permissions/pane-launch-config.js';
 export type { NudgeRule } from './permissions/nudges.js';
 export { NUDGE_CATALOG, nudgeFor, injectNudge } from './permissions/nudges.js';
 
@@ -1054,6 +1067,108 @@ export {
 export { ResearchProjector } from './research/research-projector.js';
 export type { ResearchStore } from './research/research-store.js';
 export { openResearchStore } from './research/research-store.js';
+
+// L7 B0 — durable session record: event + projector + store (AC-L7-7 sandbox).
+// One `session.created` per agent per pane; a second active session for the same agent fails loud
+// until a later explicit `session.ended` event exists, preventing hidden duplicate hosts.
+export type {
+  ResumeHandle,
+  SessionCreated,
+  SessionEnded,
+  SessionRecord,
+} from './session/events.js';
+export {
+  SESSION_EVENT_V,
+  EVENT_SESSION_CREATED,
+  EVENT_SESSION_ENDED,
+  SESSION_SCOPE_PREFIX,
+  sessionScope,
+  sessionCreatedSchema,
+  sessionEndedSchema,
+  sessionSchemas,
+  sessionUpcasters,
+  makeSessionCreatedEvent,
+  makeSessionEndedEvent,
+} from './session/events.js';
+export { SessionProjector } from './session/session-projector.js';
+export type { SessionStore } from './session/session-store.js';
+export { openSessionStore } from './session/session-store.js';
+
+// L7 B0 — PtyHost / FakePty contract (FROZEN cross-phase interface — B1/C1/C2/E1/P1 all import).
+// PtyHost.spawn() returns a Pane; NodePtyHost (B1) wraps a real node-pty IPty over this interface.
+// FakePty is the in-sandbox test double: no real binaries, no timers, deterministic CI.
+export type { PrelaunchFile, SpawnSpec, PtyExit, Pane, PtyHost } from './pty/pty-host.js';
+export type { FakePtyPane } from './pty/fake-pty.js';
+export { FakePty } from './pty/fake-pty.js';
+
+// L7 B1 — startup interstitial state machine (PURE, provider-aware): classify a freshly-spawned
+// claude/codex TUI's startup dialogs from the whitespace-normalized output, and drive a Pane through
+// them to ready (authed) or a terminal login menu. Sandbox-tested over FakePty fixtures.
+// `Provider` is the canonical project-wide enum, already exported from the dispatch layer above —
+// the classifier reuses it, so only the pty-specific types are surfaced here.
+export type { StartupInterstitialName, StartupPhase } from './pty/startup-classifier.js';
+export { classifyStartup, normalizeStartupOutput } from './pty/startup-classifier.js';
+export type { StartupOutcome } from './pty/startup-driver.js';
+export { driveToReady } from './pty/startup-driver.js';
+
+// L7 B1 — NodePtyHost: the one real-binary adapter, implementing PtyHost over node-pty. node-pty is
+// reached only via a lazy injected loader behind a local type shim, so the gate is green without the
+// native module present; the live binary reaching ready is the operator's host-side proof.
+export type {
+  IDisposableLike,
+  IPtyExitEvent,
+  IPtyForkOptionsLike,
+  IPtyLike,
+  NodePtyModule,
+  NodePtyModuleLoader,
+} from './pty/node-pty-host.js';
+export { NodePtyHost } from './pty/node-pty-host.js';
+
+// L7 C2 — mail-injection protocol (PURE over a Pane): drive a live session to act on ONE mail exactly
+// once (bracketed-paste for multi-line + settle + echo-verify + continuous dialog-watcher). Plus the
+// reusable continuous permission/approval dialog-watcher it composes. Sandbox-tested over FakePty.
+export type { InjectMailOptions } from './pty/mail-injector.js';
+export { injectMail } from './pty/mail-injector.js';
+export type { DialogName, DialogMatch, WatchDialogsOptions } from './pty/dialog-watcher.js';
+export { classifyDialog, watchDialogs } from './pty/dialog-watcher.js';
+
+// L7 C2 — turn-end detector (PURE): emits an IDLE / turn-boundary signal ONLY. turn-end ≠ work-end —
+// it corroborates completion (which stays keyed to co_finish/worker_done) but NEVER emits it.
+export type {
+  DetectorEvent,
+  IdleSignal,
+  TurnEndConfig,
+  TurnEndResult,
+} from './pty/turn-end-detector.js';
+export {
+  detectTurnEnd,
+  parseOsc0Titles,
+  QUIET_WINDOW_MS,
+  COMPLETION_VERBS,
+} from './pty/turn-end-detector.js';
+
+// L7 E1 — liveness watchdog: PURE `alive | wedged | dead` classifier (+ a distinct silent-stop break)
+// over the P4 byte signatures, and LivenessWatchdog, the injected-seam escalation driver (break →
+// injectNudge → STUCK on persistence). Reuses detectTurnEnd + FakePty; the STUCK transition is an
+// injected monitor seam (integration owns the live agent-state machine / `co unstick`).
+export type {
+  Liveness,
+  BreakKind,
+  BreakInfo,
+  LivenessInput,
+  LivenessConfig,
+  LivenessVerdict,
+  BreakSignal,
+  MarkStuck,
+  InjectNudgeFn,
+  MonitorSeams,
+} from './pty/liveness-watchdog.js';
+export {
+  classifyLiveness,
+  LivenessWatchdog,
+  WEDGE_MS,
+  SILENT_STOP_TRIGGER,
+} from './pty/liveness-watchdog.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

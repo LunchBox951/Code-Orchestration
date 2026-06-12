@@ -1,11 +1,15 @@
 /**
  * L6a Phase D1 — Reactive-nudge catalog as DATA (permissions.md:42-66).
  *
- * The catalog is DATA — substrate-independent policy. Break-detection and injection ride the
- * Conductor / runtime substrate and are L7 (permissions.md:64-66, Principle 16). The
- * `injectNudge` seam is the L7 plug-point: a typed stub that throws loudly rather than silently
- * no-op'ing (Principle 9).
+ * The catalog is DATA — substrate-independent policy. Break-detection rides the Conductor / runtime
+ * substrate and is L7 (permissions.md:64-66, Principle 16); the liveness watchdog
+ * ({@link ../pty/liveness-watchdog.js}) detects the break and calls {@link injectNudge}. As of L7 E1
+ * `injectNudge` is the REAL injector: it looks the nudge up by id and writes it into the agent's live
+ * pane via C2's injection primitive ({@link ../pty/mail-injector.js injectMail}). It stays fail-loud
+ * (Principle 9) — an unknown trigger id throws rather than silently no-op'ing.
  */
+import type { Pane } from '../pty/pty-host.js';
+import { injectMail, type InjectMailOptions } from '../pty/mail-injector.js';
 
 /** A single reactive-nudge entry: a detected protocol break and the corrective reminder. */
 export interface NudgeRule {
@@ -69,20 +73,29 @@ export function nudgeFor(triggerId: string): NudgeRule | undefined {
 }
 
 /**
- * The L7 nudge-injection seam — TYPED STUB that THROWS loudly.
+ * The L7 nudge-injection seam — REAL injector (L7 E1).
  *
- * The production implementation rides the Conductor's event stream: when a break is detected,
- * the Conductor looks up the nudge from this catalog and injects it into the agent's context.
- * That mechanism depends on the runtime substrate and is built in L7 (permissions.md:64-66).
+ * Looks the nudge up by `triggerId` against {@link NUDGE_CATALOG} and writes its corrective text into
+ * the agent's live `pane`, reusing C2's injection primitive ({@link injectMail}: write → echo-verify →
+ * one Enter, with the continuous dialog-watcher). The watchdog
+ * ({@link ../pty/liveness-watchdog.js LivenessWatchdog}) calls this on a detected break (e.g.
+ * `finish-before-yield` for a silent-stop) before escalating to STUCK.
  *
- * The catalog/policy DATA is here (substrate-independent). The break-detection + injection is
- * L7. Calling this stub before L7 is wired is a contract violation — it throws loudly rather
- * than returning silently, so the missing wiring is never invisible (Principle 9 / Principle 16).
+ * Fail-loud (Principle 9 / Principle 16): an unknown `triggerId` — no catalog entry — throws rather
+ * than silently no-op'ing, so a missing/typo'd trigger is never invisible.
  */
-export function injectNudge(): never {
-  throw new Error(
-    'injectNudge: reactive-nudge injection rides the Conductor — L7 (permissions.md:64-66). ' +
-      'The NUDGE_CATALOG data is declared here; break-detection and injection are L7. ' +
-      'This stub must never be a silent no-op (Principle 9).',
-  );
+export async function injectNudge(
+  pane: Pane,
+  triggerId: string,
+  opts: InjectMailOptions = {},
+): Promise<void> {
+  const rule = nudgeFor(triggerId);
+  if (rule === undefined) {
+    throw new Error(
+      `injectNudge: no nudge in NUDGE_CATALOG for trigger id "${triggerId}" — ` +
+        'an unknown trigger must fail loud, never silently no-op (Principle 9). ' +
+        'This injector rides the L7 Conductor (permissions.md:64-66).',
+    );
+  }
+  await injectMail(pane, rule.nudge, opts);
 }

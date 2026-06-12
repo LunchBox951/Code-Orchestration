@@ -10,9 +10,9 @@
  *   - `nuke`    — force-remove a sandbox the operator has explicitly condemned.
  * The "prove the work is merged before removing" safety check is L8's invariant — NOT this layer's.
  *
- * This is a TYPED stub marking that seam — copied from L1's
- * {@link import('../mail/delivery.js').LiveDeliveryStub} (the same pattern L3-C used for the review
- * gate, since made real in L5): it fails loud (Principle 9) rather than
+ * This is a TYPED stub marking that seam — copied from L1's then-throwing live-delivery stub (now the
+ * real {@link import('../mail/delivery.js').LiveDelivery}, made real in L7; the same pattern L3-C used
+ * for the review gate, since made real in L5): it fails loud (Principle 9) rather than
  * being a silent no-op, because a silent stub is exactly the fallback that hid the prototype's gaps.
  * Nothing in L3 calls it — it exists so the L8 plug-point is a real, typed thing rather than an
  * absence, and so the lack of a cleanup verb in L3 is a deliberate, documented boundary (P7 —

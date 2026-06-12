@@ -36,7 +36,8 @@ export interface CoMcpServerOptions {
  * orchestration logic — every tool dispatches into `@co/core` via {@link invokeTool}, which is the
  * single I/O-validation + dispatch seam (the schemas are the single syntax source, Principle 5).
  * Transport-agnostic: this server is independent of how a live session is hosted (stdio now; the
- * L7 pty session-host is a typed stub — see live-session-host.ts).
+ * L7 identity-injecting session-host SURFACE is real — see `LiveSessionHostImpl` in
+ * live-session-host.ts — while binding it to a provider's live pty transport stays host-side wiring).
  *
  * For each offered {@link ToolSpec} it registers a tool carrying the spec's title, description and
  * its zod input/output schemas (mounted via core's `toolInputShape`/`toolOutputShape`, so the

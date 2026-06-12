@@ -1,5 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { NUDGE_CATALOG, injectNudge, nudgeFor } from './nudges.js';
+import { FakePty } from '../pty/fake-pty.js';
+import type { SpawnSpec } from '../pty/pty-host.js';
+
+const CLAUDE_SPEC: SpawnSpec = {
+  command: 'claude',
+  args: [],
+  cwd: '/work/agent',
+  env: {},
+};
+
+/** A fully test-controlled settle/retry window (mirrors mail-injector.test.ts). */
+function controllableDelay(): { delay: () => Promise<void>; release: () => void } {
+  const resolvers: Array<() => void> = [];
+  return {
+    delay: () => new Promise<void>((resolve) => resolvers.push(resolve)),
+    release: () => {
+      while (resolvers.length) resolvers.shift()!();
+    },
+  };
+}
 
 describe('NUDGE_CATALOG', () => {
   it('is non-empty', () => {
@@ -32,8 +52,26 @@ describe('nudgeFor', () => {
   });
 });
 
-describe('injectNudge — L7 stub (AC-L6a-9)', () => {
-  it('throws loudly rather than silently no-op-ing', () => {
-    expect(() => injectNudge()).toThrow(/L7/);
+describe('injectNudge — L7 E1 real injector (AC-L6a-9 fail-loud preserved)', () => {
+  it('writes the catalog nudge text into the pane (then exactly one submit)', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const { delay } = controllableDelay();
+    const rule = nudgeFor('finish-before-yield');
+    expect(rule).toBeDefined();
+
+    const p = injectNudge(pane, 'finish-before-yield', { provider: 'claude', retryDelay: delay });
+    pane.emit(rule!.nudge); // the composer echoes the typed nudge → echo-verify passes
+    await p;
+
+    expect(pane.written).toContain(rule!.nudge); // the captured write contains the nudge message
+    expect(pane.written).toEqual([rule!.nudge, '\r']); // nudge text, then a single Enter
+  });
+
+  it('throws loudly for an unknown trigger id — never a silent no-op', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    await expect(injectNudge(pane, 'no-such-nudge', { provider: 'claude' })).rejects.toThrow(
+      /no nudge in NUDGE_CATALOG|fail loud/i,
+    );
+    expect(pane.written).toEqual([]); // nothing written for an unknown trigger
   });
 });

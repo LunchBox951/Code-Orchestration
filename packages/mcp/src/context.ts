@@ -16,6 +16,7 @@ import {
   openWorktreeStore,
   parseSubRoleId,
   toolsForRole,
+  type ProjectId,
   type Role,
   type ToolContext,
   type ToolSpec,
@@ -100,6 +101,89 @@ export function toolsFromEnv(): readonly ToolSpec[] | undefined {
 }
 
 /**
+ * The explicit identity a per-pane session context is built from. All fields are authoritative
+ * (supplied by the Conductor from its session record); none are read from process.env.
+ */
+export interface ExplicitIdentity {
+  /** The pane's authoritative agent id. Never read from client input. */
+  readonly agent: string;
+  /** The resolved project id for this session. */
+  readonly projectId: ProjectId;
+  /** Absolute path of the worktree/cwd the agent operates in. */
+  readonly cwd: string;
+}
+
+/**
+ * Open all per-project stores for `identity` and assemble a {@link ToolContext}. This is the
+ * shared store-open + context assembly used by BOTH {@link defaultContextFactory} (env-sourced
+ * stdio mount) and the per-pane {@link LiveSessionHost} (explicit conductor-supplied identity).
+ * Mount-specific env cross-checks (CO_PROJECT_ID vs cwd, CO_AGENT vs recorded worktree, roster
+ * registration) belong to the calling mount, not here.
+ *
+ * Returns a { ctx, close } pair; the caller is responsible for calling `close()` on error or
+ * session end to release all opened stores.
+ */
+export function openContextStores(identity: ExplicitIdentity): {
+  ctx: ToolContext;
+  close: () => void;
+} {
+  const registry = openRegistry();
+  const closeOnFailure: Array<() => void> = [() => registry.close()];
+  const closeAll = (): void => {
+    for (const close of [...closeOnFailure].reverse()) {
+      try {
+        close();
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  };
+
+  try {
+    const { agent, projectId, cwd } = identity;
+    const mail = openMailStore(projectId);
+    closeOnFailure.push(() => mail.close());
+    const worktrees = openWorktreeStore(projectId);
+    closeOnFailure.push(() => worktrees.close());
+    const dispatch = openDispatchStore(projectId);
+    closeOnFailure.push(() => dispatch.close());
+    const reviews = openReviewStore(projectId);
+    closeOnFailure.push(() => reviews.close());
+    const roster = openRosterStore(projectId);
+    closeOnFailure.push(() => roster.close());
+    const specs = openSpecStore(projectId);
+    closeOnFailure.push(() => specs.close());
+    const plans = openPlanStore(projectId);
+    closeOnFailure.push(() => plans.close());
+    const issues = openIssueStore(projectId);
+    closeOnFailure.push(() => issues.close());
+    const research = openResearchStore(projectId);
+    closeOnFailure.push(() => research.close());
+
+    const ctx: ToolContext = {
+      agent,
+      projectId,
+      cwd,
+      mail,
+      registry,
+      worktrees,
+      dispatch,
+      reviews,
+      roster,
+      specs,
+      plans,
+      issues,
+      research,
+      usageSourceFactory: defaultUsageSourceFactory,
+    };
+    return { ctx, close: closeAll };
+  } catch (e) {
+    closeAll();
+    throw e;
+  }
+}
+
+/**
  * Build the default stdio {@link ToolContext} factory. The server serves a SINGLE agent for the
  * life of the process, so this resolves identity + project + mail bus ONCE (eagerly, here) and
  * hands the same context to every tool call — opening the registry/MailStore once and reusing
@@ -130,35 +214,30 @@ export function defaultContextFactory(): () => ToolContext {
   }
 
   const cwd = process.cwd();
-  const registry = openRegistry();
-  const closeOnFailure: Array<() => void> = [() => registry.close()];
-  const closeOpened = (): void => {
-    for (const close of [...closeOnFailure].reverse()) {
-      try {
-        close();
-      } catch {
-        // Preserve the original mount failure; cleanup best-effort is enough here.
-      }
-    }
-  };
 
+  // Phase 1: resolve projectId from the launch environment using a temp registry.
+  // Closed explicitly before opening the full store set — avoids holding two registries at once.
+  const envRegistry = openRegistry();
+  let projectId!: string;
+  let resolvedFromCwd: string | undefined;
+  let explicitProjectId: string | undefined;
   try {
-    const explicitProjectId = process.env[CO_PROJECT_ID_ENV]?.trim();
+    explicitProjectId = process.env[CO_PROJECT_ID_ENV]?.trim();
     if (process.env[CO_PROJECT_ID_ENV] != null && explicitProjectId === '') {
       throw new Error(
         `co MCP server: ${CO_PROJECT_ID_ENV} is set but empty — the mount must supply a project id.`,
       );
     }
-
-    const resolvedFromCwd = registry.resolve(cwd);
-    const projectId = explicitProjectId ?? resolvedFromCwd;
-    if (projectId == null) {
+    resolvedFromCwd = envRegistry.resolve(cwd);
+    const candidate = explicitProjectId ?? resolvedFromCwd;
+    if (candidate == null) {
       throw new Error(
         `co MCP server: worktree '${cwd}' is not a registered project and ${CO_PROJECT_ID_ENV} ` +
           "is not set (Principle 9). Registration / sandbox binding is an init concern, not the tool server's.",
       );
     }
-    registry.dataDirFor(projectId); // validates the id is bounded under program-data.
+    projectId = candidate;
+    envRegistry.dataDirFor(projectId); // validates the id is bounded under program-data.
     if (explicitProjectId != null && resolvedFromCwd != null && resolvedFromCwd !== projectId) {
       throw new Error(
         `co MCP server: ${CO_PROJECT_ID_ENV} '${projectId}' does not match registered cwd project ` +
@@ -171,46 +250,24 @@ export function defaultContextFactory(): () => ToolContext {
           'to expose the full toolset.',
       );
     }
+  } catch (e) {
+    try {
+      envRegistry.close();
+    } catch {
+      // best-effort; preserve original error
+    }
+    throw e;
+  }
+  envRegistry.close(); // phase 1 done — close temp registry before opening stores
 
-    const mail = openMailStore(projectId);
-    closeOnFailure.push(() => mail.close());
-    // L3: open + inject the worktree store alongside mail (a second connection on the same per-project
-    // store.db is safe — node:sqlite is synchronous and the two own different scopes/tables). A tool
-    // never opens its own store; the mount resolves and injects it.
-    const worktrees = openWorktreeStore(projectId);
-    closeOnFailure.push(() => worktrees.close());
-    // L4: open + inject the dispatch store (usage/cost/placement). PlacementProjector/UsageProjector/
-    // CostProjector own distinct tables from WorktreeProjector so sharing the same store.db is safe.
-    const dispatch = openDispatchStore(projectId);
-    closeOnFailure.push(() => dispatch.close());
-    // L5: open + inject the review store (verdict/request/serialize). ReviewProjector owns a distinct
-    // scope (`review:`) and read-model table from the other stores, so sharing the same store.db is safe.
-    const reviews = openReviewStore(projectId);
-    closeOnFailure.push(() => reviews.close());
-    // L6a: open + inject the roster store (agent→role→parent projection). RosterProjector owns a
-    // distinct scope (`agent:`) and read-model table (`roster`) from the other stores, so sharing the
-    // same store.db is safe. A tool never opens its own store; the mount resolves and injects it.
-    const roster = openRosterStore(projectId);
-    closeOnFailure.push(() => roster.close());
-    // L6b: open + inject the spec store (spec draft/lock/archive projection). SpecsProjector owns a
-    // distinct scope (`spec:`) and read-model table (`specs`) from the other stores, so sharing the
-    // same store.db is safe. A tool never opens its own store; the mount resolves and injects it.
-    const specs = openSpecStore(projectId);
-    closeOnFailure.push(() => specs.close());
-    // L6b E1: open + inject the plan store (plan draft/phase-status/replan projection). PlansProjector
-    // owns distinct scopes (`plan:`) and read-model tables (`plans`, `plan_phases`) from the other
-    // stores, so sharing the same store.db is safe. A tool never opens its own store.
-    const plans = openPlanStore(projectId);
-    closeOnFailure.push(() => plans.close());
-    // L6b G: open + inject the issue store (capture/diagnose/file projection). IssuesProjector owns
-    // a distinct scope (`issue:`) and read-model table (`issues`) from the other stores, so sharing
-    // the same store.db is safe. A tool never opens its own store.
-    const issues = openIssueStore(projectId);
-    closeOnFailure.push(() => issues.close());
-    // L6b H: open + inject the research store (finalized maps/answers). ResearchProjector owns a
-    // distinct scope (`research:`) and read-model table (`research_reports`), so sharing is safe.
-    const research = openResearchStore(projectId);
-    closeOnFailure.push(() => research.close());
+  // Phase 2: open all stores via the shared helper, then perform env-specific cross-checks.
+  const { ctx, close: closeOpened } = openContextStores({ agent, projectId, cwd });
+  // worktrees is always present: openContextStores opens it unconditionally.
+  const worktrees = ctx.worktrees!;
+  const roster = ctx.roster!;
+  try {
+    // Env-specific cross-checks: CO_PROJECT_ID vs recorded worktrees, CO_AGENT vs worktree agent,
+    // CO_ROLE vs worktree role, roster registration. These remain in the env path.
     let scopedSandbox: ReturnType<typeof worktrees.listWorktrees>[number] | undefined;
     if (explicitProjectId != null && resolvedFromCwd == null) {
       const normalizedCwd = resolve(cwd);
@@ -308,22 +365,6 @@ export function defaultContextFactory(): () => ToolContext {
         parent,
       });
     }
-    const ctx: ToolContext = {
-      agent,
-      projectId,
-      cwd,
-      mail,
-      registry,
-      worktrees,
-      dispatch,
-      reviews,
-      roster,
-      specs,
-      plans,
-      issues,
-      research,
-      usageSourceFactory: defaultUsageSourceFactory,
-    };
     return () => ctx;
   } catch (e) {
     closeOpened();

@@ -1,36 +1,221 @@
 /**
- * The live-session-hosting seam (L7 plug-point) — the L2 analogue of L1's `LiveDeliveryStub`.
- * In production the Conductor hosts the REAL interactive claude/codex in a pty (Principle 2 —
- * authentic-terminal; never headless `-p`/`exec`) and serves the co MCP tools to that live
- * session, injecting the session's agent identity into each {@link ToolContext} (never trusting
- * client-supplied identity) and waking/routing the session on inbound mail. L2 ships the
- * transport-agnostic server (stdio) + this typed stub; it does NOT host live sessions, and the
- * stdio server works WITHOUT it (that is what "transport-agnostic" means).
+ * The live-session-hosting seam (L7) — the L2 analogue of L1's now-real `LiveDelivery`.
+ * {@link LiveSessionHostImpl} serves the co MCP surface to ONE hosted pane at a time, injecting the
+ * Conductor's AUTHORITATIVE per-pane agent identity (from the B0 session record) into every
+ * {@link ToolContext} — server-side, never trusting client-supplied identity — and offering the
+ * role-scoped toolset. In production the Conductor hosts the REAL interactive claude/codex in a pty
+ * (Principle 2 — authentic-terminal; never headless `-p`/`exec`); binding this MCP server to that live
+ * pty's transport and waking/routing on inbound mail is the host-side runtime wiring, while the
+ * identity-injecting surface itself is real here and sandbox-tested over an in-memory transport.
  */
-export interface LiveSessionHost {
-  /**
-   * Host a live pty session for `agent` and serve the co MCP surface to it. Returns `never`: the
-   * exact parameters and lifecycle are L7's to finalize; this signature only marks the seam.
-   */
-  hostSession(agent: string): never;
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import {
+  openSessionStore,
+  toolsForRole,
+  type ProjectId,
+  type ResumeHandle,
+  type Role,
+  type SessionStore,
+} from '@co/core';
+import { createCoMcpServer } from './server.js';
+import { openContextStores } from './context.js';
+
+/**
+ * The authoritative per-pane identity the Conductor supplies when hosting a session. All fields
+ * come from the Conductor's session record (B0 SessionRecord) — never from the client (live
+ * provider). The Conductor assigned this identity; the host trusts it and injects it into every
+ * ToolContext without re-deriving or allowing client override (AC-L7-2; Principle 9).
+ */
+export interface HostedIdentity {
+  /** The pane's authoritative agent id (from the session record). Never client-supplied. */
+  readonly agent: string;
+  /** The base role to scope the offered toolset. */
+  readonly role: Role;
+  /** Optional sub-role specialization to preserve in the roster record. */
+  readonly subRole?: string;
+  /** The parent agent id (used for roster context). */
+  readonly parent: string;
+  /** The live pane id backing this hosted session. */
+  readonly pane: string;
+  /** The resolved project id for this session. */
+  readonly projectId: ProjectId;
+  /** Absolute path of the worktree/cwd the agent operates in. */
+  readonly cwd: string;
+  /** Provider backing this pane. */
+  readonly provider: 'claude' | 'codex';
+  /** Provider-specific resume handle persisted for recovery. */
+  readonly resume: ResumeHandle;
 }
 
 /**
- * The L7 STUB host. Fails loud (Principle 9) until the Conductor owns live session-hosting — never
- * a silent no-op (a silent stub is exactly the fallback that hid the prototype's gaps).
+ * A handle to a live-hosted session. Returned by {@link LiveSessionHost.hostSession}.
+ * Closing frees all stores opened for the session.
  */
-export class LiveSessionHostStub implements LiveSessionHost {
-  // L7 PLUG-POINT (Conductor → runtime substrate). The production host must:
-  //  (1) spawn + host the real interactive claude/codex in a pty (Principle 2; never headless -p/exec);
-  //  (2) inject the session's agent identity into each tool call's ToolContext (never trust client input);
-  //  (3) wake/route the session on inbound mail (turn lifecycle is L6/L7).
-  // Until then this stub fails loud (Principle 9). The signature omits the params the interface
-  // declares (TS allows a method to ignore trailing parameters) — it always throws regardless.
-  hostSession(): never {
-    throw new Error(
-      'LiveSessionHostStub.hostSession: live pty session-hosting is not implemented at L2. ' +
-        'This is the L7 plug-point: host the real claude/codex in a pty, inject per-session identity ' +
-        'into the ToolContext, and wake/route on mail. Use the stdio server for headless flows.',
-    );
+export interface HostedSession {
+  /**
+   * Release all per-session resources (MCP server/transport + opened stores). Called by the
+   * Conductor when the pane's session ends.
+   */
+  close(): Promise<void>;
+}
+
+/**
+ * The live MCP session host. Serves the co MCP surface to one pane/session at a time, stamping
+ * the Conductor's authoritative agent identity into every ToolContext — server-side, never
+ * trusting what the live provider (client) claims (AC-L7-2; Principle 9).
+ *
+ * This is the L7 C1 implementation; pty hosting (B1) and mail injection (C2) are separate phases.
+ */
+export interface LiveSessionHost {
+  /**
+   * Host the co MCP surface for a single pane. Connects the co MCP server to `transport`,
+   * injecting `identity.agent` (and project + store context) into every tool call's ToolContext.
+   * The offered toolset is role-scoped to `identity.role` — matching the stdio mount's behaviour
+   * but with identity injected from the session record rather than from env.
+   *
+   * Fails loud (Principle 9) if `identity.agent` is missing or blank — never fabricates an
+   * identity or falls back to a client-claimed one.
+   *
+   * @param identity  The Conductor's authoritative session identity (from the session record).
+   * @param transport The server-side transport to connect the MCP server to.
+   * @returns A handle to close per-session resources when the pane ends.
+   */
+  hostSession(identity: HostedIdentity, transport: Transport): Promise<HostedSession>;
+}
+
+type SessionStoreOpener = (projectId: ProjectId) => SessionStore;
+
+/**
+ * Production implementation of {@link LiveSessionHost}. Builds a role-scoped co MCP server for
+ * each hosted pane and connects it to the supplied transport. Identity comes from the Conductor's
+ * session record — never re-derived from, or overridable by, the live provider.
+ */
+export class LiveSessionHostImpl implements LiveSessionHost {
+  private static readonly activeHostedAgents = new Set<string>();
+  private static readonly activeHostedPanes = new Set<string>();
+
+  constructor(private readonly openSessions: SessionStoreOpener = openSessionStore) {}
+
+  async hostSession(identity: HostedIdentity, transport: Transport): Promise<HostedSession> {
+    const agent = identity.agent?.trim();
+    if (agent == null || agent.length === 0) {
+      throw new Error(
+        'LiveSessionHost.hostSession: authoritative agent identity is missing or blank — ' +
+          'the Conductor must supply the session record identity (Principle 9: never fabricate).',
+      );
+    }
+
+    const parent = identity.parent?.trim();
+    if (parent == null || parent.length === 0) {
+      throw new Error(
+        'LiveSessionHost.hostSession: authoritative parent identity is missing or blank — ' +
+          'the Conductor must supply the recorded spawn parent.',
+      );
+    }
+    const pane = identity.pane?.trim();
+    if (pane == null || pane.length === 0) {
+      throw new Error(
+        'LiveSessionHost.hostSession: authoritative pane identity is missing or blank — ' +
+          'the Conductor must supply the session record pane.',
+      );
+    }
+
+    const activeKey = `${identity.projectId}:${agent}`;
+    const paneKey = `${identity.projectId}:${pane}`;
+    if (LiveSessionHostImpl.activeHostedAgents.has(activeKey)) {
+      throw new Error(
+        `LiveSessionHost.hostSession: agent '${agent}' already has an active hosted MCP session ` +
+          `in project '${identity.projectId}'.`,
+      );
+    }
+    if (LiveSessionHostImpl.activeHostedPanes.has(paneKey)) {
+      throw new Error(
+        `LiveSessionHost.hostSession: pane '${pane}' already has an active hosted MCP session ` +
+          `in project '${identity.projectId}'.`,
+      );
+    }
+    let sessionStore: SessionStore | undefined;
+    let activeClaimed = false;
+    let sessionClaimed = false;
+    let opened: ReturnType<typeof openContextStores> | undefined;
+    let server;
+    try {
+      sessionStore = this.openSessions(identity.projectId);
+      LiveSessionHostImpl.activeHostedAgents.add(activeKey);
+      LiveSessionHostImpl.activeHostedPanes.add(paneKey);
+      activeClaimed = true;
+      sessionStore.recordSession({
+        agentId: agent,
+        pane,
+        cwd: identity.cwd,
+        provider: identity.provider,
+        resume: identity.resume,
+      });
+      sessionClaimed = true;
+      opened = openContextStores({
+        agent,
+        projectId: identity.projectId,
+        cwd: identity.cwd,
+      });
+      opened.ctx.roster!.recordAgent({
+        agentId: agent,
+        role: identity.role,
+        ...(identity.subRole != null ? { subRole: identity.subRole } : {}),
+        parent,
+      });
+      const scopedTools = toolsForRole(identity.role);
+      server = createCoMcpServer({
+        tools: scopedTools,
+        contextFactory: () => opened!.ctx,
+      });
+      await server.connect(transport);
+    } catch (e) {
+      try {
+        await server?.close();
+      } catch {
+        /* best-effort close of a partially connected MCP server */
+      }
+      if (activeClaimed) {
+        LiveSessionHostImpl.activeHostedAgents.delete(activeKey);
+        LiveSessionHostImpl.activeHostedPanes.delete(paneKey);
+      }
+      if (sessionClaimed) {
+        try {
+          sessionStore?.endSession(agent, pane);
+        } catch {
+          /* best-effort rollback of a failed host setup */
+        }
+      }
+      sessionStore?.close();
+      opened?.close();
+      throw e;
+    }
+
+    let closed = false;
+    const hostedSessionStore = sessionStore;
+    const hostedServer = server;
+    if (hostedSessionStore == null || hostedServer == null) {
+      throw new Error('LiveSessionHost.hostSession: setup completed without required handles.');
+    }
+    const activeHostedAgents = LiveSessionHostImpl.activeHostedAgents;
+    const activeHostedPanes = LiveSessionHostImpl.activeHostedPanes;
+    return {
+      async close(): Promise<void> {
+        if (closed) return;
+        closed = true;
+        try {
+          await hostedServer.close();
+        } finally {
+          try {
+            hostedSessionStore.endSession(agent, pane);
+          } finally {
+            hostedSessionStore.close();
+            activeHostedAgents.delete(activeKey);
+            activeHostedPanes.delete(paneKey);
+            opened?.close();
+          }
+        }
+      },
+    };
   }
 }
