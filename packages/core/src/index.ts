@@ -839,6 +839,7 @@ export type { SubRoleViolation } from './roles/sub-role-completeness.js';
 export { checkSubRoleCompleteness } from './roles/sub-role-completeness.js';
 
 // L6a Phase D1 — non-destructive block-list registry + drift check + reactive-nudge catalog.
+// L7 Phase P1 — per-pane isolated launch-config builder + real readEnforcedConfig.
 // The declared LIST and DATA only (Principle 6 — block only the workarounds, everything else
 // is a nudge). Enforcement hooks (PreToolUse, Claude/Codex variants) and nudge injection are
 // L7 typed stubs here; the production wiring lands in L7 (permissions.md:90-98 / :64-66).
@@ -846,6 +847,8 @@ export type { BlockCategory, BlockRule, MatchBlockOptions } from './permissions/
 export { BLOCK_LIST, matchBlock } from './permissions/block-list.js';
 export type { EnforcedConfig, DriftViolation } from './permissions/drift.js';
 export { checkBlockListDrift, readEnforcedConfig } from './permissions/drift.js';
+export type { PaneIdentity, PaneLaunchConfig } from './permissions/pane-launch-config.js';
+export { buildPaneLaunchConfig } from './permissions/pane-launch-config.js';
 export type { NudgeRule } from './permissions/nudges.js';
 export { NUDGE_CATALOG, nudgeFor, injectNudge } from './permissions/nudges.js';
 

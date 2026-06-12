@@ -1,12 +1,14 @@
 /**
  * L6a Phase D1 — Drift check: declared registry vs. enforced config (permissions.md:90-94).
+ * L7 Phase P1 — fills `readEnforcedConfig` with the real per-pane config reader.
  *
  * A declared block that isn't enforced, or an enforced id nobody declared, is the exact silent
  * drift this check kills (Principle 9 — no-silent-failures). The check is PURE over injected
- * inputs; the `readEnforcedConfig` seam is the L7 plug-point that the harness gate hooks fill in
- * at runtime.
+ * inputs; `readEnforcedConfig` reads back the `enforcedIds` that {@link buildPaneLaunchConfig}
+ * recorded, so the roundtrip is real: dropping a rule from the builder's output causes drift.
  */
 
+import type { PaneLaunchConfig } from './pane-launch-config.js';
 import type { BlockRule } from './block-list.js';
 
 /** What the harness gate hooks actually enforce. Produced by L7; injected here for tests. */
@@ -63,23 +65,16 @@ export function checkBlockListDrift(
 }
 
 /**
- * The L7 enforcement seam — TYPED STUB that THROWS loudly.
+ * Read the {@link EnforcedConfig} from a {@link PaneLaunchConfig} produced by
+ * {@link buildPaneLaunchConfig}.
  *
- * The production implementation reads the harness gate hooks' active config and returns an
- * {@link EnforcedConfig}. That reading logic depends on the runtime substrate (Claude/Codex
- * PreToolUse hook variants) and is built in L7 (permissions.md:90-98).
+ * The builder records every block-rule id it enforces in `config.enforcedIds`; this reader
+ * returns them as `blockedIds`. The meaningful roundtrip: if the builder drops a rule id,
+ * this reader returns fewer ids and {@link checkBlockListDrift} flags `declared-not-enforced`.
  *
- * In tests, inject an {@link EnforcedConfig} directly into {@link checkBlockListDrift} instead
- * of calling this seam — the drift check is pure over injected input. In production L7 wires
- * this seam to the real harness reader.
- *
- * Throws rather than returning a silent default because a silent no-op would mask the very
- * enforcement-layer absence this check exists to detect (Principle 9 / Principle 16).
+ * Fail-loud (Principle 9): the function has no silent default — passing a config with an empty
+ * `enforcedIds` returns an empty set, which drift will immediately flag as a full mismatch.
  */
-export function readEnforcedConfig(): EnforcedConfig {
-  throw new Error(
-    'readEnforcedConfig: the permission enforcement layer is L7 — inject the enforced config ' +
-      'directly in tests, or wire the harness reader in L7 (permissions.md:90-98). ' +
-      'This stub must never be a silent no-op (Principle 9).',
-  );
+export function readEnforcedConfig(config: PaneLaunchConfig): EnforcedConfig {
+  return { blockedIds: config.enforcedIds };
 }
