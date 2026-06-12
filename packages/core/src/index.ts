@@ -108,7 +108,12 @@ export type {
 // `LiveDeliveryStub`): it DELEGATES persistence to a composed `InProcessDelivery`, then wakes the
 // recipient + injects unread actionable mail into its live pty via injected seams.
 export { InProcessDelivery, LiveDelivery } from './mail/delivery.js';
-export type { MailStore, MailStoreOptions, ReplyDraft } from './mail/mail-store.js';
+export type {
+  MailStore,
+  MailStoreOptions,
+  DeliveryFactory,
+  ReplyDraft,
+} from './mail/mail-store.js';
 export { openMailStore } from './mail/mail-store.js';
 // L1 W4 outward-action approval gate + operator-terminal addressing (AC-L1-5).
 export type { ApprovalOutcome, OutwardApprovalRequest } from './mail/approval.js';
