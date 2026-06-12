@@ -73,12 +73,20 @@ export interface PaneLaunchConfig {
 
 const CLAUDE_RULE_PATTERNS: ReadonlyMap<string, readonly string[]> = new Map([
   [
+    // Belt-and-suspenders: Bash(git push*) from raw-git-push already subsumes these
+    // force-push variants, but explicit patterns ensure pre-exec denial fires on the
+    // more specific rule id even if raw-git-push is somehow absent.
     'git-force-push',
     ['Bash(git push --force*)', 'Bash(git push -f*)', 'Bash(git push --force-with-lease*)'],
   ],
   ['rm-rf-root-or-home', ['Bash(rm -rf /*)', 'Bash(rm -rf ~*)', 'Bash(rm -rf $HOME*)']],
   ['sudo', ['Bash(sudo*)']],
-  ['daemon-direct', ['Bash(co run*)']],
+  [
+    // Belt-and-suspenders: Bash(co *) from co-in-shell subsumes this, but explicit
+    // pattern ensures daemon-direct is denied even when co-in-shell is absent.
+    'daemon-direct',
+    ['Bash(co run*)'],
+  ],
   ['raw-git-merge', ['Bash(git merge*)', 'Bash(git pull*)']],
   ['raw-git-push', ['Bash(git push*)']],
   ['raw-gh-pr-merge', ['Bash(gh pr merge*)', 'Bash(gh pr create*)', 'Bash(gh api*)']],
