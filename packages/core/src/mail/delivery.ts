@@ -178,14 +178,17 @@ export class InProcessDelivery implements Delivery {
   }
 
   /**
-   * Deliver a down-resolution and optional relay atomically. This is used when an upstream answer
-   * must both resolve the held escalation and flow back down to the original clarify asker.
+   * Deliver a down-resolution and optional relays atomically, returning the response row AND every
+   * delivered relay row. {@link resolve} is the {@link Delivery}-interface wrapper that returns just
+   * the response; {@link LiveDelivery} uses this richer form so it can wake/inject each relay recipient
+   * — a relay is a NEW item delivered to a (possibly WAITING) recipient, e.g. the answer flowing back
+   * down to the original clarify asker, so it must be woken like any other delivery (freeze #3 / duty 2).
    */
-  resolve(
+  resolveWithRelays(
     held: DeliveredMail,
     envelope: MailEnvelope,
     relays: readonly MailEnvelope[] = [],
-  ): DeliveredMail {
+  ): { response: DeliveredMail; relays: readonly DeliveredMail[] } {
     return this.store.transaction((tx) => {
       const db = tx.raw as DatabaseSync;
       ensureInboxTable(db);
@@ -210,19 +213,41 @@ export class InProcessDelivery implements Delivery {
       const [storedResponse] = tx.append([makeMailEvent(this.projectId, envelope)]);
       applyEvent(tx, decode(storedResponse!, mailUpcasters, mailSchemas), this.projectors);
 
+      const relayRows: DeliveredMail[] = [];
       for (const relay of relays) {
         const [storedRelay] = tx.append([makeMailEvent(this.projectId, relay)]);
         applyEvent(tx, decode(storedRelay!, mailUpcasters, mailSchemas), this.projectors);
+        const relayRow = selectMailBySeq(db, storedRelay!.seq);
+        if (!relayRow) {
+          throw new Error(
+            `InProcessDelivery.resolve: relay row missing after projection (seq=${storedRelay!.seq})`,
+          );
+        }
+        relayRows.push(relayRow);
       }
 
-      const delivered = selectMailBySeq(db, storedResponse!.seq);
-      if (!delivered) {
+      const response = selectMailBySeq(db, storedResponse!.seq);
+      if (!response) {
         throw new Error(
           `InProcessDelivery.resolve: inbox row missing after projection (seq=${storedResponse!.seq})`,
         );
       }
-      return delivered;
+      return { response, relays: relayRows };
     });
+  }
+
+  /**
+   * Deliver a down-resolution and optional relay atomically (the {@link Delivery} seam). Returns the
+   * resolution response row; any relays are persisted in the SAME transaction. See
+   * {@link resolveWithRelays} for the form that also returns the relay rows (used by
+   * {@link LiveDelivery} to wake/inject each relay recipient).
+   */
+  resolve(
+    held: DeliveredMail,
+    envelope: MailEnvelope,
+    relays: readonly MailEnvelope[] = [],
+  ): DeliveredMail {
+    return this.resolveWithRelays(held, envelope, relays).response;
   }
 
   /**
@@ -328,11 +353,14 @@ function isInjectableActionable(mail: DeliveredMail): boolean {
  *      the transaction logic (freeze #3 — one writer). "Conductor-side" just means this runs in the
  *      Conductor process, never a worker sandbox; composition satisfies that.
  *   2. **Wake the WAITING recipient** — via the injected {@link WakeRecipient} seam, on every operation
- *      that delivers a NEW item to a recipient (`deliver`/`forward`/`resolve`). Receipts
- *      (`markRead`/`retract`) deliver nothing new, so they persist only — no wake.
+ *      that delivers a NEW item to a recipient: `deliver`, `forward`, and `resolve` — the last waking
+ *      BOTH the resolution response AND every relay recipient (each relay is its own new-item delivery,
+ *      e.g. an answer flowing back down to the original asker). Receipts (`markRead`/`retract`) deliver
+ *      nothing new, so they persist only — no wake.
  *   3. **Inject unread actionable mail into the recipient's live pty** — via the injected
- *      {@link InjectToRecipient} seam, when the delivered item is an outstanding `actionable`
- *      ({@link isInjectableActionable}). Informational mail and receipts are never injected.
+ *      {@link InjectToRecipient} seam, for each woken item that is an outstanding `actionable`
+ *      ({@link isInjectableActionable}) — including an actionable `resolve` relay. Informational mail
+ *      and receipts are never injected.
  *
  * Decoupling: `wake` and `injectToRecipient` are constructor-injected callbacks; this module does NOT
  * import `pty/`. Wiring the seams to real panes is host-side integration, not this sandbox's job.
@@ -366,9 +394,13 @@ export class LiveDelivery implements Delivery {
     envelope: MailEnvelope,
     relays: readonly MailEnvelope[] = [],
   ): DeliveredMail {
-    const delivered = this.inner.resolve(held, envelope, relays);
-    this.wakeAndMaybeInject(delivered);
-    return delivered;
+    // The resolution response AND every relay are NEW items delivered to (possibly WAITING) recipients
+    // — wake each, and inject the outstanding-actionable ones (e.g. an answer relayed back down to the
+    // original asker). A relay delivered to a WAITING agent that was NOT woken was the gap (review #193).
+    const { response, relays: relayRows } = this.inner.resolveWithRelays(held, envelope, relays);
+    this.wakeAndMaybeInject(response);
+    for (const relayRow of relayRows) this.wakeAndMaybeInject(relayRow);
+    return response;
   }
 
   markRead(recipient: string, seq: number): DeliveredMail {

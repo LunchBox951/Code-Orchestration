@@ -6,6 +6,7 @@ import { openProjectStore } from '../store/sqlite-store.js';
 import {
   MAIL_CHAT,
   MAIL_CLARIFY_REQUEST,
+  MAIL_ESCALATION,
   type DeliveredMail,
   type MailEnvelope,
 } from './events.js';
@@ -191,6 +192,113 @@ describe('LiveDelivery — persistence parity with InProcessDelivery (delegation
     } finally {
       liveStore.close();
       inprocStore.close();
+    }
+  });
+});
+
+describe('LiveDelivery — forward + resolve wake/inject every new-item recipient (incl. relays)', () => {
+  it('forward of an escalation: persists, wakes the up-chain recipient, injects (actionable)', () => {
+    const store = openProjectStore('p-live-forward');
+    const seams = makeSeams();
+    const delivery = new LiveDelivery('p-live-forward', store, [new MailProjector()], seams);
+    const mail = openMailStore('p-live-forward', { delivery });
+    try {
+      // A held escalation the holder ('lead') must forward up to 'coord'.
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'impl',
+        subject: 'esc',
+        body: 'help',
+      });
+      // Reset captures so we observe ONLY the forward (the held deliver already woke 'lead').
+      seams.wakeCalls.length = 0;
+      seams.injectCalls.length = 0;
+
+      const thread = held.correlationId ?? String(held.seq);
+      const forwarded = delivery.forward!(held, {
+        type: MAIL_ESCALATION,
+        to: 'coord',
+        from: 'lead', // = held.recipient (assertForwardEnvelope)
+        subject: 'esc',
+        body: 'help',
+        causationId: String(held.seq),
+        correlationId: thread,
+      });
+
+      expect(forwarded.recipient).toBe('coord');
+      expect(forwarded.kind).toBe('actionable');
+      expect(seams.wakeCalls).toEqual(['coord']); // woke the up-chain recipient
+      expect(seams.injectCalls).toHaveLength(1); // an actionable escalation is injected
+      expect(seams.injectCalls[0]!.recipient).toBe('coord');
+      expect(seams.injectCalls[0]!.mail).toEqual(forwarded);
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('resolve of an escalation: wakes the response recipient AND every relay; injects actionable relays only', () => {
+    const store = openProjectStore('p-live-resolve');
+    const seams = makeSeams();
+    const delivery = new LiveDelivery('p-live-resolve', store, [new MailProjector()], seams);
+    const mail = openMailStore('p-live-resolve', { delivery });
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'impl',
+        subject: 'esc',
+        body: 'help',
+      });
+      seams.wakeCalls.length = 0;
+      seams.injectCalls.length = 0;
+
+      const thread = held.correlationId ?? String(held.seq);
+      // Informational answer back to the escalation's sender ('impl'), plus two relays flowing down:
+      // an ACTIONABLE clarify to 'carol' (must be injected) and an INFORMATIONAL note to 'dave' (wake only).
+      const response: MailEnvelope = {
+        type: MAIL_CHAT,
+        to: 'impl', // = held.sender (assertResolutionEnvelope)
+        from: 'lead', // = held.recipient
+        subject: 're: esc',
+        body: 'do X',
+        causationId: String(held.seq),
+        correlationId: thread,
+      };
+      const actionableRelay: MailEnvelope = {
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'carol',
+        from: 'lead',
+        subject: 'relay-q',
+        body: 'please confirm',
+        causationId: String(held.seq),
+        correlationId: thread,
+      };
+      const infoRelay: MailEnvelope = {
+        type: MAIL_CHAT,
+        to: 'dave',
+        from: 'lead',
+        subject: 'relay-fyi',
+        body: 'for your awareness',
+        causationId: String(held.seq),
+        correlationId: thread,
+      };
+
+      const resolved = delivery.resolve!(held, response, [actionableRelay, infoRelay]);
+
+      expect(resolved.recipient).toBe('impl');
+      // Duty 2: every new-item recipient is woken — the response AND each relay (the relay-wake gap, #193).
+      expect(seams.wakeCalls).toEqual(['impl', 'carol', 'dave']);
+      // Duty 3: inject only the outstanding-actionable items — the clarify relay, NOT the informational
+      // response or the informational relay.
+      expect(seams.injectCalls).toHaveLength(1);
+      expect(seams.injectCalls[0]!.recipient).toBe('carol');
+      expect(seams.injectCalls[0]!.mail.kind).toBe('actionable');
+      expect(seams.injectCalls[0]!.mail.subject).toBe('relay-q');
+    } finally {
+      mail.close();
+      store.close();
     }
   });
 });
