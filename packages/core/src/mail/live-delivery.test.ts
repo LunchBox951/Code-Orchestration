@@ -10,7 +10,12 @@ import {
   type MailEnvelope,
 } from './events.js';
 import { MailProjector } from './mail-projector.js';
-import { InProcessDelivery, LiveDelivery, type LiveDeliveryOptions } from './delivery.js';
+import {
+  InProcessDelivery,
+  LiveDelivery,
+  type Delivery,
+  type LiveDeliveryOptions,
+} from './delivery.js';
 import { openMailStore } from './mail-store.js';
 
 // ── Program-data dir per test (mirrors mail.test.ts) ──────────────────────────
@@ -70,7 +75,14 @@ describe('LiveDelivery — deliver persists (delegation) + wakes + injects actio
   it('deliver of an ACTIONABLE mail: persists, wakes once, injects once', () => {
     const store = openProjectStore('p-live-actionable');
     const seams = makeSeams();
-    const delivery = new LiveDelivery('p-live-actionable', store, [new MailProjector()], seams);
+    // Typed as Delivery to make the drop-in-Delivery shape explicit (review #185): LiveDelivery is a
+    // drop-in for the Delivery seam, so L7 can swap in the Conductor-side writer without bus changes.
+    const delivery: Delivery = new LiveDelivery(
+      'p-live-actionable',
+      store,
+      [new MailProjector()],
+      seams,
+    );
     const mail = openMailStore('p-live-actionable', { delivery });
     try {
       const delivered = mail.send(ACTIONABLE);
