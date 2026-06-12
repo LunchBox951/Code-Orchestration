@@ -585,26 +585,30 @@ export class ConductorEngine {
 
     for (const [projectId, agents] of agentsByProject) {
       const timeoutMs = this.clarifyTimeoutSeconds(projectId) * 1000;
+      // Nested try/finally so `mail` is closed even if `openRoster` throws (no leak on the error path).
       const mail = this.openMail(projectId);
-      const roster = this.openRoster(projectId);
       try {
-        const resolver = roleParentResolver(roster);
-        for (const agent of agents) {
-          for (const unanswered of waitingItems(mail, agent)) {
-            const key = `${projectId}:${unanswered.seq}`; // unique per project + mail seq
-            const firstSeen = this.clarifyFirstSeen.get(key);
-            if (firstSeen == null) {
-              this.clarifyFirstSeen.set(key, observedAt);
-              continue; // just observed — start its clock; it cannot already have timed out.
-            }
-            if (observedAt - firstSeen >= timeoutMs) {
-              forwarded.push(forwardOnTimeout(mail, resolver, unanswered));
-              this.clarifyFirstSeen.delete(key); // forwarded — stop tracking the (now-discharged) item.
+        const roster = this.openRoster(projectId);
+        try {
+          const resolver = roleParentResolver(roster);
+          for (const agent of agents) {
+            for (const unanswered of waitingItems(mail, agent)) {
+              const key = `${projectId}:${unanswered.seq}`; // unique per project + mail seq
+              const firstSeen = this.clarifyFirstSeen.get(key);
+              if (firstSeen == null) {
+                this.clarifyFirstSeen.set(key, observedAt);
+                continue; // just observed — start its clock; it cannot already have timed out.
+              }
+              if (observedAt - firstSeen >= timeoutMs) {
+                forwarded.push(forwardOnTimeout(mail, resolver, unanswered));
+                this.clarifyFirstSeen.delete(key); // forwarded — stop tracking the discharged item.
+              }
             }
           }
+        } finally {
+          roster.close();
         }
       } finally {
-        roster.close();
         mail.close();
       }
     }
