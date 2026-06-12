@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { FakePty } from './fake-pty.js';
-import type { SpawnSpec } from './pty-host.js';
+import type { Pane, PtyExit, SpawnSpec } from './pty-host.js';
 import { driveToReady } from './startup-driver.js';
 
 const ESC = '\u001B';
@@ -38,6 +38,45 @@ const CODEX_SIGNIN =
   '❯ 1. Sign in with ChatGPT\r\n' +
   '  2. Sign in with Device Code\r\n' +
   '  3. Provide your own API key\r\n';
+
+class ReplayOnSubscribePane implements Pane {
+  readonly id = 'replay-on-subscribe';
+  readonly written: string[] = [];
+  dataUnsubscribed = 0;
+  exitUnsubscribed = 0;
+  private readonly dataListeners = new Set<(chunk: string) => void>();
+  private readonly exitListeners = new Set<(ev: PtyExit) => void>();
+
+  constructor(private readonly replay: string) {}
+
+  write(data: string): void {
+    this.written.push(data);
+  }
+
+  onData(cb: (chunk: string) => void): () => void {
+    this.dataListeners.add(cb);
+    cb(this.replay);
+    return () => {
+      this.dataUnsubscribed += 1;
+      this.dataListeners.delete(cb);
+    };
+  }
+
+  onExit(cb: (ev: PtyExit) => void): () => void {
+    this.exitListeners.add(cb);
+    return () => {
+      this.exitUnsubscribed += 1;
+      this.exitListeners.delete(cb);
+    };
+  }
+
+  emitData(chunk: string): void {
+    for (const listener of this.dataListeners) listener(chunk);
+  }
+
+  kill(): void {}
+  signal(): void {}
+}
 
 describe('driveToReady — authed (reaches ready)', () => {
   it('claude: answers trust with one Enter, then resolves authed', async () => {
@@ -142,6 +181,31 @@ describe('driveToReady — fail-loud + liveness', () => {
     pane.emit(CLAUDE_READY);
     await p;
     expect(settled).toBe(true);
+  });
+
+  it('rejects loudly on startup timeout instead of staying pending forever', async () => {
+    vi.useFakeTimers();
+    try {
+      const pane = new FakePty().spawn(CLAUDE_SPEC);
+      const p = driveToReady(pane, 'claude', { timeoutMs: 10 }).catch((error: unknown) => error);
+      pane.emit('booting' + ESC + '[2J' + ' ⠋ ⠙ ⠹\r\n');
+      await vi.advanceTimersByTimeAsync(10);
+      const outcome = await Promise.race([p, Promise.resolve('pending')]);
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as Error).message).toMatch(/timed out during claude startup/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('tears down subscriptions when synchronous replay reaches ready during onData', async () => {
+    const pane = new ReplayOnSubscribePane(CLAUDE_READY);
+    await expect(driveToReady(pane, 'claude')).resolves.toEqual({ authed: true });
+
+    expect(pane.dataUnsubscribed).toBe(1);
+    expect(pane.exitUnsubscribed).toBe(1);
+    pane.emitData(CLAUDE_TRUST);
+    expect(pane.written).toEqual([]);
   });
 
   it('a pty exit AFTER ready does not override the resolved outcome', async () => {

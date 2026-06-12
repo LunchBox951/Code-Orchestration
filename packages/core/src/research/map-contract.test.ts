@@ -63,8 +63,29 @@ describe('checkLocatorMap — structural violations beyond shape', () => {
       ...GOOD_MAP,
       readOrder: ['packages/core/src/mail/mail-store.ts', 'ghost.ts'],
     });
+    expect(violations.map((v) => v.reason)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/ghost\.ts/)]),
+    );
+  });
+
+  it('flags an entry path missing from readOrder', () => {
+    const missing = GOOD_MAP.entries[1]!.path;
+    const violations = checkLocatorMap({
+      ...GOOD_MAP,
+      readOrder: [GOOD_MAP.entries[0]!.path],
+    });
     expect(violations).toHaveLength(1);
-    expect(violations[0]?.reason).toMatch(/ghost\.ts/);
+    expect(violations[0]?.reason).toMatch(new RegExp(missing));
+  });
+
+  it('flags duplicate readOrder paths', () => {
+    const duplicate = GOOD_MAP.entries[0]!.path;
+    const violations = checkLocatorMap({
+      ...GOOD_MAP,
+      readOrder: [duplicate, duplicate, GOOD_MAP.entries[1]!.path],
+    });
+    expect(violations).toHaveLength(1);
+    expect(violations[0]?.reason).toMatch(/duplicate.*readOrder/i);
   });
 
   it('flags duplicate entry paths', () => {

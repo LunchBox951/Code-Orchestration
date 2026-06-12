@@ -2,11 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import { openProjectStore } from '../store/sqlite-store.js';
 import {
+  EVENT_MAIL_LIVE_EFFECT,
   MAIL_CHAT,
   MAIL_CLARIFY_REQUEST,
+  MAIL_CLARIFY_RESPONSE,
   MAIL_ESCALATION,
+  mailSchemas,
+  mailUpcasters,
   type DeliveredMail,
   type MailEnvelope,
 } from './events.js';
@@ -18,6 +23,10 @@ import {
   type LiveDeliveryOptions,
 } from './delivery.js';
 import { openMailStore } from './mail-store.js';
+import { forwardOnTimeout, prototypeParentResolver, resolveEscalation } from './escalation.js';
+import type { Store, StoreTx, NewEvent, StoredEvent } from '../store/types.js';
+import { rebuildAll } from '../replay/projector.js';
+import { decode } from '../replay/decode.js';
 
 // ── Program-data dir per test (mirrors mail.test.ts) ──────────────────────────
 const ORIGINAL_ENV = process.env;
@@ -72,6 +81,39 @@ const flush = async (): Promise<void> => {
   await tick();
   await tick();
 };
+
+function failOnTransaction(
+  inner: Store,
+  failOn: number,
+  error = new Error('ack write failed'),
+): Store {
+  let calls = 0;
+  return {
+    append(events: readonly NewEvent[]): readonly StoredEvent[] {
+      return inner.append(events);
+    },
+    readStream(
+      scope: string,
+      opts?: { afterSeq?: number; limit?: number },
+    ): readonly StoredEvent[] {
+      return inner.readStream(scope, opts);
+    },
+    readAll(opts?: { afterSeq?: number; limit?: number }): readonly StoredEvent[] {
+      return inner.readAll(opts);
+    },
+    transaction<R>(fn: (tx: StoreTx) => R): R {
+      calls += 1;
+      if (calls === failOn) throw error;
+      return inner.transaction(fn);
+    },
+    head(): number {
+      return inner.head();
+    },
+    close(): void {
+      inner.close();
+    },
+  };
+}
 
 const ACTIONABLE: MailEnvelope = {
   type: MAIL_CLARIFY_REQUEST, // actionable in the kind registry
@@ -275,6 +317,65 @@ describe('LiveDelivery — deliver persists (delegation) + wakes + injects actio
     }
   });
 
+  it('records live side-effect acks as replayable events', () => {
+    const projectId = 'p-live-acks-are-events';
+    const store = openProjectStore(projectId);
+    const seams = makeSeams();
+    try {
+      const delivery = new LiveDelivery(projectId, store, [new MailProjector()], seams);
+      delivery.deliver({ ...ACTIONABLE, idempotencyKey: 'clarify:ack-events' });
+
+      const effectEvents = store.readAll().filter((e) => e.type === EVENT_MAIL_LIVE_EFFECT);
+      expect(effectEvents.map((e) => e.payload)).toEqual([
+        { seq: 1, wakeSucceeded: true },
+        { seq: 1, injectSucceeded: true },
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rebuilds live side-effect acks from the event log', () => {
+    const projectId = 'p-live-acks-rebuild';
+    const firstStore = openProjectStore(projectId);
+    const firstSeams = makeSeams();
+    try {
+      const firstDelivery = new LiveDelivery(
+        projectId,
+        firstStore,
+        [new MailProjector()],
+        firstSeams,
+      );
+      firstDelivery.deliver({ ...ACTIONABLE, idempotencyKey: 'clarify:ack-rebuild' });
+      expect(firstSeams.wakeCalls).toEqual(['bob']);
+      expect(firstSeams.injectCalls).toHaveLength(1);
+
+      firstStore.transaction((tx) => {
+        (tx.raw as DatabaseSync).exec('DROP TABLE IF EXISTS live_delivery_effects');
+      });
+      rebuildAll(firstStore, [new MailProjector()], (e) => decode(e, mailUpcasters, mailSchemas));
+    } finally {
+      firstStore.close();
+    }
+
+    const secondStore = openProjectStore(projectId);
+    const secondSeams = makeSeams();
+    try {
+      const secondDelivery = new LiveDelivery(
+        projectId,
+        secondStore,
+        [new MailProjector()],
+        secondSeams,
+      );
+      secondDelivery.deliver({ ...ACTIONABLE, idempotencyKey: 'clarify:ack-rebuild' });
+
+      expect(secondSeams.wakeCalls).toEqual([]);
+      expect(secondSeams.injectCalls).toEqual([]);
+    } finally {
+      secondStore.close();
+    }
+  });
+
   it('reports async injection rejection instead of dropping it after wake', async () => {
     const store = openProjectStore('p-live-inject-fail');
     const failures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
@@ -295,6 +396,75 @@ describe('LiveDelivery — deliver persists (delegation) + wakes + injects actio
       expect(failures[0]).toMatchObject({ recipient: 'bob', mail: delivered });
       expect(failures[0]!.error).toBeInstanceOf(Error);
       expect((failures[0]!.error as Error).message).toBe('inject failed');
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('reports async injection ack-write failures and retries on an idempotent resend', async () => {
+    const realStore = openProjectStore('p-live-inject-ack-fail');
+    const store = failOnTransaction(realStore, 4);
+    const failures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
+    const injectCalls: Array<{ recipient: string; mail: DeliveredMail }> = [];
+    let resolveInject!: () => void;
+    const delivery = new LiveDelivery('p-live-inject-ack-fail', store, [new MailProjector()], {
+      wake: () => {},
+      injectToRecipient: (recipient, mail) => {
+        injectCalls.push({ recipient, mail });
+        return new Promise<void>((resolve) => {
+          resolveInject = resolve;
+        });
+      },
+      onWakeFailure: () => {},
+      onInjectFailure: (recipient, mail, error) => failures.push({ recipient, mail, error }),
+    });
+    const mail = openMailStore('p-live-inject-ack-fail', { delivery });
+    try {
+      const envelope = { ...ACTIONABLE, idempotencyKey: 'clarify:inject-ack-retry' };
+      const first = mail.send(envelope);
+      expect(injectCalls).toHaveLength(1);
+
+      resolveInject();
+      await flush();
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({ recipient: 'bob', mail: first });
+
+      const second = mail.send(envelope);
+      await flush();
+      expect(second.seq).toBe(first.seq);
+      expect(injectCalls).toHaveLength(2);
+      expect(injectCalls[1]).toMatchObject({ recipient: 'bob', mail: first });
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('reports wake ack-write failures and retries wake on an idempotent resend', () => {
+    const realStore = openProjectStore('p-live-wake-ack-fail');
+    const store = failOnTransaction(realStore, 3);
+    const failures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
+    let wakeAttempts = 0;
+    const delivery = new LiveDelivery('p-live-wake-ack-fail', store, [new MailProjector()], {
+      wake: () => {
+        wakeAttempts += 1;
+      },
+      injectToRecipient: () => {},
+      onWakeFailure: (recipient, mail, error) => failures.push({ recipient, mail, error }),
+      onInjectFailure: () => {},
+    });
+    const mail = openMailStore('p-live-wake-ack-fail', { delivery });
+    try {
+      const envelope = { ...ACTIONABLE, idempotencyKey: 'clarify:wake-ack-retry' };
+      const first = mail.send(envelope);
+      expect(wakeAttempts).toBe(1);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({ recipient: 'bob', mail: first });
+
+      const second = mail.send(envelope);
+      expect(second.seq).toBe(first.seq);
+      expect(wakeAttempts).toBe(2);
     } finally {
       mail.close();
       store.close();
@@ -463,6 +633,69 @@ describe('LiveDelivery — forward + resolve wake/inject every new-item recipien
     }
   });
 
+  it('retries forward live effects against the already-forwarded row', () => {
+    const store = openProjectStore('p-live-forward-retry-effects');
+    const wakeCalls: string[] = [];
+    const wakeFailures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
+    const injectCalls: Array<{ recipient: string; mail: DeliveredMail }> = [];
+    let failFirstCoordWake = true;
+    const delivery = new LiveDelivery(
+      'p-live-forward-retry-effects',
+      store,
+      [new MailProjector()],
+      {
+        wake: (recipient) => {
+          wakeCalls.push(recipient);
+          if (recipient === 'coord' && failFirstCoordWake) {
+            failFirstCoordWake = false;
+            throw new Error('wake coord failed');
+          }
+        },
+        injectToRecipient: (recipient, mail) => {
+          injectCalls.push({ recipient, mail });
+        },
+        onWakeFailure: (recipient, mail, error) => wakeFailures.push({ recipient, mail, error }),
+        onInjectFailure: () => {},
+      },
+    );
+    const mail = openMailStore('p-live-forward-retry-effects', { delivery });
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'impl',
+        subject: 'esc',
+        body: 'help',
+      });
+      wakeCalls.length = 0;
+      injectCalls.length = 0;
+
+      const thread = held.correlationId ?? String(held.seq);
+      const envelope: MailEnvelope = {
+        type: MAIL_ESCALATION,
+        to: 'coord',
+        from: 'lead',
+        subject: 'esc',
+        body: 'help',
+        causationId: String(held.seq),
+        correlationId: thread,
+      };
+
+      const forwarded = delivery.forward!(held, envelope);
+      expect(wakeFailures).toHaveLength(1);
+      expect(injectCalls).toEqual([]);
+
+      const retried = delivery.forward!(held, envelope);
+      expect(retried.seq).toBe(forwarded.seq);
+      expect(wakeCalls).toEqual(['coord', 'coord']);
+      expect(injectCalls).toHaveLength(1);
+      expect(injectCalls[0]).toMatchObject({ recipient: 'coord', mail: forwarded });
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
   it('resolve of an escalation: wakes the response recipient AND every relay; injects actionable relays only', () => {
     const store = openProjectStore('p-live-resolve');
     const seams = makeSeams();
@@ -521,6 +754,236 @@ describe('LiveDelivery — forward + resolve wake/inject every new-item recipien
       expect(seams.injectCalls[0]!.recipient).toBe('carol');
       expect(seams.injectCalls[0]!.mail.kind).toBe('actionable');
       expect(seams.injectCalls[0]!.mail.subject).toBe('relay-q');
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('retries resolve relay injection against the already-resolved rows', async () => {
+    const store = openProjectStore('p-live-resolve-retry-effects');
+    const wakeCalls: string[] = [];
+    const injectCalls: Array<{ recipient: string; mail: DeliveredMail }> = [];
+    const injectFailures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
+    let failFirstRelayInject = true;
+    const delivery = new LiveDelivery(
+      'p-live-resolve-retry-effects',
+      store,
+      [new MailProjector()],
+      {
+        wake: (recipient) => wakeCalls.push(recipient),
+        injectToRecipient: (recipient, mail) => {
+          injectCalls.push({ recipient, mail });
+          if (recipient === 'carol' && failFirstRelayInject) {
+            failFirstRelayInject = false;
+            throw new Error('inject carol failed');
+          }
+        },
+        onWakeFailure: () => {},
+        onInjectFailure: (recipient, mail, error) =>
+          injectFailures.push({ recipient, mail, error }),
+      },
+    );
+    const mail = openMailStore('p-live-resolve-retry-effects', { delivery });
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'impl',
+        subject: 'esc',
+        body: 'help',
+      });
+      wakeCalls.length = 0;
+      injectCalls.length = 0;
+
+      const thread = held.correlationId ?? String(held.seq);
+      const response: MailEnvelope = {
+        type: MAIL_CHAT,
+        to: 'impl',
+        from: 'lead',
+        subject: 're: esc',
+        body: 'do X',
+        causationId: String(held.seq),
+        correlationId: thread,
+      };
+      const relay: MailEnvelope = {
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'carol',
+        from: 'lead',
+        subject: 'relay-q',
+        body: 'please confirm',
+        causationId: String(held.seq),
+        correlationId: thread,
+      };
+
+      const resolved = delivery.resolve!(held, response, [relay]);
+      expect(injectFailures).toHaveLength(1);
+      expect(injectCalls).toHaveLength(1);
+
+      const retried = delivery.resolve!(held, response, [relay]);
+      await flush();
+      expect(retried.seq).toBe(resolved.seq);
+      expect(wakeCalls).toEqual(['impl', 'carol']);
+      expect(injectCalls).toHaveLength(2);
+      expect(injectCalls[1]).toMatchObject({ recipient: 'carol' });
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('does not recover resolve from matching rows when the held item is still unresolved', () => {
+    const store = openProjectStore('p-live-resolve-recovery-unresolved-held');
+    const seams = makeSeams();
+    const delivery = new LiveDelivery(
+      'p-live-resolve-recovery-unresolved-held',
+      store,
+      [new MailProjector()],
+      seams,
+    );
+    const mail = openMailStore('p-live-resolve-recovery-unresolved-held', { delivery });
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'impl',
+        subject: 'esc',
+        body: 'help',
+      });
+      const thread = held.correlationId ?? String(held.seq);
+      const response: MailEnvelope = {
+        type: MAIL_CHAT,
+        to: 'auditor',
+        from: 'lead',
+        subject: 're: esc',
+        body: 'do X',
+        causationId: String(held.seq),
+        correlationId: thread,
+      };
+
+      // A raw matching row can exist without resolving `held` when it is not a valid down-answer.
+      // Recovery must not treat that as a completed resolve operation.
+      mail.send(response);
+      expect(mail.inbox('lead').find((m) => m.seq === held.seq)!.resolved).toBe(false);
+
+      expect(() => delivery.resolve!(held, response)).toThrow(/held item sender/i);
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('does not recover invalid resolve envelopes after the held item is resolved', () => {
+    const store = openProjectStore('p-live-resolve-recovery-invalid-envelope');
+    const seams = makeSeams();
+    const delivery = new LiveDelivery(
+      'p-live-resolve-recovery-invalid-envelope',
+      store,
+      [new MailProjector()],
+      seams,
+    );
+    const mail = openMailStore('p-live-resolve-recovery-invalid-envelope', { delivery });
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'impl',
+        subject: 'esc',
+        body: 'help',
+      });
+      const thread = held.correlationId ?? String(held.seq);
+      delivery.resolve!(held, {
+        type: MAIL_CHAT,
+        to: 'impl',
+        from: 'lead',
+        subject: 're: esc',
+        body: 'do X',
+        causationId: String(held.seq),
+        correlationId: thread,
+      });
+      expect(mail.inbox('lead').find((m) => m.seq === held.seq)!.resolved).toBe(true);
+
+      const wrongRecipient: MailEnvelope = {
+        type: MAIL_CHAT,
+        to: 'auditor',
+        from: 'lead',
+        subject: 'wrong recipient',
+        body: 'not a down answer',
+        causationId: String(held.seq),
+        correlationId: thread,
+      };
+      mail.send(wrongRecipient);
+
+      expect(() => delivery.resolve!(held, wrongRecipient)).toThrow(/held item sender/i);
+    } finally {
+      mail.close();
+      store.close();
+    }
+  });
+
+  it('retries resolveEscalation relay wake when the relay causation points at the forwarded source', () => {
+    const projectId = 'p-live-resolve-escalation-relay-retry';
+    const store = openProjectStore(projectId);
+    const resolver = prototypeParentResolver({
+      implementer: 'impl-1',
+      lead: 'lead-1',
+      coordinator: 'coord-1',
+    });
+    const wakeCalls: string[] = [];
+    const wakeFailures: Array<{ recipient: string; mail: DeliveredMail; error: unknown }> = [];
+    const injectCalls: Array<{ recipient: string; mail: DeliveredMail }> = [];
+    let failFirstImplWake = true;
+    const delivery = new LiveDelivery(projectId, store, [new MailProjector()], {
+      wake: (recipient) => {
+        wakeCalls.push(recipient);
+        if (recipient === 'impl-1' && failFirstImplWake) {
+          failFirstImplWake = false;
+          throw new Error('wake impl failed');
+        }
+      },
+      injectToRecipient: (recipient, mail) => {
+        injectCalls.push({ recipient, mail });
+      },
+      onWakeFailure: (recipient, mail, error) => wakeFailures.push({ recipient, mail, error }),
+      onInjectFailure: () => {},
+    });
+    const mail = openMailStore(projectId, { delivery });
+    try {
+      const req = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'lead-1',
+        from: 'impl-1',
+        subject: 'intent?',
+        body: 'what did you mean?',
+      });
+      const forwarded = forwardOnTimeout(
+        mail,
+        resolver,
+        mail.inbox('lead-1').find((m) => m.seq === req.seq)!,
+      );
+      wakeCalls.length = 0;
+      injectCalls.length = 0;
+
+      const heldByCoordinator = mail.inbox('coord-1').find((m) => m.seq === forwarded.seq)!;
+      const resolution = {
+        subject: 're: intent?',
+        body: 'use the simpler interpretation',
+      };
+      const down = resolveEscalation(mail, heldByCoordinator, resolution);
+      expect(wakeFailures).toHaveLength(1);
+      expect(wakeCalls).toEqual(['lead-1', 'impl-1']);
+      expect(injectCalls).toEqual([]);
+      expect(
+        mail
+          .inbox('impl-1')
+          .find((m) => m.type === MAIL_CLARIFY_RESPONSE && m.causationId === String(req.seq)),
+      ).toBeDefined();
+
+      const retried = resolveEscalation(mail, heldByCoordinator, resolution);
+      expect(retried.seq).toBe(down.seq);
+      expect(wakeFailures).toHaveLength(1);
+      expect(wakeCalls).toEqual(['lead-1', 'impl-1', 'impl-1']);
+      expect(injectCalls).toEqual([]);
     } finally {
       mail.close();
       store.close();

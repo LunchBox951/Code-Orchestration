@@ -28,6 +28,7 @@ import {
  * value can be tuned host-side once real startup output volume is known.
  */
 const MAX_STARTUP_BUFFER_CHARS = 64 * 1024;
+const DEFAULT_STARTUP_TIMEOUT_MS = 60_000;
 
 /** The terminal result of driving a freshly-spawned session through its startup dialogs. */
 export interface StartupOutcome {
@@ -37,6 +38,11 @@ export interface StartupOutcome {
   readonly loginRequired?: { readonly methods: readonly string[] };
 }
 
+export interface StartupDriverOptions {
+  /** Fail loud if no terminal startup state is reached within this bound. */
+  readonly timeoutMs?: number;
+}
+
 /**
  * Drive `pane` (a freshly-spawned `provider` session) through its startup interstitials to readiness.
  *
@@ -44,21 +50,44 @@ export interface StartupOutcome {
  * login menu. Rejects (fail-loud, Principle 9) if the pty exits before either terminal state is
  * reached. The returned promise settles exactly once; all pane subscriptions are torn down on settle.
  */
-export function driveToReady(pane: Pane, provider: Provider): Promise<StartupOutcome> {
+export function driveToReady(
+  pane: Pane,
+  provider: Provider,
+  opts: StartupDriverOptions = {},
+): Promise<StartupOutcome> {
   return new Promise<StartupOutcome>((resolve, reject) => {
     let buffer = '';
     let settled = false;
     const answered = new Set<StartupInterstitialName>();
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
 
-    let unsubData: () => void = () => {};
-    let unsubExit: () => void = () => {};
+    const cleanups = new Set<() => void>();
+    const timeout = setTimeout(() => {
+      settle(() =>
+        reject(
+          new Error(
+            `timed out during ${provider} startup before reaching ready after ${timeoutMs}ms`,
+          ),
+        ),
+      );
+    }, timeoutMs);
+    (timeout as { unref?: () => void }).unref?.();
 
     const settle = (run: () => void): void => {
       if (settled) return;
       settled = true;
-      unsubData();
-      unsubExit();
+      clearTimeout(timeout);
+      for (const cleanup of cleanups) cleanup();
+      cleanups.clear();
       run();
+    };
+
+    const registerCleanup = (cleanup: () => void): void => {
+      if (settled) {
+        cleanup();
+        return;
+      }
+      cleanups.add(cleanup);
     };
 
     const evaluate = (): void => {
@@ -82,24 +111,30 @@ export function driveToReady(pane: Pane, provider: Provider): Promise<StartupOut
       }
     };
 
-    unsubData = pane.onData((chunk) => {
-      buffer += chunk;
-      // Drop already-processed leading output once past the cap. Safe: `answered` (not the buffer)
-      // tracks interstitial progress, and the current screen's signature is always within the tail.
-      if (buffer.length > MAX_STARTUP_BUFFER_CHARS) {
-        buffer = buffer.slice(-MAX_STARTUP_BUFFER_CHARS);
-      }
-      evaluate();
-    });
-    unsubExit = pane.onExit((ev) => {
-      settle(() =>
-        reject(
-          new Error(
-            `pty exited during ${provider} startup before reaching ready ` +
-              `(code=${ev.code}, signal=${ev.signal})`,
+    registerCleanup(
+      pane.onExit((ev) => {
+        settle(() =>
+          reject(
+            new Error(
+              `pty exited during ${provider} startup before reaching ready ` +
+                `(code=${ev.code}, signal=${ev.signal})`,
+            ),
           ),
-        ),
-      );
-    });
+        );
+      }),
+    );
+    if (settled) return;
+
+    registerCleanup(
+      pane.onData((chunk) => {
+        buffer += chunk;
+        // Drop already-processed leading output once past the cap. Safe: `answered` (not the buffer)
+        // tracks interstitial progress, and the current screen's signature is always within the tail.
+        if (buffer.length > MAX_STARTUP_BUFFER_CHARS) {
+          buffer = buffer.slice(-MAX_STARTUP_BUFFER_CHARS);
+        }
+        evaluate();
+      }),
+    );
   });
 }

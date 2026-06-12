@@ -9,6 +9,7 @@ import {
   MAIL_REVIEW_RESPONSE,
   makeMailForwardEvent,
   makeMailEvent,
+  makeMailLiveEffectEvent,
   makeMailReadEvent,
   makeMailRetractEvent,
   mailSchemas,
@@ -16,62 +17,15 @@ import {
   type DeliveredMail,
   type MailEnvelope,
 } from './events.js';
-import { ensureInboxTable, selectMailByIdempotencyKey, selectMailBySeq } from './mail-projector.js';
-
-const CREATE_LIVE_DELIVERY_EFFECTS_TABLE = `
-  CREATE TABLE IF NOT EXISTS live_delivery_effects (
-    mail_seq         INTEGER PRIMARY KEY,
-    wake_succeeded   INTEGER NOT NULL DEFAULT 0,
-    inject_succeeded INTEGER NOT NULL DEFAULT 0
-  );
-`;
-
-interface PersistedLiveEffect {
-  readonly wakeSucceeded: boolean;
-  readonly injectSucceeded: boolean;
-}
-
-function ensureLiveDeliveryEffectsTable(db: DatabaseSync): void {
-  db.exec(CREATE_LIVE_DELIVERY_EFFECTS_TABLE);
-}
-
-function selectLiveDeliveryEffect(db: DatabaseSync, seq: number): PersistedLiveEffect | undefined {
-  ensureLiveDeliveryEffectsTable(db);
-  const row = db
-    .prepare(
-      'SELECT wake_succeeded, inject_succeeded FROM live_delivery_effects WHERE mail_seq = ?',
-    )
-    .get(seq) as Record<string, unknown> | undefined;
-  if (row == null) return undefined;
-  return {
-    wakeSucceeded: Number(row['wake_succeeded']) === 1,
-    injectSucceeded: Number(row['inject_succeeded']) === 1,
-  };
-}
-
-function upsertLiveDeliveryEffect(
-  db: DatabaseSync,
-  seq: number,
-  patch: Partial<PersistedLiveEffect>,
-): PersistedLiveEffect {
-  ensureLiveDeliveryEffectsTable(db);
-  const existing = selectLiveDeliveryEffect(db, seq) ?? {
-    wakeSucceeded: false,
-    injectSucceeded: false,
-  };
-  const next = {
-    wakeSucceeded: patch.wakeSucceeded ?? existing.wakeSucceeded,
-    injectSucceeded: patch.injectSucceeded ?? existing.injectSucceeded,
-  };
-  db.prepare(
-    `INSERT INTO live_delivery_effects (mail_seq, wake_succeeded, inject_succeeded)
-     VALUES (?, ?, ?)
-     ON CONFLICT(mail_seq) DO UPDATE SET
-       wake_succeeded = excluded.wake_succeeded,
-       inject_succeeded = excluded.inject_succeeded`,
-  ).run(seq, next.wakeSucceeded ? 1 : 0, next.injectSucceeded ? 1 : 0);
-  return next;
-}
+import {
+  ensureInboxTable,
+  forwardedMailForHeld,
+  selectLiveDeliveryEffect,
+  selectMailByIdempotencyKey,
+  selectMailBySeq,
+  selectMailMatchingEnvelope,
+  type PersistedLiveEffect,
+} from './mail-projector.js';
 
 function assertForwardEnvelope(held: DeliveredMail, envelope: MailEnvelope): void {
   if (held.type !== MAIL_ESCALATION && held.type !== MAIL_CLARIFY_REQUEST) {
@@ -445,9 +399,9 @@ export class LiveDelivery implements Delivery {
   >();
 
   constructor(
-    projectId: string,
+    private readonly projectId: string,
     private readonly store: Store,
-    projectors: readonly Projector[],
+    private readonly projectors: readonly Projector[],
     private readonly opts: LiveDeliveryOptions,
   ) {
     this.inner = new InProcessDelivery(projectId, store, projectors);
@@ -462,7 +416,7 @@ export class LiveDelivery implements Delivery {
   }
 
   forward(held: DeliveredMail, envelope: MailEnvelope): DeliveredMail {
-    const delivered = this.inner.forward(held, envelope);
+    const delivered = this.forwardOrRecover(held, envelope);
     this.wakeAndMaybeInject(delivered);
     return delivered;
   }
@@ -475,7 +429,7 @@ export class LiveDelivery implements Delivery {
     // The resolution response AND every relay are NEW items delivered to (possibly WAITING) recipients
     // — wake each, and inject the outstanding-actionable ones (e.g. an answer relayed back down to the
     // original asker). A relay delivered to a WAITING agent that was NOT woken was the gap (review #193).
-    const { response, relays: relayRows } = this.inner.resolveWithRelays(held, envelope, relays);
+    const { response, relays: relayRows } = this.resolveOrRecover(held, envelope, relays);
     this.wakeAndMaybeInject(response);
     for (const relayRow of relayRows) this.wakeAndMaybeInject(relayRow);
     return response;
@@ -496,9 +450,9 @@ export class LiveDelivery implements Delivery {
     if (!state.wakeSucceeded) {
       try {
         this.opts.wake(delivered.recipient);
-        state.wakeSucceeded = true;
         this.persistEffect(delivered.seq, { wakeSucceeded: true });
       } catch (error) {
+        state.wakeSucceeded = false;
         this.opts.onWakeFailure(delivered.recipient, delivered, error);
         return;
       }
@@ -512,6 +466,57 @@ export class LiveDelivery implements Delivery {
     const state = this.effectState(delivered);
     if (!state.wakeSucceeded) return true;
     return isInjectableActionable(delivered) && !state.injectQueued && !state.injectSucceeded;
+  }
+
+  private forwardOrRecover(held: DeliveredMail, envelope: MailEnvelope): DeliveredMail {
+    try {
+      return this.inner.forward(held, envelope);
+    } catch (error) {
+      const recovered = this.store.transaction((tx) =>
+        forwardedMailForHeld(tx.raw as DatabaseSync, held.seq),
+      );
+      if (recovered != null && deliveredMatchesEnvelope(recovered, envelope)) {
+        return recovered;
+      }
+      throw error;
+    }
+  }
+
+  private resolveOrRecover(
+    held: DeliveredMail,
+    envelope: MailEnvelope,
+    relays: readonly MailEnvelope[],
+  ): { response: DeliveredMail; relays: readonly DeliveredMail[] } {
+    try {
+      return this.inner.resolveWithRelays(held, envelope, relays);
+    } catch (error) {
+      const recovered = this.store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        const currentHeld = selectMailBySeq(db, held.seq);
+        if (
+          currentHeld == null ||
+          currentHeld.recipient !== held.recipient ||
+          currentHeld.type !== MAIL_ESCALATION ||
+          currentHeld.kind !== 'actionable' ||
+          currentHeld.resolved !== true ||
+          currentHeld.retracted === true
+        ) {
+          return undefined;
+        }
+        assertResolutionEnvelope(currentHeld, envelope);
+        const response = selectMailMatchingEnvelope(db, envelope);
+        if (response == null || response.causationId !== String(held.seq)) return undefined;
+        const relayRows: DeliveredMail[] = [];
+        for (const relay of relays) {
+          const relayRow = selectMailMatchingEnvelope(db, relay);
+          if (relayRow == null) return undefined;
+          relayRows.push(relayRow);
+        }
+        return { response, relays: relayRows };
+      });
+      if (recovered != null) return recovered;
+      throw error;
+    }
   }
 
   private effectState(delivered: DeliveredMail): {
@@ -538,9 +543,21 @@ export class LiveDelivery implements Delivery {
   }
 
   private persistEffect(seq: number, patch: Partial<PersistedLiveEffect>): PersistedLiveEffect {
-    const persisted = this.store.transaction((tx) =>
-      upsertLiveDeliveryEffect(tx.raw as DatabaseSync, seq, patch),
-    );
+    const event = {
+      seq,
+      ...(patch.wakeSucceeded === true ? { wakeSucceeded: true as const } : {}),
+      ...(patch.injectSucceeded === true ? { injectSucceeded: true as const } : {}),
+    };
+    const persisted = this.store.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      const [stored] = tx.append([makeMailLiveEffectEvent(this.projectId, event)]);
+      applyEvent(tx, decode(stored!, mailUpcasters, mailSchemas), this.projectors);
+      const updated = selectLiveDeliveryEffect(db, seq);
+      if (updated == null) {
+        throw new Error(`LiveDelivery: live-effect row missing after projection (seq=${seq})`);
+      }
+      return updated;
+    });
     const state = this.liveEffects.get(seq);
     if (state != null) {
       state.wakeSucceeded = persisted.wakeSucceeded;
@@ -562,9 +579,14 @@ export class LiveDelivery implements Delivery {
         if (isPromiseLike(result)) {
           return result.then(
             () => {
-              state.injectSucceeded = true;
-              this.persistEffect(delivered.seq, { injectSucceeded: true });
-              state.injectQueued = false;
+              try {
+                this.persistEffect(delivered.seq, { injectSucceeded: true });
+              } catch (error) {
+                state.injectSucceeded = false;
+                this.opts.onInjectFailure(recipient, delivered, error);
+              } finally {
+                state.injectQueued = false;
+              }
             },
             (error: unknown) => {
               state.injectSucceeded = false;
@@ -573,7 +595,6 @@ export class LiveDelivery implements Delivery {
             },
           );
         }
-        state.injectSucceeded = true;
         this.persistEffect(delivered.seq, { injectSucceeded: true });
       } catch (error) {
         state.injectSucceeded = false;
@@ -597,4 +618,17 @@ export class LiveDelivery implements Delivery {
 
 function isPromiseLike(value: void | Promise<void>): value is Promise<void> {
   return typeof (value as { then?: unknown } | undefined)?.then === 'function';
+}
+
+function deliveredMatchesEnvelope(mail: DeliveredMail, envelope: MailEnvelope): boolean {
+  return (
+    mail.recipient === envelope.to &&
+    mail.sender === envelope.from &&
+    mail.type === envelope.type &&
+    mail.subject === envelope.subject &&
+    mail.body === envelope.body &&
+    (mail.causationId ?? undefined) === (envelope.causationId ?? undefined) &&
+    (mail.correlationId ?? undefined) === (envelope.correlationId ?? undefined) &&
+    (mail.idempotencyKey ?? undefined) === (envelope.idempotencyKey ?? undefined)
+  );
 }

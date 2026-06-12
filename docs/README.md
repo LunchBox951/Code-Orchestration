@@ -10,12 +10,16 @@ Start here. These docs are the "why" behind `co`; the code is the "how".
    grep a handle to jump here.
 4. [L6a acceptance criteria](l6a-acceptance-criteria.md) — local role/permission hardening
    criteria cited as `AC-L6a-*`, each laddering to the v1 criteria.
-5. Architecture — one topic per file under [`architecture/`](architecture/):
+5. [L6b acceptance criteria](l6b-acceptance-criteria.md) — local specs/plans/issues/research
+   criteria cited as `AC-L6b-*`, each laddering to the v1 criteria.
+6. [L7 acceptance criteria](l7-acceptance-criteria.md) — local Conductor foundation criteria cited
+   as `AC-L7-*`, split into sandbox and host-live proof.
+7. Architecture — one topic per file under [`architecture/`](architecture/):
    mail bus, dispatch, providers, worktrees, review gates, phases & plans, specs & issues,
    state & recovery, event router, permissions, prompts & memory, agent roles, TUI, buddy,
    cost & usage, health & diagnostics, init & config, MCP tools, CLI reference, research.
-6. [Research](research/) — open, evidence-pending decisions (runtime substrate, stack).
-7. [Governance](governance/) — how this repo's GitHub structure mirrors `co`'s own model.
+8. [Research](research/) — open, evidence-pending decisions (runtime substrate, stack).
+9. [Governance](governance/) — how this repo's GitHub structure mirrors `co`'s own model.
 
 ## Status
 

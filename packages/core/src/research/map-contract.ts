@@ -71,7 +71,8 @@ export interface LocatorMapViolation {
  * Structural rules a shape-valid map must still satisfy — pure, returns `[]` when green or one
  * violation per failure (mirrors `checkToolCompleteness` / `checkRoleProfileCompleteness`):
  *   (a) every read-order item references an entry path (a read order over ghost files is noise),
- *   (b) entry paths are unique (a duplicated pointer is a dump artifact).
+ *   (b) every entry path appears exactly once in readOrder,
+ *   (c) entry paths are unique (a duplicated pointer is a dump artifact).
  */
 export function checkLocatorMap(map: LocatorMap): LocatorMapViolation[] {
   const violations: LocatorMapViolation[] = [];
@@ -82,12 +83,26 @@ export function checkLocatorMap(map: LocatorMap): LocatorMapViolation[] {
     }
     paths.add(entry.path);
   }
+  const readPaths = new Set<string>();
   for (const item of map.readOrder) {
     if (!paths.has(item)) {
       violations.push({
         reason:
           `readOrder item '${item}' references no map entry — the read order must point ` +
           'at the entries',
+      });
+    }
+    if (readPaths.has(item)) {
+      violations.push({
+        reason: `duplicate readOrder path '${item}' — each map entry must appear exactly once`,
+      });
+    }
+    readPaths.add(item);
+  }
+  for (const path of paths) {
+    if (!readPaths.has(path)) {
+      violations.push({
+        reason: `entry path '${path}' is missing from readOrder — every map entry must be ordered`,
       });
     }
   }

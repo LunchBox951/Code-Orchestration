@@ -9,8 +9,9 @@
  *      whose subject/body are the SCRUBBED outward artifact — what the operator approves is
  *      byte-for-byte what would be posted.
  *   2. The recorded `approval_response` decision then gates the actual `gh issue create` through
- *      {@link gateOutwardAction}: BLOCKED while pending, run once on approve, REFUSED on decline.
- *      Nothing posts without the recorded approve (Principle 7/8 — fail loud, Principle 9).
+ *      {@link gateOutwardAction}: BLOCKED while pending, run on approve, REFUSED on decline.
+ *      Nothing posts without the recorded approve, and successful `issue.filed` records make retries
+ *      idempotent (Principle 7/8 — fail loud, Principle 9).
  *
  * Destination gating rides the repo-relationship modes (worktrees/repo-mode.ts): `target`
  * filings need a remote, so Offline mode refuses; `co` filings go to `co`'s own public repo
@@ -22,7 +23,7 @@ import {
   outwardApprovalEnvelope,
   type ApprovalOutcome,
 } from '../mail/approval.js';
-import { MAIL_APPROVAL, type DeliveredMail, type MailEnvelope } from '../mail/events.js';
+import { MAIL_APPROVAL, OPERATOR, type DeliveredMail, type MailEnvelope } from '../mail/events.js';
 import type { MailStore } from '../mail/mail-store.js';
 import type { GhExec, RepoMode } from '../worktrees/repo-mode.js';
 import type { IssueDestination, IssueRecord } from './events.js';
@@ -55,34 +56,40 @@ export function renderIssueBody(issue: IssueRecord): string {
 /**
  * Build the per-post approval mail for filing `issue` — addressed to @operator by construction
  * ({@link outwardApprovalEnvelope}), idempotency-keyed per issue so retries never double-ask,
- * carrying the scrubbed outward artifact as its body.
+ * carrying the scrubbed outward artifact as its subject/body.
  */
 export function buildIssueFilingApproval(opts: {
   readonly from: string;
   readonly issue: IssueRecord;
+  readonly title?: string;
 }): MailEnvelope {
-  const { from, issue } = opts;
+  const { from, issue, title } = opts;
   return outwardApprovalEnvelope({
     from,
-    subject: scrubIssueText(`file issue (${issue.destination}): ${issue.summary}`),
+    subject: scrubIssueText(title ?? issue.summary),
     body: renderIssueBody(issue),
     idempotencyKey: issueFilingApprovalKey(issue.issueId),
   });
 }
 
 /**
- * The previously-sent filing approval for `issueId` from `agent`, or undefined. Reads the
- * rebuildable by-sender projection, so the lookup (like the outcome) survives a replay.
+ * The previously-sent filing approval for `issueId`, regardless of which owner-tier agent sent it,
+ * or undefined. Reads @operator's rebuildable inbox projection so a lead retry cannot double-ask
+ * after a coordinator already requested the same idempotency-keyed approval.
  */
 export function findIssueFilingApproval(
   mail: MailStore,
-  agent: string,
+  _agent: string,
   issueId: string,
+  opts: { readonly senderAllowed?: (sender: string) => boolean } = {},
 ): DeliveredMail | undefined {
   const key = issueFilingApprovalKey(issueId);
-  return mail
-    .sentBy(agent)
-    .find((m) => m.type === MAIL_APPROVAL && m.idempotencyKey === key && m.retracted !== true);
+  return mail.inbox(OPERATOR).find((m) => {
+    if (m.type !== MAIL_APPROVAL || m.idempotencyKey !== key || m.retracted === true) {
+      return false;
+    }
+    return opts.senderAllowed?.(m.sender) ?? true;
+  });
 }
 
 /**
@@ -121,8 +128,8 @@ export function ghIssueCreateArgs(opts: {
 
 /**
  * Enact the outward filing through the approval gate: {@link gateOutwardAction} BLOCKS a pending
- * approval, REFUSES a declined one, and runs `gh issue create` exactly once on approve.
- * Returns the posted issue ref (the URL `gh` prints).
+ * approval, REFUSES a declined one, and runs `gh issue create` on approve. Returns the posted issue
+ * ref (the URL `gh` prints); the caller records that ref as the durable idempotency marker.
  */
 export function fileIssueOutward(opts: {
   readonly outcome: ApprovalOutcome;

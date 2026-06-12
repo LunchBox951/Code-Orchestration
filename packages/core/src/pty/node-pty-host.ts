@@ -78,10 +78,15 @@ const defaultLoader: NodePtyModuleLoader = async () => {
 class NodePtyPane implements Pane {
   readonly id: string;
   readonly #pty: IPtyLike;
+  #earlyDataSub: IDisposableLike | undefined;
+  #earlyDataChunks: string[] = [];
 
   constructor(id: string, pty: IPtyLike) {
     this.id = id;
     this.#pty = pty;
+    this.#earlyDataSub = pty.onData((chunk) => {
+      this.#earlyDataChunks.push(chunk);
+    });
   }
 
   write(data: string): void {
@@ -90,6 +95,13 @@ class NodePtyPane implements Pane {
 
   onData(cb: (chunk: string) => void): () => void {
     const sub = this.#pty.onData(cb);
+    if (this.#earlyDataSub != null) {
+      const replay = this.#earlyDataChunks.join('');
+      this.#earlyDataChunks = [];
+      this.#earlyDataSub.dispose();
+      this.#earlyDataSub = undefined;
+      if (replay.length > 0) cb(replay);
+    }
     return () => sub.dispose();
   }
 

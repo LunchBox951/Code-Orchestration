@@ -72,7 +72,7 @@ function git(cwd: string, ...args: string[]): string {
       'commit.gpgsign=false',
       ...args,
     ],
-    { cwd, encoding: 'utf8' },
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
   ).trim();
 }
 

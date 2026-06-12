@@ -95,13 +95,14 @@ proves it.
   through L1's `gateOutwardAction` (its first real consumer): the approval mail is
   idempotency-keyed per issue (retries never double-ask), its subject/body are the SCRUBBED
   outward artifact (what the operator approves is what posts), a pending approval BLOCKS loud, a
-  declined approval REFUSES loud, and `gh issue create` runs exactly once on approve with the
-  approval seq + posted ref recorded on `issue.filed` for audit. Destination rides repo mode:
-  `target` filing refuses in Offline; `co` filing posts to the configured `issues.coRepo` slug.
+  declined approval REFUSES loud, and an approved `gh issue create` records the approval seq + posted
+  ref on `issue.filed` for audit; once that durable filing record exists, re-calls are idempotent and
+  do not re-run `gh`. Destination rides repo mode: `target` filing refuses in Offline; `co` filing
+  posts to the configured `issues.coRepo` slug.
   All `gh` I/O is behind the injectable `GhExec` seam — `pnpm test` performs no real network
   operations. Evidence: `packages/core/src/issues/filing.ts`, `scrub.ts`, the verb at
   `packages/core/src/tools/specs/issue-file.ts`; proven by `filing.test.ts`, `scrub.test.ts`, and
-  `issue-file.test.ts` (blocked/refused/run-once + scrub + idempotent re-call). Ladders to
+  `issue-file.test.ts` (blocked/refused + scrub + idempotent re-call). Ladders to
   Principle 8, `RG-1`, `SF-3`.
 - `AC-L6b-G4` — The pipeline verbs are scoped by role: any agent may capture and list
   (`co_issue_capture`/`co_issue_list` in `UNIVERSAL` — friction can hit anyone, and dedup needs

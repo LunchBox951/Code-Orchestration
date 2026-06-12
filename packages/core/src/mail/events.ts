@@ -123,6 +123,14 @@ export const EVENT_MAIL_FORWARD = 'mail.forwarded' as const;
  */
 export const EVENT_MAIL_RETRACTED = 'mail.retracted' as const;
 
+/**
+ * The internal live-delivery side-effect receipt. This is infrastructure, not sendable mail:
+ * `LiveDelivery` appends it after the Conductor-side wake/inject side effect succeeds, and the
+ * projector folds it into the live-effect read model. Keeping these acknowledgements in the log
+ * makes a rebuild/recovery able to avoid duplicate wake/inject attempts (Principle 14).
+ */
+export const EVENT_MAIL_LIVE_EFFECT = 'mail.live_effect' as const;
+
 /** Current payload schema version — v1; no upcasters yet (see {@link mailUpcasters}). */
 export const MAIL_EVENT_V = 1;
 
@@ -204,6 +212,21 @@ export const mailRetractSchema = z.object({
 export type MailRetract = z.infer<typeof mailRetractSchema>;
 
 /**
+ * The live-effect payload: the mail `seq` plus the successful effect bit(s). At least one effect
+ * must be present; both are optional so wake and inject can be acknowledged separately.
+ */
+export const mailLiveEffectSchema = z
+  .object({
+    seq: z.number().int().nonnegative(),
+    wakeSucceeded: z.literal(true).optional(),
+    injectSucceeded: z.literal(true).optional(),
+  })
+  .refine((v) => v.wakeSucceeded === true || v.injectSucceeded === true, {
+    message: 'mail live effect must acknowledge wakeSucceeded or injectSucceeded',
+  });
+export type MailLiveEffect = z.infer<typeof mailLiveEffectSchema>;
+
+/**
  * Current-version schema per mail event type — validated on append AND on read
  * (decode). Most {@link MAIL_TYPES} members share the {@link mailMessageSchema}
  * `{subject, body}` payload (a question / an answer / prose); `approval_response`
@@ -226,6 +249,7 @@ export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [EVENT_MAIL_READ, mailReadSchema],
   [EVENT_MAIL_FORWARD, mailForwardSchema],
   [EVENT_MAIL_RETRACTED, mailRetractSchema], // infrastructure tombstone; never a MAIL_TYPES member
+  [EVENT_MAIL_LIVE_EFFECT, mailLiveEffectSchema], // infrastructure live-effect ack; never sendable
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -430,6 +454,22 @@ export function makeMailForwardEvent(
     payload: mailForwardSchema.parse({ seq, forwardedTo }),
     actor: holder,
     causationId: String(seq),
+  };
+}
+
+/**
+ * Build + validate a live-effect acknowledgement event. Scope is keyed by the target mail seq
+ * rather than a recipient stream because the effect read model is per delivered mail.
+ */
+export function makeMailLiveEffectEvent(projectId: string, effect: MailLiveEffect): NewEvent {
+  const payload = mailLiveEffectSchema.parse(effect);
+  return {
+    projectId,
+    scope: `mail-effect:${payload.seq}`,
+    type: EVENT_MAIL_LIVE_EFFECT,
+    v: MAIL_EVENT_V,
+    payload,
+    causationId: String(payload.seq),
   };
 }
 

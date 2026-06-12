@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Projector } from '../replay/projector.js';
 import type { StoredEvent, StoreTx } from '../store/types.js';
 import {
+  EVENT_MAIL_LIVE_EFFECT,
   EVENT_MAIL_FORWARD,
   EVENT_MAIL_READ,
   EVENT_MAIL_RETRACTED,
@@ -18,6 +19,8 @@ import {
   type ApprovalResponse,
   type DeliveredMail,
   type MailForward,
+  type MailEnvelope,
+  type MailLiveEffect,
   type MailMessage,
   type MailRead,
   type MailRetract,
@@ -92,6 +95,19 @@ const CREATE_INBOX_TABLE = `
   CREATE INDEX IF NOT EXISTS idx_inbox_forward_links_held ON inbox_forward_links (held_seq);
 `;
 
+const CREATE_LIVE_DELIVERY_EFFECTS_TABLE = `
+  CREATE TABLE IF NOT EXISTS live_delivery_effects (
+    mail_seq         INTEGER PRIMARY KEY,
+    wake_succeeded   INTEGER NOT NULL DEFAULT 0,
+    inject_succeeded INTEGER NOT NULL DEFAULT 0
+  );
+`;
+
+export interface PersistedLiveEffect {
+  readonly wakeSucceeded: boolean;
+  readonly injectSucceeded: boolean;
+}
+
 /**
  * Defensive create of the `inbox` read-model. Called from the projector's
  * reset/apply AND every read path, so a freshly opened store can be queried before
@@ -108,6 +124,51 @@ function addMissingInboxColumn(db: DatabaseSync, column: string, definition: str
   if (!columns.some((c) => c.name === column)) {
     db.exec(`ALTER TABLE inbox ADD COLUMN ${column} ${definition}`);
   }
+}
+
+function ensureLiveDeliveryEffectsTable(db: DatabaseSync): void {
+  db.exec(CREATE_LIVE_DELIVERY_EFFECTS_TABLE);
+}
+
+export function selectLiveDeliveryEffect(
+  db: DatabaseSync,
+  seq: number,
+): PersistedLiveEffect | undefined {
+  ensureLiveDeliveryEffectsTable(db);
+  const row = db
+    .prepare(
+      'SELECT wake_succeeded, inject_succeeded FROM live_delivery_effects WHERE mail_seq = ?',
+    )
+    .get(seq) as Record<string, unknown> | undefined;
+  if (row == null) return undefined;
+  return {
+    wakeSucceeded: Number(row['wake_succeeded']) === 1,
+    injectSucceeded: Number(row['inject_succeeded']) === 1,
+  };
+}
+
+function upsertLiveDeliveryEffect(
+  db: DatabaseSync,
+  seq: number,
+  patch: Partial<PersistedLiveEffect>,
+): PersistedLiveEffect {
+  ensureLiveDeliveryEffectsTable(db);
+  const existing = selectLiveDeliveryEffect(db, seq) ?? {
+    wakeSucceeded: false,
+    injectSucceeded: false,
+  };
+  const next = {
+    wakeSucceeded: patch.wakeSucceeded ?? existing.wakeSucceeded,
+    injectSucceeded: patch.injectSucceeded ?? existing.injectSucceeded,
+  };
+  db.prepare(
+    `INSERT INTO live_delivery_effects (mail_seq, wake_succeeded, inject_succeeded)
+     VALUES (?, ?, ?)
+     ON CONFLICT(mail_seq) DO UPDATE SET
+       wake_succeeded = excluded.wake_succeeded,
+       inject_succeeded = excluded.inject_succeeded`,
+  ).run(seq, next.wakeSucceeded ? 1 : 0, next.injectSucceeded ? 1 : 0);
+  return next;
 }
 
 /** Columns selected for every read, in `inbox` order — mapped by name in {@link rowToDeliveredMail}. */
@@ -224,6 +285,32 @@ export function forwardSourceForSeq(
   return link ? selectMailBySeq(db, Number(link.held_seq)) : undefined;
 }
 
+/** The forwarded mail produced for held item `heldSeq`, if that forward receipt already exists. */
+export function forwardedMailForHeld(db: DatabaseSync, heldSeq: number): DeliveredMail | undefined {
+  ensureInboxTable(db);
+  const link = db
+    .prepare('SELECT forwarded_seq FROM inbox_forward_links WHERE held_seq = ?')
+    .get(heldSeq) as { forwarded_seq: number } | undefined;
+  return link ? selectMailBySeq(db, Number(link.forwarded_seq)) : undefined;
+}
+
+/** Earliest non-retracted mail row matching an already-validated envelope. */
+export function selectMailMatchingEnvelope(
+  db: DatabaseSync,
+  envelope: MailEnvelope,
+): DeliveredMail | undefined {
+  return inboxForRecipient(db, envelope.to).find(
+    (mail) =>
+      mail.sender === envelope.from &&
+      mail.type === envelope.type &&
+      mail.subject === envelope.subject &&
+      mail.body === envelope.body &&
+      (mail.causationId ?? undefined) === (envelope.causationId ?? undefined) &&
+      (mail.correlationId ?? undefined) === (envelope.correlationId ?? undefined) &&
+      (mail.idempotencyKey ?? undefined) === (envelope.idempotencyKey ?? undefined),
+  );
+}
+
 /** Count of a recipient's outstanding actions — the {@link outstandingForRecipient} cardinality. */
 export function countOutstanding(db: DatabaseSync, recipient: string): number {
   ensureInboxTable(db);
@@ -280,6 +367,7 @@ export class MailProjector implements Projector {
       type === EVENT_MAIL_READ ||
       type === EVENT_MAIL_FORWARD ||
       type === EVENT_MAIL_RETRACTED ||
+      type === EVENT_MAIL_LIVE_EFFECT ||
       (MAIL_TYPES as readonly string[]).includes(type)
     );
   }
@@ -287,8 +375,10 @@ export class MailProjector implements Projector {
   reset(tx: StoreTx): void {
     const db = tx.raw as DatabaseSync;
     ensureInboxTable(db);
+    ensureLiveDeliveryEffectsTable(db);
     db.exec('DELETE FROM inbox');
     db.exec('DELETE FROM inbox_forward_links');
+    db.exec('DELETE FROM live_delivery_effects');
   }
 
   apply(tx: StoreTx, event: StoredEvent): void {
@@ -304,6 +394,10 @@ export class MailProjector implements Projector {
     }
     if (event.type === EVENT_MAIL_RETRACTED) {
       this.applyRetractReceipt(db, event);
+      return;
+    }
+    if (event.type === EVENT_MAIL_LIVE_EFFECT) {
+      this.applyLiveEffectReceipt(db, event);
       return;
     }
     this.applyMail(db, event);
@@ -463,6 +557,27 @@ export class MailProjector implements Projector {
       `INSERT INTO inbox_forward_links (forwarded_seq, held_seq, holder, forwarded_to)
        VALUES (?, ?, ?, ?)`,
     ).run(Number(forwarded.seq), seq, holder, forwardedTo);
+  }
+
+  /** Fold a Conductor live side-effect receipt into the replayable live-effect read model. */
+  private applyLiveEffectReceipt(db: DatabaseSync, event: StoredEvent): void {
+    const effect = event.payload as MailLiveEffect;
+    if (event.scope !== `mail-effect:${effect.seq}`) {
+      throw new Error(
+        `mail projector: live-effect receipt seq=${event.seq} has scope '${event.scope}', ` +
+          `expected 'mail-effect:${effect.seq}'`,
+      );
+    }
+    const mail = selectMailBySeq(db, effect.seq);
+    if (mail == null) {
+      throw new Error(
+        `mail projector: live-effect receipt seq=${event.seq} names missing mail ${effect.seq}`,
+      );
+    }
+    upsertLiveDeliveryEffect(db, effect.seq, {
+      ...(effect.wakeSucceeded === true ? { wakeSucceeded: true } : {}),
+      ...(effect.injectSucceeded === true ? { injectSucceeded: true } : {}),
+    });
   }
 }
 

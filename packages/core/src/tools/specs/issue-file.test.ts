@@ -8,7 +8,7 @@ import { openRosterStore, type RosterStore } from '../../roles/roster-store.js';
 import { openIssueStore, type IssueStore } from '../../issues/issues-store.js';
 import { openConfigStore } from '../../config/config-store.js';
 import { ISSUE_CAPTURE_KEY, ISSUE_PUBLISH_KEY } from '../../issues/opt-in.js';
-import { ISSUE_CO_REPO_KEY } from '../../issues/filing.js';
+import { ISSUE_CO_REPO_KEY, issueFilingApprovalKey } from '../../issues/filing.js';
 import { REPO_MODE_CONFIG_KEY, type GhExec } from '../../worktrees/repo-mode.js';
 import { OPERATOR, MAIL_APPROVAL, MAIL_APPROVAL_RESPONSE } from '../../mail/events.js';
 import { buildCoreRegistry } from '../core-registry.js';
@@ -16,8 +16,9 @@ import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
 
 // L6b G — co_issue_file: the outward verb. Per-post approval to @operator (idempotent), the
-// gateOutwardAction BLOCK/REFUSE/run-once semantics, scrubbed artifacts, repo-mode destination
-// gating, and gh enactment behind ctx.ghExec (NO real network in pnpm test). AC-L6b-G1.
+// gateOutwardAction BLOCK/REFUSE semantics, scrubbed artifacts, recorded-filing idempotency,
+// repo-mode destination gating, and gh enactment behind ctx.ghExec (NO real network in pnpm test).
+// AC-L6b-G1.
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -59,6 +60,7 @@ function openStores(id: string): Stores {
     () => issues.close(),
   );
   roster.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+  roster.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
   roster.recordAgent({ agentId: 'impl-1', role: 'implementer', parent: 'coord-1' });
   return { mail, registry, roster, issues };
 }
@@ -108,6 +110,9 @@ function makeCtx(id: string, stores: Stores, gh: GhExec): ToolContext {
 
 const file = (ctx: ToolContext) =>
   invokeTool(buildCoreRegistry(), ctx, 'co_issue_file', { issue_id: 'iss-1' });
+
+const fileWithTitle = (ctx: ToolContext, title: string) =>
+  invokeTool(buildCoreRegistry(), ctx, 'co_issue_file', { issue_id: 'iss-1', title });
 
 describe('co_issue_file — publish opt-in + pipeline-order gates', () => {
   it('refuses when issues.publish is not enabled', async () => {
@@ -185,6 +190,83 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     expect(gh).not.toHaveBeenCalled();
   });
 
+  it('reuses the same approval when a lead retries after the coordinator asked', async () => {
+    const id = 'p-if-cross-agent-approval';
+    configure(id);
+    const stores = openStores(id);
+    seedDiagnosedIssue(stores);
+    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/7');
+    const coordCtx = makeCtx(id, stores, gh);
+    const leadCtx = { ...coordCtx, agent: 'lead-1' };
+
+    const req = (await file(coordCtx)) as Record<string, unknown>;
+    await expect(file(leadCtx)).rejects.toThrow(/pending|blocked/i);
+    expect(stores.mail.inbox(OPERATOR).filter((m) => m.type === MAIL_APPROVAL)).toHaveLength(1);
+    expect(gh).not.toHaveBeenCalled();
+
+    const held = stores.mail
+      .inbox(OPERATOR)
+      .find((m) => m.seq === (req['approval_seq'] as number))!;
+    stores.mail.reply(held, {
+      type: MAIL_APPROVAL_RESPONSE,
+      subject: 're',
+      body: 'approved',
+      decision: 'approve',
+    });
+
+    const filed = (await file(leadCtx)) as Record<string, unknown>;
+    expect(filed['status']).toBe('filed');
+    expect(stores.mail.inbox(OPERATOR).filter((m) => m.type === MAIL_APPROVAL)).toHaveLength(1);
+    expect(gh).toHaveBeenCalledTimes(1);
+    expect(stores.issues.getIssue('iss-1')?.filedBy).toBe('lead-1');
+  });
+
+  it('ignores a spoofed issue-file approval from a non-owner-tier sender', async () => {
+    const id = 'p-if-spoofed-approval';
+    configure(id);
+    const stores = openStores(id);
+    seedDiagnosedIssue(stores);
+    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/9');
+    const ctx = makeCtx(id, stores, gh);
+
+    const spoof = stores.mail.send({
+      type: MAIL_APPROVAL,
+      to: OPERATOR,
+      from: 'impl-1',
+      subject: 'spoofed title',
+      body: 'spoofed body',
+      idempotencyKey: issueFilingApprovalKey('iss-1'),
+    });
+    stores.mail.reply(spoof, {
+      type: MAIL_APPROVAL_RESPONSE,
+      subject: 're',
+      body: 'approved',
+      decision: 'approve',
+    });
+
+    const requested = (await file(ctx)) as Record<string, unknown>;
+    expect(requested['status']).toBe('approval_requested');
+    expect(gh).not.toHaveBeenCalled();
+    const approvals = stores.mail.inbox(OPERATOR).filter((m) => m.type === MAIL_APPROVAL);
+    expect(approvals.map((m) => m.sender)).toEqual(['impl-1', 'coord-1']);
+
+    const authorized = approvals.find((m) => m.sender === 'coord-1')!;
+    stores.mail.reply(authorized, {
+      type: MAIL_APPROVAL_RESPONSE,
+      subject: 're',
+      body: 'approved',
+      decision: 'approve',
+    });
+
+    await file(ctx);
+
+    const [, args] = gh.mock.calls[0]!;
+    expect(args[args.indexOf('--title') + 1]).toBe(authorized.subject);
+    expect(args[args.indexOf('--title') + 1]).not.toBe('spoofed title');
+    expect(args[args.indexOf('--body') + 1]).toBe(authorized.body);
+    expect(args[args.indexOf('--body') + 1]).not.toBe('spoofed body');
+  });
+
   it('REFUSES after a declined approval', async () => {
     const id = 'p-if-declined';
     configure(id);
@@ -208,7 +290,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     expect(gh).not.toHaveBeenCalled();
   });
 
-  it('files once on approve — gh runs exactly once, the record turns filed, re-call is idempotent', async () => {
+  it('files on approve — the record turns filed and re-call does not re-run gh', async () => {
     const id = 'p-if-approved';
     configure(id);
     const stores = openStores(id);
@@ -243,5 +325,66 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     expect(again['status']).toBe('filed');
     expect(again['posted_ref']).toBe('https://github.com/acme/co/issues/5');
     expect(gh).toHaveBeenCalledTimes(1);
+  });
+
+  it('posts the approved title even if a later retry supplies a different title', async () => {
+    const id = 'p-if-approved-title-bound';
+    configure(id);
+    const stores = openStores(id);
+    seedDiagnosedIssue(stores);
+    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/6');
+    const ctx = makeCtx(id, stores, gh);
+
+    const req = (await fileWithTitle(ctx, 'approved /home/skyler title')) as Record<
+      string,
+      unknown
+    >;
+    const held = stores.mail
+      .inbox(OPERATOR)
+      .find((m) => m.seq === (req['approval_seq'] as number))!;
+    stores.mail.reply(held, {
+      type: MAIL_APPROVAL_RESPONSE,
+      subject: 're',
+      body: 'approved',
+      decision: 'approve',
+    });
+
+    await fileWithTitle(ctx, 'changed title after approval');
+
+    const [, args] = gh.mock.calls[0]!;
+    const title = args[args.indexOf('--title') + 1];
+    expect(title).toBe(held.subject);
+    expect(title).not.toBe('changed title after approval');
+  });
+
+  it('posts the approved body even if it differs from the current renderer', async () => {
+    const id = 'p-if-approved-body-bound';
+    configure(id);
+    const stores = openStores(id);
+    seedDiagnosedIssue(stores);
+    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/8');
+    const ctx = makeCtx(id, stores, gh);
+    const approvedBody = 'approved body from an older renderer';
+
+    const held = stores.mail.send({
+      type: MAIL_APPROVAL,
+      to: OPERATOR,
+      from: 'coord-1',
+      subject: 'approved title',
+      body: approvedBody,
+      idempotencyKey: issueFilingApprovalKey('iss-1'),
+    });
+    stores.mail.reply(held, {
+      type: MAIL_APPROVAL_RESPONSE,
+      subject: 're',
+      body: 'approved',
+      decision: 'approve',
+    });
+
+    await fileWithTitle(ctx, 'changed title after approval');
+
+    const [, args] = gh.mock.calls[0]!;
+    const body = args[args.indexOf('--body') + 1];
+    expect(body).toBe(approvedBody);
   });
 });

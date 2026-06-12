@@ -120,6 +120,29 @@ describe('co_research_finalize — researcher-only, contract-validated', () => {
     ).rejects.toThrow(/ghost\.ts/);
   });
 
+  it('rejects an incoherent map with an entry missing from read order', async () => {
+    const id = 'p-rt-missing-read-order';
+    const stores = openStores(id);
+    const bad = {
+      ...MAP_INPUT,
+      research_id: 'res-q-missing-read-order',
+      map: {
+        ...MAP_INPUT.map,
+        entries: [
+          ...MAP_INPUT.map.entries,
+          {
+            path: 'packages/core/src/mail/mail-store.ts',
+            why: 'the facade that wires delivery into the mail store',
+            symbols: ['openMailStore'],
+          },
+        ],
+      },
+    };
+    await expect(
+      invokeTool(buildCoreRegistry(), makeCtx(id, stores), 'co_research_finalize', bad),
+    ).rejects.toThrow(/mail-store\.ts/);
+  });
+
   it('records a cited answer finalize', async () => {
     const id = 'p-rt-answer';
     const stores = openStores(id);

@@ -198,10 +198,22 @@ describe('NodePtyHost — IPty → Pane adapter wiring', () => {
     mod.pty.fireData('a');
     expect(got).toEqual(['a']);
 
+    const disposedBeforeUnsub = mod.pty.disposedData;
     unsub();
-    expect(mod.pty.disposedData).toBe(1);
+    expect(mod.pty.disposedData).toBe(disposedBeforeUnsub + 1);
     mod.pty.fireData('b');
     expect(got).toEqual(['a']);
+  });
+
+  it('Pane.onData replays output emitted before the startup driver subscribes', () => {
+    const mod = new FakeNodePty();
+    const pane = new NodePtyHost(mod).spawn(FULL_SPEC);
+
+    mod.pty.fireData('early prompt');
+
+    const got: string[] = [];
+    pane.onData((c) => got.push(c));
+    expect(got).toEqual(['early prompt']);
   });
 
   it('Pane.onExit maps {exitCode,signal} → {code,signal}; missing signal becomes null', () => {

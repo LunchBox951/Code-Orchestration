@@ -9,10 +9,8 @@ import {
   buildIssueFilingApproval,
   fileIssueOutward,
   findIssueFilingApproval,
-  renderIssueBody,
 } from '../../issues/filing.js';
 import { ISSUE_PUBLISH_KEY, resolveIssueOptIns } from '../../issues/opt-in.js';
-import { scrubIssueText } from '../../issues/scrub.js';
 import { defaultGhExec, resolveRepoMode } from '../../worktrees/repo-mode.js';
 import { issueRecordOutputSchema, issueRecordToOutput } from './issue-record-output.js';
 
@@ -54,8 +52,9 @@ type IssueFileOutput = z.infer<typeof issueFileOutput>;
  * ONE idempotency-keyed `approval` mail to @operator carrying the scrubbed artifact (what the
  * operator approves is what posts) and reports `approval_requested`. Re-invocations route the
  * recorded decision through `gateOutwardAction`: BLOCKED loud while pending, REFUSED loud on
- * decline, and `gh issue create` exactly once on approve — then the `issue.filed` event records
- * the approval seq + posted ref for the audit trail.
+ * decline, and `gh issue create` on approve — then the `issue.filed` event records the approval
+ * seq + posted ref for the audit trail. Once that durable filing record exists, re-invocation is
+ * idempotent and never re-runs `gh`.
  *
  * Gates, in order: coordinator/lead caller → `issues.publish` opt-in (OFF by default) →
  * pipeline order (diagnosed only) → destination vs repo mode (no target filing in Offline) →
@@ -129,9 +128,20 @@ export const issueFileTool: ToolSpec<IssueFileInput, IssueFileOutput> = {
     assertIssueDestinationAllowed(issue.destination, mode);
 
     // The per-post approval (idempotency-keyed — retries never double-ask the operator).
-    const existing = findIssueFilingApproval(ctx.mail, ctx.agent, issue.issueId);
+    const existing = findIssueFilingApproval(ctx.mail, ctx.agent, issue.issueId, {
+      senderAllowed: (sender) => {
+        const record = ctx.roster!.getAgent(sender);
+        return record?.role === 'coordinator' || record?.role === 'lead';
+      },
+    });
     if (existing == null) {
-      const sent = ctx.mail.send(buildIssueFilingApproval({ from: ctx.agent, issue }));
+      const sent = ctx.mail.send(
+        buildIssueFilingApproval({
+          from: ctx.agent,
+          issue,
+          title: input.title ?? issue.summary,
+        }),
+      );
       return {
         status: 'approval_requested',
         approval_seq: sent.seq,
@@ -140,7 +150,8 @@ export const issueFileTool: ToolSpec<IssueFileInput, IssueFileOutput> = {
     }
 
     // gateOutwardAction semantics: BLOCKED (pending) / REFUSED (declined) throw loud; approved
-    // runs gh exactly once and yields the posted ref.
+    // runs gh and yields the posted ref. The existing issue.filed record is the durable idempotency
+    // marker; after it exists, the terminal read above prevents a second gh run.
     const outcome = approvalOutcome(ctx.mail, existing);
     const postedRef = fileIssueOutward({
       outcome,
@@ -148,8 +159,8 @@ export const issueFileTool: ToolSpec<IssueFileInput, IssueFileOutput> = {
       cwd: ctx.cwd,
       destination: issue.destination,
       ...(coRepoSlug != null ? { coRepoSlug } : {}),
-      title: scrubIssueText(input.title ?? issue.summary),
-      body: renderIssueBody(issue),
+      title: existing.subject,
+      body: existing.body,
     });
 
     const filed = ctx.issues.recordFiling({

@@ -75,6 +75,7 @@ describe('findIssueFilingApproval — idempotent approval lookup', () => {
       const sent = mail.send(buildIssueFilingApproval({ from: 'coord-1', issue: ISSUE }));
       const found = findIssueFilingApproval(mail, 'coord-1', 'iss-9');
       expect(found?.seq).toBe(sent.seq);
+      expect(findIssueFilingApproval(mail, 'lead-1', 'iss-9')?.seq).toBe(sent.seq);
       expect(findIssueFilingApproval(mail, 'coord-1', 'iss-other')).toBeUndefined();
     } finally {
       mail.close();
@@ -152,7 +153,7 @@ describe('fileIssueOutward — gateOutwardAction is the gate', () => {
     expect(gh).not.toHaveBeenCalled();
   });
 
-  it('runs gh exactly once on approval and returns the posted ref', () => {
+  it('runs gh on approval and returns the posted ref', () => {
     const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/12');
     const ref = fileViaGh(gh, 'approved');
     expect(ref).toBe('https://github.com/acme/co/issues/12');
