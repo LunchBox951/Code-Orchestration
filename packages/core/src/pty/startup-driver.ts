@@ -20,6 +20,15 @@ import {
   type StartupInterstitialName,
 } from './startup-classifier.js';
 
+/**
+ * Cap on retained startup output (~64 KB of UTF-16 units). Startup dialogs are full-screen repaints,
+ * so a signature always lands within the recent tail; keeping only the tail bounds memory and the
+ * per-chunk re-normalization cost when a slow startup streams many spinner frames (review #178). The
+ * cap is far larger than any single TUI screen, so it never truncates an in-flight prompt; the exact
+ * value can be tuned host-side once real startup output volume is known.
+ */
+const MAX_STARTUP_BUFFER_CHARS = 64 * 1024;
+
 /** The terminal result of driving a freshly-spawned session through its startup dialogs. */
 export interface StartupOutcome {
   /** True iff the session reached the ready composer (authed). */
@@ -75,6 +84,11 @@ export function driveToReady(pane: Pane, provider: Provider): Promise<StartupOut
 
     unsubData = pane.onData((chunk) => {
       buffer += chunk;
+      // Drop already-processed leading output once past the cap. Safe: `answered` (not the buffer)
+      // tracks interstitial progress, and the current screen's signature is always within the tail.
+      if (buffer.length > MAX_STARTUP_BUFFER_CHARS) {
+        buffer = buffer.slice(-MAX_STARTUP_BUFFER_CHARS);
+      }
       evaluate();
     });
     unsubExit = pane.onExit((ev) => {

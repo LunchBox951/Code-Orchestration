@@ -151,4 +151,16 @@ describe('driveToReady — fail-loud + liveness', () => {
     await expect(p).resolves.toEqual({ authed: true });
     expect(() => pane.exit(0, null)).not.toThrow();
   });
+
+  it('still detects ready after a large volume of pre-ready noise (buffer cap preserves the tail)', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const p = driveToReady(pane, 'claude');
+    // ~128 KB of spinner frames (well past the 64 KB cap), none containing a startup signature.
+    for (let i = 0; i < 16; i++) {
+      pane.emit(' ⠋ ⠙ ⠹ ⠸ loading the workspace… '.repeat(256));
+    }
+    pane.emit(CLAUDE_READY);
+    await expect(p).resolves.toEqual({ authed: true });
+    expect(pane.written).toEqual([]);
+  });
 });

@@ -100,7 +100,12 @@ const SIGNATURES: Readonly<Record<Provider, ProviderSignatures>> = {
     ],
   },
   codex: {
-    // [synthesized] idle composer footer hints (`send` + `newline`); stable, NOT the placeholder.
+    // [synthesized] idle composer footer hints (`send` + `newline` must BOTH be present); stable, NOT
+    // the placeholder. Host-side hardening (review #178): if live probes show false-ready positives
+    // from these short words, anchor instead on a longer codex-specific token such as the idle
+    // composer block element `▌`. Kept as the broader AND-match here because over-narrowing to an
+    // unverified glyph risks the worse failure (a false-NEGATIVE ready → the session hangs at startup);
+    // the `login_required`-before-`ready` precedence already guards the dangerous logged-out case.
     readyAnchors: ['send', 'newline'],
     // [documented] sign-in menu: anchor on the first + last options (the header is not documented).
     loginAnchors: ['sign in with chatgpt', 'provide your own api key'],
