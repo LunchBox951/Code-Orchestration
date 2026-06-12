@@ -18,7 +18,15 @@ const CLAUDE_SPEC: SpawnSpec = {
 const CLAUDE_PERMISSION =
   'Claude wants to use co_probe.\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n';
 
-/** A fully test-controlled settle/retry window: each `delay()` parks until `release()` drains it. */
+/**
+ * A fully test-controlled settle/retry window: each `delay()` parks until `release()` drains it.
+ *
+ * Test-only simplification: the production `retryDelay` seam takes an `AbortSignal` (aborted the
+ * instant the echo wins, so the real timer is cleared) — this stub deliberately IGNORES the signal
+ * and just leaves a never-resolved parked promise behind when the echo race wins. That is benign in
+ * tests (the won race is settled; the dangling promise is GC'd at test end and never observed); we
+ * skip honoring the signal only to keep the helper a two-liner.
+ */
 function controllableDelay(): { delay: () => Promise<void>; release: () => void } {
   const resolvers: Array<() => void> = [];
   return {

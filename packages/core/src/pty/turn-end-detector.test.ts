@@ -54,6 +54,27 @@ describe('detectTurnEnd — byte-quiescence is the necessary idle gate (AC-L7-4)
     expect(Object.keys(r).sort()).toEqual(['idle', 'idleSignals', 'sawCompletionVerb']);
   });
 
+  it('never-rendered: an empty trace (and a byte-less trace) is NOT idle (nothing to go quiet FROM)', () => {
+    // Byte-quiescence is "had bytes, then went silent" — absence of any render is NOT idle, so a
+    // not-yet-started session is never mistaken for an idle one (guards the documented invariant).
+    const empty = detectTurnEnd([], 10_000, { provider: 'claude' });
+    expect(empty.idle).toBe(false);
+    expect(empty.idleSignals).toEqual([]);
+    expect(empty.sawCompletionVerb).toBe(false);
+
+    // A trace with activity but ZERO byte events likewise has nothing to have gone quiet from.
+    const noBytes = detectTurnEnd(
+      [
+        { kind: 'osc0', at: 0, title: 'my-project' },
+        { kind: 'mcp', at: 0, verb: 'co_status' },
+      ],
+      10_000,
+      { provider: 'codex' },
+    );
+    expect(noBytes.idle).toBe(false);
+    expect(noBytes.idleSignals).toEqual([]);
+  });
+
   it('long-silent-but-working: a long turn whose spinner keeps rendering bytes is NOT idle', () => {
     const trace: DetectorEvent[] = [];
     for (let t = 0; t <= 30000; t += 200) trace.push({ kind: 'bytes', at: t, bytes: 80 }); // spinner frames
