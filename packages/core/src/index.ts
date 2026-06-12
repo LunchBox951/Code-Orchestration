@@ -30,7 +30,7 @@ export { assertRepoPristine } from './config/pristine.js';
 
 // L1 mail bus: a typed, schema-validated, idempotent envelope over the L0 log that
 // activates the four reserved fields, plus send/inbox and the in-process Delivery
-// seam (the L7 plug-point is a typed stub). W3 adds actionable/informational
+// seam (whose L7 Conductor-side plug-point is now the real `LiveDelivery`). W3 adds actionable/informational
 // classification, log-derived sticky resolution, an event-sourced read-receipt, the
 // completion-predicate registry, and the outstanding-action projection. W4 adds the
 // first-class `approval` type + `approval_response` decision and the log-derived
@@ -841,8 +841,10 @@ export { checkSubRoleCompleteness } from './roles/sub-role-completeness.js';
 // L6a Phase D1 — non-destructive block-list registry + drift check + reactive-nudge catalog.
 // L7 Phase P1 — per-pane isolated launch-config builder + real readEnforcedConfig.
 // The declared LIST and DATA only (Principle 6 — block only the workarounds, everything else
-// is a nudge). Enforcement hooks (PreToolUse, Claude/Codex variants) and nudge injection are
-// L7 typed stubs here; the production wiring lands in L7 (permissions.md:90-98 / :64-66).
+// is a nudge). This slice (L7) makes the enforcement CONFIG and `injectNudge` real —
+// `buildPaneLaunchConfig` emits the isolated per-pane `--disallowedTools`/`CODEX_HOME` config and
+// `readEnforcedConfig` reads it back drift-clean; the LIVE host-side block-enforcement E2E is the
+// operator's proof (AC-L7-6 [host-live], permissions.md:90-98 / :64-66).
 export type { BlockCategory, BlockRule, MatchBlockOptions } from './permissions/block-list.js';
 export { BLOCK_LIST, matchBlock } from './permissions/block-list.js';
 export type { EnforcedConfig, DriftViolation } from './permissions/drift.js';

@@ -203,7 +203,7 @@ export class InProcessDelivery implements Delivery {
         currentHeld.retracted
       ) {
         throw new Error(
-          `InProcessDelivery.resolve: no unresolved escalation seq=${held.seq} ` +
+          `InProcessDelivery.resolveWithRelays: no unresolved escalation seq=${held.seq} ` +
             `(or it was retracted) ` +
             `for holder '${held.recipient}'`,
         );
@@ -220,7 +220,7 @@ export class InProcessDelivery implements Delivery {
         const relayRow = selectMailBySeq(db, storedRelay!.seq);
         if (!relayRow) {
           throw new Error(
-            `InProcessDelivery.resolve: relay row missing after projection (seq=${storedRelay!.seq})`,
+            `InProcessDelivery.resolveWithRelays: relay row missing after projection (seq=${storedRelay!.seq})`,
           );
         }
         relayRows.push(relayRow);
@@ -229,7 +229,7 @@ export class InProcessDelivery implements Delivery {
       const response = selectMailBySeq(db, storedResponse!.seq);
       if (!response) {
         throw new Error(
-          `InProcessDelivery.resolve: inbox row missing after projection (seq=${storedResponse!.seq})`,
+          `InProcessDelivery.resolveWithRelays: inbox row missing after projection (seq=${storedResponse!.seq})`,
         );
       }
       return { response, relays: relayRows };

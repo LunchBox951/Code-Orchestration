@@ -1,11 +1,12 @@
 /**
- * The live-session-hosting seam (L7 plug-point) — the L2 analogue of L1's `LiveDeliveryStub`.
- * In production the Conductor hosts the REAL interactive claude/codex in a pty (Principle 2 —
- * authentic-terminal; never headless `-p`/`exec`) and serves the co MCP tools to that live
- * session, injecting the session's agent identity into each {@link ToolContext} (never trusting
- * client-supplied identity) and waking/routing the session on inbound mail. L2 ships the
- * transport-agnostic server (stdio) + this typed stub; it does NOT host live sessions, and the
- * stdio server works WITHOUT it (that is what "transport-agnostic" means).
+ * The live-session-hosting seam (L7) — the L2 analogue of L1's now-real `LiveDelivery`.
+ * {@link LiveSessionHostImpl} serves the co MCP surface to ONE hosted pane at a time, injecting the
+ * Conductor's AUTHORITATIVE per-pane agent identity (from the B0 session record) into every
+ * {@link ToolContext} — server-side, never trusting client-supplied identity — and offering the
+ * role-scoped toolset. In production the Conductor hosts the REAL interactive claude/codex in a pty
+ * (Principle 2 — authentic-terminal; never headless `-p`/`exec`); binding this MCP server to that live
+ * pty's transport and waking/routing on inbound mail is the host-side runtime wiring, while the
+ * identity-injecting surface itself is real here and sandbox-tested over an in-memory transport.
  */
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { toolsForRole, type ProjectId, type Role } from '@co/core';
