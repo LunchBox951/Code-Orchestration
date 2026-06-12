@@ -1134,5 +1134,28 @@ export {
   COMPLETION_VERBS,
 } from './pty/turn-end-detector.js';
 
+// L7 E1 — liveness watchdog: PURE `alive | wedged | dead` classifier (+ a distinct silent-stop break)
+// over the P4 byte signatures, and LivenessWatchdog, the injected-seam escalation driver (break →
+// injectNudge → STUCK on persistence). Reuses detectTurnEnd + FakePty; the STUCK transition is an
+// injected monitor seam (integration owns the live agent-state machine / `co unstick`).
+export type {
+  Liveness,
+  BreakKind,
+  BreakInfo,
+  LivenessInput,
+  LivenessConfig,
+  LivenessVerdict,
+  BreakSignal,
+  MarkStuck,
+  InjectNudgeFn,
+  MonitorSeams,
+} from './pty/liveness-watchdog.js';
+export {
+  classifyLiveness,
+  LivenessWatchdog,
+  WEDGE_MS,
+  SILENT_STOP_TRIGGER,
+} from './pty/liveness-watchdog.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
