@@ -59,8 +59,12 @@ describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas
       [
         'idempotency_key',
         'in_reply_to',
+        'issue_id',
         'operator_override',
+        'probable_cause',
         'reasoning_budget',
+        'requested_by',
+        'research_id',
         'review_id',
         'review_verdict',
         'task_criteria',

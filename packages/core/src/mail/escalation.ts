@@ -5,6 +5,7 @@ import {
   MAIL_ESCALATION,
   OPERATOR,
   type DeliveredMail,
+  type MailEnvelope,
   type MailType,
 } from './events.js';
 import type { MailStore } from './mail-store.js';
@@ -220,12 +221,7 @@ export function resolveEscalation(
   resolution: EscalationResolution,
 ): DeliveredMail {
   const currentHeld = mail.inbox(held.recipient).find((m) => m.seq === held.seq);
-  if (
-    !currentHeld ||
-    currentHeld.type !== MAIL_ESCALATION ||
-    currentHeld.kind !== 'actionable' ||
-    currentHeld.resolved
-  ) {
+  if (!currentHeld || currentHeld.type !== MAIL_ESCALATION || currentHeld.kind !== 'actionable') {
     throw new Error('resolveEscalation: expected an unresolved persisted escalation');
   }
   if (resolution.type === MAIL_ESCALATION) {
@@ -264,7 +260,33 @@ export function resolveEscalation(
         },
   );
 
+  if (currentHeld.resolved && !alreadyDelivered(mail, response, relays)) {
+    throw new Error('resolveEscalation: expected an unresolved persisted escalation');
+  }
+
   return mail.resolve(currentHeld, response, relays);
+}
+
+function alreadyDelivered(
+  mail: MailStore,
+  response: MailEnvelope,
+  relays: readonly MailEnvelope[],
+): boolean {
+  return [response, ...relays].every((envelope) =>
+    mail.inbox(envelope.to).some((delivered) => deliveredMatchesEnvelope(delivered, envelope)),
+  );
+}
+
+function deliveredMatchesEnvelope(delivered: DeliveredMail, envelope: MailEnvelope): boolean {
+  return (
+    delivered.sender === envelope.from &&
+    delivered.type === envelope.type &&
+    delivered.subject === envelope.subject &&
+    delivered.body === envelope.body &&
+    (delivered.causationId ?? undefined) === (envelope.causationId ?? undefined) &&
+    (delivered.correlationId ?? undefined) === (envelope.correlationId ?? undefined) &&
+    (delivered.idempotencyKey ?? undefined) === (envelope.idempotencyKey ?? undefined)
+  );
 }
 
 // ── Clarify-timeout policy (Q4) — POLICY/DATA ONLY; the FIRING is L7 (no wall-clock here) ──

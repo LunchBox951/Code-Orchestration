@@ -72,6 +72,85 @@ function fakeUsageOptions(
   return { usageSourceFactory: () => source };
 }
 
+function writeRulesFile(ids: readonly string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), 'co-cli-hook-'));
+  tmpDirs.push(dir);
+  const path = join(dir, 'rules.json');
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      tool: 'shell',
+      matcher: '@co/core/permissions/matchBlock',
+      rules: ids.map((id) => ({ id })),
+    }),
+  );
+  return path;
+}
+
+describe('co hook codex-block-list', () => {
+  it('denies blocked Bash commands using the canonical block-list matcher', async () => {
+    const rules = writeRulesFile(['raw-git-merge']);
+    const result = await run(['hook', 'codex-block-list', '--rules', rules], process.cwd(), {
+      stdin: JSON.stringify({
+        tool_name: 'Bash',
+        tool_input: { command: 'git merge feature' },
+      }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toMatch(/permissionDecision.*deny|decision.*block/s);
+    expect(result.output).toMatch(/raw-git-merge/);
+  });
+
+  it('denies blocked lowercase bash hook payloads', async () => {
+    const rules = writeRulesFile(['raw-git-merge']);
+    const result = await run(['hook', 'codex-block-list', '--rules', rules], process.cwd(), {
+      stdin: JSON.stringify({
+        tool_name: 'bash',
+        tool_input: { command: 'git merge feature' },
+      }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toMatch(/permissionDecision.*deny|decision.*block/s);
+    expect(result.output).toMatch(/raw-git-merge/);
+  });
+
+  it('allows safe Bash commands and non-Bash tool payloads', async () => {
+    const rules = writeRulesFile(['raw-git-merge']);
+    const safe = await run(['hook', 'codex-block-list', '--rules', rules], process.cwd(), {
+      stdin: JSON.stringify({
+        tool_name: 'Bash',
+        tool_input: { command: 'git status --short' },
+      }),
+    });
+    const nonShell = await run(['hook', 'codex-block-list', '--rules', rules], process.cwd(), {
+      stdin: JSON.stringify({ tool_name: 'Read', tool_input: { file_path: 'README.md' } }),
+    });
+
+    expect(safe).toEqual({ output: '', exitCode: 0 });
+    expect(nonShell).toEqual({ output: '', exitCode: 0 });
+  });
+
+  it('fails closed when the rules file is missing or invalid', async () => {
+    const result = await run(
+      ['hook', 'codex-block-list', '--rules', '/tmp/no-such-co-rules.json'],
+      process.cwd(),
+      {
+        stdin: JSON.stringify({
+          tool_name: 'Bash',
+          tool_input: { command: 'git status --short' },
+        }),
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toMatch(/permissionDecision.*deny|decision.*block/s);
+    expect(result.output).toMatch(/failed closed/);
+  });
+});
+
 describe('co usage', () => {
   it('reports usage buckets for a registered project', async () => {
     const { projectId, dir } = makeRegisteredProject();

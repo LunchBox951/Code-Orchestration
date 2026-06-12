@@ -10,6 +10,8 @@ import type { ReviewStore } from '../review/review-store.js';
 import type { RosterStore } from '../roles/roster-store.js';
 import type { SpecStore } from '../specs/specs-store.js';
 import type { PlanStore } from '../plans/plans-store.js';
+import type { IssueStore } from '../issues/issues-store.js';
+import type { ResearchStore } from '../research/research-store.js';
 import type { UsageSourceFactory } from '../dispatch/cli-render.js';
 import type { GhExec } from '../worktrees/repo-mode.js';
 
@@ -74,6 +76,20 @@ export interface ToolContext {
    * (`co_plan_ingest`) loud-fail when absent (Principle 9), mirroring the specs seam.
    */
   readonly plans?: PlanStore;
+  /**
+   * OPTIONAL L6b G program-data handle: the issue record store (capture/diagnose/file records),
+   * opened + injected by the mount alongside {@link plans}. Optional + additive so every existing
+   * ToolContext construction site keeps compiling; the issue verbs (`co_issue_capture`,
+   * `co_issue_list`, `co_issue_diagnose`, `co_issue_file`) loud-fail when absent (Principle 9),
+   * mirroring the specs/plans seams.
+   */
+  readonly issues?: IssueStore;
+  /**
+   * OPTIONAL L6b H program-data handle: the research record store (finalized maps/answers),
+   * opened + injected by the mount alongside {@link issues}. Optional + additive; the research
+   * verbs (`co_research_finalize`, `co_research_get`) loud-fail when absent (Principle 9).
+   */
+  readonly research?: ResearchStore;
   /**
    * OPTIONAL L4 passive/live usage-source factory. When the mount supplies it, dispatching tools refresh
    * stale/missing usage buckets through {@link import('../dispatch/provider-source.js').readProviderUsageCached}

@@ -3,6 +3,7 @@ import {
   previewPlacementWithUsage,
   defaultProviderAccounts,
   defaultUsageSourceFactory,
+  matchBlock,
   renderCostReport,
   renderDispatchResolution,
   renderUsageReport,
@@ -11,6 +12,7 @@ import {
   workSizeSchema,
 } from '@co/core';
 import type { ProviderAccount, UsageSourceFactory, WorkSize, ReasoningBudget } from '@co/core';
+import { readFileSync } from 'node:fs';
 
 export interface RunResult {
   output: string;
@@ -19,6 +21,7 @@ export interface RunResult {
 
 export interface RunOptions {
   readonly usageSourceFactory?: UsageSourceFactory;
+  readonly stdin?: string;
 }
 
 const HELP_TEXT = `co — the orchestration CLI
@@ -27,6 +30,7 @@ Commands:
   co usage                  Show provider usage buckets for the current project
   co cost                   Show cost rollups and near-budget crossings
   co sling --dry-run        Preview dispatch placement; refreshes usage cache
+  co hook codex-block-list  Run the Codex PreToolUse block-list hook
     --role <role>           Agent role (default: implementer)
     --work-size <w>         simple|average|technical (default: average)
     --reasoning-budget <r>  economy|standard|deep (default: standard)
@@ -35,6 +39,91 @@ Commands:
 Options:
   --help                    Show this help text
 `;
+
+function hookDeny(reason: string): string {
+  return (
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: reason,
+      },
+      decision: 'block',
+      reason,
+    }) + '\n'
+  );
+}
+
+function readHookStdin(options: RunOptions): string {
+  return options.stdin ?? readFileSync(0, 'utf8');
+}
+
+function extractHookCommand(raw: string): string | undefined {
+  const parsed = JSON.parse(raw) as {
+    tool_name?: unknown;
+    toolName?: unknown;
+    tool_input?: unknown;
+    toolInput?: unknown;
+  };
+  const toolName = parsed.tool_name ?? parsed.toolName;
+  if (typeof toolName !== 'string') return undefined;
+  const normalizedToolName = toolName.toLowerCase();
+  if (normalizedToolName !== 'bash' && normalizedToolName !== 'shell') return undefined;
+  const input = parsed.tool_input ?? parsed.toolInput;
+  if (typeof input !== 'object' || input == null) return undefined;
+  const command = (input as { command?: unknown }).command;
+  return typeof command === 'string' ? command : undefined;
+}
+
+function readAllowedRuleIds(path: string): Set<string> {
+  const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
+    version?: unknown;
+    matcher?: unknown;
+    rules?: unknown;
+  };
+  if (
+    parsed.version !== 1 ||
+    parsed.matcher !== '@co/core/permissions/matchBlock' ||
+    !Array.isArray(parsed.rules)
+  ) {
+    throw new Error(`Invalid codex block-list rules file '${path}'.`);
+  }
+  return new Set(
+    parsed.rules
+      .map((rule) =>
+        typeof rule === 'object' && rule != null ? (rule as { id?: unknown }).id : undefined,
+      )
+      .filter((id): id is string => typeof id === 'string' && id.length > 0),
+  );
+}
+
+function runHookCommand(argv: string[], options: RunOptions): RunResult {
+  const [hookName, ...rest] = argv;
+  if (hookName !== 'codex-block-list') {
+    return { output: `co hook: unknown hook '${hookName ?? ''}'.\n`, exitCode: 1 };
+  }
+  const rulesPath = requiredArg(rest, '--rules');
+  if (rulesPath == null) {
+    return { output: hookDeny('BLOCKED: missing codex block-list rules path.'), exitCode: 0 };
+  }
+  try {
+    const allowedRuleIds = readAllowedRuleIds(rulesPath);
+    const command = extractHookCommand(readHookStdin(options));
+    if (command == null) return { output: '', exitCode: 0 };
+    const blocked = matchBlock(command);
+    if (blocked == null || !allowedRuleIds.has(blocked.id)) return { output: '', exitCode: 0 };
+    return {
+      output: hookDeny(`BLOCKED: '${command}' matches co hard-block rule '${blocked.id}'.`),
+      exitCode: 0,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      output: hookDeny(`BLOCKED: codex block-list hook failed closed: ${msg}`),
+      exitCode: 0,
+    };
+  }
+}
 
 function requiredArg(argv: string[], flag: string): string | undefined {
   const idx = argv.indexOf(flag);
@@ -131,6 +220,10 @@ export async function run(
 
   if (cmd === '--help' || cmd === 'help' || cmd === undefined) {
     return { output: HELP_TEXT, exitCode: 0 };
+  }
+
+  if (cmd === 'hook') {
+    return runHookCommand(rest, options);
   }
 
   // Resolve projectId from cwd — loud-fail (P9) if unregistered.

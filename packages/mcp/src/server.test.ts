@@ -17,7 +17,7 @@ import {
   type ToolContext,
 } from '@co/core';
 import { createCoMcpServer, type CoMcpServerOptions } from './server.js';
-import { LiveSessionHostStub } from './live-session-host.js';
+import { LiveSessionHostImpl } from './live-session-host.js';
 
 // The canonical `co_*` tools the mount must expose 1:1 (registration order from buildCoreRegistry).
 // Pinned here so the parity test catches a tool added OR dropped.
@@ -43,6 +43,12 @@ const EXPECTED_TOOLS = [
   'co_spec_lock',
   'co_plan_ingest',
   'co_phase_status',
+  'co_issue_capture',
+  'co_issue_list',
+  'co_issue_diagnose',
+  'co_issue_file',
+  'co_research_finalize',
+  'co_research_get',
 ];
 
 // ── Per-test program-data dir + live stores (mirrors the CO_DATA_DIR idiom in mail.test.ts) ──
@@ -349,10 +355,24 @@ describe('createCoMcpServer — per-role tool-scoping (AC-L2-5: the server scope
   });
 });
 
-describe('LiveSessionHostStub — the L7 live-session-hosting seam', () => {
-  it('hostSession throws with the documented L7 plug-point contract (never a silent no-op)', () => {
-    const host = new LiveSessionHostStub();
-    expect(() => host.hostSession()).toThrow(/L7 plug-point/);
-    expect(() => host.hostSession()).toThrow(/not implemented at L2/);
+describe('LiveSessionHostImpl — fail-loud on missing identity (Principle 9)', () => {
+  it('hostSession rejects a blank authoritative agent without fabricating an identity', async () => {
+    const host = new LiveSessionHostImpl();
+    // A blank/missing agent must throw (Principle 9 — never fabricate who is calling).
+    await expect(
+      host.hostSession(
+        {
+          agent: '',
+          role: 'implementer',
+          parent: 'lead-1',
+          pane: 'pane-blank',
+          projectId: 'proj-1',
+          cwd: '/tmp',
+          provider: 'claude',
+          resume: { provider: 'claude', sessionId: 'session-blank' },
+        },
+        {} as import('@modelcontextprotocol/sdk/shared/transport.js').Transport,
+      ),
+    ).rejects.toThrow(/authoritative agent.*missing or blank/);
   });
 });

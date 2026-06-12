@@ -29,7 +29,7 @@ import {
   type MailEnvelope,
 } from './events.js';
 import { ensureInboxTable, MailProjector } from './mail-projector.js';
-import { InProcessDelivery, LiveDeliveryStub, type Delivery } from './delivery.js';
+import { InProcessDelivery, type Delivery } from './delivery.js';
 import { openMailStore } from './mail-store.js';
 
 // ── Program-data dir per test (mirrors config-store.test.ts) ──────────────────
@@ -353,18 +353,9 @@ describe('AC-L1-2 — in-process delivery; headless; L7 stub fails loud', () => 
     }
   });
 
-  it('LiveDeliveryStub.deliver throws the documented not-implemented error', () => {
-    // Typed as the seam to prove the stub is a drop-in Delivery (L7 swaps the writer).
-    const stub: Delivery = new LiveDeliveryStub();
-    const env: MailEnvelope = {
-      type: MAIL_CHAT,
-      to: 'bob',
-      from: 'alice',
-      subject: 's',
-      body: 'b',
-    };
-    expect(() => stub.deliver(env)).toThrow(/not implemented|L7 plug-point/i);
-  });
+  // L7 C2 replaced the throwing `LiveDeliveryStub` with the real Conductor-side `LiveDelivery`
+  // (delegates persistence to InProcessDelivery + injected wake/inject seams). Its behavior is
+  // covered in live-delivery.test.ts; the drop-in `Delivery` shape is still asserted there.
 });
 
 describe('AC-L1-2 — send routes through the Delivery seam (regression 5)', () => {

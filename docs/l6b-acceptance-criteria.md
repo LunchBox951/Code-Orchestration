@@ -1,12 +1,16 @@
 # L6b Acceptance Criteria
 
-L6b is the specs-and-plans slice: it turns specs and plans into durable, event-sourced
-program-data records, adds an operator-only spec-lock gate and a plan validator that mechanically
-rejects fuzzy acceptance criteria, and adds the record-aware resolver the review gate will use to
-resolve acceptance criteria from the locked spec record. The live `triggerReview` call-site swap stays
-an L7 conductor wiring step. These IDs are cited in code/tests as local implementation criteria; each
-ladder points back to the project-wide v1 acceptance criteria. Evidence cites `file:line` on the
-integration branch plus the test that proves it.
+L6b is the specs-and-plans slice (E + F, "L6b-core") **plus the deferred G + H closure**: it turns
+specs and plans into durable, event-sourced program-data records, adds an operator-only spec-lock
+gate and a plan validator that mechanically rejects fuzzy acceptance criteria, and adds the
+record-aware resolver the review gate will use to resolve acceptance criteria from the locked spec
+record. The live `triggerReview` call-site swap stays an L7 conductor wiring step. G adds the
+bottom-up issue pipeline (`detect → diagnose → dedup → file`, per-post approved, layered opt-ins
+all OFF by default); H adds the static half of the codebase locator (the map output contract + the
+durable research-finalize record — live locating/dispatch is L7-coupled). These IDs are cited in
+code/tests as local implementation criteria; each ladder points back to the project-wide v1
+acceptance criteria. Evidence cites `file:line` on the integration branch plus the test that
+proves it.
 
 ## F — Specs
 
@@ -71,10 +75,65 @@ integration branch plus the test that proves it.
   `packages/core/src/plans/plans-store.ts:50` (`recordReplan` with caller actor); proven by
   `plans-store.test.ts` asserting persisted actor + reason. Ladders to `ST-1`.
 
+## G — Issues
+
+- `AC-L6b-G1` — The issue pipeline is a durable, event-sourced record of
+  `detect → diagnose → dedup → file → (opt-in) self-assign`: pipeline order is enforced loud-fail
+  (file requires diagnose; self-assign requires filed), replay-equal, program-data only. Evidence:
+  `packages/core/src/issues/events.ts`, `issues-projector.ts` (`validateIssueTransition`,
+  `findDuplicateIssue`), `issues-store.ts` (`openIssueStore`); proven by `issues-store.test.ts`
+  (roundtrip, idempotent re-assert, illegal transitions, dedup, replay-equal, pristine-repo).
+  Ladders to `ST-1`, `SH-2`, Principle 8.
+- `AC-L6b-G2` — Layered opt-in, all OFF by default: `issues.capture` (local) → `issues.publish`
+  (GitHub) → `issues.selfAssign`, each its own config-cascade switch, a later layer effective only
+  when every earlier layer is on, and only the boolean `true` enables — so a stranger repo never
+  auto-captures or auto-files. The opt-in check runs BEFORE any write (robust on read-only state).
+  Evidence: `packages/core/src/issues/opt-in.ts` (`layerIssueOptIns`/`resolveIssueOptIns`); gate
+  order proven by `opt-in.test.ts` and `issue-tools.test.ts` (refusal writes nothing). Ladders to
+  Principle 8, `RG-5`.
+- `AC-L6b-G3` — Filing is gated by a per-post `@operator` approval and the outward action runs
+  through L1's `gateOutwardAction` (its first real consumer): the approval mail is
+  idempotency-keyed per issue (retries never double-ask), its subject/body are the SCRUBBED
+  outward artifact (what the operator approves is what posts), a pending approval BLOCKS loud, a
+  declined approval REFUSES loud, and an approved `gh issue create` records the approval seq + posted
+  ref on `issue.filed` for audit; once that durable filing record exists, re-calls are idempotent and
+  do not re-run `gh`. Destination rides repo mode: `target` filing refuses in Offline; `co` filing
+  posts to the configured `issues.coRepo` slug.
+  All `gh` I/O is behind the injectable `GhExec` seam — `pnpm test` performs no real network
+  operations. Evidence: `packages/core/src/issues/filing.ts`, `scrub.ts`, the verb at
+  `packages/core/src/tools/specs/issue-file.ts`; proven by `filing.test.ts`, `scrub.test.ts`, and
+  `issue-file.test.ts` (blocked/refused + scrub + idempotent re-call). Ladders to
+  Principle 8, `RG-1`, `SF-3`.
+- `AC-L6b-G4` — The pipeline verbs are scoped by role: any agent may capture and list
+  (`co_issue_capture`/`co_issue_list` in `UNIVERSAL` — friction can hit anyone, and dedup needs
+  read access), only a researcher may diagnose (`co_issue_diagnose` — the `researcher:diagnostic`
+  mandate), only a coordinator/lead may file (`co_issue_file` — the outward tier). Evidence:
+  `packages/core/src/roles/profile.ts` toolsets; proven by `issue-tools.test.ts` /
+  `issue-file.test.ts` role-refusal cases. Ladders to `RL-1`, `RL-2`.
+
+## H — Codebase locator (static half)
+
+- `AC-L6b-H1` — `co_research_finalize` records a cited map/answer as replay-safe program-data, and
+  the locator map output contract is structured + enforced: files + a one-line *why* each + key
+  symbols + a suggested read order (pointers, not a content dump) — multi-line/oversize whys,
+  incoherent read orders, duplicate paths, and citation-free answers are mechanically rejected.
+  `researcher:codebase` scoping is confirmed (the no-web sub-role profile shipped in L6a;
+  `co_research_finalize` is researcher-only; `co_research_get` is offered to every role so the
+  requester reads the durable record instead of re-searching). Evidence:
+  `packages/core/src/research/map-contract.ts` (`locatorMapSchema`/`checkLocatorMap`/
+  `citedAnswerSchema`), `events.ts`, `research-projector.ts`, `research-store.ts`; verbs at
+  `packages/core/src/tools/specs/research-finalize.ts` / `research-get.ts`; proven by
+  `map-contract.test.ts`, `research-store.test.ts`, `research-tools.test.ts`. **L7 deferral:**
+  research *dispatch* (spawning a live researcher) and the live "agent maps a stranger repo" proof
+  (`SH-4`) need the hosted session — they land with/after L7, per the Stage 7 scope research
+  (§2.H.2: bundling the live half pre-substrate risks half-building it). Ladders to `MC-3`,
+  `SH-4`, Principle 5.
+
 ## Completeness
 
-All five new MCP tools (`co_spec_get`, `co_spec_draft`, `co_spec_lock`, `co_plan_ingest`,
-`co_phase_status`) pass the L2 completeness gate (`tools/completeness.ts`) over the whole
-`buildCoreRegistry`. `co_spec_lock` is operator-only: it lives in the mount's `OPERATOR_TOOL_NAMES`
-(`packages/mcp/src/context.ts`) and in **no** role toolset, while the registry-wide completeness gate
-still covers it.
+All eleven L6b MCP tools (`co_spec_get`, `co_spec_draft`, `co_spec_lock`, `co_plan_ingest`,
+`co_phase_status`, `co_issue_capture`, `co_issue_list`, `co_issue_diagnose`, `co_issue_file`,
+`co_research_finalize`, `co_research_get`) pass the L2 completeness gate (`tools/completeness.ts`)
+over the whole `buildCoreRegistry`. `co_spec_lock` is operator-only: it lives in the mount's
+`OPERATOR_TOOL_NAMES` (`packages/mcp/src/context.ts`) and in **no** role toolset, while the
+registry-wide completeness gate still covers it.

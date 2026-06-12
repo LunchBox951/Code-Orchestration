@@ -9,6 +9,7 @@ import {
   MAIL_REVIEW_RESPONSE,
   makeMailForwardEvent,
   makeMailEvent,
+  makeMailLiveEffectEvent,
   makeMailReadEvent,
   makeMailRetractEvent,
   mailSchemas,
@@ -16,7 +17,15 @@ import {
   type DeliveredMail,
   type MailEnvelope,
 } from './events.js';
-import { ensureInboxTable, selectMailByIdempotencyKey, selectMailBySeq } from './mail-projector.js';
+import {
+  ensureInboxTable,
+  forwardedMailForHeld,
+  selectLiveDeliveryEffect,
+  selectMailByIdempotencyKey,
+  selectMailBySeq,
+  selectMailMatchingEnvelope,
+  type PersistedLiveEffect,
+} from './mail-projector.js';
 
 function assertForwardEnvelope(held: DeliveredMail, envelope: MailEnvelope): void {
   if (held.type !== MAIL_ESCALATION && held.type !== MAIL_CLARIFY_REQUEST) {
@@ -87,6 +96,11 @@ export interface Delivery {
   retract?(sender: string, seq: number): DeliveredMail;
 }
 
+export interface DeliveryResult {
+  readonly mail: DeliveredMail;
+  readonly created: boolean;
+}
+
 /**
  * The PROTOTYPE delivery (spec §2 PROTOTYPE). Owns the project store + the mail
  * projectors and runs ONE `store.transaction` per `deliver`:
@@ -103,6 +117,10 @@ export class InProcessDelivery implements Delivery {
   ) {}
 
   deliver(envelope: MailEnvelope): DeliveredMail {
+    return this.deliverWithStatus(envelope).mail;
+  }
+
+  deliverWithStatus(envelope: MailEnvelope): DeliveryResult {
     return this.store.transaction((tx) => {
       const db = tx.raw as DatabaseSync;
       ensureInboxTable(db);
@@ -116,7 +134,7 @@ export class InProcessDelivery implements Delivery {
           sender: envelope.from,
           type: envelope.type,
         });
-        if (existing) return existing;
+        if (existing) return { mail: existing, created: false };
       }
 
       // Never-drop (freeze #5): the store transaction throws on a failed persist;
@@ -130,7 +148,7 @@ export class InProcessDelivery implements Delivery {
           `InProcessDelivery: inbox row missing after projection (seq=${stored!.seq})`,
         );
       }
-      return delivered;
+      return { mail: delivered, created: true };
     });
   }
 
@@ -178,14 +196,17 @@ export class InProcessDelivery implements Delivery {
   }
 
   /**
-   * Deliver a down-resolution and optional relay atomically. This is used when an upstream answer
-   * must both resolve the held escalation and flow back down to the original clarify asker.
+   * Deliver a down-resolution and optional relays atomically, returning the response row AND every
+   * delivered relay row. {@link resolve} is the {@link Delivery}-interface wrapper that returns just
+   * the response; {@link LiveDelivery} uses this richer form so it can wake/inject each relay recipient
+   * — a relay is a NEW item delivered to a (possibly WAITING) recipient, e.g. the answer flowing back
+   * down to the original clarify asker, so it must be woken like any other delivery (freeze #3 / duty 2).
    */
-  resolve(
+  resolveWithRelays(
     held: DeliveredMail,
     envelope: MailEnvelope,
     relays: readonly MailEnvelope[] = [],
-  ): DeliveredMail {
+  ): { response: DeliveredMail; relays: readonly DeliveredMail[] } {
     return this.store.transaction((tx) => {
       const db = tx.raw as DatabaseSync;
       ensureInboxTable(db);
@@ -200,7 +221,7 @@ export class InProcessDelivery implements Delivery {
         currentHeld.retracted
       ) {
         throw new Error(
-          `InProcessDelivery.resolve: no unresolved escalation seq=${held.seq} ` +
+          `InProcessDelivery.resolveWithRelays: no unresolved escalation seq=${held.seq} ` +
             `(or it was retracted) ` +
             `for holder '${held.recipient}'`,
         );
@@ -210,19 +231,41 @@ export class InProcessDelivery implements Delivery {
       const [storedResponse] = tx.append([makeMailEvent(this.projectId, envelope)]);
       applyEvent(tx, decode(storedResponse!, mailUpcasters, mailSchemas), this.projectors);
 
+      const relayRows: DeliveredMail[] = [];
       for (const relay of relays) {
         const [storedRelay] = tx.append([makeMailEvent(this.projectId, relay)]);
         applyEvent(tx, decode(storedRelay!, mailUpcasters, mailSchemas), this.projectors);
+        const relayRow = selectMailBySeq(db, storedRelay!.seq);
+        if (!relayRow) {
+          throw new Error(
+            `InProcessDelivery.resolveWithRelays: relay row missing after projection (seq=${storedRelay!.seq})`,
+          );
+        }
+        relayRows.push(relayRow);
       }
 
-      const delivered = selectMailBySeq(db, storedResponse!.seq);
-      if (!delivered) {
+      const response = selectMailBySeq(db, storedResponse!.seq);
+      if (!response) {
         throw new Error(
-          `InProcessDelivery.resolve: inbox row missing after projection (seq=${storedResponse!.seq})`,
+          `InProcessDelivery.resolveWithRelays: inbox row missing after projection (seq=${storedResponse!.seq})`,
         );
       }
-      return delivered;
+      return { response, relays: relayRows };
     });
+  }
+
+  /**
+   * Deliver a down-resolution and optional relay atomically (the {@link Delivery} seam). Returns the
+   * resolution response row; any relays are persisted in the SAME transaction. See
+   * {@link resolveWithRelays} for the form that also returns the relay rows (used by
+   * {@link LiveDelivery} to wake/inject each relay recipient).
+   */
+  resolve(
+    held: DeliveredMail,
+    envelope: MailEnvelope,
+    relays: readonly MailEnvelope[] = [],
+  ): DeliveredMail {
+    return this.resolveWithRelays(held, envelope, relays).response;
   }
 
   /**
@@ -294,54 +337,298 @@ export class InProcessDelivery implements Delivery {
 }
 
 /**
- * The L7 STUB delivery (spec §2 STUB). Fails loud (Principle 9) until the
- * Conductor owns delivery.
+ * Wake a WAITING recipient so it takes a turn on its newly-delivered mail. The turn lifecycle is L6
+ * and the real wake is host-side integration, so it is an INJECTED seam here — sandbox-testable, and
+ * `delivery.ts` stays decoupled from L6/pty. Synchronous: it only signals; it does not await a turn.
  */
-export class LiveDeliveryStub implements Delivery {
-  // L7 PLUG-POINT (Conductor → runtime substrate). The production Delivery must:
-  //  (1) persist the mail event Conductor-side — NOT from inside a worker sandbox (freeze #3);
-  //  (2) wake the WAITING recipient (turn lifecycle is L6);
-  //  (3) inject unread *actionable* mail into the recipient's live pty session; the
-  //      mail-vs-session-injection choice for deferred types is the canonical L7 question
-  //      (mail-bus.md:68-72). Until then this stub fails loud (Principle 9).
-  deliver(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.deliver: live (Conductor-side) delivery is not implemented at L1. ' +
-        'This is the L7 plug-point: persist the mail Conductor-side (never from a worker sandbox), ' +
-        'wake the WAITING recipient, and inject unread actionable mail into its live pty session. ' +
-        'Use InProcessDelivery for headless flows.',
-    );
+export type WakeRecipient = (recipient: string) => void;
+
+/**
+ * Inject an unread *actionable* mail into the recipient's LIVE pty session. Wired in production to
+ * `injectMail` on the recipient's `Pane` (resolved via the B0 session record's pane↔agent map); an
+ * INJECTED seam here so `delivery.ts` never statically imports `pty/` and stays sandbox-testable.
+ */
+export type InjectToRecipient = (recipient: string, mail: DeliveredMail) => void | Promise<void>;
+
+/** Reports a live injection failure after the mail was durably persisted and the recipient was woken. */
+export type ReportInjectFailure = (recipient: string, mail: DeliveredMail, error: unknown) => void;
+/** Reports a live wake failure after the mail was durably persisted. */
+export type ReportWakeFailure = (recipient: string, mail: DeliveredMail, error: unknown) => void;
+
+export interface LiveDeliveryOptions {
+  readonly wake: WakeRecipient;
+  readonly injectToRecipient: InjectToRecipient;
+  readonly onWakeFailure: ReportWakeFailure;
+  readonly onInjectFailure: ReportInjectFailure;
+}
+
+/**
+ * Whether a just-delivered mail is the kind that must be PUSHED into a live session: an `actionable`
+ * item that is still outstanding (not already read / resolved / retracted). Informational mail is
+ * persisted + the recipient is woken, but never injected (it demands no response).
+ */
+function isInjectableActionable(mail: DeliveredMail): boolean {
+  return mail.kind === 'actionable' && !mail.read && !mail.resolved && !mail.retracted;
+}
+
+/**
+ * The L7 Conductor-side delivery (replaces the former `LiveDeliveryStub`). Its three duties:
+ *   1. **Persist Conductor-side** — the store-write half is IDENTICAL to {@link InProcessDelivery}, so
+ *      we DELEGATE to a composed instance (same projectId/store/projectors) rather than re-implement
+ *      the transaction logic (freeze #3 — one writer). "Conductor-side" just means this runs in the
+ *      Conductor process, never a worker sandbox; composition satisfies that.
+ *   2. **Wake the WAITING recipient** — via the injected {@link WakeRecipient} seam, on every operation
+ *      that delivers a NEW item to a recipient: `deliver`, `forward`, and `resolve` — the last waking
+ *      BOTH the resolution response AND every relay recipient (each relay is its own new-item delivery,
+ *      e.g. an answer flowing back down to the original asker). Receipts (`markRead`/`retract`) deliver
+ *      nothing new, so they persist only — no wake.
+ *   3. **Inject unread actionable mail into the recipient's live pty** — via the injected
+ *      {@link InjectToRecipient} seam, for each woken item that is an outstanding `actionable`
+ *      ({@link isInjectableActionable}) — including an actionable `resolve` relay. Informational mail
+ *      and receipts are never injected.
+ *
+ * Decoupling: `wake` and `injectToRecipient` are constructor-injected callbacks; this module does NOT
+ * import `pty/`. Wiring the seams to real panes is host-side integration, not this sandbox's job.
+ */
+export class LiveDelivery implements Delivery {
+  private readonly inner: InProcessDelivery;
+  private readonly injectQueues = new Map<string, Promise<void>>();
+  private readonly liveEffects = new Map<
+    number,
+    { wakeSucceeded: boolean; injectQueued: boolean; injectSucceeded: boolean }
+  >();
+
+  constructor(
+    private readonly projectId: string,
+    private readonly store: Store,
+    private readonly projectors: readonly Projector[],
+    private readonly opts: LiveDeliveryOptions,
+  ) {
+    this.inner = new InProcessDelivery(projectId, store, projectors);
   }
 
-  forward(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.forward: live (Conductor-side) forwarding is not implemented at L1. ' +
-        'This is the L7 plug-point: persist the forwarded mail and its forward receipt ' +
-        'Conductor-side in one durable operation. Use InProcessDelivery for headless flows.',
-    );
+  deliver(envelope: MailEnvelope): DeliveredMail {
+    const delivered = this.inner.deliverWithStatus(envelope);
+    if (delivered.created || this.shouldRetryLiveEffects(delivered.mail)) {
+      this.wakeAndMaybeInject(delivered.mail);
+    }
+    return delivered.mail;
   }
 
-  resolve(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.resolve: live (Conductor-side) resolution is not implemented at L1. ' +
-        'This is the L7 plug-point: persist the resolution and any required relay ' +
-        'Conductor-side in one durable operation. Use InProcessDelivery for headless flows.',
-    );
+  forward(held: DeliveredMail, envelope: MailEnvelope): DeliveredMail {
+    const delivered = this.forwardOrRecover(held, envelope);
+    this.wakeAndMaybeInject(delivered);
+    return delivered;
   }
 
-  markRead(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.markRead: live (Conductor-side) read-receipts are not implemented at L1. ' +
-        'This is the L7 plug-point: append the read-receipt Conductor-side (never from a worker ' +
-        'sandbox). Use InProcessDelivery for headless flows.',
-    );
+  resolve(
+    held: DeliveredMail,
+    envelope: MailEnvelope,
+    relays: readonly MailEnvelope[] = [],
+  ): DeliveredMail {
+    // The resolution response AND every relay are NEW items delivered to (possibly WAITING) recipients
+    // — wake each, and inject the outstanding-actionable ones (e.g. an answer relayed back down to the
+    // original asker). A relay delivered to a WAITING agent that was NOT woken was the gap (review #193).
+    const { response, relays: relayRows } = this.resolveOrRecover(held, envelope, relays);
+    this.wakeAndMaybeInject(response);
+    for (const relayRow of relayRows) this.wakeAndMaybeInject(relayRow);
+    return response;
   }
 
-  retract(): DeliveredMail {
-    throw new Error(
-      'LiveDeliveryStub.retract: live (Conductor-side) retraction is not implemented at L1. ' +
-        'This is the L7 plug-point: append the retract-receipt tombstone Conductor-side (never ' +
-        'from a worker sandbox). Use InProcessDelivery for headless flows.',
-    );
+  markRead(recipient: string, seq: number): DeliveredMail {
+    // A read-receipt delivers nothing new — persist only (no wake, no injection).
+    return this.inner.markRead(recipient, seq);
   }
+
+  retract(sender: string, seq: number): DeliveredMail {
+    // A retract-receipt is a tombstone — persist only (no wake, no injection).
+    return this.inner.retract(sender, seq);
+  }
+
+  private wakeAndMaybeInject(delivered: DeliveredMail): void {
+    const state = this.effectState(delivered);
+    if (!state.wakeSucceeded) {
+      try {
+        this.opts.wake(delivered.recipient);
+        this.persistEffect(delivered.seq, { wakeSucceeded: true });
+      } catch (error) {
+        state.wakeSucceeded = false;
+        this.opts.onWakeFailure(delivered.recipient, delivered, error);
+        return;
+      }
+    }
+    if (isInjectableActionable(delivered) && !state.injectSucceeded && !state.injectQueued) {
+      this.enqueueInject(delivered, state);
+    }
+  }
+
+  private shouldRetryLiveEffects(delivered: DeliveredMail): boolean {
+    const state = this.effectState(delivered);
+    if (!state.wakeSucceeded) return true;
+    return isInjectableActionable(delivered) && !state.injectQueued && !state.injectSucceeded;
+  }
+
+  private forwardOrRecover(held: DeliveredMail, envelope: MailEnvelope): DeliveredMail {
+    try {
+      return this.inner.forward(held, envelope);
+    } catch (error) {
+      const recovered = this.store.transaction((tx) =>
+        forwardedMailForHeld(tx.raw as DatabaseSync, held.seq),
+      );
+      if (recovered != null && deliveredMatchesEnvelope(recovered, envelope)) {
+        return recovered;
+      }
+      throw error;
+    }
+  }
+
+  private resolveOrRecover(
+    held: DeliveredMail,
+    envelope: MailEnvelope,
+    relays: readonly MailEnvelope[],
+  ): { response: DeliveredMail; relays: readonly DeliveredMail[] } {
+    try {
+      return this.inner.resolveWithRelays(held, envelope, relays);
+    } catch (error) {
+      const recovered = this.store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        const currentHeld = selectMailBySeq(db, held.seq);
+        if (
+          currentHeld == null ||
+          currentHeld.recipient !== held.recipient ||
+          currentHeld.type !== MAIL_ESCALATION ||
+          currentHeld.kind !== 'actionable' ||
+          currentHeld.resolved !== true ||
+          currentHeld.retracted === true
+        ) {
+          return undefined;
+        }
+        assertResolutionEnvelope(currentHeld, envelope);
+        const response = selectMailMatchingEnvelope(db, envelope);
+        if (response == null || response.causationId !== String(held.seq)) return undefined;
+        const relayRows: DeliveredMail[] = [];
+        for (const relay of relays) {
+          const relayRow = selectMailMatchingEnvelope(db, relay);
+          if (relayRow == null) return undefined;
+          relayRows.push(relayRow);
+        }
+        return { response, relays: relayRows };
+      });
+      if (recovered != null) return recovered;
+      throw error;
+    }
+  }
+
+  private effectState(delivered: DeliveredMail): {
+    wakeSucceeded: boolean;
+    injectQueued: boolean;
+    injectSucceeded: boolean;
+  } {
+    let state = this.liveEffects.get(delivered.seq);
+    if (state == null) {
+      const persisted = this.readEffect(delivered.seq);
+      state = {
+        wakeSucceeded: persisted?.wakeSucceeded ?? false,
+        injectQueued: false,
+        injectSucceeded:
+          !isInjectableActionable(delivered) || (persisted?.injectSucceeded ?? false),
+      };
+      this.liveEffects.set(delivered.seq, state);
+    }
+    return state;
+  }
+
+  private readEffect(seq: number): PersistedLiveEffect | undefined {
+    return this.store.transaction((tx) => selectLiveDeliveryEffect(tx.raw as DatabaseSync, seq));
+  }
+
+  private persistEffect(seq: number, patch: Partial<PersistedLiveEffect>): PersistedLiveEffect {
+    const event = {
+      seq,
+      ...(patch.wakeSucceeded === true ? { wakeSucceeded: true as const } : {}),
+      ...(patch.injectSucceeded === true ? { injectSucceeded: true as const } : {}),
+    };
+    const persisted = this.store.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      const [stored] = tx.append([makeMailLiveEffectEvent(this.projectId, event)]);
+      applyEvent(tx, decode(stored!, mailUpcasters, mailSchemas), this.projectors);
+      const updated = selectLiveDeliveryEffect(db, seq);
+      if (updated == null) {
+        throw new Error(`LiveDelivery: live-effect row missing after projection (seq=${seq})`);
+      }
+      return updated;
+    });
+    const state = this.liveEffects.get(seq);
+    if (state != null) {
+      state.wakeSucceeded = persisted.wakeSucceeded;
+      state.injectSucceeded = persisted.injectSucceeded;
+    }
+    return persisted;
+  }
+
+  private enqueueInject(
+    delivered: DeliveredMail,
+    state: { wakeSucceeded: boolean; injectQueued: boolean; injectSucceeded: boolean },
+  ): void {
+    const recipient = delivered.recipient;
+    const previous = this.injectQueues.get(recipient);
+    state.injectQueued = true;
+    const run = (): Promise<void> => {
+      try {
+        const result = this.opts.injectToRecipient(recipient, delivered);
+        if (isPromiseLike(result)) {
+          return result.then(
+            () => {
+              try {
+                this.persistEffect(delivered.seq, { injectSucceeded: true });
+              } catch (error) {
+                state.injectSucceeded = false;
+                this.opts.onInjectFailure(recipient, delivered, error);
+              } finally {
+                state.injectQueued = false;
+              }
+            },
+            (error: unknown) => {
+              state.injectSucceeded = false;
+              this.opts.onInjectFailure(recipient, delivered, error);
+              state.injectQueued = false;
+            },
+          );
+        }
+        this.persistEffect(delivered.seq, { injectSucceeded: true });
+      } catch (error) {
+        state.injectSucceeded = false;
+        this.opts.onInjectFailure(recipient, delivered, error);
+      } finally {
+        state.injectQueued = false;
+      }
+      return Promise.resolve();
+    };
+    const current = previous == null ? run() : previous.catch(() => undefined).then(run);
+
+    this.injectQueues.set(recipient, current);
+    const cleanup = (): void => {
+      if (this.injectQueues.get(recipient) === current) {
+        this.injectQueues.delete(recipient);
+      }
+    };
+    void current.then(cleanup, cleanup);
+  }
+}
+
+function isPromiseLike(value: void | Promise<void>): value is Promise<void> {
+  return typeof (value as { then?: unknown } | undefined)?.then === 'function';
+}
+
+function deliveredMatchesEnvelope(mail: DeliveredMail, envelope: MailEnvelope): boolean {
+  return (
+    mail.recipient === envelope.to &&
+    mail.sender === envelope.from &&
+    mail.type === envelope.type &&
+    mail.subject === envelope.subject &&
+    mail.body === envelope.body &&
+    (mail.causationId ?? undefined) === (envelope.causationId ?? undefined) &&
+    (mail.correlationId ?? undefined) === (envelope.correlationId ?? undefined) &&
+    (mail.idempotencyKey ?? undefined) === (envelope.idempotencyKey ?? undefined)
+  );
 }

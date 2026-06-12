@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BLOCK_LIST } from './block-list.js';
-import { checkBlockListDrift, readEnforcedConfig } from './drift.js';
+import { checkBlockListDrift } from './drift.js';
 
 const ALL_IDS = BLOCK_LIST.map((r) => r.id);
 
@@ -39,8 +39,5 @@ describe('checkBlockListDrift', () => {
   });
 });
 
-describe('readEnforcedConfig — L7 stub (AC-L6a-9)', () => {
-  it('throws loudly rather than silently no-op-ing', () => {
-    expect(() => readEnforcedConfig()).toThrow(/L7/);
-  });
-});
+// readEnforcedConfig is tested via the drift-clean roundtrip in pane-launch-config.test.ts
+// (L7 Phase P1). The stub that previously threw is replaced by the real reader.
