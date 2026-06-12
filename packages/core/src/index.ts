@@ -1080,5 +1080,28 @@ export type { SpawnSpec, PtyExit, Pane, PtyHost } from './pty/pty-host.js';
 export type { FakePtyPane } from './pty/fake-pty.js';
 export { FakePty } from './pty/fake-pty.js';
 
+// L7 B1 — startup interstitial state machine (PURE, provider-aware): classify a freshly-spawned
+// claude/codex TUI's startup dialogs from the whitespace-normalized output, and drive a Pane through
+// them to ready (authed) or a terminal login menu. Sandbox-tested over FakePty fixtures.
+// `Provider` is the canonical project-wide enum, already exported from the dispatch layer above —
+// the classifier reuses it, so only the pty-specific types are surfaced here.
+export type { StartupInterstitialName, StartupPhase } from './pty/startup-classifier.js';
+export { classifyStartup, normalizeStartupOutput } from './pty/startup-classifier.js';
+export type { StartupOutcome } from './pty/startup-driver.js';
+export { driveToReady } from './pty/startup-driver.js';
+
+// L7 B1 — NodePtyHost: the one real-binary adapter, implementing PtyHost over node-pty. node-pty is
+// reached only via a lazy injected loader behind a local type shim, so the gate is green without the
+// native module present; the live binary reaching ready is the operator's host-side proof.
+export type {
+  IDisposableLike,
+  IPtyExitEvent,
+  IPtyForkOptionsLike,
+  IPtyLike,
+  NodePtyModule,
+  NodePtyModuleLoader,
+} from './pty/node-pty-host.js';
+export { NodePtyHost } from './pty/node-pty-host.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
