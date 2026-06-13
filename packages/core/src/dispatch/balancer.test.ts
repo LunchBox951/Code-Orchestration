@@ -166,26 +166,29 @@ describe('AC1 — pinned seats are returned unchanged (never re-routed)', () => 
     expect(decision.placement.account).toBe('claude:team');
   });
 
-  it('fails loud when a provider pin sees multiple same-provider accounts', () => {
-    expect(() =>
-      placeAgent({
-        role: 'implementer',
-        workSize: 'average',
-        reasoningBudget: 'standard',
-        pins: { implementer: { provider: 'claude' } },
-        candidates: [
-          {
-            provider: 'claude',
-            account: 'claude:max',
-            available: false,
-            headroom: { kind: 'unknown', reason: 'account unavailable' },
-            resetAt: FAR_RESET,
-          },
-          known('claude', 5, FAR_RESET, 'claude:team'),
-        ],
-        nowMs: NOW,
-      }),
-    ).toThrow(/same-provider multi-subscription routing/i);
+  it('pinned provider with multiple same-provider accounts picks the roomiest healthy one (RL4-MS)', () => {
+    const decision = placeAgent({
+      role: 'implementer',
+      workSize: 'average',
+      reasoningBudget: 'standard',
+      pins: { implementer: { provider: 'claude' } },
+      candidates: [
+        {
+          provider: 'claude',
+          account: 'claude:max',
+          available: false,
+          headroom: { kind: 'unknown', reason: 'account unavailable' },
+          resetAt: FAR_RESET,
+        },
+        known('claude', 5, FAR_RESET, 'claude:team'),
+      ],
+      nowMs: NOW,
+    });
+    expect(decision.kind).toBe('pinned');
+    if (decision.kind !== 'pinned') throw new Error('expected pinned');
+    // claude:team is the only healthy account — must be chosen (RL4-MS).
+    expect(decision.placement.provider).toBe('claude');
+    expect(decision.placement.account).toBe('claude:team');
   });
 
   it('an exact sub-role pin wins over a base-role pin for the same seat', () => {
@@ -263,27 +266,30 @@ describe('AC2 — floating routes to the roomiest healthy provider', () => {
     expect(decision.reason).toMatch(/hysteresis/);
   });
 
-  it('fails loud when floating placement sees multiple same-provider accounts', () => {
+  it('floating accepts same-provider accounts; hysteresis holds incumbent within margin (RL4-MS)', () => {
     const previous: Placement = {
       role: 'implementer',
       account: 'claude:max',
       ...resolveTier('average', 'standard', 'claude'),
     };
-
-    expect(() =>
-      placeAgent({
-        role: 'implementer',
-        workSize: 'average',
-        reasoningBudget: 'standard',
-        pins: {},
-        candidates: [
-          known('claude', 35, FAR_RESET, 'claude:max'),
-          known('claude', 30, FAR_RESET, 'claude:team'),
-        ],
-        nowMs: NOW,
-        previous,
-      }),
-    ).toThrow(/same-provider multi-subscription routing/i);
+    const decision = placeAgent({
+      role: 'implementer',
+      workSize: 'average',
+      reasoningBudget: 'standard',
+      pins: {},
+      // claude:team (30%, score 70) vs claude:max (35%, score 65) — challenger leads by 5 ≤ margin(10).
+      candidates: [
+        known('claude', 35, FAR_RESET, 'claude:max'),
+        known('claude', 30, FAR_RESET, 'claude:team'),
+      ],
+      nowMs: NOW,
+      previous,
+    });
+    if (decision.kind !== 'floating') throw new Error('expected floating');
+    // Hysteresis holds claude:max (incumbent) — the challenger's lead (5) is ≤ the default margin (10).
+    expect(decision.placement.provider).toBe('claude');
+    expect(decision.placement.account).toBe('claude:max');
+    expect(decision.reason).toMatch(/hysteresis/);
   });
 
   it('hysteresis: a LARGE delta DOES flip away from previous', () => {
@@ -344,6 +350,125 @@ describe('AC2 — floating routes to the roomiest healthy provider', () => {
     });
     if (decision.kind !== 'floating') throw new Error('expected floating');
     expect(decision.placement.provider).toBe('codex');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// RL4-MS — same-provider multi-subscription: floating and pinned route to roomiest account
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe('RL4-MS — same-provider multi-subscription placement', () => {
+  it('floating: two accounts of same provider — picks the roomiest by headroomScore', () => {
+    // claude:pro at 20% (score 80) is roomier than claude:max at 40% (score 60).
+    const decision = placeAgent({
+      role: 'implementer',
+      workSize: 'average',
+      reasoningBudget: 'standard',
+      pins: {},
+      candidates: [
+        known('claude', 40, FAR_RESET, 'claude:max'),
+        known('claude', 20, FAR_RESET, 'claude:pro'),
+      ],
+      nowMs: NOW,
+    });
+    if (decision.kind !== 'floating') throw new Error('expected floating');
+    expect(decision.placement.provider).toBe('claude');
+    expect(decision.placement.account).toBe('claude:pro');
+    expect(decision.ranked).toHaveLength(2);
+    expect(decision.ranked[0]!.account).toBe('claude:pro');
+    expect(decision.ranked[1]!.account).toBe('claude:max');
+  });
+
+  it('floating: hysteresis holds same-provider incumbent unless challenger beats margin', () => {
+    const previous: Placement = {
+      role: 'implementer',
+      account: 'claude:max',
+      ...resolveTier('average', 'standard', 'claude'),
+    };
+    // claude:pro leads by 5 ≤ margin(10) → hold claude:max.
+    const held = placeAgent({
+      role: 'implementer',
+      workSize: 'average',
+      reasoningBudget: 'standard',
+      pins: {},
+      candidates: [
+        known('claude', 35, FAR_RESET, 'claude:max'),
+        known('claude', 30, FAR_RESET, 'claude:pro'),
+      ],
+      nowMs: NOW,
+      previous,
+    });
+    if (held.kind !== 'floating') throw new Error('expected floating');
+    expect(held.placement.account).toBe('claude:max');
+    expect(held.reason).toMatch(/hysteresis/);
+
+    // claude:pro leads by 50 > margin(10) → flip to claude:pro.
+    const flipped = placeAgent({
+      role: 'implementer',
+      workSize: 'average',
+      reasoningBudget: 'standard',
+      pins: {},
+      candidates: [
+        known('claude', 70, FAR_RESET, 'claude:max'),
+        known('claude', 20, FAR_RESET, 'claude:pro'),
+      ],
+      nowMs: NOW,
+      previous,
+    });
+    if (flipped.kind !== 'floating') throw new Error('expected floating');
+    expect(flipped.placement.account).toBe('claude:pro');
+  });
+
+  it('pinned: two healthy same-provider accounts — picks the roomiest', () => {
+    const decision = placeAgent({
+      role: 'implementer',
+      workSize: 'average',
+      reasoningBudget: 'standard',
+      pins: { implementer: { provider: 'claude' } },
+      candidates: [
+        known('claude', 60, FAR_RESET, 'claude:max'),
+        known('claude', 20, FAR_RESET, 'claude:pro'),
+      ],
+      nowMs: NOW,
+    });
+    if (decision.kind !== 'pinned') throw new Error('expected pinned');
+    expect(decision.placement.provider).toBe('claude');
+    expect(decision.placement.account).toBe('claude:pro');
+  });
+
+  it('pinned: one healthy, one unhealthy same-provider account — picks the healthy one', () => {
+    const decision = placeAgent({
+      role: 'implementer',
+      workSize: 'average',
+      reasoningBudget: 'standard',
+      pins: { implementer: { provider: 'claude' } },
+      candidates: [
+        known('claude', 10, FAR_RESET, 'claude:pro'),
+        {
+          provider: 'claude' as const,
+          account: 'claude:max',
+          available: false,
+          headroom: { kind: 'unknown' as const, reason: 'over-limit' },
+        },
+      ],
+      nowMs: NOW,
+    });
+    if (decision.kind !== 'pinned') throw new Error('expected pinned');
+    expect(decision.placement.account).toBe('claude:pro');
+  });
+
+  it('single-account per provider: placement is identical to pre-RL4-MS behavior', () => {
+    // Regression guard: one claude + one codex — existing routing must be unchanged.
+    const decision = placeAgent({
+      role: 'implementer',
+      workSize: 'average',
+      reasoningBudget: 'standard',
+      pins: {},
+      candidates: [known('claude', 50), known('codex', 10)],
+      nowMs: NOW,
+    });
+    if (decision.kind !== 'floating') throw new Error('expected floating');
+    expect(decision.placement.provider).toBe('codex');
+    expect(decision.placement.account).toBe('codex:pro');
   });
 });
 

@@ -165,7 +165,6 @@ export function resolveDispatch(
   opts: { nowMs: number; maxedThresholdPct?: number },
 ): DispatchResolution {
   const threshold = opts.maxedThresholdPct ?? MAXED_THRESHOLD_PCT_DEFAULT;
-  assertSingleAccountPerProvider([...providerAccountsFromDecision(decision), ...candidates]);
 
   switch (decision.kind) {
     case 'floating': {
@@ -309,49 +308,6 @@ function providerAccountKey(
   return `${value.provider}\0${value.account}`;
 }
 
-function providerAccountsFromDecision(
-  decision: PlacementDecision,
-): Array<{ readonly provider: Provider; readonly account: string }> {
-  switch (decision.kind) {
-    case 'floating':
-      return [
-        { provider: decision.placement.provider, account: decision.placement.account },
-        ...decision.ranked.map((ranked) => ({
-          provider: ranked.provider,
-          account: ranked.account,
-        })),
-      ];
-    case 'pinned':
-      return [{ provider: decision.placement.provider, account: decision.placement.account }];
-    case 'no-candidate':
-      return decision.excluded.flatMap((excluded) =>
-        excluded.account === undefined
-          ? []
-          : [{ provider: excluded.provider, account: excluded.account }],
-      );
-    default:
-      return assertNever(decision);
-  }
-}
-
-function assertSingleAccountPerProvider(
-  values: readonly { readonly provider: Provider; readonly account: string }[],
-): void {
-  const byProvider = new Map<Provider, Set<string>>();
-  for (const value of values) {
-    const accounts = byProvider.get(value.provider) ?? new Set<string>();
-    accounts.add(value.account);
-    byProvider.set(value.provider, accounts);
-  }
-  for (const [provider, accounts] of byProvider) {
-    if (accounts.size <= 1) continue;
-    const list = [...accounts].sort((a, b) => a.localeCompare(b)).join(', ');
-    throw new Error(
-      `same-provider multi-subscription routing is unsupported for provider '${provider}'; candidates offered multiple accounts: ${list}`,
-    );
-  }
-}
-
 function uniqueProviderList(providers: readonly Provider[]): Provider[] {
   return [...new Set(providers)];
 }
@@ -380,7 +336,6 @@ export function canResume(
 ): boolean {
   const threshold = opts.maxedThresholdPct ?? MAXED_THRESHOLD_PCT_DEFAULT;
   const filterPairs = resumeFilterProviderAccounts(opts);
-  assertSingleAccountPerProvider([...candidates, ...filterPairs]);
   const allowedPairs = resumeAllowedPairs(opts, filterPairs);
   return candidates.some(
     (c) =>
