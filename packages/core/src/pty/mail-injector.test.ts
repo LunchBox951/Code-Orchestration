@@ -66,6 +66,18 @@ describe('injectMail — multi-line: bracketed paste + one submit', () => {
     expect(pane.written).toEqual([PASTE_START + text + PASTE_END, '\r']);
   });
 
+  it('accepts Claude Code live paste-preview echo for collapsed multiline paste, then submits once', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const { delay } = controllableDelay();
+    const text = 'first line\nsecond line\nthird line\nfourth line\nfifth line\nsixth line';
+    const p = injectMail(pane, text, { provider: 'claude', retryDelay: delay });
+
+    pane.emit('[Pasted text #1 +6 lines]\npaste again to expand');
+    await p;
+
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END, '\r']);
+  });
+
   it('fails loud instead of retrying an uncertain delayed multiline echo', async () => {
     const pane = new FakePty().spawn(CLAUDE_SPEC);
     const { delay, release } = controllableDelay();

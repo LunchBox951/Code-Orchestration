@@ -54,6 +54,13 @@ const DIALOG_SIGNATURES: Readonly<Record<Provider, readonly DialogSig[]>> = {
       answer: '1\r',
       anchors: ['mcp server to run tool', '1. yes', '2. no'],
     },
+    // [host-live] Codex 0.139.0 renders MCP approval as an Allow/Cancel menu with option 1 already
+    // highlighted. Submit the highlighted Allow option with Enter; do not choose session/future allow.
+    {
+      name: 'codex_approval',
+      answer: '\r',
+      anchors: ['mcp server to run tool', '1. allow', '4. cancel'],
+    },
   ],
 };
 

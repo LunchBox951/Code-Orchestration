@@ -21,8 +21,10 @@ import { openDispatchStore } from '../dispatch/dispatch-store.js';
 import { openReviewStore } from '../review/review-store.js';
 import { ensureReviewTables } from '../review/review-projector.js';
 import {
+  defaultProviderProbe,
   runDoctor,
   REQUIRED_CAPABILITIES,
+  type ProviderProbeCommand,
   type ProviderProbeSeam,
   type ProviderProbeResult,
 } from './doctor.js';
@@ -213,8 +215,8 @@ describe('doctor check: provider-compatibility', () => {
   });
 
   it('returns ok when all providers are healthy (not skewed, all capabilities present)', () => {
-    const probe: ProviderProbeSeam = () => ({
-      version: '1.0.0',
+    const probe: ProviderProbeSeam = (provider) => ({
+      version: `${provider}-1.0.0`,
       versionSkewed: false,
       capabilities: [...REQUIRED_CAPABILITIES],
     });
@@ -222,6 +224,8 @@ describe('doctor check: provider-compatibility', () => {
     const report = runDoctor({ projectId: PROJECT_ID, repoRoot: repoDir, providerProbe: probe });
     const check = report.checks.find((c) => c.name === 'provider-compatibility')!;
     expect(check.status).toBe('ok');
+    expect(check.reason).toMatch(/claude-1\.0\.0/);
+    expect(check.reason).toMatch(/codex-1\.0\.0/);
   });
 
   it('returns warn when a provider has version skew but all required capabilities', () => {
@@ -267,6 +271,92 @@ describe('doctor check: provider-compatibility', () => {
     const report = runDoctor({ projectId: PROJECT_ID, repoRoot: repoDir, providerProbe: probe });
     const check = report.checks.find((c) => c.name === 'provider-compatibility')!;
     expect(check.status).toBe('warn');
+  });
+});
+
+// ── default provider probe ([host-live] metadata-only binary checks) ───────────
+
+describe('defaultProviderProbe', () => {
+  it('runs only provider metadata commands and returns observed versions + capabilities', () => {
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const command: ProviderProbeCommand = (cmd, args) => {
+      calls.push({ command: cmd, args: [...args] });
+      if (cmd === 'claude' && args.join(' ') === '--version') {
+        return { stdout: '2.1.158 (Claude Code)\n', stderr: '', status: 0 };
+      }
+      if (cmd === 'claude' && args.join(' ') === 'auth status --json') {
+        return { stdout: '{"logged_in":true}\n', stderr: '', status: 0 };
+      }
+      if (cmd === 'codex' && args.join(' ') === '--version') {
+        return { stdout: 'codex-cli 0.139.0\n', stderr: '', status: 0 };
+      }
+      if (cmd === 'codex' && args.join(' ') === 'doctor --json') {
+        return { stdout: '{"authenticated":true,"status":"warning"}\n', stderr: '', status: 0 };
+      }
+      return { stdout: '', stderr: 'unexpected command', status: 127 };
+    };
+    const probe = defaultProviderProbe({ command });
+
+    expect(probe('claude')).toEqual({
+      version: '2.1.158 (Claude Code)',
+      versionSkewed: false,
+      capabilities: [...REQUIRED_CAPABILITIES],
+    });
+    expect(probe('codex')).toEqual({
+      version: 'codex-cli 0.139.0',
+      versionSkewed: false,
+      capabilities: [...REQUIRED_CAPABILITIES],
+    });
+    expect(calls).toEqual([
+      { command: 'claude', args: ['--version'] },
+      { command: 'claude', args: ['auth', 'status', '--json'] },
+      { command: 'codex', args: ['--version'] },
+      { command: 'codex', args: ['doctor', '--json'] },
+    ]);
+    for (const call of calls) {
+      expect(
+        call.args.some((arg) => /exec|prompt|complete|completion|--message|query|-p/i.test(arg)),
+      ).toBe(false);
+    }
+  });
+
+  it('fails closed with no capabilities when a provider binary is unreachable', () => {
+    const command: ProviderProbeCommand = () => ({
+      stdout: '',
+      stderr: '',
+      status: null,
+      error: new Error('ENOENT'),
+    });
+    const probe = defaultProviderProbe({ command });
+
+    const result = probe('claude');
+    expect(result.version).toBeUndefined();
+    expect(result.versionSkewed).toBe(true);
+    expect(result.capabilities).toEqual([]);
+    expect(result.diagnostic).toMatch(/ENOENT/);
+  });
+
+  it('fails closed when codex doctor reports an overall failure payload', () => {
+    const command: ProviderProbeCommand = (cmd, args) => {
+      if (cmd === 'codex' && args.join(' ') === '--version') {
+        return { stdout: 'codex-cli 0.139.0\n', stderr: '', status: 0 };
+      }
+      if (cmd === 'codex' && args.join(' ') === 'doctor --json') {
+        return {
+          stdout: '{"authenticated":true,"overallStatus":"fail"}\n',
+          stderr: '',
+          status: 1,
+        };
+      }
+      return { stdout: '', stderr: 'unexpected command', status: 127 };
+    };
+    const probe = defaultProviderProbe({ command });
+
+    const result = probe('codex');
+    expect(result.version).toBe('codex-cli 0.139.0');
+    expect(result.versionSkewed).toBe(false);
+    expect(result.capabilities).toEqual([]);
+    expect(result.diagnostic).toMatch(/unhealthy|unauthenticated/i);
   });
 });
 

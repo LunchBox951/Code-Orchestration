@@ -315,6 +315,8 @@ describe('parseCodexDoctor — metadata preflight (defensive)', () => {
   it('marks unhealthy on an explicit failing signal', () => {
     expect(parseCodexDoctor({ authenticated: false }).healthy).toBe(false);
     expect(parseCodexDoctor({ status: 'logged-out' }).healthy).toBe(false);
+    expect(parseCodexDoctor({ overallStatus: 'fail' }).healthy).toBe(false);
+    expect(parseCodexDoctor({ overallStatus: 'warning' }).healthy).toBe(true);
   });
 });
 

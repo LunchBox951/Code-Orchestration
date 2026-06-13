@@ -29,6 +29,7 @@ import type {
   ReasoningBudget,
   ObservabilitySnapshot,
   DoctorReport,
+  ProviderProbeSeam,
   MailEnvelope,
   DeliveredMail,
   MailType,
@@ -48,6 +49,7 @@ export interface RunResult {
 
 export interface RunOptions {
   readonly usageSourceFactory?: UsageSourceFactory;
+  readonly providerProbe?: ProviderProbeSeam;
   readonly stdin?: string;
 }
 
@@ -631,7 +633,11 @@ export async function run(
     case 'doctor': {
       try {
         validateNoArgs('doctor', rest);
-        const report = runDoctor({ projectId, repoRoot: cwd });
+        const report = runDoctor({
+          projectId,
+          repoRoot: cwd,
+          ...(options.providerProbe != null ? { providerProbe: options.providerProbe } : {}),
+        });
         return { output: renderDoctorReport(report), exitCode: report.healthy ? 0 : 1 };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

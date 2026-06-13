@@ -7,9 +7,12 @@
  * Operator-only: these are NOT agent MCP tools. No ToolSpec is registered here; the completeness
  * gate stays green by construction. The P7 CLI exposes them.
  */
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { CLAUDE_AUTH_STATUS_ARGS, parseClaudeAuthStatus } from '../dispatch/claude-source.js';
+import { CODEX_DOCTOR_ARGS, parseCodexDoctor } from '../dispatch/codex-source.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import { buildCoreRegistry } from '../tools/core-registry.js';
@@ -49,6 +52,7 @@ export interface ProviderProbeResult {
   readonly version: string | undefined;
   readonly versionSkewed: boolean;
   readonly capabilities: readonly string[];
+  readonly diagnostic?: string;
 }
 
 /**
@@ -56,6 +60,25 @@ export interface ProviderProbeResult {
  * Sandbox tests inject synthetic results; the real binary probe wires in at runtime.
  */
 export type ProviderProbeSeam = (provider: Provider) => ProviderProbeResult;
+
+/** Result from running one metadata-only provider command for {@link defaultProviderProbe}. */
+export interface ProviderProbeCommandResult {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly status: number | null;
+  readonly error?: Error;
+}
+
+/** A sync, shell-free command seam for provider metadata probes. */
+export type ProviderProbeCommand = (
+  command: string,
+  args: readonly string[],
+) => ProviderProbeCommandResult;
+
+export interface DefaultProviderProbeOptions {
+  readonly command?: ProviderProbeCommand;
+  readonly expectedVersions?: Partial<Record<Provider, string | RegExp>>;
+}
 
 /**
  * Capabilities every provider MUST advertise — derived from the dispatch/tier.ts default
@@ -66,6 +89,143 @@ export const REQUIRED_CAPABILITIES: readonly string[] = ['inference', 'tool-use'
 
 /** The two providers the tier matrix monitors by default (claude + codex). */
 const MONITORED_PROVIDERS: readonly Provider[] = ['claude', 'codex'];
+
+const PROVIDER_PROBE_TIMEOUT_MS = 15_000;
+
+function realProviderProbeCommand(
+  command: string,
+  args: readonly string[],
+): ProviderProbeCommandResult {
+  const result = spawnSync(command, [...args], {
+    encoding: 'utf8',
+    timeout: PROVIDER_PROBE_TIMEOUT_MS,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const out: ProviderProbeCommandResult = {
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
+    stderr: typeof result.stderr === 'string' ? result.stderr : '',
+    status: result.status,
+    ...(result.error instanceof Error ? { error: result.error } : {}),
+  };
+  return out;
+}
+
+function trimmed(value: string): string | undefined {
+  const t = value.trim();
+  return t.length > 0 ? t : undefined;
+}
+
+function commandDiagnostic(label: string, result: ProviderProbeCommandResult): string {
+  const detail = trimmed(result.stderr) ?? result.error?.message ?? `exit status ${result.status}`;
+  return `${label} failed: ${detail}`;
+}
+
+function parseJsonObject(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function versionSkewed(
+  provider: Provider,
+  version: string | undefined,
+  expectedVersions: Partial<Record<Provider, string | RegExp>>,
+): boolean {
+  if (version === undefined) return true;
+  const expected = expectedVersions[provider];
+  if (expected === undefined) return false;
+  return typeof expected === 'string' ? version !== expected : !expected.test(version);
+}
+
+function probeClaude(
+  command: ProviderProbeCommand,
+  expectedVersions: Partial<Record<Provider, string | RegExp>>,
+): ProviderProbeResult {
+  const versionResult = command('claude', ['--version']);
+  const version = versionResult.status === 0 ? trimmed(versionResult.stdout) : undefined;
+  const auth = command('claude', CLAUDE_AUTH_STATUS_ARGS);
+  if (auth.error !== undefined || auth.status !== 0 || trimmed(auth.stdout) === undefined) {
+    return {
+      version,
+      versionSkewed: versionSkewed('claude', version, expectedVersions),
+      capabilities: [],
+      diagnostic: commandDiagnostic('claude auth status --json', auth),
+    };
+  }
+  const account = parseClaudeAuthStatus(parseJsonObject(auth.stdout));
+  if (!account.loggedIn) {
+    return {
+      version,
+      versionSkewed: versionSkewed('claude', version, expectedVersions),
+      capabilities: [],
+      diagnostic: 'claude auth status --json reported not logged in.',
+    };
+  }
+  return {
+    version,
+    versionSkewed: versionSkewed('claude', version, expectedVersions),
+    capabilities: [...REQUIRED_CAPABILITIES],
+  };
+}
+
+function probeCodex(
+  command: ProviderProbeCommand,
+  expectedVersions: Partial<Record<Provider, string | RegExp>>,
+): ProviderProbeResult {
+  const versionResult = command('codex', ['--version']);
+  const version = versionResult.status === 0 ? trimmed(versionResult.stdout) : undefined;
+  const doctor = command('codex', CODEX_DOCTOR_ARGS);
+  if (doctor.error !== undefined || trimmed(doctor.stdout) === undefined) {
+    return {
+      version,
+      versionSkewed: versionSkewed('codex', version, expectedVersions),
+      capabilities: [],
+      diagnostic: commandDiagnostic('codex doctor --json', doctor),
+    };
+  }
+  const account = parseCodexDoctor(parseJsonObject(doctor.stdout));
+  if (!account.healthy) {
+    return {
+      version,
+      versionSkewed: versionSkewed('codex', version, expectedVersions),
+      capabilities: [],
+      diagnostic: 'codex doctor --json reported the provider is unhealthy or unauthenticated.',
+    };
+  }
+  return {
+    version,
+    versionSkewed: versionSkewed('codex', version, expectedVersions),
+    capabilities: [...REQUIRED_CAPABILITIES],
+  };
+}
+
+/**
+ * Build the real provider compatibility probe used by the CLI host process.
+ *
+ * The commands are metadata-only:
+ * - Claude: `claude --version`, `claude auth status --json`
+ * - Codex: `codex --version`, `codex doctor --json`
+ *
+ * No inference subcommands are spawned.
+ */
+export function defaultProviderProbe(options: DefaultProviderProbeOptions = {}): ProviderProbeSeam {
+  const command = options.command ?? realProviderProbeCommand;
+  const expectedVersions = options.expectedVersions ?? {};
+  return (provider) => {
+    switch (provider) {
+      case 'claude':
+        return probeClaude(command, expectedVersions);
+      case 'codex':
+        return probeCodex(command, expectedVersions);
+      default: {
+        const exhaustive: never = provider;
+        return exhaustive;
+      }
+    }
+  };
+}
 
 // ─── Doctor deps ──────────────────────────────────────────────────────────────
 
@@ -233,20 +393,27 @@ function checkProviderCompatibility(providerProbe: ProviderProbeSeam | undefined
 
   const warns: string[] = [];
   const fails: string[] = [];
+  const ok: string[] = [];
 
   for (const provider of MONITORED_PROVIDERS) {
     const result = providerProbe(provider);
     const missingCaps = REQUIRED_CAPABILITIES.filter((c) => !result.capabilities.includes(c));
 
     if (missingCaps.length > 0) {
+      const diagnostic = result.diagnostic === undefined ? '' : ` ${result.diagnostic}`;
       fails.push(
-        `${provider}: missing required capabilities [${missingCaps.join(', ')}] — hard-stop.`,
+        `${provider}: missing required capabilities [${missingCaps.join(
+          ', ',
+        )}] — hard-stop.${diagnostic}`,
       );
     } else if (result.versionSkewed) {
+      const diagnostic = result.diagnostic === undefined ? '' : ` ${result.diagnostic}`;
       warns.push(
         `${provider}: version skew detected (version=${result.version ?? 'unknown'}) — ` +
-          `all required capabilities present; proceeding at-risk.`,
+          `all required capabilities present; proceeding at-risk.${diagnostic}`,
       );
+    } else {
+      ok.push(`${provider}: version=${result.version ?? 'unknown'}`);
     }
   }
 
@@ -260,7 +427,11 @@ function checkProviderCompatibility(providerProbe: ProviderProbeSeam | undefined
       reason: warns.join(' '),
     };
   }
-  return { name, status: 'ok', reason: 'All monitored providers are compatible.' };
+  return {
+    name,
+    status: 'ok',
+    reason: `All monitored providers are compatible (${ok.join('; ')}).`,
+  };
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────

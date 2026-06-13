@@ -237,6 +237,32 @@ describe('co cost', () => {
   });
 });
 
+describe('co doctor', () => {
+  it('threads a provider probe into runDoctor instead of skipping provider compatibility', async () => {
+    const { dir } = makeRegisteredProject();
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Project memory\n');
+    writeFileSync(join(dir, 'AGENTS.md'), '# Project memory\n');
+    const probed: Provider[] = [];
+
+    const result = await run(['doctor'], dir, {
+      providerProbe: (provider) => {
+        probed.push(provider);
+        return {
+          version: `${provider}-test-version`,
+          versionSkewed: false,
+          capabilities: ['inference', 'tool-use'],
+        };
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(probed).toEqual(['claude', 'codex']);
+    expect(result.output).toMatch(/provider-compatibility/i);
+    expect(result.output).toMatch(/compatible/i);
+    expect(result.output).not.toMatch(/skipped/i);
+  });
+});
+
 describe('co sling --dry-run', () => {
   it('reports PLACED for a healthy provider', async () => {
     const { projectId, dir } = makeRegisteredProject();

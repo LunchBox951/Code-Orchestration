@@ -1225,10 +1225,13 @@ export type {
   DoctorCheck,
   DoctorReport,
   ProviderProbeResult,
+  ProviderProbeCommandResult,
+  ProviderProbeCommand,
+  DefaultProviderProbeOptions,
   ProviderProbeSeam,
   DoctorDeps,
 } from './doctor/doctor.js';
-export { REQUIRED_CAPABILITIES, runDoctor } from './doctor/doctor.js';
+export { REQUIRED_CAPABILITIES, defaultProviderProbe, runDoctor } from './doctor/doctor.js';
 export type { ReviewSummary, ObservabilitySnapshot } from './doctor/observability.js';
 export { queryObservability } from './doctor/observability.js';
 

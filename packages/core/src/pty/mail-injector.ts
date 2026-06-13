@@ -78,7 +78,19 @@ export async function injectMail(
 
   let echoBuffer = '';
   let notifyEcho: (() => void) | null = null;
-  const echoed = (): boolean => normalizeStartupOutput(echoBuffer).includes(normalizedText);
+  const echoed = (): boolean => {
+    const normalizedEcho = normalizeStartupOutput(echoBuffer);
+    if (normalizedEcho.includes(normalizedText)) return true;
+    // [host-live] Claude Code 2.1.158 collapses longer bracketed pastes into a composer-side
+    // `[Pasted text #N +M lines]` preview instead of echoing the full pasted text. That preview is
+    // still the provider acknowledging the paste landed in the composer; submit exactly once.
+    return (
+      multiline &&
+      opts.provider === 'claude' &&
+      normalizedEcho.toLowerCase().includes('pasted text #') &&
+      normalizedEcho.toLowerCase().includes('paste again to expand')
+    );
+  };
 
   const unsubEcho = pane.onData((chunk) => {
     echoBuffer += chunk;

@@ -46,6 +46,42 @@ const CLAUDE_READY =
   '[0m\r\n' +
   '  ? for shortcuts\r\n';
 
+// [host-live] Claude Code 2.1.158 paints the ready footer with cursor-positioning between words,
+// not literal spaces: `?` at col 3, `for` at col 5, `shortcuts` at col 9.
+const CLAUDE_READY_CURSOR_POSITIONED =
+  ESC +
+  ']0;✳ Claude Code' +
+  BEL +
+  '❯ ' +
+  ESC +
+  '[7m ' +
+  ESC +
+  '[27m\r\n' +
+  ESC +
+  '[3G?' +
+  ESC +
+  '[5Gfor' +
+  ESC +
+  '[9Gshortcuts' +
+  ESC +
+  '[19G·' +
+  ESC +
+  '[21G←' +
+  ESC +
+  '[23Gfor' +
+  ESC +
+  '[27Gagents\r\n';
+
+// [host-live] Claude Code 2.1.158 no longer shows `? for shortcuts`; the stable ready footer is the
+// permission-mode/status strip with `shift+tab to cycle`, `for agents`, and a token count.
+const CLAUDE_READY_STATUS_STRIP =
+  ESC +
+  ']0;✳ Claude Code' +
+  BEL +
+  '▐▛███▜▌ Claude Code v2.1.158\r\n' +
+  '❯ Try "how do I log an error?"\r\n' +
+  "⏵⏵ don't ask on (shift+tab to cycle) · ← for agents                 0 tokens\r\n";
+
 // [synthesized] first-run theme/onboarding picker: "Choose the text style…".
 const CLAUDE_THEME =
   ESC +
@@ -84,6 +120,17 @@ const CODEX_TRUST =
   '❯ 1. Yes, allow Codex to work here\r\n' +
   '  2. No\r\n';
 
+// [host-live] Codex 0.139.0 hook trust prompt for an isolated generated PreToolUse hook.
+const CODEX_HOOKS_REVIEW =
+  ESC +
+  '[2J' +
+  'Hooks need review\r\n' +
+  '1 hook is new or changed.\r\n' +
+  'Hooks can run outside the sandbox after you trust them.\r\n' +
+  '› 1. Review hooks\r\n' +
+  '2. Trust all and continue\r\n' +
+  "3. Continue without trusting (hooks won't run)\r\n";
+
 // [synthesized] idle composer/status line ("send" + "newline" footer hints).
 const CODEX_READY =
   ESC +
@@ -95,6 +142,25 @@ const CODEX_READY =
   ESC +
   '[0m\r\n' +
   '⏎ send   ⌃J newline   ⌃C quit\r\n';
+
+// [host-live] Codex 0.139.0 idle composer: prompt glyph + skills hint + model/cwd footer.
+const CODEX_READY_CURRENT =
+  ESC +
+  ']0;Code-Orchestration' +
+  BEL +
+  ESC +
+  '[11;1H' +
+  '›' +
+  ESC +
+  '[11;3H' +
+  ESC +
+  '[2mUse /skills to list available skills' +
+  ESC +
+  '[13;3H' +
+  'gpt-5.5 xhigh' +
+  ESC +
+  '[2m · ' +
+  '~/Documents/Code-Orchestration\r\n';
 
 // [documented] sign-in menu.
 const CODEX_SIGNIN =
@@ -135,6 +201,18 @@ describe('classifyStartup — claude', () => {
     expect(classifyStartup('claude', norm(CLAUDE_READY))).toEqual({ kind: 'ready' });
   });
 
+  it('classifies the live cursor-positioned ready footer as ready', () => {
+    expect(classifyStartup('claude', norm(CLAUDE_READY_CURSOR_POSITIONED))).toEqual({
+      kind: 'ready',
+    });
+  });
+
+  it('classifies the current live Claude status strip as ready', () => {
+    expect(classifyStartup('claude', norm(CLAUDE_READY_STATUS_STRIP))).toEqual({
+      kind: 'ready',
+    });
+  });
+
   it('classifies the theme picker as interstitial theme answered by Enter', () => {
     expect(classifyStartup('claude', norm(CLAUDE_THEME))).toEqual({
       kind: 'interstitial',
@@ -172,8 +250,20 @@ describe('classifyStartup — codex', () => {
     });
   });
 
+  it('classifies the hook trust prompt as interstitial hooks answered by trust-all + Enter', () => {
+    expect(classifyStartup('codex', norm(CODEX_HOOKS_REVIEW))).toEqual({
+      kind: 'interstitial',
+      name: 'hooks',
+      answer: '2\r',
+    });
+  });
+
   it('classifies the idle composer/status line as ready', () => {
     expect(classifyStartup('codex', norm(CODEX_READY))).toEqual({ kind: 'ready' });
+  });
+
+  it('classifies the current idle composer skills hint as ready', () => {
+    expect(classifyStartup('codex', norm(CODEX_READY_CURRENT))).toEqual({ kind: 'ready' });
   });
 
   it('classifies the sign-in menu as login_required and captures the methods', () => {
