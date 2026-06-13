@@ -123,6 +123,13 @@ export interface ReviewGateDeps {
    * {@link ReviewerSpawnGateStub} is the loud-fail stand-in; `dispatch` must also be wired to reach this).
    */
   readonly reviewerSpawnGate?: ReviewerSpawnGate;
+  /**
+   * Called when a fire-and-forget {@link ReviewerSpawnGate.spawn} rejects. Surfaces the error in
+   * observability (e.g. structured logging, telemetry) without blocking `triggerReview`. When absent,
+   * unhandled rejections are still caught and discarded silently — inject this in production to avoid
+   * silent spawn failures disappearing.
+   */
+  readonly onSpawnError?: (agentId: string, err: unknown) => void;
 }
 
 /**
@@ -896,15 +903,21 @@ export class CoReviewGate implements FinishReviewGate {
     if (request != null) {
       const result = this.deps.dispatch.recordPlacementWithReviewRequest(seat, placement, request);
       if (placement.kind === 'placed' && this.deps.reviewerSpawnGate != null) {
-        void this.deps.reviewerSpawnGate.spawn(projectId, result.placement);
+        this.fireSpawn(result.placement.agent, projectId, result.placement);
       }
       return { request: result.request };
     }
     const record = this.deps.dispatch.recordPlacement(seat, placement);
     if (placement.kind === 'placed' && this.deps.reviewerSpawnGate != null) {
-      void this.deps.reviewerSpawnGate.spawn(projectId, record);
+      this.fireSpawn(record.agent, projectId, record);
     }
     return undefined;
+  }
+
+  private fireSpawn(agentId: string, projectId: string, record: PlacementRecord): void {
+    void this.deps.reviewerSpawnGate!.spawn(projectId, record).catch((err: unknown) => {
+      this.deps.onSpawnError?.(agentId, err);
+    });
   }
 
   merge(req: ReviewMergeRequest): ReviewMergeResult {
