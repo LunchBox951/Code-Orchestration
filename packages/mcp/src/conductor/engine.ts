@@ -329,10 +329,14 @@ export class ConductorEngine {
    * duplicate pane is spawned (the `LiveSessionHostImpl` static guard is the MCP-bind backstop). Warm
    * reuse across turns does NOT call this — it reuses the handle from {@link getHosted}.
    *
+   * @param identity - The authoritative session identity.
+   * @param spec - Optional explicit SpawnSpec (P2 placement-based launch). When present, used instead
+   *   of {@link ConductorEngineDeps.spawnSpecFor}. Allows the placement→launch-spec builder to supply
+   *   the fully-isolated config (MNR-6) without reworking ensureHosted's core.
    * @returns the hosted handle. @throws if the agent or pane is already hosted (MNR-5), or if startup /
    *          binding fails (fail-loud, Principle 9 — `driveToReady` rejects on a pty exit).
    */
-  async ensureHosted(identity: HostedIdentity): Promise<HostedPane> {
+  async ensureHosted(identity: HostedIdentity, spec?: SpawnSpec): Promise<HostedPane> {
     const agentKey = ConductorEngine.agentKey(identity.projectId, identity.agent);
     const paneKey = ConductorEngine.paneKey(identity.projectId, identity.pane);
     if (this.hosted.has(agentKey)) {
@@ -349,8 +353,10 @@ export class ConductorEngine {
       );
     }
 
-    // Spawn the pane (host-side build artifacts / env-isolation live in the SpawnSpec).
-    const pane = this.deps.pty.spawn(this.spawnSpecFor(identity));
+    // Spawn the pane. When a caller-supplied spec is present (P2 placement-based launch), use it
+    // directly (it already carries the isolated config from buildPlacementLaunchSpec); otherwise fall
+    // back to the injected spawnSpecFor seam (the default minimal spec or a host-live override).
+    const pane = this.deps.pty.spawn(spec ?? this.spawnSpecFor(identity));
     try {
       // Drive it through its startup interstitials to ready (or surface a terminal login menu);
       // `driveToReady` rejects fail-loud (Principle 9) if the pty exits before ready.
