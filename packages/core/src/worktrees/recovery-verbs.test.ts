@@ -373,47 +373,70 @@ describe('nuke — gated (AC-S9-5)', () => {
 // ── unstick: genuinely re-wakes a stuck agent (MNR-3) (AC-S9-5) ──────────────────────────────────
 
 describe('unstick — genuinely re-wakes a stuck agent within the bounded window (MNR-3)', () => {
-  it('invokes the router seam revertStuck + rewake for the branch (the inverse of markStuck)', () => {
-    const { gate, router } = makeGate('p-unstick-rewake');
+  it('invokes the router seam revertStuck + rewake keyed by the recorded agentId — NOT the branch (MNR-3 round-trip)', () => {
+    // MNR-3: unstick must resolve branch → agentId and pass the agentId to the router seam,
+    // never the branch string (which would silently revert the wrong key).
+    const branch = 'co/stuck';
+    const agentId = 'impl-stuck-agent';
+    const { gate, router, store } = makeGate('p-unstick-rewake');
+    store.recordWorktree(
+      rec({ branch, agent: agentId, path: worktreePathFor('p-unstick-rewake', branch) }),
+    );
 
-    const report = gate.unstick('co/stuck');
+    const report = gate.unstick(branch);
 
-    // The STUCK flip must be reverted (inverse of P4's markStuck).
-    expect(router.calls.revertStuck).toEqual(['co/stuck']);
-    // The agent must be re-woken so the runtime gives it a new turn.
-    expect(router.calls.rewake).toEqual(['co/stuck']);
+    // The STUCK flip must be reverted using the agentId, not the branch string.
+    expect(router.calls.revertStuck).toEqual([agentId]);
+    // The agent must be re-woken using the agentId so the runtime gives it a new turn.
+    expect(router.calls.rewake).toEqual([agentId]);
     expect(report.agentRewoken).toBe(true);
     expect(report.repaired).toBe(true);
   });
 
   it('runs git worktree repair/prune via the seam (git side of unstick)', () => {
     const repairCalls: string[] = [];
-    const { gate } = makeGate('p-unstick-repair', {
+    const branch = 'co/stuck';
+    const { gate, store } = makeGate('p-unstick-repair', {
       repair: (cwd) => {
         repairCalls.push(cwd);
       },
     });
+    store.recordWorktree(
+      rec({
+        branch,
+        agent: 'impl-repair-agent',
+        path: worktreePathFor('p-unstick-repair', branch),
+      }),
+    );
 
-    gate.unstick('co/stuck', { repoCwd: '/main/repo' });
+    gate.unstick(branch, { repoCwd: '/main/repo' });
 
     expect(repairCalls).toEqual(['/main/repo']);
   });
 
   it('defaults repoCwd to the gate deps repoCwd when not overridden', () => {
     const repairCalls: string[] = [];
-    const { gate } = makeGate('p-unstick-default-cwd', {
+    const branch = 'co/stuck';
+    const { gate, store } = makeGate('p-unstick-default-cwd', {
       repoCwd: '/default/repo',
       repair: (cwd) => {
         repairCalls.push(cwd);
       },
     });
+    store.recordWorktree(
+      rec({
+        branch,
+        agent: 'impl-default-cwd-agent',
+        path: worktreePathFor('p-unstick-default-cwd', branch),
+      }),
+    );
 
-    gate.unstick('co/stuck');
+    gate.unstick(branch);
 
     expect(repairCalls).toEqual(['/default/repo']);
   });
 
-  it('revertStuck and rewake are called IN ORDER (revert before re-wake)', () => {
+  it('revertStuck and rewake are called IN ORDER (revert before re-wake), keyed by agentId', () => {
     const order: string[] = [];
     const orderedRouter: AgentRouterSeam = {
       revertStuck: (id) => {
@@ -425,7 +448,12 @@ describe('unstick — genuinely re-wakes a stuck agent within the bounded window
       pause: () => {},
       stop: () => {},
     };
+    const branch = 'co/agent-1';
+    const agentId = 'agent-1';
     const store = openStore('p-unstick-order');
+    store.recordWorktree(
+      rec({ branch, agent: agentId, path: worktreePathFor('p-unstick-order', branch) }),
+    );
     const gate = new CleanupGateImpl({
       store,
       repoCwd: '/repo',
@@ -434,20 +462,22 @@ describe('unstick — genuinely re-wakes a stuck agent within the bounded window
       router: orderedRouter,
     });
 
-    gate.unstick('co/agent-1');
+    gate.unstick(branch);
 
-    expect(order).toEqual(['revert:co/agent-1', 'rewake:co/agent-1']);
+    expect(order).toEqual([`revert:${agentId}`, `rewake:${agentId}`]);
   });
 
-  it('unstick does NOT require a recorded worktree (router side is independent)', () => {
-    // The router seam is always invoked; the branch need not have a worktree record
-    // (unstick operates on agent state, not just worktree records).
+  it('throws loud when no agent is recorded for the branch — refuses to pass a branch as agent id (Principle 9, MNR-3)', () => {
+    // P5 previously asserted unstick "does not require a recorded worktree (router side is
+    // independent)". That design CAUSED the MNR-3 regression — it is what allowed the branch to
+    // be passed as the agent key. unstick now REQUIRES a resolvable recorded agent.
     const { gate, router } = makeGate('p-unstick-no-record');
 
-    // Should not throw even with no recorded worktree.
-    expect(() => gate.unstick('co/any-agent')).not.toThrow();
-    expect(router.calls.revertStuck).toEqual(['co/any-agent']);
-    expect(router.calls.rewake).toEqual(['co/any-agent']);
+    // No worktree recorded for 'co/any-agent' → must throw (Principle 9, MNR-3).
+    expect(() => gate.unstick('co/any-agent')).toThrow(/MNR-3|no agent recorded/i);
+    // revertStuck and rewake must NOT have been called — no partial side effect.
+    expect(router.calls.revertStuck).toHaveLength(0);
+    expect(router.calls.rewake).toHaveLength(0);
   });
 });
 
