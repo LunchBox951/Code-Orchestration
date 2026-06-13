@@ -278,12 +278,24 @@ export class CleanupGateImpl implements CleanupGate {
   unstick(branch: string, opts?: { readonly repoCwd?: string }): UnstickReport {
     const repoCwd = opts?.repoCwd ?? this.deps.repoCwd;
 
+    // Resolve branch → agentId BEFORE any git side effect (Principle 9, MNR-3).
+    // The router seam is keyed by agentId, not branch — passing the branch would silently
+    // revert the WRONG key (MNR-3 regression). Fail loud if no agent is recorded.
+    const agentId = this.deps.store.getWorktree(branch)?.agent;
+    if (!agentId) {
+      throw new Error(
+        `CleanupGateImpl.unstick: no agent recorded for branch '${branch}' — cannot resolve ` +
+          `the agentId the router seam requires (MNR-3 — never pass a branch as an agent id); ` +
+          `Principle 9 — no silent no-op.`,
+      );
+    }
+
     // 1. Git side: repair/prune stale `.git/worktrees/…` admin metadata.
     this.deps.repair(repoCwd);
 
     // 2. Router side: revert STUCK flip + re-wake the agent (bounded window, MNR-3).
-    this.deps.router.revertStuck(branch);
-    this.deps.router.rewake(branch);
+    this.deps.router.revertStuck(agentId);
+    this.deps.router.rewake(agentId);
 
     return { branch, repaired: true, agentRewoken: true };
   }
