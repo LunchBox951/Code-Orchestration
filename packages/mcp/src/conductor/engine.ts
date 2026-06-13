@@ -43,6 +43,7 @@ import {
   type RosterStore,
   type SpawnSpec,
   type StartupOutcome,
+  type Steer,
   type TurnEndConfig,
   type TurnEndResult,
   CLARIFY_TIMEOUT_SECONDS_DEFAULT,
@@ -59,6 +60,7 @@ import {
   openRosterStore,
   parseOsc0Titles,
   roleParentResolver,
+  steerPane,
   waitingItems,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -561,6 +563,36 @@ export class ConductorEngine {
       this.getHosted(identity.projectId, identity.agent) ?? (await this.ensureHosted(identity));
     const turn = await this.runOneTurn(hosted, mail);
     return { hosted, mail, turn };
+  }
+
+  /**
+   * SF-2 — STEER a warm hosted pane MID-TURN, WITHOUT tearing it down (Principle 1 — the turn continues).
+   * Look up the agent's warm pane ({@link getHosted}) and apply the operator's {@link Steer} via
+   * {@link steerPane}: `answer`/`redirect` inject the operator text (echo-verified, exactly one Enter);
+   * `interrupt` sends the provider's interrupt key. This method NEVER releases / closes / kills / signals
+   * the pane — the hosted ledger keeps it, so the live session stays warm for the rest of the turn.
+   *
+   * Operator-initiated only: the engine registers ZERO agent MCP tools (Principle D4 — the Conductor is
+   * never agent-callable); this is a METHOD, not a tool. Throws fail-loud (Principle 9) if the agent is
+   * not hosted (there is no warm pane to steer — steering never spawns or relaunches). The provider is
+   * the pane's AUTHORITATIVE identity, and the same injected timing seam as a driven turn is forwarded,
+   * so the text-steer stays deterministic in-sandbox.
+   *
+   * The real mid-turn interrupt against a live binary (and the exact per-provider interrupt key) is
+   * host-side ([host-live], deferred); here it is proven in-sandbox over `FakePty`.
+   */
+  async steer(projectId: ProjectId, agent: string, steer: Steer): Promise<void> {
+    const hosted = this.getHosted(projectId, agent);
+    if (hosted == null) {
+      throw new Error(
+        `ConductorEngine.steer: agent '${agent}' is not hosted in project '${projectId}' — ` +
+          'cannot steer a pane that is not warm (Principle 1 — steering never spawns or relaunches).',
+      );
+    }
+    await steerPane(hosted.pane, steer, {
+      provider: hosted.identity.provider,
+      ...this.deps.injectOptions,
+    });
   }
 
   /**

@@ -749,3 +749,55 @@ describe('ConductorEngine — P1b runCycle reuses a warm pane (no relaunch)', ()
     expect(pty.panes).toHaveLength(1); // still exactly one pane after two cycles
   });
 });
+
+// ── SF-2: mid-turn steer over the warm hosted pane, NEVER tear down (Principle 1) ────────────────
+describe('ConductorEngine — SF-2 steer: route a mid-turn steer to the warm pane, keep it alive', () => {
+  const CR = String.fromCharCode(0x0d); // submit key — codepoint-authored so the source holds no raw CR
+
+  it('interrupt routes EXACTLY the provider key to the warm pane and leaves the session intact', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd }); // provider defaults to 'claude'
+    const { engine, pty } = makeEngine();
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    let exited = false;
+    pane.onExit(() => void (exited = true));
+    const before = pane.written.length;
+
+    await engine.steer(projectId, 'impl-x', { kind: 'interrupt' });
+
+    // exactly the interrupt key (claude ⇒ ESC) reached the warm pane — nothing else ...
+    expect(pane.written.slice(before)).toEqual([ESC]);
+    // ... and the pane is STILL warm: not exited, not signal-stopped, still in the hosted ledger.
+    expect(exited).toBe(false);
+    expect(pane.stopped).toBe(false);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true);
+    expect(engine.getHosted(projectId, 'impl-x')?.pane).toBe(hosted.pane); // same warm pane, never released
+  });
+
+  it('answer routes the operator text + exactly one submit into the warm pane (echo-verified)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    const steerP = engine.steer(projectId, 'impl-x', { kind: 'answer', text: 'use claude' });
+    await tick(); // injectMail has written the text and is awaiting the composer echo
+    pane.emit('use claude'); // the composer echoes the operator's answer → exactly one submit
+    await steerP;
+
+    expect(pane.written.join('')).toContain('use claude');
+    expect(pane.written.filter((w) => w === CR)).toHaveLength(1); // exactly one Enter
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // still warm — steering never releases
+  });
+
+  it('throws fail-loud when the agent is not hosted (no warm pane to steer)', async () => {
+    const { projectId } = makeProject();
+    const { engine } = makeEngine();
+    await expect(engine.steer(projectId, 'nope', { kind: 'interrupt' })).rejects.toThrow(
+      /not hosted/i,
+    );
+  });
+});
