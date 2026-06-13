@@ -13,6 +13,17 @@ export { upcast } from './replay/upcaster.js';
 export type { SchemaMap } from './replay/decode.js';
 export { decode } from './replay/decode.js';
 
+// AC-S9-3 holistic recovery: reconstruct every read-model from the event log alone.
+// No repo dependency — reads only program-data (CO_DATA_DIR). Byte-equal to live (AC-L0-2).
+export {
+  buildProjectProjectors,
+  buildGlobalProjectors,
+  buildProjectDecode,
+  buildGlobalDecode,
+  recoverProjectStore,
+  recoverGlobalStore,
+} from './replay/recovery.js';
+
 // Part C registry: absolute path → stable opaque project id → data dir, with
 // headless relink (lives in the GLOBAL store; built on the parts above).
 export type { ProjectRegistry, ProjectId } from './registry/registry.js';
