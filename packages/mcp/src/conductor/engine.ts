@@ -288,9 +288,12 @@ export class ConductorEngine {
   /** Per-pane onExit unsubscribers, keyed `${projectId}:${agent}` — torn down on release. */
   private readonly paneExitUnsub = new Map<string, () => void>();
   /**
-   * When each unresolved clarify was FIRST observed by a tick, keyed `${projectId}:${seq}` → `now()`.
-   * The clarify-timeout ages against this injected-time mark (never a wall clock), so the WHEN stays
-   * the Conductor's and replay-deterministic (P1b clarify-tick).
+   * When each unresolved clarify was FIRST observed by a tick, keyed
+   * `${projectId}:${agent}:${seq}` → `now()`. The clarify-timeout ages against this injected-time
+   * mark (never a wall clock), so the WHEN stays the Conductor's and replay-deterministic (P1b
+   * clarify-tick). After each tick, entries are pruned within each processed (project, agent) scope:
+   * a clarify answered before its timeout is removed on the next tick for that agent. Agents absent
+   * from `candidates` this tick are never touched — their clocks survive unharmed.
    */
   private readonly clarifyFirstSeen = new Map<string, number>();
 
@@ -630,8 +633,11 @@ export class ConductorEngine {
         try {
           const resolver = roleParentResolver(roster);
           for (const agent of agents) {
-            for (const unanswered of waitingItems(mail, agent)) {
-              const key = `${projectId}:${unanswered.seq}`; // unique per project + mail seq
+            const waiting = waitingItems(mail, agent);
+            const currentWaitingKeys = new Set<string>();
+            for (const unanswered of waiting) {
+              const key = `${projectId}:${agent}:${unanswered.seq}`;
+              currentWaitingKeys.add(key);
               const firstSeen = this.clarifyFirstSeen.get(key);
               if (firstSeen == null) {
                 this.clarifyFirstSeen.set(key, observedAt);
@@ -640,6 +646,16 @@ export class ConductorEngine {
               if (observedAt - firstSeen >= timeoutMs) {
                 forwarded.push(forwardOnTimeout(mail, resolver, unanswered));
                 this.clarifyFirstSeen.delete(key); // forwarded — stop tracking the discharged item.
+              }
+            }
+            // Prune stale entries for this (project, agent) scope — keys that were tracking a
+            // clarify that is no longer waiting (answered before its timeout). Only prune within
+            // the exact scope processed this tick; an absent-from-candidates agent's clock is
+            // never touched (it may still be waiting in a future tick).
+            const prefix = `${projectId}:${agent}:`;
+            for (const key of this.clarifyFirstSeen.keys()) {
+              if (key.startsWith(prefix) && !currentWaitingKeys.has(key)) {
+                this.clarifyFirstSeen.delete(key);
               }
             }
           }

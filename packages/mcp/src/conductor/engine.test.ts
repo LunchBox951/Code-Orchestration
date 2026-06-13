@@ -715,6 +715,67 @@ describe('ConductorEngine — P1b fires the clarify-timeout tick (forwardOnTimeo
     expect(await engine.tickClarifyTimeouts([asker])).toHaveLength(0);
     expect(store.inbox('coord-1')).toHaveLength(0);
   });
+
+  it('prunes clarifyFirstSeen when a clarify is answered before its timeout (no map leak)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const store = openMailStore(projectId);
+    mailStores.push(store);
+    // impl-x sends a clarify_request to lead-1; impl-x is the asker (waiting for a reply).
+    const clarify = store.send({
+      type: 'clarify_request',
+      to: 'lead-1',
+      from: 'impl-x',
+      subject: 'q',
+      body: 'b',
+    });
+    const asker = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, clock } = makeEngine({ clarifyTimeoutSeconds: () => 1800 });
+
+    // Tick #1: impl-x is in candidates; the entry is recorded in clarifyFirstSeen.
+    clock.set(0);
+    expect(await engine.tickClarifyTimeouts([asker])).toHaveLength(0);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((engine as any).clarifyFirstSeen.size).toBe(1);
+
+    // lead-1 ANSWERS the clarify before the timeout — impl-x is no longer waiting.
+    store.reply(clarify, { type: 'clarify_response', subject: 'answer', body: 'answered' });
+
+    // Tick #2 (still well before timeout): the answered clarify is gone from waitingItems for
+    // impl-x, so its clarifyFirstSeen entry must be pruned — no unbounded-growth leak.
+    clock.set(100);
+    expect(await engine.tickClarifyTimeouts([asker])).toHaveLength(0);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((engine as any).clarifyFirstSeen.size).toBe(0);
+  });
+
+  it('does NOT prune a still-unanswered clarify whose agent is absent from candidates this tick', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const store = openMailStore(projectId);
+    mailStores.push(store);
+    store.send({ type: 'clarify_request', to: 'lead-1', from: 'impl-x', subject: 'q', body: 'b' });
+    const asker = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, clock } = makeEngine({ clarifyTimeoutSeconds: () => 1800 });
+
+    // Tick #1 with impl-x in candidates: clock starts at t=0.
+    clock.set(0);
+    expect(await engine.tickClarifyTimeouts([asker])).toHaveLength(0);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((engine as any).clarifyFirstSeen.size).toBe(1);
+
+    // Tick #2 with impl-x ABSENT from candidates: its clock must survive unharmed.
+    clock.set(500);
+    expect(await engine.tickClarifyTimeouts([])).toHaveLength(0); // no candidates processed
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((engine as any).clarifyFirstSeen.size).toBe(1); // entry NOT pruned
+
+    // Tick #3 with impl-x in candidates again, past the timeout: forward fires using the
+    // preserved t=0 clock (not a fresh clock from t=500, which would not yet have timed out).
+    clock.set(1800 * 1000 + 1);
+    const forwarded = await engine.tickClarifyTimeouts([asker]);
+    expect(forwarded).toHaveLength(1); // forwarded using the preserved t=0 first-seen clock
+  });
 });
 
 // ── P1b: warm-pane reuse (getHosted branch — ensureHosted SKIPPED, no relaunch) ─────────────────

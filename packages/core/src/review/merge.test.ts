@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -2914,6 +2914,92 @@ describe('CoReviewGate.triggerReview — agent reviewer placement (AC-L5-11)', (
     // The stub (like CleanupGateStub / HumanReviewGateStub) always throws regardless of arguments —
     // it marks the L7 plug-point; L5 records the placement but never launches.
     expect(() => new ReviewerSpawnGateStub().spawn()).toThrow(/not implemented \(deferred to L7\)/);
+  });
+});
+
+// ── Nit 3 (P9 fix): fireSpawn is loud by default — never a silent discard ─────────────────────────
+describe('CoReviewGate.fireSpawn — spawn errors are surfaced, never silent (Principle 9)', () => {
+  /** Build a gate with a dispatch store, a healthy snapshot for a placed placement, and a spawn gate that rejects. */
+  function makeGateWithRejectingSpawn(
+    projectId: string,
+    onSpawnError?: (agentId: string, err: unknown) => void,
+  ): CoReviewGate {
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const dispatch = openDispatchStore(projectId);
+    // Seed a healthy provider snapshot so the dispatch policy returns 'placed' (not 'waiting').
+    dispatch.recordSnapshot({
+      provider: 'claude',
+      account: accountForProvider('claude'),
+      available: true,
+      source: 'test',
+      sampled_at: '1970-01-01T00:00:00.000Z',
+      windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+    });
+    // close via afterEach — open it but track via a local try/finally in the caller
+    mailStores.push({ close: () => dispatch.close() } as unknown as Parameters<
+      typeof mailStores.push
+    >[0]);
+    return new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      config: fakeConfig(),
+      dispatch,
+      nowMs: 0,
+      reviewerSpawnGate: { spawn: () => Promise.reject(new Error('spawn failed in test')) },
+      ...(onSpawnError != null ? { onSpawnError } : {}),
+    });
+  }
+
+  it('surfaces spawn failure to stderr by DEFAULT when onSpawnError is absent (Principle 9 — never silent)', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const gate = makeGateWithRejectingSpawn('p-spawn-loud-default');
+      gate.triggerReview({
+        reviewId: 'rev-spawn-default',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'worker_merge',
+        projectId: 'p-spawn-loud-default',
+      });
+      // Drain the microtask queue so the fire-and-forget rejection handler runs.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(spy).toHaveBeenCalledOnce();
+      expect(spy.mock.calls[0]![0]).toMatch(
+        /reviewer spawn for .* failed \(no onSpawnError injected\)/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('routes spawn failure to onSpawnError (not console.error) when the handler is injected', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const errors: Array<{ agentId: string; err: unknown }> = [];
+    try {
+      const gate = makeGateWithRejectingSpawn('p-spawn-handler', (agentId, err) => {
+        errors.push({ agentId, err });
+      });
+      gate.triggerReview({
+        reviewId: 'rev-spawn-handler',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'worker_merge',
+        projectId: 'p-spawn-handler',
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.agentId).toContain('reviewer');
+      expect((errors[0]!.err as Error).message).toBe('spawn failed in test');
+      expect(consoleSpy).not.toHaveBeenCalled(); // handler injected → no stderr fallback
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 });
 

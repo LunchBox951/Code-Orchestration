@@ -59,8 +59,10 @@ These are the top-level conditions that, all met, *are* v1.
   the sandbox-tested pty host (`PtyHost`/`FakePty`) + the Conductor engine that drives it (spawn →
   drive → bind → inject → route → classify liveness). Remaining: the host-side live proof against the
   real `claude`/`codex` binaries.
-- `SF-2` ☐ The operator can **steer any agent mid-turn** from its terminal pane (answer, redirect,
-  interrupt) without tearing it down (Principle 1).
+- `SF-2` ◐ The operator can **steer any agent mid-turn** from its terminal pane (answer, redirect,
+  interrupt) without tearing it down (Principle 1). L7-F lands the sandbox seam (`steerPane` +
+  `ConductorEngine.steer`) proven in-sandbox over `FakePty`. Remaining: the host-side live proof
+  (real mid-turn interrupt against the real binaries) is outstanding.
 - `SF-3` ◐ Agents coordinate **only** via the typed, persisted **mail bus**; the operator is a
   first-class participant and escalations/approvals **filter up** to their inbox (Principles 1, 8). L1 delivers the typed, schema-validated, persisted mail bus over the L0 event log, with `@operator` first-class. Remaining: 'ONLY via mail' (no other channel) is enforced once the MCP surface (L2) + Conductor (L7) wire it.
 - `SF-4` ◐ Actionable mail is **un-loseable** (sticky until acted on); informational mail is not
@@ -90,8 +92,9 @@ These are the top-level conditions that, all met, *are* v1.
   **paces** rather than degrading quality (Principle 13, `DISPATCH`, `COST-and-USAGE`). L4 ships
   provider/account usage buckets, passive live usage adapters, provider-neutral tier placement across
   the default Claude/Codex accounts, throttle-as-WAITING with reset ETA, CLI dry-run diagnostics, and
-  `co_sling` placement recording. Remaining: same-provider multi-subscription placement/output,
-  L7 live session hosting/re-wake, and full self-host proof under real worker load.
+  `co_sling` placement recording. L9 (RL4-MS) lands same-provider multi-subscription placement —
+  the balancer selects the roomiest healthy account among same-provider candidates.
+  Remaining: L7 live session hosting/re-wake, and full self-host proof under real worker load.
 
 ## D. Review gate & integration (P6, P7, P10)
 
@@ -138,7 +141,9 @@ These are the top-level conditions that, all met, *are* v1.
   with override; the review gate applies in all three (`WORKTREES`). L3 ships read-only
   auto-detection, `repo.mode` override, Offline push/PR-disabled capabilities, and minimal host
   convention probes. L6a applies the gated publish verbs across Owner, Contributor, and Offline
-  modes. Remaining: live hosted use of those verbs and upstream PR lifecycle beyond creation.
+  modes. L9 (WT4-HC) lands the rich host-convention parser (`parseHostConventions` —
+  CONTRIBUTING.md / PR-template parse with checklist, required trailers, and template-body
+  extraction). Remaining: live hosted use of those verbs and upstream PR lifecycle beyond creation.
 
 ## F. State, recovery & observability (P9, P14)
 

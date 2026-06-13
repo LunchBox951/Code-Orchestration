@@ -124,10 +124,10 @@ export interface ReviewGateDeps {
    */
   readonly reviewerSpawnGate?: ReviewerSpawnGate;
   /**
-   * Called when a fire-and-forget {@link ReviewerSpawnGate.spawn} rejects. Surfaces the error in
-   * observability (e.g. structured logging, telemetry) without blocking `triggerReview`. When absent,
-   * unhandled rejections are still caught and discarded silently — inject this in production to avoid
-   * silent spawn failures disappearing.
+   * Called when a fire-and-forget {@link ReviewerSpawnGate.spawn} rejects. When absent a **loud
+   * default** surfaces the rejection to stderr (Principle 9 — no silent discard). **Hosts SHOULD
+   * inject a structured handler in production** to route spawn failures into telemetry/alerting
+   * rather than relying on the stderr fallback.
    */
   readonly onSpawnError?: (agentId: string, err: unknown) => void;
 }
@@ -916,7 +916,16 @@ export class CoReviewGate implements FinishReviewGate {
 
   private fireSpawn(agentId: string, projectId: string, record: PlacementRecord): void {
     void this.deps.reviewerSpawnGate!.spawn(projectId, record).catch((err: unknown) => {
-      this.deps.onSpawnError?.(agentId, err);
+      if (this.deps.onSpawnError != null) {
+        this.deps.onSpawnError(agentId, err);
+      } else {
+        // Loud by default (Principle 9): a spawn failure is never silently discarded.
+        // Hosts SHOULD inject onSpawnError for structured observability in production.
+        console.error(
+          `co: reviewer spawn for '${agentId}' failed (no onSpawnError injected):`,
+          err,
+        );
+      }
     });
   }
 
