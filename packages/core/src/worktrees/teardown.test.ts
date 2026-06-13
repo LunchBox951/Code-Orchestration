@@ -603,6 +603,8 @@ describe('CleanupGateStub — the L8 operator cleanup verbs fail loud (Principle
     const gate: CleanupGate = new CleanupGateStub();
     expect(() => gate.cleanup('co/x')).toThrow(/cleanup.*not implemented at L3.*L8 plug-point/s);
     expect(() => gate.unstick('co/x')).toThrow(/unstick.*not implemented at L3.*L8 plug-point/s);
-    expect(() => gate.nuke('co/x')).toThrow(/nuke.*not implemented at L3.*L8 plug-point/s);
+    expect(() => gate.nuke('co/x', { confirm: true })).toThrow(
+      /nuke.*not implemented at L3.*L8 plug-point/s,
+    );
   });
 });

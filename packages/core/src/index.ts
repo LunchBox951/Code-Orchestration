@@ -252,8 +252,20 @@ export {
   defaultWorktreeRealityProbe,
   defaultSandboxFs,
 } from './worktrees/worktree-store.js';
-export type { CleanupGate } from './worktrees/cleanup-gate.js';
-export { CleanupGateStub } from './worktrees/cleanup-gate.js';
+// L8 operator cleanup/recovery verbs (AC-S9-5): CleanupGateImpl fills the named loud-fail stub.
+// Operator-only — none of these are ToolSpecs; the completeness gate stays green by construction.
+export type {
+  CleanupGate,
+  CleanupDryRun,
+  CleanupExecuted,
+  CleanupReport,
+  UnstickReport,
+  MergeProbeSeam,
+  WorktreeRepairSeam,
+  AgentRouterSeam,
+  CleanupGateDeps,
+} from './worktrees/cleanup-gate.js';
+export { CleanupGateStub, CleanupGateImpl } from './worktrees/cleanup-gate.js';
 // L3-C message contract (AC-L3-3): pure, provider-deterministic renderers — commit / merge / PR text
 // from a structured intent in a fixed house style, with NO provider/voice parameter (Principle 3).
 // Only the commit renderer has a consumer in L3 (`co_finish`); the merge/PR renderers ship as core
