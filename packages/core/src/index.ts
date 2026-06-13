@@ -1162,6 +1162,12 @@ export { injectMail } from './pty/mail-injector.js';
 export type { DialogName, DialogMatch, WatchDialogsOptions } from './pty/dialog-watcher.js';
 export { classifyDialog, watchDialogs } from './pty/dialog-watcher.js';
 
+// SF-2 (Stage 9 tail L7-F) — mid-turn STEER protocol (PURE over a Pane): the operator steers a live
+// agent (answer / redirect / interrupt) WITHOUT tearing it down (Principle 1 — the turn continues).
+// Reuses injectMail for the text steers; `interrupt` sends the provider's interrupt key. Sandbox-tested.
+export type { Steer, SteerOptions } from './pty/steer.js';
+export { steerPane } from './pty/steer.js';
+
 // L7 C2 — turn-end detector (PURE): emits an IDLE / turn-boundary signal ONLY. turn-end ≠ work-end —
 // it corroborates completion (which stays keyed to co_finish/worker_done) but NEVER emits it.
 export type {
