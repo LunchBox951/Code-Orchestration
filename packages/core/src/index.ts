@@ -1209,5 +1209,20 @@ export type {
 } from './pty/reconcile.js';
 export { ReconcileLoop } from './pty/reconcile.js';
 
+// Stage 9 P6 (L8-B + L8-OBS) — `co doctor` structural health suite + observability rollup.
+// Operator-only: NOT agent MCP tools; completeness gate stays green by construction.
+// The P7 CLI exposes these to the operator. ([host-live] D5: the real provider probe seam.)
+export type {
+  DoctorStatus,
+  DoctorCheck,
+  DoctorReport,
+  ProviderProbeResult,
+  ProviderProbeSeam,
+  DoctorDeps,
+} from './doctor/doctor.js';
+export { REQUIRED_CAPABILITIES, runDoctor } from './doctor/doctor.js';
+export type { ReviewSummary, ObservabilitySnapshot } from './doctor/observability.js';
+export { queryObservability } from './doctor/observability.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
