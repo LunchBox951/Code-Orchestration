@@ -18,7 +18,7 @@ import type { HostedIdentity } from '../live-session-host.js';
 export interface CoMcpPaths {
   /** Path to the co MCP JSON config forwarded to Claude --mcp-config. */
   readonly coMcpConfig?: string;
-  /** Codex MCP server command (must be an absolute path — validated by buildPaneLaunchConfig). */
+  /** Co MCP server command (must be an absolute path — validated by buildPaneLaunchConfig). */
   readonly coMcpCommand: string;
   /** Codex MCP server args. */
   readonly coMcpArgs?: readonly string[];

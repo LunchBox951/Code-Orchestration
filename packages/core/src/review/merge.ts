@@ -145,16 +145,16 @@ export interface MergeTeardown {
 
 /**
  * The L7 reviewer-SPAWN seam (AC-L5-11). The gate RESOLVES + RECORDS a reviewer placement
- * (`placement.decided`) over injected inputs (pure decision), but LAUNCHING the placed reviewer’s live
+ * (`placement.decided`) over injected inputs (pure decision), but LAUNCHING the placed reviewer's live
  * turn is L7. This is a TYPED boundary — mirroring
- * {@link import(‘./human-review.js’).HumanReviewGateStub} /
- * {@link import(‘../worktrees/cleanup-gate.js’).CleanupGateStub}: the stub fails loud (Principle 9)
+ * {@link import('./human-review.js').HumanReviewGateStub} /
+ * {@link import('../worktrees/cleanup-gate.js').CleanupGateStub}: the stub fails loud (Principle 9)
  * rather than being a silent no-op. The real engine-backed gate lives in `packages/mcp` (P2,
  * AC-S9-2): it takes the recorded PlacementRecord and calls engine.ensureHosted.
  */
 export interface ReviewerSpawnGate {
   /**
-   * Launch the placed reviewer’s live turn. Takes the project id and the stored PlacementRecord for
+   * Launch the placed reviewer's live turn. Takes the project id and the stored PlacementRecord for
    * the reviewer seat. The real gate (P2) resolves the worktree → builds identity + spec →
    * engine.ensureHosted. The stub (default for headless paths) fails loud.
    */
