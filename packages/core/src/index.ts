@@ -297,8 +297,8 @@ export type {
 // Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe (PR-template
 // presence + a sign-off signal). As of L5 Phase C, the owner/offline merge enactment, the remote
 // PUSH enactment (`co_push`), and the PR creation enactment (`co_pr_merge`) are all REAL. The
-// Contributor fork→PR host-convention probe uses the minimal Phase C `detectHostConventions`; the rich
-// CONTRIBUTING/PR-template parse remains L9 — `parseHostConventions` stays the loud-failing seam (P7, P9).
+// Contributor fork→PR host-convention probe: minimal Phase C `detectHostConventions` (presence +
+// sign-off indicator); rich CONTRIBUTING/PR-template parse via `parseHostConventions` (WT4-HC, L9).
 export type {
   RepoMode,
   RemoteSignals,
@@ -306,6 +306,7 @@ export type {
   ResolveRepoModeDeps,
   RepoModeCapabilities,
   HostConventions,
+  ParsedHostConventions,
   RepoModeGate,
   PublishRequest,
   PublishResult,
@@ -326,6 +327,7 @@ export {
   resolveRepoMode,
   repoModeCapabilities,
   detectHostConventions,
+  parseHostConventions,
   CoRepoModeGate,
 } from './worktrees/repo-mode.js';
 export type { GitReader } from './worktrees/detect-base.js';

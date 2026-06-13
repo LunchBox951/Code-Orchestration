@@ -44,8 +44,7 @@ export const defaultGhExec: GhExec = (cwd, args) => {
  * capability, the minimal Contributor host-convention probe) AND — as of L5 — the **owner + offline
  * merge enactment** the gated `co_merge` uses ({@link CoRepoModeGate.enactPublish}), plus the real
  * remote push / PR creation enactment the gated `co_push` and `co_pr_merge` use. The rich
- * `CONTRIBUTING.md`/PR-template parse ({@link CoRepoModeGate.parseHostConventions}) remains L9 and
- * fails loud rather than no-opping (Principle 7 — gated-by-default; Principle 9 — no silent stub).
+ * `CONTRIBUTING.md`/PR-template parse ({@link parseHostConventions}) is implemented as of WT4-HC (L9).
  *
  * Pristine (Principle 12): detection and host-convention reads are READ-ONLY over the repo (the
  * prober wraps read-only `git ls-remote` + `gh`, reusing the `--no-optional-locks` discipline; the
@@ -328,15 +327,28 @@ export function repoModeCapabilities(mode: RepoMode): RepoModeCapabilities {
  *                           `CONTRIBUTING.md`), NOT a rich parse.
  *
  * The **rich `CONTRIBUTING.md` / PR-template parse** (extracting the actual template body, checklist
- * items, required trailers, etc.) is explicitly DEFERRED to L9 — see
- * {@link CoRepoModeGate.parseHostConventions}. This probe READS repo files and writes nothing
- * (Principle 12 — pristine holds).
+ * items, required trailers, etc.) is implemented in {@link parseHostConventions} (WT4-HC, L9). This
+ * probe READS repo files and writes nothing (Principle 12 — pristine holds).
  */
 export interface HostConventions {
   /** Does the repo ship a pull-request template? (presence only — not its contents.) */
   readonly hasPrTemplate: boolean;
   /** Does the repo signal a sign-off / DCO requirement? (minimal indicator — not a rich parse.) */
   readonly requiresSignOff: boolean;
+}
+
+/**
+ * The RICH host-convention parse result (WT4-HC, L9) — the full structured extraction a
+ * Contributor-mode PR must yield to: the raw PR-template body, its unchecked checklist items, and
+ * the trailer names the repo requires every merged commit to carry. See {@link parseHostConventions}.
+ */
+export interface ParsedHostConventions {
+  /** The raw PR-template body text, or empty string if no template file is present. */
+  readonly templateBody: string;
+  /** The `- [ ] …` checklist items from the PR template, in document order. */
+  readonly checklist: readonly string[];
+  /** Trailer names every PR commit must carry (e.g. `'Signed-off-by'` for DCO-mandating repos). */
+  readonly requiredTrailers: readonly string[];
 }
 
 /** Common PR-template locations across hosts (GitHub + GitLab), in the order GitHub itself resolves. */
@@ -387,6 +399,66 @@ function defaultReadFileOrNull(path: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The RICH host-convention parse (WT4-HC, L9). Read-only over the repo — mirrors
+ * {@link detectHostConventions}'s read-only, injected-`readFile` style. Reads the first present
+ * PR-template path and the first present `CONTRIBUTING.md` path, then extracts:
+ *
+ *   - `templateBody`      — the raw PR-template text (empty string if no template is found).
+ *   - `checklist`         — the `- [ ] …` lines from the template, in document order.
+ *   - `requiredTrailers`  — trailer names the repo mandates: `Signed-off-by` when a DCO/sign-off
+ *                           requirement is detected, plus any hyphenated `Word-Word: value` trailer
+ *                           lines found verbatim in `CONTRIBUTING.md` (e.g. co-authorship trailers
+ *                           shown in example commits).
+ *
+ * Absent files degrade gracefully to empty fields — a repo with no template has no conventions to
+ * yield to, and that is a valid state (not an error). Writes nothing (Principle 12). `readFile` is
+ * injectable for headless tests (the same seam {@link detectHostConventions} uses).
+ */
+export function parseHostConventions(
+  cwd: string,
+  readFile: (path: string) => string | null = defaultReadFileOrNull,
+): ParsedHostConventions {
+  // Read the first present PR-template.
+  let templateBody = '';
+  for (const rel of PR_TEMPLATE_PATHS) {
+    const text = readFile(join(cwd, rel));
+    if (text != null) {
+      templateBody = text;
+      break;
+    }
+  }
+
+  // Extract `- [ ] …` checklist items from the template body, in document order.
+  const checklist: readonly string[] = templateBody.match(/^- \[ \] .+/gm) ?? [];
+
+  // Read the first present CONTRIBUTING.
+  let contributingText: string | null = null;
+  for (const rel of CONTRIBUTING_PATHS) {
+    const text = readFile(join(cwd, rel));
+    if (text != null) {
+      contributingText = text;
+      break;
+    }
+  }
+
+  // Extract required trailers from CONTRIBUTING.
+  const trailerSet = new Set<string>();
+  if (contributingText != null) {
+    // Primary: DCO/sign-off indicator → Signed-off-by.
+    if (SIGN_OFF_INDICATOR.test(contributingText)) {
+      trailerSet.add('Signed-off-by');
+    }
+    // Secondary: explicit hyphenated trailer-format lines (e.g. `Co-authored-by: Name <email>` in
+    // an example commit block indicate additional required trailers).
+    for (const m of contributingText.matchAll(/^([A-Z][a-zA-Z]*(?:-[A-Za-z]+)+):\s+\S/gm)) {
+      trailerSet.add(m[1]!);
+    }
+  }
+
+  return { templateBody, checklist, requiredTrailers: [...trailerSet] };
 }
 
 /**
@@ -508,8 +580,8 @@ export interface EnactPrMergeDeps {
  *     `git push origin <branch>` (push the feature branch to fork); offline: refuse (Principle 9).
  *   - {@link enactPrMerge} — owner + contributor: `gh pr create` with the pre-rendered description;
  *     offline: refuse. Contributor additionally probes host conventions via {@link detectHostConventions}
- *     (the minimal Phase C probe; the rich parse is L9 — {@link parseHostConventions} stays loud-failing).
- *   - {@link parseHostConventions} — the rich `CONTRIBUTING.md`/PR-template parse remains **L9**.
+ *     (the minimal Phase C probe; the full rich parse is {@link parseHostConventions}, WT4-HC/L9).
+ *   - {@link parseHostConventions} — the rich `CONTRIBUTING.md`/PR-template parse (WT4-HC, L9).
  *
  * The only repo writes are: a merge commit (enactPublish), a git push (enactPush), and a gh PR
  * (enactPrMerge). Orchestration state lands in program-data (Principle 12).
@@ -538,16 +610,19 @@ export interface RepoModeGate {
   ): EnactPrMergeResult;
   /**
    * The RICH host-convention parse a Contributor PR yields to — extract the actual PR-template body,
-   * required checklist items, and trailers from `CONTRIBUTING.md` / the PR template. Returns `never`:
-   * the rich parse is L9 (this layer ships only the minimal presence/sign-off probe above).
+   * required checklist items, and required trailers from `CONTRIBUTING.md` / the PR template (WT4-HC,
+   * L9). Read-only; injectable `readFile` seam for headless tests. See {@link parseHostConventions}.
    */
-  parseHostConventions(cwd: string): never;
+  parseHostConventions(
+    cwd: string,
+    readFile?: (path: string) => string | null,
+  ): ParsedHostConventions;
 }
 
 /**
  * The production {@link RepoModeGate}. As of Phase C, `enactPublish` (local merge), `enactPush`
- * (remote push), and `enactPrMerge` (PR creation) are all REAL; `parseHostConventions` stays the
- * loud-failing L9 seam (never a silent no-op — Principle 9).
+ * (remote push), and `enactPrMerge` (PR creation) are all REAL; `parseHostConventions` is the rich
+ * CONTRIBUTING.md/PR-template parse implemented in WT4-HC (L9).
  */
 export class CoRepoModeGate implements RepoModeGate {
   enactPublish(req: PublishRequest, mode: RepoMode, deps: EnactPublishDeps = {}): PublishResult {
@@ -629,7 +704,7 @@ export class CoRepoModeGate implements RepoModeGate {
       }
       case 'contributor': {
         // Detect minimal host conventions (PR-template presence + sign-off indicator). The rich
-        // CONTRIBUTING.md / PR-template parse is deferred to L9 (parseHostConventions stays loud-failing).
+        // CONTRIBUTING.md / PR-template parse is available via parseHostConventions (WT4-HC, L9).
         // Phase C: we probe and note conventions; the agent has already surfaced them in PrIntent.conventions.
         void detectHostConventions(req.repoCwd, deps.readFile);
         const prUrl = ghExec(req.repoCwd, [
@@ -657,12 +732,10 @@ export class CoRepoModeGate implements RepoModeGate {
     }
   }
 
-  parseHostConventions(): never {
-    throw new Error(
-      'RepoModeGate.parseHostConventions: the rich CONTRIBUTING.md / PR-template parse is not ' +
-        'implemented (deferred to L9): extract the template body, checklist, and required trailers a ' +
-        'Contributor PR must yield to. This module detects PR-template presence + a minimal sign-off ' +
-        'signal only (detectHostConventions).',
-    );
+  parseHostConventions(
+    cwd: string,
+    readFile?: (path: string) => string | null,
+  ): ParsedHostConventions {
+    return parseHostConventions(cwd, readFile);
   }
 }
