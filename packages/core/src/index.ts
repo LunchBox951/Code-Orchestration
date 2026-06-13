@@ -1186,5 +1186,16 @@ export {
   SILENT_STOP_TRIGGER,
 } from './pty/liveness-watchdog.js';
 
+// Stage 9 P4 (L8-WDOG) — silent-stop watchdog-reconcile loop (PURE + seam-injected). See reconcile.ts.
+export type {
+  RunningAgent,
+  LivenessProbe,
+  ReconcileSeams,
+  ReconcileAssessment,
+  ReconcileError,
+  ReconcileTickResult,
+} from './pty/reconcile.js';
+export { ReconcileLoop } from './pty/reconcile.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
