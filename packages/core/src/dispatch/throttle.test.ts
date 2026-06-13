@@ -312,7 +312,7 @@ describe('resolveDispatch — floating', () => {
     expect(result.kind).toBe('waiting');
   });
 
-  it('fails loud when floating resolution sees multiple same-provider accounts', () => {
+  it('floating: same-provider accounts — places on the below-threshold account when chosen is maxed (RL4-MS)', () => {
     const decision = floatingDecisionWithAccounts(
       [
         { provider: 'claude', account: 'claude:max', usedPct: 99, resetAt: RESET_SOON },
@@ -320,10 +320,10 @@ describe('resolveDispatch — floating', () => {
       ],
       'claude:max',
     );
-
-    expect(() => resolveDispatch(decision, [], { nowMs: NOW })).toThrow(
-      /same-provider multi-subscription routing/i,
-    );
+    const result = resolveDispatch(decision, [], { nowMs: NOW });
+    expect(result.kind).toBe('placed');
+    if (result.kind !== 'placed') throw new Error('expected placed');
+    expect(result.placement.account).toBe('claude:team');
   });
 
   it('does not drop unavailable diagnostics for another provider account', () => {
@@ -408,19 +408,21 @@ describe('resolveDispatch — pinned', () => {
     expect(result.kind).toBe('placed');
   });
 
-  it('fails loud when pinned resolution sees multiple same-provider accounts', () => {
-    const decision = pinnedDecision('claude');
-
-    expect(() =>
-      resolveDispatch(
-        decision,
-        [
-          maxed('claude', 99, RESET_SOON, 'claude:max'),
-          healthy('claude', 50, RESET_LATER, 'claude:team'),
-        ],
-        { nowMs: NOW },
-      ),
-    ).toThrow(/same-provider multi-subscription routing/i);
+  it('pinned: same-provider accounts — waits on the pinned account if maxed, never re-routes (RL4-MS)', () => {
+    // Balancer picked claude:max for the pinned seat; claude:max is maxed; throttle must WAIT.
+    const decision = pinnedDecision('claude'); // account = 'claude:max'
+    const result = resolveDispatch(
+      decision,
+      [
+        maxed('claude', 99, RESET_SOON, 'claude:max'),
+        healthy('claude', 50, RESET_LATER, 'claude:team'),
+      ],
+      { nowMs: NOW },
+    );
+    expect(result.kind).toBe('waiting');
+    if (result.kind !== 'waiting') throw new Error('expected waiting');
+    expect(result.maxedProviders).toEqual(['claude']);
+    expect(result.etaResetAt).toBe(RESET_SOON);
   });
 });
 
@@ -481,7 +483,7 @@ describe('resolveDispatch — no-candidate', () => {
     expect(result.unavailableProviders).toEqual(['claude', 'codex']);
   });
 
-  it('fails loud when no-candidate resolution sees multiple same-provider accounts', () => {
+  it('no-candidate: same-provider excluded accounts — resolves to waiting with both listed (RL4-MS)', () => {
     const decision: PlacementDecision = {
       kind: 'no-candidate',
       reason: 'all provider accounts excluded',
@@ -490,10 +492,10 @@ describe('resolveDispatch — no-candidate', () => {
         { provider: 'claude', account: 'claude:team', why: 'unavailable' },
       ],
     };
-
-    expect(() => resolveDispatch(decision, [], { nowMs: NOW })).toThrow(
-      /same-provider multi-subscription routing/i,
-    );
+    const result = resolveDispatch(decision, [], { nowMs: NOW });
+    expect(result.kind).toBe('waiting');
+    if (result.kind !== 'waiting') throw new Error('expected waiting');
+    expect(result.unavailableAccounts).toEqual(['claude:max', 'claude:team']);
   });
 });
 
@@ -553,25 +555,23 @@ describe('canResume', () => {
     ).toBe(true);
   });
 
-  it('fails loud when resume filters describe multiple same-provider accounts', () => {
-    expect(() =>
+  it('canResume: provider+accounts filter selects only matching (provider, account) pairs (RL4-MS)', () => {
+    // Only claude:max is offered; it is maxed — filter to it → false.
+    expect(
       canResume([maxed('claude', 99, RESET_SOON, 'claude:max')], {
         nowMs: NOW,
         providers: ['claude'],
         accounts: ['claude:max', 'claude:team'],
       }),
-    ).toThrow(/same-provider multi-subscription routing/i);
+    ).toBe(false);
   });
 
-  it('fails loud when resume sees multiple same-provider accounts', () => {
+  it('canResume: same-provider multiple accounts — true when at least one is healthy (RL4-MS)', () => {
     const candidates = [
       maxed('claude', 99, RESET_SOON, 'claude:max'),
       healthy('claude', 50, RESET_LATER, 'claude:team'),
     ];
-
-    expect(() => canResume(candidates, { nowMs: NOW })).toThrow(
-      /same-provider multi-subscription routing/i,
-    );
+    expect(canResume(candidates, { nowMs: NOW })).toBe(true);
   });
 
   it('true when candidate is just below threshold (boundary)', () => {

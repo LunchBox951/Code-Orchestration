@@ -442,18 +442,11 @@ function validateNoArgs(command: string, argv: string[]): void {
 function parseAccounts(argv: string[]): readonly ProviderAccount[] | undefined {
   const raw = requiredArg(argv, '--account');
   if (raw === undefined) return undefined;
-  const seenProviders = new Set<string>();
   return raw.split(',').map((pair) => {
     const colon = pair.indexOf(':');
     if (colon < 1)
       throw new Error(`Invalid --account format '${pair}'. Expected 'provider:account'.`);
     const provider = providerSchema.parse(pair.slice(0, colon));
-    if (seenProviders.has(provider)) {
-      throw new Error(
-        `Duplicate provider '${provider}' in --account; same-provider multi-subscription routing is not yet supported.`,
-      );
-    }
-    seenProviders.add(provider);
     const suffix = pair.slice(colon + 1);
     if (suffix.length === 0) {
       throw new Error(`Invalid --account format '${pair}'. Account must be non-empty.`);
