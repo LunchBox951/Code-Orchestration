@@ -12,6 +12,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   openSessionStore,
   toolsForRole,
+  type DeliveryFactory,
   type ProjectId,
   type ResumeHandle,
   type Role,
@@ -59,6 +60,16 @@ export interface HostedSession {
   close(): Promise<void>;
 }
 
+/** Optional per-session wiring the Conductor supplies when hosting a pane. */
+export interface HostSessionOptions {
+  /**
+   * The L7 routing seam: a {@link DeliveryFactory} threaded into this pane's mail bus so its emitted
+   * mail delivers through a `LiveDelivery` whose wake/inject callbacks the Conductor binds to live
+   * panes. Absent ⇒ the in-process default writer (persist-only; the C1 identity surface is unchanged).
+   */
+  readonly deliveryFactory?: DeliveryFactory;
+}
+
 /**
  * The live MCP session host. Serves the co MCP surface to one pane/session at a time, stamping
  * the Conductor's authoritative agent identity into every ToolContext — server-side, never
@@ -78,9 +89,14 @@ export interface LiveSessionHost {
    *
    * @param identity  The Conductor's authoritative session identity (from the session record).
    * @param transport The server-side transport to connect the MCP server to.
+   * @param opts      Optional per-session wiring (e.g. the L7 routing delivery seam).
    * @returns A handle to close per-session resources when the pane ends.
    */
-  hostSession(identity: HostedIdentity, transport: Transport): Promise<HostedSession>;
+  hostSession(
+    identity: HostedIdentity,
+    transport: Transport,
+    opts?: HostSessionOptions,
+  ): Promise<HostedSession>;
 }
 
 type SessionStoreOpener = (projectId: ProjectId) => SessionStore;
@@ -96,7 +112,11 @@ export class LiveSessionHostImpl implements LiveSessionHost {
 
   constructor(private readonly openSessions: SessionStoreOpener = openSessionStore) {}
 
-  async hostSession(identity: HostedIdentity, transport: Transport): Promise<HostedSession> {
+  async hostSession(
+    identity: HostedIdentity,
+    transport: Transport,
+    opts?: HostSessionOptions,
+  ): Promise<HostedSession> {
     const agent = identity.agent?.trim();
     if (agent == null || agent.length === 0) {
       throw new Error(
@@ -152,11 +172,14 @@ export class LiveSessionHostImpl implements LiveSessionHost {
         resume: identity.resume,
       });
       sessionClaimed = true;
-      opened = openContextStores({
-        agent,
-        projectId: identity.projectId,
-        cwd: identity.cwd,
-      });
+      opened = openContextStores(
+        {
+          agent,
+          projectId: identity.projectId,
+          cwd: identity.cwd,
+        },
+        opts?.deliveryFactory != null ? { deliveryFactory: opts.deliveryFactory } : undefined,
+      );
       opened.ctx.roster!.recordAgent({
         agentId: agent,
         role: identity.role,

@@ -13,6 +13,17 @@ export { upcast } from './replay/upcaster.js';
 export type { SchemaMap } from './replay/decode.js';
 export { decode } from './replay/decode.js';
 
+// AC-S9-3 holistic recovery: reconstruct every read-model from the event log alone.
+// No repo dependency — reads only program-data (CO_DATA_DIR). Byte-equal to live (AC-L0-2).
+export {
+  buildProjectProjectors,
+  buildGlobalProjectors,
+  buildProjectDecode,
+  buildGlobalDecode,
+  recoverProjectStore,
+  recoverGlobalStore,
+} from './replay/recovery.js';
+
 // Part C registry: absolute path → stable opaque project id → data dir, with
 // headless relink (lives in the GLOBAL store; built on the parts above).
 export type { ProjectRegistry, ProjectId } from './registry/registry.js';
@@ -108,7 +119,12 @@ export type {
 // `LiveDeliveryStub`): it DELEGATES persistence to a composed `InProcessDelivery`, then wakes the
 // recipient + injects unread actionable mail into its live pty via injected seams.
 export { InProcessDelivery, LiveDelivery } from './mail/delivery.js';
-export type { MailStore, MailStoreOptions, ReplyDraft } from './mail/mail-store.js';
+export type {
+  MailStore,
+  MailStoreOptions,
+  DeliveryFactory,
+  ReplyDraft,
+} from './mail/mail-store.js';
 export { openMailStore } from './mail/mail-store.js';
 // L1 W4 outward-action approval gate + operator-terminal addressing (AC-L1-5).
 export type { ApprovalOutcome, OutwardApprovalRequest } from './mail/approval.js';
@@ -236,8 +252,20 @@ export {
   defaultWorktreeRealityProbe,
   defaultSandboxFs,
 } from './worktrees/worktree-store.js';
-export type { CleanupGate } from './worktrees/cleanup-gate.js';
-export { CleanupGateStub } from './worktrees/cleanup-gate.js';
+// L8 operator cleanup/recovery verbs (AC-S9-5): CleanupGateImpl fills the named loud-fail stub.
+// Operator-only — none of these are ToolSpecs; the completeness gate stays green by construction.
+export type {
+  CleanupGate,
+  CleanupDryRun,
+  CleanupExecuted,
+  CleanupReport,
+  UnstickReport,
+  MergeProbeSeam,
+  WorktreeRepairSeam,
+  AgentRouterSeam,
+  CleanupGateDeps,
+} from './worktrees/cleanup-gate.js';
+export { CleanupGateStub, CleanupGateImpl } from './worktrees/cleanup-gate.js';
 // L3-C message contract (AC-L3-3): pure, provider-deterministic renderers — commit / merge / PR text
 // from a structured intent in a fixed house style, with NO provider/voice parameter (Principle 3).
 // Only the commit renderer has a consumer in L3 (`co_finish`); the merge/PR renderers ship as core
@@ -269,8 +297,8 @@ export type {
 // Offline "push/PR disabled" capability, and a minimal Contributor host-convention probe (PR-template
 // presence + a sign-off signal). As of L5 Phase C, the owner/offline merge enactment, the remote
 // PUSH enactment (`co_push`), and the PR creation enactment (`co_pr_merge`) are all REAL. The
-// Contributor fork→PR host-convention probe uses the minimal Phase C `detectHostConventions`; the rich
-// CONTRIBUTING/PR-template parse remains L9 — `parseHostConventions` stays the loud-failing seam (P7, P9).
+// Contributor fork→PR host-convention probe: minimal Phase C `detectHostConventions` (presence +
+// sign-off indicator); rich CONTRIBUTING/PR-template parse via `parseHostConventions` (WT4-HC, L9).
 export type {
   RepoMode,
   RemoteSignals,
@@ -278,6 +306,7 @@ export type {
   ResolveRepoModeDeps,
   RepoModeCapabilities,
   HostConventions,
+  ParsedHostConventions,
   RepoModeGate,
   PublishRequest,
   PublishResult,
@@ -298,6 +327,7 @@ export {
   resolveRepoMode,
   repoModeCapabilities,
   detectHostConventions,
+  parseHostConventions,
   CoRepoModeGate,
 } from './worktrees/repo-mode.js';
 export type { GitReader } from './worktrees/detect-base.js';
@@ -1132,6 +1162,12 @@ export { injectMail } from './pty/mail-injector.js';
 export type { DialogName, DialogMatch, WatchDialogsOptions } from './pty/dialog-watcher.js';
 export { classifyDialog, watchDialogs } from './pty/dialog-watcher.js';
 
+// SF-2 (Stage 9 tail L7-F) — mid-turn STEER protocol (PURE over a Pane): the operator steers a live
+// agent (answer / redirect / interrupt) WITHOUT tearing it down (Principle 1 — the turn continues).
+// Reuses injectMail for the text steers; `interrupt` sends the provider's interrupt key. Sandbox-tested.
+export type { Steer, SteerOptions } from './pty/steer.js';
+export { steerPane } from './pty/steer.js';
+
 // L7 C2 — turn-end detector (PURE): emits an IDLE / turn-boundary signal ONLY. turn-end ≠ work-end —
 // it corroborates completion (which stays keyed to co_finish/worker_done) but NEVER emits it.
 export type {
@@ -1169,6 +1205,32 @@ export {
   WEDGE_MS,
   SILENT_STOP_TRIGGER,
 } from './pty/liveness-watchdog.js';
+
+// Stage 9 P4 (L8-WDOG) — silent-stop watchdog-reconcile loop (PURE + seam-injected). See reconcile.ts.
+export type {
+  RunningAgent,
+  LivenessProbe,
+  ReconcileSeams,
+  ReconcileAssessment,
+  ReconcileError,
+  ReconcileTickResult,
+} from './pty/reconcile.js';
+export { ReconcileLoop } from './pty/reconcile.js';
+
+// Stage 9 P6 (L8-B + L8-OBS) — `co doctor` structural health suite + observability rollup.
+// Operator-only: NOT agent MCP tools; completeness gate stays green by construction.
+// The P7 CLI exposes these to the operator. ([host-live] D5: the real provider probe seam.)
+export type {
+  DoctorStatus,
+  DoctorCheck,
+  DoctorReport,
+  ProviderProbeResult,
+  ProviderProbeSeam,
+  DoctorDeps,
+} from './doctor/doctor.js';
+export { REQUIRED_CAPABILITIES, runDoctor } from './doctor/doctor.js';
+export type { ReviewSummary, ObservabilitySnapshot } from './doctor/observability.js';
+export { queryObservability } from './doctor/observability.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

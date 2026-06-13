@@ -20,6 +20,7 @@ import { kickbackTool } from './specs/kickback.js';
 import { specGetTool } from './specs/spec-get.js';
 import { specDraftTool } from './specs/spec-draft.js';
 import { specLockTool } from './specs/spec-lock.js';
+import { specArchiveTool } from './specs/spec-archive.js';
 import { planIngestTool } from './specs/plan-ingest.js';
 import { phaseStatusTool } from './specs/phase-status.js';
 import { issueCaptureTool } from './specs/issue-capture.js';
@@ -62,6 +63,7 @@ export function buildCoreRegistry(): ToolRegistry {
   registry.register(specGetTool);
   registry.register(specDraftTool);
   registry.register(specLockTool);
+  registry.register(specArchiveTool);
   registry.register(planIngestTool);
   registry.register(phaseStatusTool);
   registry.register(issueCaptureTool);

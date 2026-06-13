@@ -21,3 +21,15 @@ export {
   type HostedSession,
   LiveSessionHostImpl,
 } from './live-session-host.js';
+// L7-ENG (Stage 9 P1a) — the Conductor ENGINE: the single-turn cycle that drives the landed L7
+// components (host/spawn/driveToReady/bind/injectMail/detectTurnEnd) + the MNR-5 launch authority.
+// FROZEN public interface for P1b (mail-routing/liveness) + P2 (spawn-from-placement) to compose onto.
+export {
+  ConductorEngine,
+  selectEligible,
+  type ConductorEngineDeps,
+  type TransportPair,
+  type HostedPane,
+  type TurnOutcome,
+  type CycleOutcome,
+} from './conductor/engine.js';

@@ -537,12 +537,33 @@ describe('co sling --dry-run', () => {
     expect(result.output).toMatch(/provider|claude|codex/i);
   });
 
-  it('exits with code 1 for duplicate same-provider --account entries until same-provider routing exists', async () => {
+  it('accepts same-provider multi-subscription --account entries (RL4-MS)', async () => {
     const { dir } = makeRegisteredProject();
-    const result = await run(['sling', '--dry-run', '--account', 'claude:max,claude:team'], dir);
-    expect(result.exitCode).toBe(1);
-    expect(result.output).toMatch(/duplicate provider|claude|same-provider/i);
-    expect(result.output).not.toMatch(/account-aware placement output is not yet supported/i);
+    const result = await run(['sling', '--dry-run', '--account', 'claude:max,claude:team'], dir, {
+      usageSourceFactory: (account) =>
+        new FakeUsageSource({
+          snapshots: {
+            [account.provider]: {
+              provider: account.provider,
+              account: account.account,
+              available: true,
+              source: 'fake',
+              sampled_at: new Date().toISOString(),
+              windows: [
+                {
+                  kind: 'five_hour',
+                  used_pct: account.account === 'claude:team' ? 10 : 40,
+                  reset_at: new Date(Date.now() + 5 * 3600_000).toISOString(),
+                },
+              ],
+            },
+          },
+        }),
+    });
+    // Same-provider multi-subscription is now supported — must not error with a "not yet supported" message.
+    expect(result.output).not.toMatch(/not yet supported|duplicate provider/i);
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toMatch(/placed/i);
   });
 
   it('exits with code 1 for a missing --account value', async () => {

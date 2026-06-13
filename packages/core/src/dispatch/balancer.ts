@@ -63,9 +63,10 @@ export const DISPATCH_PINS_CONFIG_KEY = 'dispatch.pins';
 
 /**
  * A provider's effective headroom + availability — the live signal {@link placeAgent} ranks over. The
- * non-pure adapter derives one of these per **tier-capable** provider account; v1 accepts at most one
- * account per provider until same-provider multi-subscription routing is specified. The pure core treats
- * every candidate as tier-capable; tier filtering is the adapter's job. A provider account is **HEALTHY**
+ * non-pure adapter derives one of these per **tier-capable** provider account; same-provider
+ * multi-subscription is supported (RL4-MS) — multiple accounts of the same provider are ranked and the
+ * roomiest is chosen. The pure core treats every candidate as tier-capable; tier filtering is the
+ * adapter's job. A provider account is **HEALTHY**
  * iff it is `available` AND its binding-window {@link Headroom} is `known`. An unavailable account
  * (not-logged-in / offline / over-limit) OR an `unknown` headroom ⇒ NOT healthy ⇒ EXCLUDED from floating
  * placement (AC3, P9 — never silently treated as healthy / 0% used).
@@ -212,7 +213,7 @@ export interface PlaceAgentInput {
   readonly reasoningBudget: ReasoningBudget;
   /** Resolved pin table (injected; from {@link resolvePinTable}). */
   readonly pins: PinTable;
-  /** Provider-account candidates (injected; from {@link candidatesFromStore}); v1 allows one per provider. */
+  /** Provider-account candidates (injected; from {@link candidatesFromStore}); same-provider multi-subscription supported (RL4-MS). */
   readonly candidates: readonly ProviderHeadroom[];
   /** Injected, replay-safe clock (epoch ms) for reset-aware scoring — never the wall clock (AC10). */
   readonly nowMs: number;
@@ -236,12 +237,11 @@ export interface PlaceAgentInput {
  */
 export function placeAgent(input: PlaceAgentInput): PlacementDecision {
   const { role, workSize, reasoningBudget, pins, candidates, nowMs, previous, hysteresis } = input;
-  assertSingleAccountPerProvider(candidates);
 
   // 1) Pinned seats are never overridden (AC1).
   const pin = lookupPin(pins, role);
   if (pin !== undefined) {
-    const account = accountForPinnedProvider(pin.provider, candidates);
+    const account = accountForPinnedProvider(pin.provider, candidates, nowMs);
     return {
       kind: 'pinned',
       placement: placementFromPin(role, pin, workSize, reasoningBudget, account),
@@ -383,36 +383,31 @@ function placementFromPin(
 function accountForPinnedProvider(
   provider: Provider,
   candidates: readonly ProviderHeadroom[],
+  nowMs: number,
 ): string {
-  const accounts = [
-    ...new Set(
-      candidates
-        .filter((candidate) => candidate.provider === provider)
-        .map((candidate) => candidate.account),
-    ),
-  ].sort((a, b) => a.localeCompare(b));
-  if (accounts.length > 1) {
-    throw new Error(
-      `same-provider multi-subscription routing is unsupported for pinned provider '${provider}'; candidates offered multiple accounts: ${accounts.join(', ')}`,
-    );
-  }
-  return accounts[0] ?? accountForProvider(provider);
-}
+  const providerCandidates = candidates.filter((c) => c.provider === provider);
+  if (providerCandidates.length === 0) return accountForProvider(provider);
 
-function assertSingleAccountPerProvider(candidates: readonly ProviderHeadroom[]): void {
-  const byProvider = new Map<Provider, Set<string>>();
-  for (const candidate of candidates) {
-    const accounts = byProvider.get(candidate.provider) ?? new Set<string>();
-    accounts.add(candidate.account);
-    byProvider.set(candidate.provider, accounts);
+  // Among healthy candidates, pick the roomiest by headroomScore (RL4-MS). Total order: score desc,
+  // ties broken by account name asc (deterministic — no Map nondeterminism).
+  let bestAccount: string | undefined;
+  let bestScore = -Infinity;
+  for (const c of providerCandidates) {
+    if (!c.available || c.headroom.kind !== 'known') continue;
+    const score = headroomScore(c.headroom.used_pct, c.headroom.reset_at, nowMs);
+    if (
+      score > bestScore ||
+      (score === bestScore &&
+        (bestAccount === undefined || c.account.localeCompare(bestAccount) < 0))
+    ) {
+      bestScore = score;
+      bestAccount = c.account;
+    }
   }
-  for (const [provider, accounts] of byProvider) {
-    if (accounts.size <= 1) continue;
-    const list = [...accounts].sort((a, b) => a.localeCompare(b)).join(', ');
-    throw new Error(
-      `same-provider multi-subscription routing is unsupported for provider '${provider}'; candidates offered multiple accounts: ${list}`,
-    );
-  }
+  if (bestAccount !== undefined) return bestAccount;
+
+  // No healthy candidate — stable alphabetical fallback so a pinned dead provider still resolves.
+  return [...providerCandidates].sort((a, b) => a.account.localeCompare(b.account))[0]!.account;
 }
 
 /**
