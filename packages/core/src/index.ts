@@ -1186,5 +1186,20 @@ export {
   SILENT_STOP_TRIGGER,
 } from './pty/liveness-watchdog.js';
 
+// Stage 9 P4 (L8-WDOG) — the silent-stop watchdog-RECONCILE loop (the canonical-bug cure). PURE +
+// seam-injected: one tick scans the recovered RUNNING set (P3 selectAllSessions), observes each agent's
+// LivenessInput via an injected seam, and drives a persisted-per-agent LivenessWatchdog (silent_stop ⇒
+// nudge → STUCK; wedged ⇒ STUCK; dead ⇒ reap) in a BOUNDED window. Completion stays keyed to
+// co_finish/worker_done, never turn-end. The host wires the live seams (kill(pid,0) probe, router STUCK).
+export type {
+  RunningAgent,
+  LivenessProbe,
+  ReconcileSeams,
+  ReconcileAssessment,
+  ReconcileError,
+  ReconcileTickResult,
+} from './pty/reconcile.js';
+export { ReconcileLoop } from './pty/reconcile.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
