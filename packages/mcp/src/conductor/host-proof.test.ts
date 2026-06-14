@@ -261,4 +261,52 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     // EXACTLY one turn submitted: the composer received exactly one Enter.
     expect(pane.written.filter((w) => w === '\r')).toHaveLength(1);
   });
+
+  it('returns mailRouted=false when the parent pre-holds an item but the hosted agent routes nothing (regression guard: old tautological check)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    // Pre-seed an item in coord-1's outstanding queue FROM a different sender (not impl-hp).
+    // This mirrors the [host-live] @operator case: @operator already holds the injected test
+    // mail BEFORE the turn runs. Under the OLD `.length > 0` check, mailRouted would be
+    // unconditionally true — this test catches that regression.
+    const preStore = openMailStore(projectId);
+    mailStores.push(preStore);
+    preStore.send({
+      type: 'clarify_request',
+      to: 'coord-1',
+      from: 'unrelated-agent',
+      subject: 'pre-existing item',
+      body: 'already in the queue before the turn',
+    });
+
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    // awaitMailRouted intentionally omitted — the hosted agent routes nothing during the turn.
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    // mailRouted must be false: coord-1's only outstanding item has sender='unrelated-agent',
+    // not 'impl-hp'. The old check (.length > 0) would have returned true here — silent failure.
+    expect(result.mailRouted).toBe(false);
+  });
 });

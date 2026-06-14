@@ -129,7 +129,14 @@ export async function runHostProof(
   const routingStore = openMailStore(projectId);
   let mailRouted: boolean;
   try {
-    mailRouted = routingStore.outstanding(identity.parent).length > 0;
+    // Principle 9 — fail loud: assert the hosted agent itself sent a NEW reply to the parent,
+    // NOT merely that the parent's queue is non-empty. The parent may already hold ≥1 item
+    // before the turn runs (e.g. the injected test mail in the [host-live] path), so a plain
+    // `.length > 0` check is unconditionally true and can never catch broken routing.
+    // Matching by `sender === identity.agent` proves a NEW item arrived FROM the hosted agent.
+    mailRouted = routingStore
+      .outstanding(identity.parent)
+      .some((item) => item.sender === identity.agent);
   } finally {
     routingStore.close();
   }
