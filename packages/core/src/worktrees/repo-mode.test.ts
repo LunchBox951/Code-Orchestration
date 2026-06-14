@@ -11,6 +11,7 @@ import {
   resolveRepoMode,
   repoModeCapabilities,
   detectHostConventions,
+  parseHostConventions,
   CoRepoModeGate,
   type RemoteSignals,
   type RemoteProbe,
@@ -280,7 +281,150 @@ describe('detectHostConventions — minimal PR-template + sign-off signals (D3, 
   });
 });
 
-// ── 5) The L5 enactment gate (CoRepoModeGate): owner+offline merge real; contributor/rich-parse deferred ─
+// ── 5a) parseHostConventions — rich CONTRIBUTING/PR-template parse (WT4-HC, L9) ───────────────────
+describe('parseHostConventions — rich host-convention parse (WT4-HC, L9)', () => {
+  const PR_TEMPLATE = [
+    '## Description',
+    '',
+    'What does this PR do?',
+    '',
+    '## Checklist',
+    '',
+    '- [ ] Tests pass',
+    '- [ ] Docs updated',
+    '- [ ] Changelog entry',
+    '',
+    '## Notes',
+    '',
+    '- [x] Already done item (should not appear)',
+  ].join('\n');
+
+  const CONTRIBUTING_DCO = [
+    '# Contributing',
+    '',
+    'All commits must carry a `Signed-off-by` trailer (DCO — Developer Certificate of Origin).',
+    'Use `git commit --signoff` to add it automatically.',
+  ].join('\n');
+
+  const CONTRIBUTING_NO_SIGN_OFF = [
+    '# Contributing',
+    '',
+    'Open a PR, be kind, and run the tests before submitting.',
+  ].join('\n');
+
+  function reader(files: Record<string, string>): (path: string) => string | null {
+    return (path) => {
+      for (const [suffix, content] of Object.entries(files)) {
+        if (path.endsWith(suffix)) return content;
+      }
+      return null;
+    };
+  }
+
+  it('returns empty fields for a repo with no template and no CONTRIBUTING (no throw)', () => {
+    expect(parseHostConventions('/no/such', () => null)).toEqual({
+      templateBody: '',
+      checklist: [],
+      requiredTrailers: [],
+    });
+  });
+
+  it('extracts the template body when a PR-template is present', () => {
+    const result = parseHostConventions(
+      '/repo',
+      reader({ 'PULL_REQUEST_TEMPLATE.md': PR_TEMPLATE }),
+    );
+    expect(result.templateBody).toBe(PR_TEMPLATE);
+  });
+
+  it('extracts checklist items (- [ ] lines) from the template, in document order', () => {
+    const result = parseHostConventions(
+      '/repo',
+      reader({ 'PULL_REQUEST_TEMPLATE.md': PR_TEMPLATE }),
+    );
+    expect(result.checklist).toEqual([
+      '- [ ] Tests pass',
+      '- [ ] Docs updated',
+      '- [ ] Changelog entry',
+    ]);
+  });
+
+  it('does NOT include already-checked (- [x]) items in the checklist', () => {
+    const result = parseHostConventions(
+      '/repo',
+      reader({ 'PULL_REQUEST_TEMPLATE.md': PR_TEMPLATE }),
+    );
+    expect(result.checklist.every((item) => item.startsWith('- [ ] '))).toBe(true);
+  });
+
+  it('yields Signed-off-by when CONTRIBUTING mandates DCO', () => {
+    const result = parseHostConventions(
+      '/repo',
+      reader({
+        'PULL_REQUEST_TEMPLATE.md': PR_TEMPLATE,
+        'CONTRIBUTING.md': CONTRIBUTING_DCO,
+      }),
+    );
+    expect(result.requiredTrailers).toContain('Signed-off-by');
+  });
+
+  it('yields no required trailers when CONTRIBUTING has no sign-off requirement', () => {
+    const result = parseHostConventions(
+      '/repo',
+      reader({ 'CONTRIBUTING.md': CONTRIBUTING_NO_SIGN_OFF }),
+    );
+    expect(result.requiredTrailers).toEqual([]);
+  });
+
+  it('full parse: template + DCO-requiring CONTRIBUTING yields all three fields populated', () => {
+    const result = parseHostConventions(
+      '/repo',
+      reader({
+        'PULL_REQUEST_TEMPLATE.md': PR_TEMPLATE,
+        'CONTRIBUTING.md': CONTRIBUTING_DCO,
+      }),
+    );
+    expect(result.templateBody).toBe(PR_TEMPLATE);
+    expect(result.checklist).toHaveLength(3);
+    expect(result.requiredTrailers).toContain('Signed-off-by');
+  });
+
+  it('reads the first present PR-template path (GitHub .github/ takes precedence)', () => {
+    const githubTemplate = '## GitHub template\n- [ ] Review done\n';
+    const rootTemplate = '## Root template\n- [ ] Root check\n';
+    const result = parseHostConventions(
+      '/repo',
+      reader({
+        '.github/PULL_REQUEST_TEMPLATE.md': githubTemplate,
+        'PULL_REQUEST_TEMPLATE.md': rootTemplate,
+      }),
+    );
+    expect(result.templateBody).toBe(githubTemplate);
+    expect(result.checklist).toEqual(['- [ ] Review done']);
+  });
+
+  it('CoRepoModeGate.parseHostConventions delegates to the standalone function', () => {
+    const gate = new CoRepoModeGate();
+    const result = gate.parseHostConventions('/no/such', () => null);
+    expect(result).toEqual({ templateBody: '', checklist: [], requiredTrailers: [] });
+  });
+
+  it('extracts explicit hyphenated trailer-format lines from CONTRIBUTING', () => {
+    const contributing = [
+      '# Contributing',
+      '',
+      'Each commit must include the following trailers:',
+      '',
+      'Signed-off-by: Your Name <email@example.com>',
+      'Co-authored-by: Pair Name <pair@example.com>',
+    ].join('\n');
+    const result = parseHostConventions('/repo', reader({ 'CONTRIBUTING.md': contributing }));
+    expect(result.requiredTrailers).toContain('Signed-off-by');
+    expect(result.requiredTrailers).toContain('Co-authored-by');
+  });
+});
+
+// ── 5) The L5 enactment gate (CoRepoModeGate): owner+offline merge real; contributor/rich-parse ────
 describe('CoRepoModeGate — the L5 merge enactment (owner + offline real; the rest loud-fail)', () => {
   /** A fake GitExec that records each git invocation, so the enactment is testable with no real repo. */
   function recordingGitExec(): {
@@ -346,11 +490,9 @@ describe('CoRepoModeGate — the L5 merge enactment (owner + offline real; the r
     }
   });
 
-  it('parseHostConventions throws (the rich CONTRIBUTING/PR-template parse is deferred to L9)', () => {
-    // The concrete impl omits the interface's `cwd` param (TS allows it) — it always throws.
-    const gate = new CoRepoModeGate();
-    expect(() => gate.parseHostConventions()).toThrow(/deferred to L9/);
-    expect(() => gate.parseHostConventions()).toThrow(/not implemented/);
+  it('parseHostConventions returns empty fields when no template or CONTRIBUTING exists (no throw)', () => {
+    const result = new CoRepoModeGate().parseHostConventions('/no/such/repo', () => null);
+    expect(result).toEqual({ templateBody: '', checklist: [], requiredTrailers: [] });
   });
 });
 

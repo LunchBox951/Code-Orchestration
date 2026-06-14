@@ -7,7 +7,7 @@ import {
   prepareReviewVerdictForDb,
 } from '../review/review-store.js';
 import { openProjectStore } from '../store/sqlite-store.js';
-import type { StoreTx, StoredEvent } from '../store/types.js';
+import type { Store, StoreTx, StoredEvent } from '../store/types.js';
 import {
   makeMergeSerializedEvent,
   makeReviewRequestedEvent,
@@ -121,6 +121,19 @@ export interface MailStore {
   close(): void;
 }
 
+/**
+ * Build the delivery seam from THIS mail store's own project store + mail projectors, so the
+ * injected writer shares the SAME store handle the facade reads through (one connection, one
+ * writer — freeze #3). This is the seam L7's `LiveDelivery` threads through: its store-write half
+ * still delegates to {@link InProcessDelivery} over `store`/`projectors`, and only the wake/inject
+ * callbacks bind to live panes. Receives exactly what the default `new InProcessDelivery(...)` does.
+ */
+export type DeliveryFactory = (
+  projectId: string,
+  store: Store,
+  projectors: readonly Projector[],
+) => Delivery;
+
 /** Optional wiring for {@link openMailStore}; mainly the injectable delivery seam (for tests). */
 export interface MailStoreOptions {
   /**
@@ -129,6 +142,12 @@ export interface MailStoreOptions {
    * swap the writer Conductor-side without touching the facade.
    */
   delivery?: Delivery;
+  /**
+   * Build the delivery seam from this store's own project store + mail projectors (one shared
+   * handle). Used by L7 to wire a {@link LiveDelivery} that shares the facade's store so the live
+   * writer and the read model never diverge. Ignored when {@link delivery} is set.
+   */
+  deliveryFactory?: DeliveryFactory;
 }
 
 /**
@@ -140,7 +159,12 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
   const store = openProjectStore(projectId);
   const projectors: readonly Projector[] = [new MailProjector()];
   const reviewProjectors: readonly Projector[] = [new ReviewProjector()];
-  const delivery = opts?.delivery ?? new InProcessDelivery(projectId, store, projectors);
+  // Precedence: an explicit `delivery` wins; else a `deliveryFactory` builds one over THIS store
+  // (shared handle, one writer — freeze #3); else the default in-process writer.
+  const delivery =
+    opts?.delivery ??
+    opts?.deliveryFactory?.(projectId, store, projectors) ??
+    new InProcessDelivery(projectId, store, projectors);
 
   // Freeze #8: validate the envelope HERE, then hand it to the seam. The builder
   // re-validates (defense for direct callers); both share validateEnvelope, so the

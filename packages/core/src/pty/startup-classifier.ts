@@ -31,7 +31,7 @@ import type { Provider } from '../dispatch/usage-source.js';
 export type { Provider };
 
 /** The startup interstitials we know how to answer. */
-export type StartupInterstitialName = 'trust' | 'update' | 'theme';
+export type StartupInterstitialName = 'trust' | 'update' | 'theme' | 'hooks';
 
 /**
  * The classified startup state for the current output buffer.
@@ -67,8 +67,11 @@ interface InterstitialSig {
 }
 
 interface ProviderSignatures {
-  /** Lowercased anchors; ALL present ⇒ ready (authed). The stable status line, never placeholder. */
-  readonly readyAnchors: readonly string[];
+  /**
+   * Lowercased anchor groups; ALL anchors in ANY group present ⇒ ready (authed). Groups cover stable
+   * provider footer variants, never rotating placeholders.
+   */
+  readonly readyAnchorGroups: readonly (readonly string[])[];
   /** Lowercased anchors; ALL present ⇒ login_required (terminal). */
   readonly loginAnchors: readonly string[];
   /** Known login methods; those whose `match` is present are captured (surfaced, not answered). */
@@ -80,7 +83,10 @@ interface ProviderSignatures {
 const SIGNATURES: Readonly<Record<Provider, ProviderSignatures>> = {
   claude: {
     // [documented] welcome box + `❯` composer + `? for shortcuts`; anchor the STABLE status line.
-    readyAnchors: ['? for shortcuts'],
+    // [host-live] Claude Code 2.1.158 ready footer dropped `? for shortcuts` and now shows the
+    // permission-mode/status strip (`shift+tab` cycling, agents hint, token count). Use concepts
+    // rather than exact spacing because the TUI lays the strip out with cursor-positioning.
+    readyAnchorGroups: [['? for shortcuts'], ['shift+tab', 'agents', 'tokens']],
     // [documented] `Select login method:` header.
     loginAnchors: ['select login method'],
     methods: [
@@ -100,13 +106,16 @@ const SIGNATURES: Readonly<Record<Provider, ProviderSignatures>> = {
     ],
   },
   codex: {
-    // [synthesized] idle composer footer hints (`send` + `newline` must BOTH be present); stable, NOT
-    // the placeholder. Host-side hardening (review #178): if live probes show false-ready positives
-    // from these short words, anchor instead on a longer codex-specific token such as the idle
-    // composer block element `▌`. Kept as the broader AND-match here because over-narrowing to an
-    // unverified glyph risks the worse failure (a false-NEGATIVE ready → the session hangs at startup);
-    // the `login_required`-before-`ready` precedence already guards the dangerous logged-out case.
-    readyAnchors: ['send', 'newline'],
+    // Ready variants:
+    // - [synthesized] legacy idle composer footer hints (`send` + `newline`), stable and not the
+    //   placeholder.
+    // - [host-live] Codex 0.139.0 idle composer (`›`) plus the model footer (`gpt-*`); the suggestion
+    //   text itself rotates, so it is deliberately not an anchor.
+    // `login_required`-before-`ready` still guards the dangerous logged-out false-positive case.
+    readyAnchorGroups: [
+      ['send', 'newline'],
+      ['›', 'gpt-'],
+    ],
     // [documented] sign-in menu: anchor on the first + last options (the header is not documented).
     loginAnchors: ['sign in with chatgpt', 'provide your own api key'],
     methods: [
@@ -120,11 +129,22 @@ const SIGNATURES: Readonly<Record<Provider, ProviderSignatures>> = {
       { name: 'update', answer: '2\r', anchors: ['1. update now', '2. skip'] },
       // [synthesized] directory trust prompt (may be pre-seeded absent by P1); answer Enter.
       { name: 'trust', answer: '\r', anchors: ['trust', 'directory'] },
+      // [host-live] isolated generated hooks require one trust confirmation before the composer.
+      { name: 'hooks', answer: '2\r', anchors: ['hooks need review', 'trust all and continue'] },
     ],
   },
 };
 
 const EMPTY_ANSWERED: ReadonlySet<StartupInterstitialName> = new Set();
+
+// Cursor-positioning sequences paint words into separate columns without emitting literal spaces.
+// Treat them as layout whitespace before stripping the rest of ANSI, so `?[5Gfor[9Gshortcuts`
+// normalizes to `? for shortcuts` instead of `?forshortcuts`.
+const ANSI_LAYOUT_ESCAPE = new RegExp(
+  // eslint-disable-next-line no-control-regex
+  '[\\u001B\\u009B]\\[(?:\\d{1,4}(?:;\\d{0,4})*)?[ABCDGHf]',
+  'g',
+);
 
 // ANSI/VT control sequences: CSI cursor-moves + SGR colours (ending in a letter / `=><~`) and OSC
 // title sets (ending in BEL). Stripped before whitespace-collapse so cursor-positioning noise never
@@ -142,7 +162,7 @@ const ANSI_ESCAPE = new RegExp(
  * space and trim. Case is preserved so captured login-method labels stay human-readable.
  */
 export function normalizeStartupOutput(raw: string): string {
-  return raw.replace(ANSI_ESCAPE, '').replace(/\s+/g, ' ').trim();
+  return raw.replace(ANSI_LAYOUT_ESCAPE, ' ').replace(ANSI_ESCAPE, '').replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -169,7 +189,7 @@ export function classifyStartup(
     const methods = present.length > 0 ? present : sig.methods.map((m) => m.canonical);
     return { kind: 'login_required', methods };
   }
-  if (allPresent(sig.readyAnchors)) {
+  if (sig.readyAnchorGroups.some((anchors) => allPresent(anchors))) {
     return { kind: 'ready' };
   }
   for (const it of sig.interstitials) {

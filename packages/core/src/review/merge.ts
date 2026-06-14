@@ -3,11 +3,7 @@ import { escalate, type ParentResolver } from '../mail/escalation.js';
 import { OPERATOR } from '../mail/events.js';
 import type { MailStore } from '../mail/mail-store.js';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
-import {
-  defaultProviderAccounts,
-  type Placement,
-  type ProviderAccount,
-} from '../dispatch/balancer.js';
+import { defaultProviderAccounts, type ProviderAccount } from '../dispatch/balancer.js';
 import { runDispatchPolicy } from '../dispatch/cli-render.js';
 import type { DispatchStore } from '../dispatch/dispatch-store.js';
 import type { PlacementDecided, PlacementRecord } from '../dispatch/events.js';
@@ -120,6 +116,20 @@ export interface ReviewGateDeps {
    * {@link WorktreeStore.removeWorktree}. A teardown failure is surfaced but NEVER masks a recorded merge.
    */
   readonly teardown?: MergeTeardown;
+  /**
+   * The reviewer-SPAWN gate (P2, AC-S9-2). When present and an agent review trigger records a PLACED
+   * placement, `triggerReview` fires this gate (fire-and-forget — `triggerReview` stays sync) so the
+   * Conductor can launch the reviewer pane. Absent for all headless core tests (the default
+   * {@link ReviewerSpawnGateStub} is the loud-fail stand-in; `dispatch` must also be wired to reach this).
+   */
+  readonly reviewerSpawnGate?: ReviewerSpawnGate;
+  /**
+   * Called when a fire-and-forget {@link ReviewerSpawnGate.spawn} rejects. When absent a **loud
+   * default** surfaces the rejection to stderr (Principle 9 — no silent discard). **Hosts SHOULD
+   * inject a structured handler in production** to route spawn failures into telemetry/alerting
+   * rather than relying on the stderr fallback.
+   */
+  readonly onSpawnError?: (agentId: string, err: unknown) => void;
 }
 
 /**
@@ -136,25 +146,32 @@ export interface MergeTeardown {
 /**
  * The L7 reviewer-SPAWN seam (AC-L5-11). The gate RESOLVES + RECORDS a reviewer placement
  * (`placement.decided`) over injected inputs (pure decision), but LAUNCHING the placed reviewer's live
- * turn is L7. This is a TYPED stub marking that seam — mirroring
+ * turn is L7. This is a TYPED boundary — mirroring
  * {@link import('./human-review.js').HumanReviewGateStub} /
- * {@link import('../worktrees/cleanup-gate.js').CleanupGateStub}: it fails loud (Principle 9) rather
- * than being a silent no-op. Nothing in L5 calls it — it exists so the L7 plug-point is a real, typed
- * boundary, and so the gate decision logic stays pure over injected inputs (identical inputs ⇒
- * identical decisions).
+ * {@link import('../worktrees/cleanup-gate.js').CleanupGateStub}: the stub fails loud (Principle 9)
+ * rather than being a silent no-op. The real engine-backed gate lives in `packages/mcp` (P2,
+ * AC-S9-2): it takes the recorded PlacementRecord and calls engine.ensureHosted.
  */
 export interface ReviewerSpawnGate {
-  /** Launch the placed reviewer's live turn. Returns `never`: the live spawn is L7. */
-  spawn(role: string, placement: Placement): never;
+  /**
+   * Launch the placed reviewer's live turn. Takes the project id and the stored PlacementRecord for
+   * the reviewer seat. The real gate (P2) resolves the worktree → builds identity + spec →
+   * engine.ensureHosted. The stub (default for headless paths) fails loud.
+   */
+  spawn(projectId: string, placement: PlacementRecord): Promise<void>;
 }
 
-/** The L7 STUB reviewer-spawn gate. `spawn` fails loud until L7 owns the live launch — never a no-op. */
+/**
+ * The STUB reviewer-spawn gate. `spawn` fails loud until the real P2 gate is wired — never a no-op.
+ * Used as the default for headless core paths (no engine dependency). The params are optional so
+ * existing headless tests that call spawn() without args continue to compile and assert the throw.
+ */
 export class ReviewerSpawnGateStub implements ReviewerSpawnGate {
-  // L7 PLUG-POINT (live reviewer spawn). The production gate must take the recorded placement.decided
-  // and START the reviewer agent's turn on the placed provider/model. Until then it fails loud (P9).
+  // P2 PLUG-POINT (live reviewer spawn). The production gate takes the recorded PlacementRecord
+  // and calls engine.ensureHosted. Until wired it fails loud (Principle 9).
   spawn(): never {
     throw new Error(
-      'ReviewerSpawnGate.spawn: launching a placed reviewer’s live turn is not implemented ' +
+      "ReviewerSpawnGate.spawn: launching a placed reviewer's live turn is not implemented " +
         '(deferred to L7): take the recorded placement.decided and start the reviewer agent on the ' +
         'placed provider/model. L5 resolves + records the decision; it never launches (AC-L5-11).',
     );
@@ -885,10 +902,31 @@ export class CoReviewGate implements FinishReviewGate {
     }
     if (request != null) {
       const result = this.deps.dispatch.recordPlacementWithReviewRequest(seat, placement, request);
+      if (placement.kind === 'placed' && this.deps.reviewerSpawnGate != null) {
+        this.fireSpawn(result.placement.agent, projectId, result.placement);
+      }
       return { request: result.request };
     }
-    this.deps.dispatch.recordPlacement(seat, placement);
+    const record = this.deps.dispatch.recordPlacement(seat, placement);
+    if (placement.kind === 'placed' && this.deps.reviewerSpawnGate != null) {
+      this.fireSpawn(record.agent, projectId, record);
+    }
     return undefined;
+  }
+
+  private fireSpawn(agentId: string, projectId: string, record: PlacementRecord): void {
+    void this.deps.reviewerSpawnGate!.spawn(projectId, record).catch((err: unknown) => {
+      if (this.deps.onSpawnError != null) {
+        this.deps.onSpawnError(agentId, err);
+      } else {
+        // Loud by default (Principle 9): a spawn failure is never silently discarded.
+        // Hosts SHOULD inject onSpawnError for structured observability in production.
+        console.error(
+          `co: reviewer spawn for '${agentId}' failed (no onSpawnError injected):`,
+          err,
+        );
+      }
+    });
   }
 
   merge(req: ReviewMergeRequest): ReviewMergeResult {

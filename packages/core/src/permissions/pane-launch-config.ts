@@ -21,6 +21,7 @@
 import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
+import { ROLE_PROFILES } from '../roles/profile.js';
 import type { BlockRule } from './block-list.js';
 import { BLOCK_LIST } from './block-list.js';
 import { basename, isAbsolute } from 'node:path';
@@ -107,6 +108,12 @@ const CLAUDE_RULE_PATTERNS: ReadonlyMap<string, readonly string[]> = new Map([
   ['raw-gh-pr-merge', ['Bash(gh pr merge*)', 'Bash(gh pr create*)', 'Bash(gh api*)']],
   ['co-in-shell', ['Bash(co *)']],
 ]);
+
+const CLAUDE_ALLOWED_CO_MCP_TOOLS = Array.from(
+  new Set(Object.values(ROLE_PROFILES).flatMap((profile) => profile.toolset)),
+)
+  .sort()
+  .map((tool) => `mcp__co__${tool}`);
 
 export function claudeDisallowedPatternsForRule(ruleId: string): readonly string[] | undefined {
   return CLAUDE_RULE_PATTERNS.get(ruleId);
@@ -275,6 +282,9 @@ function buildClaudeLaunchConfig(
   blockList: readonly BlockRule[],
 ): PaneLaunchConfig {
   const args: string[] = ['--strict-mcp-config'];
+  if (CLAUDE_ALLOWED_CO_MCP_TOOLS.length > 0) {
+    args.push('--allowedTools', CLAUDE_ALLOWED_CO_MCP_TOOLS.join(','));
+  }
   const patterns = claudeDisallowedPatterns(blockList);
   if (patterns.length > 0) {
     args.push('--disallowedTools', patterns.join(','));

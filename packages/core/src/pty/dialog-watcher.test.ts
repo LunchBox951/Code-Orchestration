@@ -30,6 +30,15 @@ const CLAUDE_PERMISSION =
 const CODEX_APPROVAL_BODY =
   'Allow the co_probe MCP server to run tool "ping"?\n❯ 1. Yes\n  2. No\n';
 const CODEX_APPROVAL = CLEAR + CODEX_APPROVAL_BODY;
+const CODEX_LIVE_APPROVAL_BODY =
+  'Allow the co MCP server to run tool "co_mail_send"?\n' +
+  'body: CO_ROUTE\nsubject: CO_ROUTE\nto: lead-1\n' +
+  '› 1. Allow                   Run the tool and continue.\n' +
+  '  2. Allow for this session  Run the tool and remember this choice for this session.\n' +
+  '  3. Always allow            Run the tool and remember this choice for future tool calls.\n' +
+  '  4. Cancel                  Cancel this tool call\n' +
+  'enter to submit | esc to cancel\n';
+const CODEX_LIVE_APPROVAL = CLEAR + CODEX_LIVE_APPROVAL_BODY;
 const NON_DIALOG = CLEAR + ' ⠋ working… rendering output ' + ESC + '[0m\n';
 
 describe('classifyDialog — pure prompt-text classification (whitespace-normalized)', () => {
@@ -44,6 +53,13 @@ describe('classifyDialog — pure prompt-text classification (whitespace-normali
     expect(classifyDialog('codex', normalizeStartupOutput(CODEX_APPROVAL))).toMatchObject({
       name: 'codex_approval',
       answer: '1\r',
+    });
+  });
+
+  it('matches the live Codex 0.139 MCP approval dialog → submits the highlighted Allow option', () => {
+    expect(classifyDialog('codex', normalizeStartupOutput(CODEX_LIVE_APPROVAL))).toMatchObject({
+      name: 'codex_approval',
+      answer: '\r',
     });
   });
 
@@ -73,6 +89,17 @@ describe('watchDialogs — continuous answer over a live Pane', () => {
       pane.emit(CLAUDE_PERMISSION); // dialog interleaves
       expect(pane.written).toEqual(['\r']);
       expect(answered).toEqual(['claude_permission']);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('answers the live Codex Allow/Cancel MCP dialog shape', () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const unsub = watchDialogs(pane, { provider: 'codex' });
+    try {
+      pane.emit(CODEX_LIVE_APPROVAL);
+      expect(pane.written).toEqual(['\r']);
     } finally {
       unsub();
     }

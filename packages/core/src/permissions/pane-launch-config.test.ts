@@ -309,6 +309,15 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
     expect(config.args[disallowedIdx + 1]).toBeTruthy();
   });
 
+  it('claude: args allow the CO MCP bus without allowing shell tools', () => {
+    const config = buildPaneLaunchConfig('claude', BASE_IDENTITY);
+    const allowedIdx = config.args.indexOf('--allowedTools');
+    expect(allowedIdx).toBeGreaterThanOrEqual(0);
+    const allowed = config.args[allowedIdx + 1] ?? '';
+    expect(allowed.split(',')).toContain('mcp__co__co_mail_send');
+    expect(allowed).not.toMatch(/\bBash\b/);
+  });
+
   it('claude: --mcp-config forwarded when coMcpConfig is set', () => {
     const mcpPath = '/tmp/co-mcp.json';
     const config = buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, coMcpConfig: mcpPath });

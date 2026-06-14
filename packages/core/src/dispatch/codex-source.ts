@@ -103,7 +103,9 @@ export function parseCodexDoctor(payload: unknown): CodexAccountInfo {
   const account = explicit ?? (plan ? `codex:${plan.toLowerCase()}` : CODEX_DEFAULT_ACCOUNT);
 
   const authed = boolish(pick(root, 'authenticated', 'logged_in', 'loggedIn', 'signed_in'));
-  const status = stringish(pick(root, 'status', 'health', 'state'));
+  const status = stringish(
+    pick(root, 'status', 'health', 'state', 'overallStatus', 'overall_status'),
+  );
   const statusBad = status ? /fail|error|unhealthy|down|logged.?out|expired/i.test(status) : false;
   return {
     healthy: !(authed === false || statusBad),
