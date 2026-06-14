@@ -259,6 +259,9 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     const dataDir = registry.dataDirFor(projectId);
     registry.close();
     const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    // [host-live] The WorktreeStore opened here is held for the daemon's lifetime and closed at
+    // process exit. A proper close-on-stop hook requires a runner lifecycle extension — tracked
+    // as a [host-live] hardening item (no impact while the process is running).
     spawnGate = new EngineReviewerSpawnGate(
       engine,
       openWorktreeStore(projectId),

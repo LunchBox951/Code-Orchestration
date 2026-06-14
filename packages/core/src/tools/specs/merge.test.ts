@@ -1243,6 +1243,8 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
         // fireSpawn is fire-and-forget; spawn body runs synchronously before Promise.resolve() settles.
         expect(spawned).toHaveLength(1);
         expect(spawned[0]!.projectId).toBe('p-merge-tool');
+        // Assert the agent id (reviewer seat) so a wrong-key regression is caught (spy-key-value-blind-spot).
+        expect(spawned[0]!.agent).toMatch(/^reviewer@rev-/);
       } finally {
         dispatch.close();
       }
