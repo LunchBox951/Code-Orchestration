@@ -279,7 +279,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
           worktrees,
           mail: ctx.mail,
           agentId: ctx.agent,
-          ...(operatorOverride ? {} : { parentResolver: roleParentResolver(ctx.roster) }),
+          parentResolver: roleParentResolver(ctx.roster),
           ...(ctx.dispatch != null ? { dispatch: ctx.dispatch, nowMs: Date.now() } : {}),
           reviewerSpawnGate: ctx.reviewerSpawnGate,
         });

@@ -316,6 +316,45 @@ describe('co doctor', () => {
     expect(result.output).toMatch(/provider-compatibility/i);
     expect(result.output).toMatch(/skipped/i);
   });
+
+  it('rejects a stray positional argument (arg-strictness regression guard)', async () => {
+    const { dir } = makeRegisteredProject();
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Project memory\n');
+    writeFileSync(join(dir, 'AGENTS.md'), '# Project memory\n');
+
+    const result = await run(['doctor', 'foo'], dir, {});
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/unexpected argument.*foo|foo.*unexpected argument/i);
+  });
+
+  it('still accepts --live with no stray args', async () => {
+    const { dir } = makeRegisteredProject();
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Project memory\n');
+    writeFileSync(join(dir, 'AGENTS.md'), '# Project memory\n');
+
+    const result = await run(['doctor', '--live'], dir, {
+      providerProbeCommand: (command, args) => {
+        if (command === 'claude' && args.includes('--version'))
+          return { stdout: 'claude 1.0\n', stderr: '', status: 0 };
+        if (command === 'claude' && args.includes('status'))
+          return {
+            stdout: JSON.stringify({ logged_in: true, account: { plan: 'max' } }),
+            stderr: '',
+            status: 0,
+          };
+        if (command === 'codex' && args.includes('--version'))
+          return { stdout: 'codex 1.0\n', stderr: '', status: 0 };
+        if (command === 'codex' && args.includes('doctor'))
+          return {
+            stdout: JSON.stringify({ authenticated: true, status: 'ok' }),
+            stderr: '',
+            status: 0,
+          };
+        return { stdout: '', stderr: '', status: 0 };
+      },
+    });
+    expect(result.exitCode).toBe(0);
+  });
 });
 
 describe('co sling --dry-run', () => {

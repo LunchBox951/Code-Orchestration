@@ -1069,3 +1069,35 @@ describe('co_pr_merge identity guard (AC-L6a-7)', () => {
     expect(readerCalled).toBe(false);
   });
 });
+
+describe('AC-S10-5(a) — co_pr_merge uses recorded worktree baseRef (MNR #3/#6)', () => {
+  it('resolves into from the recorded baseRef when input.into is omitted', async () => {
+    const repo = makeRepo();
+    const { ctx, worktreeStore } = makeCtxBundle(repo, fakeReader([]), { seedWorktree: false });
+
+    // Record a worktree with a non-default baseRef that does NOT exist in the test repo.
+    worktreeStore.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'co/stage-x',
+        baseSha: FAKE_BASE_SHA,
+        path: '/fake',
+        parent: 'lead-x',
+      },
+      { branch: 'co/feature', baseRef: 'co/stage-x', baseSha: FAKE_BASE_SHA, tests: [] },
+    );
+
+    const reg = buildCoreRegistry();
+    // Without input.into, the tool must pick up worktree.baseRef = 'co/stage-x'.
+    // The identity-base lookup cannot resolve 'co/stage-x' (it doesn't exist), so the error
+    // names it. If detectIntegrationTarget fell back to 'main' instead, the merge-base would
+    // resolve cleanly and the error would be "no review verdict" — not naming 'co/stage-x'.
+    await expect(
+      invokeTool(reg, ctx, 'co_pr_merge', {
+        branch: 'co/feature',
+        title: 'feat: my pr',
+        intent: SAMPLE_INTENT,
+      }),
+    ).rejects.toThrow(/co\/stage-x/);
+  });
+});
