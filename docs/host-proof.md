@@ -50,11 +50,16 @@ fix the provider installation before continuing.
 
 ## Running the host-proof driver
 
+Run from the project root (CWD must be a registered project — `co doctor` confirms this):
+
 ```sh
 co-mcp host-proof claude
 # or
 co-mcp host-proof codex
 ```
+
+The `projectId` is resolved automatically from the current working directory (same lookup as
+`co doctor`). To override, pass it explicitly: `co-mcp host-proof claude <projectId>`.
 
 This runs the scripted host-proof driver against the real binary:
 

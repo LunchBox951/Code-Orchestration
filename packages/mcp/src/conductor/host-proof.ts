@@ -14,6 +14,7 @@
  */
 import {
   openMailStore,
+  openRegistry,
   openSessionStore,
   recoverProjectStore,
   type DeliveredMail,
@@ -169,28 +170,41 @@ export async function runHostProof(
 // ── Operator entry ────────────────────────────────────────────────────────────
 
 /**
- * The `co-mcp host-proof <provider>` operator entry. Runs {@link runHostProof} once against the
- * given provider using the `[host-live]` seams (real node-pty, real stream transport, real timers).
+ * The `co-mcp host-proof <provider> [projectId]` operator entry. Runs {@link runHostProof} once
+ * against the given provider using the `[host-live]` seams (real node-pty, real stream transport,
+ * real timers). When `projectId` is omitted, it is resolved from the current working directory
+ * via the project registry (the same lookup that `co doctor` / `co status` perform).
  *
  * This is the documented `[host-live]` invocation path in the P4 runbook (`docs/host-proof.md`).
  * It is NEVER called in-sandbox; the test directly calls {@link runHostProof} with fake seams.
  *
- * Fails loud (Principle 9) on a missing provider argument.
+ * Fails loud (Principle 9) on a missing provider or an unregistered CWD.
  */
 export async function runHostProofCommand(argv: readonly string[]): Promise<void> {
   const provider = argv[0];
-  const projectId = argv[1];
   if (provider !== 'claude' && provider !== 'codex') {
     throw new Error(
       `co-mcp host-proof: provider must be 'claude' or 'codex' (got: ${provider ?? '(none)'}). ` +
-        'Usage: co-mcp host-proof <provider> <projectId>',
+        'Usage: co-mcp host-proof <provider> [projectId]',
     );
   }
-  if (projectId == null || projectId.trim().length === 0) {
-    throw new Error(
-      'co-mcp host-proof: a project id is required. ' +
-        'Usage: co-mcp host-proof <provider> <projectId>',
-    );
+
+  // Resolve projectId: explicit argv[1] wins; otherwise look up from CWD (same as `co doctor`).
+  let projectId: string | undefined = argv[1]?.trim() || undefined;
+  if (projectId == null) {
+    const registry = openRegistry();
+    try {
+      projectId = registry.resolve(process.cwd()) ?? undefined;
+    } finally {
+      registry.close();
+    }
+    if (projectId == null) {
+      throw new Error(
+        `co-mcp host-proof: '${process.cwd()}' is not a registered project. ` +
+          'Either register the project first (co doctor) or pass the projectId explicitly: ' +
+          'co-mcp host-proof <provider> <projectId>',
+      );
+    }
   }
   // [host-live] — import real seams at call-time (node-pty + real timers + stream transport).
   // These are NOT imported at module-load so the module is safe to import in-sandbox tests
