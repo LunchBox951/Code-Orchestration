@@ -1,0 +1,7 @@
+{
+  "logged_in": true,
+  "account": {
+    "plan": "max"
+  },
+  "oauth_account_type": "claude_ai"
+}

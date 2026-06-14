@@ -261,6 +261,61 @@ describe('co doctor', () => {
     expect(result.output).toMatch(/compatible/i);
     expect(result.output).not.toMatch(/skipped/i);
   });
+
+  it('--live wires defaultProviderProbe (fake command — no real binary) and includes probe result', async () => {
+    const { dir } = makeRegisteredProject();
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Project memory\n');
+    writeFileSync(join(dir, 'AGENTS.md'), '# Project memory\n');
+
+    const probed: string[] = [];
+    const result = await run(['doctor', '--live'], dir, {
+      providerProbeCommand: (command, args) => {
+        probed.push(`${command} ${args.join(' ')}`);
+        if (command === 'claude' && args.includes('--version')) {
+          return { stdout: 'claude 1.2.3\n', stderr: '', status: 0 };
+        }
+        if (command === 'claude' && args.includes('status')) {
+          return {
+            stdout: JSON.stringify({ logged_in: true, account: { plan: 'max' } }),
+            stderr: '',
+            status: 0,
+          };
+        }
+        if (command === 'codex' && args.includes('--version')) {
+          return { stdout: 'codex 0.9.0\n', stderr: '', status: 0 };
+        }
+        if (command === 'codex' && args.includes('doctor')) {
+          return {
+            stdout: JSON.stringify({ authenticated: true, status: 'ok' }),
+            stderr: '',
+            status: 0,
+          };
+        }
+        return { stdout: '', stderr: 'unknown command', status: 1 };
+      },
+    });
+
+    // The probe was called for both providers — --live wired defaultProviderProbe.
+    expect(probed.some((c) => c.startsWith('claude'))).toBe(true);
+    expect(probed.some((c) => c.startsWith('codex'))).toBe(true);
+    // The report includes the probe result (not "skipped").
+    expect(result.output).toMatch(/provider-compatibility/i);
+    expect(result.output).not.toMatch(/skipped/i);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('without --live, providerProbe is absent and provider compatibility is skipped', async () => {
+    const { dir } = makeRegisteredProject();
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Project memory\n');
+    writeFileSync(join(dir, 'AGENTS.md'), '# Project memory\n');
+
+    // No providerProbe in options AND no --live flag → probe is absent → check is skipped.
+    const result = await run(['doctor'], dir, {});
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toMatch(/provider-compatibility/i);
+    expect(result.output).toMatch(/skipped/i);
+  });
 });
 
 describe('co sling --dry-run', () => {

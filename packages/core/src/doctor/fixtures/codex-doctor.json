@@ -1,0 +1,8 @@
+{
+  "authenticated": true,
+  "status": "ok",
+  "account": {
+    "plan": "pro"
+  },
+  "health": "ok"
+}
