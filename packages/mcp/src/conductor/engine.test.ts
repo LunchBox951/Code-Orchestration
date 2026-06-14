@@ -495,6 +495,40 @@ describe('ConductorEngine — MNR-2 seam: an errored turn yields WITHOUT consumi
   });
 });
 
+// ── MNR-2 seam (end-to-end re-select): the NEXT runCycle re-selects the errored agent ──────────────
+// AC-S10-5 (#b): after an errored turn the mail stays outstanding; the NEXT runCycle call
+// re-selects the SAME agent (selectEligible re-injects it) — the work is never dropped.
+describe('ConductorEngine — MNR-2 end-to-end: runCycle re-selects the same agent after an errored turn', () => {
+  it('the NEXT runCycle selects the same agent whose turn errored because its mail is still outstanding', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    // Use an inject-fail config so the turn errors immediately (echo-verify never happens).
+    const { engine, pty } = makeEngine({
+      injectOptions: { retryDelay: async () => {}, maxEchoAttempts: 2 },
+    });
+
+    // Cycle 1: cold launch → pane ready → turn errors (inject echo-verify fails).
+    const cycle1 = engine.runCycle([identity]);
+    pty.panes[0]!.emit(CLAUDE_READY); // drive ensureHosted
+    const outcome1 = await cycle1;
+    expect(outcome1).not.toBeNull();
+    expect(outcome1!.turn.errored).toBe(true); // the turn threw — no mail consumed
+    // The mail is STILL outstanding (MNR-2: errored turn does not eat its mail).
+    expect(outstandingCount(projectId, 'impl-x')).toBe(1);
+
+    // Cycle 2: impl-x's mail is STILL outstanding → selectEligible RE-SELECTS it.
+    // The pane stayed warm (MNR-2: pane not reaped on error) — no CLAUDE_READY needed.
+    const cycle2 = engine.runCycle([identity]);
+    const outcome2 = await cycle2;
+    // Non-null outcome proves the agent was RE-SELECTED (selectEligible found outstanding mail).
+    expect(outcome2).not.toBeNull();
+    expect(outcome2!.hosted.pane).toBe(pty.panes[0]); // the SAME warm pane was reused
+    expect(outcome2!.turn.errored).toBe(true); // error persists (echo-verify still fails; expected)
+  });
+});
+
 // ── P1b: route emitted mail via LiveDelivery (wake + inject the recipient's pane) ───────────────
 describe('ConductorEngine — P1b routes emitted mail via LiveDelivery (wake + inject recipient pane)', () => {
   it('an emitted ACTIONABLE mail wakes the recipient AND injects its warm pane (echo-verified)', async () => {

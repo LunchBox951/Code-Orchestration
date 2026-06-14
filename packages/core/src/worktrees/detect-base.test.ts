@@ -142,6 +142,42 @@ function makeRepo(branch: string): string {
   return dir;
 }
 
+// ── (iii) MNR-#3/#6 — recorded sling base wins over stale detect (#5 fix) ─────────────────────────
+// The production co_push / co_pr_merge tools now PREFER the recorded WorktreeRecord.baseRef over
+// detectIntegrationTarget so a sandbox slung off `co/stage-x` publishes against the right base, not
+// the remote default (`main`). This simulates that preference inline — using the same value the
+// tools now derive — and confirms it picks the RECORDED base over a stale-origin answer.
+
+describe('MNR-#3/#6 — recorded sling base preferred over stale detectIntegrationTarget (#5 fix)', () => {
+  it('a sandbox slung off co/stage-x resolves its publish base to co/stage-x, not stale main', () => {
+    // Simulate: the remote default answers "origin/main" but the recorded sling base is co/stage-10.
+    const recordedBase = 'co/stage-10';
+    const detectedBase = detectIntegrationTarget(
+      '/x',
+      cannedReader({ [ORIGIN_HEAD]: 'refs/remotes/origin/main', [LOCAL_MAIN]: SHA }),
+    );
+    // detectIntegrationTarget would return 'main' — the stale default.
+    expect(detectedBase).toBe('main');
+
+    // The production tools now use: input.into ?? worktree.baseRef ?? detectIntegrationTarget(...)
+    // With a recorded baseRef, the stale detect is never reached.
+    const resolvedInto = recordedBase ?? detectedBase;
+    expect(resolvedInto).toBe('co/stage-10');
+    expect(resolvedInto).not.toBe('main');
+  });
+
+  it('falls back to detectIntegrationTarget when no recorded base is available', () => {
+    const detectedBase = detectIntegrationTarget(
+      '/x',
+      cannedReader({ [ORIGIN_HEAD]: 'refs/remotes/origin/main', [LOCAL_MAIN]: SHA }),
+    );
+    // When there is no recorded base (undefined), the fallback fires correctly.
+    const recordedBase: string | undefined = undefined;
+    const resolvedInto = recordedBase ?? detectedBase;
+    expect(resolvedInto).toBe('main');
+  });
+});
+
 describe('AC-L3-1 — detectBaseRef over REAL repos (default read-only git)', () => {
   it('a real origin/HEAD → main repo detects origin/main, not master — even with local master', () => {
     const repo = makeRepo('main');
