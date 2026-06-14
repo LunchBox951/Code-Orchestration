@@ -617,6 +617,73 @@ describe('ConductorDaemon — MNR #1: the reconcile cadence drives silent-stop �
   });
 });
 
+// ── Stage 10 P3 (§3c): the additive candidate-skip seam (operator pause / STUCK) ────────────────
+describe('ConductorDaemon — §3c isSkipped seam filters suppressed agents from candidates (additive)', () => {
+  it('default (no isSkipped wired) drives the agent — P1 behavior byte-for-byte unchanged', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const pane = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    seedActionableMail(projectId, 'impl-x');
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock); // no isSkipped
+
+    expect(daemon.buildCandidates().map((i) => i.agent)).toEqual(['impl-x']);
+    const tickP = daemon.tick();
+    await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
+    expect((await tickP).selected).toBe('impl-x');
+  });
+
+  it('a suppressed agent is filtered out (NOT driven); clearing the skip drives it again (resume)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const pane = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    seedActionableMail(projectId, 'impl-x');
+
+    const skipped = new Set<string>(['impl-x']);
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      isSkipped: (_pid, agent) => skipped.has(agent),
+    });
+
+    // While suppressed: candidates EXCLUDE it; the tick selects nothing — pause takes effect (not a no-op).
+    expect(daemon.buildCandidates()).toHaveLength(0);
+    const out1 = await daemon.tick();
+    expect(out1.selected).toBeNull();
+    expect(out1.candidateCount).toBe(0);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // still warm — suppression never tears down
+    expect(outstandingCount(projectId, 'impl-x')).toBe(1); // the mail is untouched (never driven)
+
+    // Clear the skip ⇒ the next tick re-selects + drives the still-outstanding item.
+    skipped.delete('impl-x');
+    const tickP = daemon.tick();
+    await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
+    expect((await tickP).selected).toBe('impl-x');
+  });
+
+  it('consults the predicate with this daemon’s projectId and each candidate agent', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    const calls: Array<{ pid: string; agent: string }> = [];
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      isSkipped: (pid, agent) => {
+        calls.push({ pid, agent });
+        return false;
+      },
+    });
+
+    daemon.buildCandidates();
+    expect(calls).toContainEqual({ pid: projectId, agent: 'impl-x' });
+  });
+});
+
 // ── Scope guardrail: the daemon registers ZERO agent MCP tools (Principle 4 + D4) ───────────────
 describe('ConductorDaemon — registers ZERO agent MCP tools (never agent-callable)', () => {
   it('no conductor/daemon/serve verb appears in the canonical agent tool registry', () => {

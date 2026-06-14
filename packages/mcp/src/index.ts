@@ -54,7 +54,21 @@ export {
   realQuietWindow,
   hostLiveTransportRequired,
   type ConductorHostRunnerDeps,
+  type ConductorControlSurface,
   type ServeConductorOptions,
   type IntervalScheduler,
   type IntervalHandle,
 } from './conductor/host.js';
+// L7-CTLOBS (Stage 10 P3) — the transport-agnostic operator CONTROL + OBSERVE surface over the running
+// engine: the daemon-backed `AgentRouterSeam` (unstick/pause/stop/steer act on LIVE agents, replacing
+// the CLI's `[host-live]` throws) and the engine-backed `LiveStateProvider` (the live half of
+// observability). Operator-only — registers ZERO agent MCP tools (Principle 4 + D4). The cross-process
+// CLI → daemon IPC binding is deferred to the app stage.
+export {
+  DaemonBackedAgentRouter,
+  type DaemonBackedAgentRouterDeps,
+} from './conductor/agent-router.js';
+export {
+  EngineLiveStateProvider,
+  type EngineLiveStateProviderDeps,
+} from './conductor/live-observe.js';

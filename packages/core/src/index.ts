@@ -1244,6 +1244,16 @@ export type {
 export { REQUIRED_CAPABILITIES, defaultProviderProbe, runDoctor } from './doctor/doctor.js';
 export type { ReviewSummary, ObservabilitySnapshot } from './doctor/observability.js';
 export { queryObservability } from './doctor/observability.js';
+// Stage 10 P3 (CTL-OBS) — the LIVE observability overlay: the static rollup ⊕ an engine-filled
+// {@link LiveStateProvider} seam (warm/paused/stuck + outstanding mail). The merge is core (transport-
+// agnostic, cli-callable); `@co/mcp` fills the seam in the daemon process. NOT an agent MCP tool.
+export type {
+  LiveAgentState,
+  LiveStateProvider,
+  AgentLiveView,
+  LiveObservabilitySnapshot,
+} from './doctor/observability.js';
+export { queryLiveObservability } from './doctor/observability.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

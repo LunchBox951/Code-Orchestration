@@ -21,6 +21,7 @@ import {
   openMailStore,
   openRegistry,
   openRosterStore,
+  openSessionStore,
   QUIET_WINDOW_MS,
   type DeliveredMail,
   type MailStore,
@@ -38,6 +39,7 @@ import {
   type IntervalHandle,
   type IntervalScheduler,
 } from './host.js';
+import { DaemonBackedAgentRouter } from './agent-router.js';
 import type { HostedIdentity } from '../live-session-host.js';
 
 const ESC = String.fromCharCode(0x1b);
@@ -409,6 +411,67 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     });
     expect(runner.started).toBe(false);
     expect(scheduler.ms).toBeNull();
+  });
+
+  it('wires the P3 control/observe surface: router + observe + the pause-skip predicate (§3d)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId); // coord-1, lead-1
+    // Record a COLD running agent impl-x (session + roster) with outstanding mail — a daemon candidate.
+    const roster = openRosterStore(projectId);
+    try {
+      roster.recordAgent({ agentId: 'impl-x', role: 'implementer', parent: 'lead-1' });
+    } finally {
+      roster.close();
+    }
+    const sessions = openSessionStore(projectId);
+    try {
+      sessions.recordSession({
+        agentId: 'impl-x',
+        pane: 'pane-impl-x',
+        cwd,
+        provider: 'claude',
+        resume: { provider: 'claude', sessionId: 'session-impl-x' },
+      });
+    } finally {
+      sessions.close();
+    }
+    seedActionableMail(projectId, 'impl-x');
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const scheduler = new FakeScheduler();
+    const ticks: DaemonTickOutcome[] = [];
+    const runner = await serveConductor({
+      projectId,
+      pty: new FakePty(),
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      onTick: (o) => ticks.push(o),
+    });
+
+    // The control surface is wired: a daemon-backed router + a live-observe query.
+    expect(runner.control).toBeDefined();
+    expect(runner.control!.router).toBeInstanceOf(DaemonBackedAgentRouter);
+
+    // PAUSE via the wired router ⇒ the daemon's shouldSkip predicate filters impl-x from candidates.
+    runner.control!.router.pause('impl-x');
+    scheduler.fire();
+    await flush();
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]!.candidateCount).toBe(0); // suppressed — pause actually took effect
+    expect(ticks[0]!.selected).toBeNull();
+
+    // OBSERVE: the live snapshot carries the engine overlay (impl-x is cold, paused, 1 outstanding).
+    const snap = runner.control!.observe();
+    const x = snap.agents.find((a) => a.agentId === 'impl-x');
+    expect(x?.hosted).toBe(false);
+    expect(x?.paused).toBe(true);
+    expect(x?.outstandingMail).toBe(1);
+
+    runner.stop();
   });
 
   it('the default makeTransport is the [host-live] operator-handoff seam (fails loud)', () => {
