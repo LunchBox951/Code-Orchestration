@@ -108,6 +108,8 @@ export interface DaemonTickOutcome {
   readonly tick: number;
   /** Size of the reconstructed live set (candidates) this tick. */
   readonly candidateCount: number;
+  /** Recovered RUNNING sessions that are cold in this engine process and therefore not driven. */
+  readonly coldCandidates: readonly string[];
   /** The engine's ≤1-turn outcome, or `null` when no candidate was eligible. */
   readonly cycle: CycleOutcome | null;
   /** The agent the engine selected + drove this tick, or `null` when none was eligible. */
@@ -237,8 +239,8 @@ export class ConductorDaemon {
   /**
    * One deterministic tick (the unit tests drive). In order (AC-S10-1, steps 2–3):
    *   1. reconstruct the live set ({@link buildCandidates});
-   *   2. `engine.runCycle(candidates)` — select a WAITING+actionable agent, ensure its pane (warm
-   *      reuse else launch), inject, drive EXACTLY ONE turn, yield (the pane stays warm);
+   *   2. `engine.runCycle(drivable)` — select a WAITING+actionable WARM agent, reuse its pane,
+   *      inject, drive EXACTLY ONE turn, yield (the pane stays warm);
    *   3. on cadence (every `reconcileEvery` ticks): `engine.tickClarifyTimeouts(candidates)` AND
    *      `reconcile.tick()` — the deferred clarify-timeout forward + the bounded silent-stop sweep.
    *
@@ -253,7 +255,15 @@ export class ConductorDaemon {
     const observedAt = this.now();
 
     const candidates = this.buildCandidates();
-    const cycle = await this.engine.runCycle(candidates);
+    // Recovered sessions are durable inputs, not launch authority. A fresh daemon can reconstruct them
+    // for reconcile/reattach handoff, but only panes already warm in THIS engine process are drivable.
+    const drivable = candidates.filter((identity) =>
+      this.engine.isHosted(identity.projectId, identity.agent),
+    );
+    const coldCandidates = candidates
+      .filter((identity) => !this.engine.isHosted(identity.projectId, identity.agent))
+      .map((identity) => identity.agent);
+    const cycle = await this.engine.runCycle(drivable);
 
     const cadenceFired = this.tickCount % this.reconcileEvery === 0;
     let clarifyForwarded: readonly DeliveredMail[] = [];
@@ -267,6 +277,7 @@ export class ConductorDaemon {
       observedAt,
       tick: this.tickCount,
       candidateCount: candidates.length,
+      coldCandidates,
       cycle,
       selected: cycle?.hosted.identity.agent ?? null,
       cadenceFired,

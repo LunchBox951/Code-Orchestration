@@ -52,6 +52,8 @@ const EXPECTED_TOOLS = [
   'co_research_get',
 ];
 
+const COORDINATOR_TOOL_LIST_BUDGET_BYTES = 16_000;
+
 // ── Per-test program-data dir + live stores (mirrors the CO_DATA_DIR idiom in mail.test.ts) ──
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -127,7 +129,7 @@ describe('createCoMcpServer — tool-list parity', () => {
     expect(exposed).toHaveLength(EXPECTED_TOOLS.length);
   });
 
-  it('publishes each tool with its title, description, and an input JSON schema', async () => {
+  it('publishes each tool with its description and input JSON schema', async () => {
     const ctx = makeTestContext('impl-schema');
     const client = await connect({ contextFactory: () => ctx });
 
@@ -155,6 +157,26 @@ describe('createCoMcpServer — tool-list parity', () => {
     expect(typeSchema?.enum).toEqual(
       MAIL_TYPES.filter((type) => type !== 'worker_done' && type !== 'review_request'),
     );
+  });
+
+  it('keeps the coordinator tools/list payload compact enough for provider MCP startup', async () => {
+    const ctx = makeTestContext('coord-compact-schema');
+    const client = await connect({
+      contextFactory: () => ctx,
+      tools: toolsForRole('coordinator'),
+    });
+
+    const { tools } = await client.listTools();
+    const encoded = JSON.stringify(tools);
+    expect(encoded.length).toBeLessThan(COORDINATOR_TOOL_LIST_BUDGET_BYTES);
+    expect(encoded).not.toContain('"$schema"');
+
+    const send = tools.find((t) => t.name === 'co_mail_send');
+    expect(send?.title).toBeUndefined();
+    const props = (send?.inputSchema as { properties?: Record<string, unknown> } | undefined)
+      ?.properties;
+    const subjectSchema = props?.subject as { description?: unknown } | undefined;
+    expect(subjectSchema?.description).toBeUndefined();
   });
 
   it('publishes co_mail_send.review_verdict over MCP', async () => {
@@ -187,6 +209,20 @@ describe('createCoMcpServer — tool-list parity', () => {
     expect(props).not.toHaveProperty('accounts');
     expect(props).not.toHaveProperty('cost');
     expect(props).not.toHaveProperty('budget');
+  });
+
+  it('omits optional output schemas by default while keeping them opt-in for compatible clients', async () => {
+    const ctx = makeTestContext('impl-output-schema');
+    const defaultClient = await connect({ contextFactory: () => ctx });
+
+    const defaultSling = (await defaultClient.listTools()).tools.find((t) => t.name === 'co_sling');
+    expect(defaultSling?.outputSchema).toBeUndefined();
+
+    const outputClient = await connect({
+      contextFactory: () => ctx,
+      advertiseOutputSchema: true,
+    });
+    const sling = (await outputClient.listTools()).tools.find((t) => t.name === 'co_sling');
 
     const outputProps = (
       sling?.outputSchema as { properties?: Record<string, unknown> } | undefined

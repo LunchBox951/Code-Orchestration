@@ -11,7 +11,8 @@
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  *
  * The verbs need COMPOSITION (there is no 1:1 engine method):
- *   - `stop`        → kill the warm pane + `engine.release` it (no further turns); fail-loud-tolerant.
+ *   - `stop`        → `engine.release` the warm pane (kills + tears down; no further turns);
+ *                     fail-loud-tolerant.
  *   - `pause`       → record in the PAUSED set; the daemon's candidate filter ({@link shouldSkip}) skips it.
  *   - `revertStuck` → clear the STUCK set (the inverse of {@link markStuck}); the agent is eligible again.
  *   - `rewake`      → clear any remaining STUCK skip so the next daemon tick re-selects it (no queue —
@@ -37,8 +38,8 @@ export interface DaemonBackedAgentRouterDeps {
    */
   readonly onStopUnhosted?: (agentId: string) => void;
   /**
-   * Surface a failure in the async pane-release that follows a `stop` (the synchronous kill already
-   * happened; this is the MCP-session teardown). Never swallowed (Principle 9). Default: none.
+   * Surface a failure in the async pane-release that follows a `stop` (pane kill or MCP-session
+   * teardown). Best-effort diagnostic callbacks must not prevent teardown. Default: none.
    */
   readonly onStopError?: (agentId: string, error: unknown) => void;
 }
@@ -93,7 +94,7 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
   }
 
   /**
-   * Stop: kill the agent's warm pane then `engine.release` it — the agent receives no further turns.
+   * Stop: release the agent's warm pane — the agent receives no further turns.
    * FAIL-LOUD-TOLERANT: an agent with no warm pane is RECORDED (and surfaced via {@link onStopUnhosted}),
    * never silently reaped and never a throw (an operator stop must not crash the daemon). Idempotent;
    * a stopped agent is also cleared from the paused/stuck skip sets. `engine.release` removes the warm-pane
@@ -106,13 +107,14 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
     this.stuck.delete(agentId);
     const hosted = this.engine.getHosted(this.projectId, agentId);
     if (hosted == null) {
-      this.onStopUnhosted?.(agentId);
+      this.reportStopUnhosted(agentId);
       return;
     }
-    hosted.pane.kill();
     const p = this.engine
-      .release(this.projectId, agentId)
-      .catch((error) => this.onStopError?.(agentId, error))
+      .release(this.projectId, agentId, {
+        onPaneKillError: (error) => this.reportStopError(agentId, error),
+      })
+      .catch((error) => this.reportStopError(agentId, error))
       .finally(() => {
         this.pending.delete(p);
       });
@@ -148,11 +150,15 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
 
   /**
    * The daemon's candidate-skip predicate: skip an agent iff it belongs to this router's project AND is
-   * PAUSED or STUCK. Wired as {@link import('./daemon.js').ConductorDaemonDeps.isSkipped}. Project-scoped
-   * by construction; the `projectId` argument is checked so a foreign project's agents are never skipped.
+   * PAUSED, STUCK, or STOPPED. Wired as {@link import('./daemon.js').ConductorDaemonDeps.isSkipped}.
+   * Project-scoped by construction; the `projectId` argument is checked so a foreign project's agents are
+   * never skipped.
    */
   shouldSkip(projectId: ProjectId, agentId: string): boolean {
-    return projectId === this.projectId && (this.paused.has(agentId) || this.stuck.has(agentId));
+    return (
+      projectId === this.projectId &&
+      (this.paused.has(agentId) || this.stuck.has(agentId) || this.stopped.has(agentId))
+    );
   }
 
   /** Whether `agentId` is currently paused (for the live-observe overlay + tests). */
@@ -173,5 +179,21 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
   /** Await every in-flight async stop teardown — for deterministic shutdown and tests. */
   async drain(): Promise<void> {
     await Promise.all([...this.pending]);
+  }
+
+  private reportStopError(agentId: string, error: unknown): void {
+    try {
+      this.onStopError?.(agentId, error);
+    } catch {
+      /* diagnostic callback failed; teardown must still complete */
+    }
+  }
+
+  private reportStopUnhosted(agentId: string): void {
+    try {
+      this.onStopUnhosted?.(agentId);
+    } catch {
+      /* diagnostic callback failed; stop is still recorded */
+    }
   }
 }

@@ -14,7 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
@@ -36,6 +36,7 @@ import { ConductorEngine, type ConductorEngineDeps, type HostedPane } from './en
 import type { HostedIdentity } from '../live-session-host.js';
 import { buildPlacementLaunchSpec, type CoMcpPaths } from './placement-launch.js';
 import { EngineReviewerSpawnGate } from './reviewer-gate.js';
+import { defaultCoMcpPaths } from './host-launch-paths.js';
 
 // ESC authored as a \u escape so the source holds no raw control byte (pristine-repo rule).
 const ESC = '\u001B';
@@ -283,7 +284,7 @@ describe('buildPlacementLaunchSpec — pure, deterministic launch-spec builder',
 // 2. MNR-6 isolation
 
 describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => {
-  it('claude spec: env has ONLY CLAUDE_CONFIG_DIR set to the isolated dir', () => {
+  it('claude spec: env has ONLY CLAUDE_CONFIG_DIR set to the isolated dir and MCP env is scoped', () => {
     const { projectId, cwd, dataDir } = makeProject();
     const placement = recordPlacement(projectId, 'impl-c', 'implementer', 'claude');
     const worktree = recordWorktree(projectId, 'impl-c', 'co/feat-c', cwd);
@@ -302,8 +303,19 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(spec.env).not.toHaveProperty('CODEX_HOME');
     // --strict-mcp-config suppresses user MCP servers
     expect(spec.args).toContain('--strict-mcp-config');
-    // no CODEX-style prelaunch files for claude
-    expect(spec.prelaunchFiles ?? []).toHaveLength(0);
+    const mcpConfig = spec.prelaunchFiles?.find((f) => f.path.endsWith('co-mcp.json'));
+    expect(mcpConfig).toBeDefined();
+    expect(mcpConfig!.path).toBe(`${isolatedHomeDir}/mcp/co-mcp.json`);
+    const parsed = JSON.parse(mcpConfig!.contents) as {
+      mcpServers?: { co?: { command?: string; env?: Record<string, string> } };
+    };
+    expect(parsed.mcpServers?.co?.command).toBe(TEST_MCP_PATHS.coMcpCommand);
+    expect(parsed.mcpServers?.co?.env).toEqual({
+      CO_AGENT: 'impl-c',
+      CO_ROLE: 'implementer',
+      CO_PARENT: 'lead-1',
+      CO_PROJECT_ID: projectId,
+    });
   });
 
   it('codex spec: env has ONLY CODEX_HOME set to the isolated dir; prelaunch has approval_policy=never', () => {
@@ -328,6 +340,88 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
     expect(configToml).toBeDefined();
     expect(configToml!.contents).toContain('approval_policy = "never"');
+    expect(configToml!.contents).toContain('[mcp_servers.co.env]');
+    expect(configToml!.contents).toContain('CO_AGENT = "impl-d"');
+    expect(configToml!.contents).toContain('CO_ROLE = "implementer"');
+    expect(configToml!.contents).toContain('CO_PARENT = "lead-1"');
+    expect(configToml!.contents).toContain(`CO_PROJECT_ID = "${projectId}"`);
+  });
+
+  it('uses a per-pane bridge socket in Claude and Codex MCP launch config when supplied', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const bridgePaths: CoMcpPaths = {
+      ...TEST_MCP_PATHS,
+      coMcpArgs: ['dist/bin.js'],
+      coMcpBridgeSocketPath: (isolatedHomeDir) => `${isolatedHomeDir}/mcp/co-mcp.sock`,
+    };
+
+    for (const provider of ['claude', 'codex'] as const) {
+      const agent = `impl-bridge-${provider}`;
+      const placement = recordPlacement(projectId, agent, 'implementer', provider);
+      const worktree = recordWorktree(projectId, agent, `co/${agent}`, cwd);
+      const isolatedHomeDir = join(dataDir, 'isolated', agent);
+      const { spec } = buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        bridgePaths,
+      );
+
+      if (provider === 'claude') {
+        const configPath = spec.args[spec.args.indexOf('--mcp-config') + 1];
+        const config = spec.prelaunchFiles?.find((file) => file.path === configPath);
+        const parsed = JSON.parse(config!.contents) as {
+          mcpServers?: { co?: { args?: string[]; env?: Record<string, string> } };
+        };
+        expect(parsed.mcpServers?.co?.args).toEqual([
+          'dist/bin.js',
+          'bridge',
+          `${isolatedHomeDir}/mcp/co-mcp.sock`,
+        ]);
+        expect(parsed.mcpServers?.co?.env?.['CO_MCP_BRIDGE_LOG']).toBe(
+          `${isolatedHomeDir}/mcp/bridge.log`,
+        );
+      } else {
+        expect(spec.args).toEqual(['--add-dir', `${isolatedHomeDir}/mcp`]);
+        const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
+        expect(configToml!.contents).toContain('args = ["dist/bin.js", "bridge", "');
+        expect(configToml!.contents).toContain(`${isolatedHomeDir}/mcp/co-mcp.sock`);
+        expect(configToml!.contents).toContain(
+          `CO_MCP_BRIDGE_LOG = "${isolatedHomeDir}/mcp/bridge.log"`,
+        );
+      }
+    }
+  });
+
+  it('default Codex bridge args grant only the private bridge socket directory', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const agent = 'impl-default-bridge';
+    const placement = recordPlacement(projectId, agent, 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, agent, 'co/default-bridge', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', agent);
+    const defaultPaths = defaultCoMcpPaths({
+      argv: ['node', '/repo/packages/mcp/dist/bin.js'],
+      env: { CO_CLI_COMMAND: '/repo/packages/cli/dist/index.js' },
+      nodeCommand: '/usr/bin/node',
+    });
+    const socketPath = defaultPaths.coMcpBridgeSocketPath?.(isolatedHomeDir, agent);
+    expect(socketPath).toBeDefined();
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      defaultPaths,
+    );
+
+    const bridgeDir = dirname(socketPath!);
+    expect(bridgeDir).not.toBe(tmpdir());
+    expect(socketPath).toBe(join(bridgeDir, 'bridge.sock'));
+    expect(spec.args).toEqual(['--add-dir', bridgeDir]);
+    const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
+    expect(configToml!.contents).toContain(`"bridge", "${socketPath}"`);
   });
 });
 

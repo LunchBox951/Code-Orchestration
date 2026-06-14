@@ -102,6 +102,16 @@ const CLAUDE_LOGIN =
   '  2. Anthropic Console account\r\n' +
   '  3. 3rd-party platform\r\n';
 
+// [host-live] Claude Code 2.1.158 can jump directly into the browser OAuth code prompt when an
+// isolated config needs an auth scope refresh for MCP. This is terminal login-required, not ready.
+const CLAUDE_OAUTH_LOGIN =
+  ESC +
+  '[2J' +
+  'Opening browser to sign in…\r\n' +
+  "Browser didn't open? Use the url below to sign in (c to copy)\r\n" +
+  'https://claude.com/cai/oauth/authorize?code=true&scope=user%3Amcp_servers\r\n' +
+  'Paste code here if prompted >\r\n';
+
 // ── codex ────────────────────────────────────────────────────────────────────
 // [documented] update-available menu.
 const CODEX_UPDATE =
@@ -161,6 +171,13 @@ const CODEX_READY_CURRENT =
   ESC +
   '[2m · ' +
   '~/Documents/Code-Orchestration\r\n';
+
+const CODEX_MCP_STARTING =
+  ESC +
+  '[2J' +
+  '• Starting MCP servers (0/2): co, codex_apps (0s • esc to interrupt)\r\n' +
+  '› Use /skills to list available skills\r\n' +
+  'gpt-5.5 default · ~/Documents/Code-Orchestration\r\n';
 
 // [documented] sign-in menu.
 const CODEX_SIGNIN =
@@ -231,6 +248,11 @@ describe('classifyStartup — claude', () => {
       '3. 3rd-party platform',
     ]);
   });
+
+  it('classifies the live OAuth code prompt as login_required before ready', () => {
+    const phase = classifyStartup('claude', norm(CLAUDE_OAUTH_LOGIN + CLAUDE_READY_STATUS_STRIP));
+    expect(phase.kind).toBe('login_required');
+  });
 });
 
 describe('classifyStartup — codex', () => {
@@ -264,6 +286,10 @@ describe('classifyStartup — codex', () => {
 
   it('classifies the current idle composer skills hint as ready', () => {
     expect(classifyStartup('codex', norm(CODEX_READY_CURRENT))).toEqual({ kind: 'ready' });
+  });
+
+  it('does not classify the MCP startup screen as ready even when the footer is present', () => {
+    expect(classifyStartup('codex', norm(CODEX_MCP_STARTING))).toEqual({ kind: 'starting' });
   });
 
   it('classifies the sign-in menu as login_required and captures the methods', () => {

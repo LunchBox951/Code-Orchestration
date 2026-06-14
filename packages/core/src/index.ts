@@ -181,7 +181,13 @@ export type { WorktreeInfo } from './tools/index.js';
 export { buildCoreRegistry, invokeTool, readWorktreeInfo } from './tools/index.js';
 // L2-B2 schema-exposure helpers: the zod `.shape` of a tool's input/output schemas, so the thin
 // MCP adapter mounts each tool's self-describing schema onto the SDK without importing zod itself.
-export { toolInputShape, toolOutputShape } from './tools/index.js';
+export type { ToolJsonSchemaObject } from './tools/index.js';
+export {
+  toolInputJsonSchema,
+  toolInputShape,
+  toolOutputJsonSchema,
+  toolOutputShape,
+} from './tools/index.js';
 // L2-C completeness gate (THE keystone, AC-L2-3): the no-stub assertion generalized from L1's
 // mail-type check to the WHOLE tool registry — flags any tool lacking a self-describing input
 // schema, a structured output schema, a real (non-`notImplemented`) handler, or mountability. A

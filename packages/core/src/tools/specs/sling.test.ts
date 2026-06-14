@@ -844,13 +844,31 @@ describe('co_sling — spawn gate integration (P2 / AC-S10-2)', () => {
       branch: 'co/sling-t',
     })) as { status: string };
 
-    // Fire-and-forget: allow the spawn microtask to resolve before asserting
-    await Promise.resolve();
-
     expect(out.status).toBe('placed');
     expect(spawned).toHaveLength(1);
     expect(spawned[0]!.agent).toBe('impl-sling-t'); // key-value guard (review-spy blind-spot)
     expect(spawned[0]!.projectId).toBe(ctx.projectId);
+  });
+
+  it('placed: fails loud when the live spawn gate rejects', async () => {
+    const repo = makeMainRepo();
+    const failingGate: ReviewerSpawnGate = {
+      spawn: async (): Promise<void> => {
+        throw new Error('spawn failed');
+      },
+    };
+    const ctx = {
+      ...makeContextWithDispatch('lead-7', repo, healthySnapshot),
+      reviewerSpawnGate: failingGate,
+    };
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-sling-fail',
+        branch: 'co/sling-fail',
+      }),
+    ).rejects.toThrow(/spawn failed/i);
   });
 
   it('headless path (no reviewerSpawnGate): co_sling placed is byte-identical to before — gate never fires', async () => {

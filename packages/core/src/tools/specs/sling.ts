@@ -413,17 +413,14 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     // Record a PLACED decision only after the sandbox exists; a git failure must not leave a false
     // successful placement in the dispatch log.
     const placedRecord = ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
-    // Symmetrical to co_merge's reviewer trigger: fire-and-forget so the slung child's pane is
-    // launched immediately after its worktree + placement are recorded (P2 / AC-S10-2).
+    // Symmetrical to co_merge's reviewer trigger: once the slung child's worktree + placement are
+    // recorded, the live spawn must succeed or the caller must see the failure. Returning `placed`
+    // while no pane exists would make launch failure invisible to recovery/operations.
     // NOTE: the dispatch record's `agent` is the CALLING agent (ctx.agent = the lead); override it
     // with the CHILD's agent id so the gate resolves the child's worktree and identity correctly.
     if (ctx.reviewerSpawnGate != null) {
       const childRecord = { ...placedRecord, agent: input.agent };
-      // A failed spawn is logged loud here; recovery is the ReconcileLoop watchdog (the child
-      // remains as a recorded placement with no live pane until the host-side reconcile restarts it).
-      void ctx.reviewerSpawnGate.spawn(ctx.projectId, childRecord).catch((err: unknown) => {
-        console.error(`co: child spawn for '${input.agent}' failed:`, err);
-      });
+      await ctx.reviewerSpawnGate.spawn(ctx.projectId, childRecord);
     }
 
     return {

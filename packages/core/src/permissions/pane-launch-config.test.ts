@@ -26,6 +26,13 @@ const BASE_IDENTITY = {
   coCliCommand: CO_CLI,
 } as const;
 
+const SCOPED_MCP_ENV = {
+  CO_AGENT: 'impl-1',
+  CO_ROLE: 'implementer',
+  CO_PARENT: 'lead-1',
+  CO_PROJECT_ID: 'proj-1',
+} as const;
+
 // ---------------------------------------------------------------------------
 // 1. Drift-clean roundtrip
 // ---------------------------------------------------------------------------
@@ -325,6 +332,29 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
     expect(config.args[config.args.indexOf('--mcp-config') + 1]).toBe(mcpPath);
   });
 
+  it('claude: scoped MCP config is materialized with identity env when coMcpConfig is set', () => {
+    const mcpPath = `${ISOLATED_HOME}/mcp/co-mcp.json`;
+    const config = buildPaneLaunchConfig('claude', {
+      ...BASE_IDENTITY,
+      coMcpConfig: mcpPath,
+      coMcpEnv: SCOPED_MCP_ENV,
+    });
+
+    expect(config.claudeMcpConfigPath).toBe(mcpPath);
+    const parsed = JSON.parse(config.claudeMcpConfigJson ?? '{}') as {
+      mcpServers?: { co?: { command?: string; args?: string[]; env?: Record<string, string> } };
+    };
+    expect(parsed.mcpServers?.co).toEqual({
+      command: CO_MCP,
+      args: [],
+      env: SCOPED_MCP_ENV,
+    });
+    expect(config.prelaunchFiles).toContainEqual({
+      path: mcpPath,
+      contents: config.claudeMcpConfigJson,
+    });
+  });
+
   it('codex: CODEX_HOME is isolated, not the user home', () => {
     const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
     expect(config.env['CODEX_HOME']).toBe(ISOLATED_HOME);
@@ -344,6 +374,8 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
     expect(toml).toContain('[mcp_servers.co]');
     expect(toml).toContain(`command = "${CO_MCP}"`);
     expect(toml).toContain('args = []');
+    expect(toml).toContain('required = true');
+    expect(toml).toContain('startup_timeout_sec = 60');
     expect(toml).toContain('[features]');
     expect(toml).toContain('hooks = true');
     expect(toml).toContain('[[hooks.PreToolUse]]');
@@ -377,6 +409,19 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
     expect(rules.rules.map((rule) => rule.id).sort()).toEqual(
       BLOCK_LIST.map((rule) => rule.id).sort(),
     );
+  });
+
+  it('codex: hook command supports a node-launched absolute CLI script', () => {
+    const config = buildPaneLaunchConfig('codex', {
+      ...BASE_IDENTITY,
+      coCliCommand: '/usr/bin/node',
+      coCliArgs: ['/repo/packages/cli/dist/index.js'],
+    });
+
+    expect(config.codexConfigToml).toContain(
+      `command = "\\"/usr/bin/node\\" \\"/repo/packages/cli/dist/index.js\\" hook codex-block-list --rules \\"/tmp/co-pane-isolated-test/hooks/co-block-list-rules.json\\""`,
+    );
+    expect(checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config))).toEqual([]);
   });
 });
 
@@ -479,6 +524,49 @@ describe('Codex config.toml string escaping', () => {
     expect(config.codexConfigToml).toContain('args = ["--project", "p1"]');
   });
 
+  it('emits scoped Codex MCP env and escapes env values', () => {
+    const config = buildPaneLaunchConfig('codex', {
+      ...BASE_IDENTITY,
+      coMcpEnv: {
+        CO_AGENT: 'impl-"quoted"',
+        CO_ROLE: 'implementer',
+        CO_PARENT: 'lead\\one',
+        CO_PROJECT_ID: 'proj-1',
+      },
+    });
+
+    expect(config.codexConfigToml).toContain('[mcp_servers.co.env]');
+    expect(config.codexConfigToml).toContain('CO_AGENT = "impl-\\"quoted\\""');
+    expect(config.codexConfigToml).toContain('CO_PARENT = "lead\\\\one"');
+    expect(config.codexConfigToml).toContain('CO_PROJECT_ID = "proj-1"');
+    expect(config.prelaunchFiles).toContainEqual({
+      path: `${ISOLATED_HOME}/config.toml`,
+      contents: config.codexConfigToml,
+    });
+  });
+
+  it('rejects invalid scoped MCP env names before writing provider config', () => {
+    expect(() =>
+      buildPaneLaunchConfig('codex', {
+        ...BASE_IDENTITY,
+        coMcpEnv: {
+          CO_AGENT: 'impl-1',
+          'bad.key': 'value',
+        },
+      }),
+    ).toThrow(/coMcpEnv key 'bad\.key'.*environment variable name/i);
+
+    expect(() =>
+      buildPaneLaunchConfig('claude', {
+        ...BASE_IDENTITY,
+        coMcpConfig: `${ISOLATED_HOME}/mcp/co-mcp.json`,
+        coMcpEnv: {
+          '1_BAD': 'value',
+        },
+      }),
+    ).toThrow(/coMcpEnv key '1_BAD'.*environment variable name/i);
+  });
+
   it('rejects relative Codex command paths', () => {
     expect(() =>
       buildPaneLaunchConfig('codex', { ...BASE_IDENTITY, coMcpCommand: 'co-mcp' }),
@@ -512,5 +600,16 @@ describe('Codex config.toml string escaping', () => {
         coMcpArgs: ['/usr/bin/env'],
       }),
     ).toThrow(/coMcpArgs.*usr\/bin\/env/i);
+  });
+
+  it('rejects PATH-dependent executable args for Claude MCP config with a Claude-scoped error', () => {
+    expect(() =>
+      buildPaneLaunchConfig('claude', {
+        ...BASE_IDENTITY,
+        coMcpConfig: `${ISOLATED_HOME}/mcp/co-mcp.json`,
+        coMcpCommand: '/usr/bin/node',
+        coMcpArgs: ['co-mcp'],
+      }),
+    ).toThrow(/buildPaneLaunchConfig\(claude\).*coMcpArgs.*absolute path/i);
   });
 });

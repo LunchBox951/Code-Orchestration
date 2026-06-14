@@ -287,6 +287,35 @@ describe('AC-S10-3.1 — stop kills + releases the warm pane (isHosted false; no
     expect(runningAgentIds(projectId)).not.toContain('impl-x');
   });
 
+  it('still releases the session when pane.kill and the stop-error reporter throw', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    (pane as unknown as { kill: () => void }).kill = () => {
+      throw new Error('kill failed in test');
+    };
+    const errors: Array<{ agent: string; error: unknown }> = [];
+    const router = new DaemonBackedAgentRouter({
+      engine,
+      projectId,
+      onStopError: (agent, error) => {
+        errors.push({ agent, error });
+        throw new Error('reporter failed in test');
+      },
+    });
+
+    expect(() => router.stop('impl-x')).not.toThrow();
+    await expect(router.drain()).resolves.toBeUndefined();
+
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(false);
+    expect(runningAgentIds(projectId)).not.toContain('impl-x');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.agent).toBe('impl-x');
+  });
+
   it('a stop on a not-hosted agent is RECORDED (never a silent no-op), not a throw', () => {
     const { projectId } = makeProject();
     const clock = makeClock();
@@ -302,6 +331,25 @@ describe('AC-S10-3.1 — stop kills + releases the warm pane (isHosted false; no
     expect(() => router.stop('ghost')).not.toThrow();
     expect(unhosted).toEqual(['ghost']);
     expect(router.isStopped('ghost')).toBe(true);
+    expect(router.shouldSkip(projectId, 'ghost')).toBe(true);
+  });
+
+  it('a throwing unhosted-stop diagnostic callback does not make stop throw', () => {
+    const { projectId } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const router = new DaemonBackedAgentRouter({
+      engine,
+      projectId,
+      onStopUnhosted: () => {
+        throw new Error('diagnostic failed in test');
+      },
+    });
+
+    expect(() => router.stop('ghost')).not.toThrow();
+    expect(router.isStopped('ghost')).toBe(true);
+    expect(router.shouldSkip(projectId, 'ghost')).toBe(true);
   });
 });
 

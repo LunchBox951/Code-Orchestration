@@ -14,6 +14,7 @@ export {
   CO_ROLE_ENV,
   CO_PARENT_ENV,
   CO_PROJECT_ID_ENV,
+  CO_MCP_BRIDGE_LOG_ENV,
 } from './context.js';
 export {
   type LiveSessionHost,

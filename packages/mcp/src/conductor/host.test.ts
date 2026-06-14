@@ -9,8 +9,8 @@
  *   - the default `makeTransport` is the `[host-live]` operator-handoff seam (fails loud), and
  *     `runServeConductor` fails loud on a missing project id.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -33,6 +33,7 @@ import { ConductorEngine, type ConductorEngineDeps } from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
 import {
   ConductorHostRunner,
+  defaultServeCoMcpPaths,
   hostLiveTransportRequired,
   runServeConductor,
   serveConductor,
@@ -297,7 +298,7 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     expect(ticks[0]!.selected).toBe('impl-x');
     expect(ticks[0]!.cycle?.turn.turnEnd?.idle).toBe(true);
 
-    runner.stop();
+    await runner.stop();
     expect(scheduler.cleared).toBe(true);
     expect(runner.started).toBe(false);
   });
@@ -321,6 +322,33 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     });
     runner.start();
     expect(() => runner.start()).toThrow(/already started/i);
+  });
+
+  it('stop() runs teardown once even when the cadence was never started', async () => {
+    const { projectId } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+    });
+    const onStop = vi.fn();
+    const runner = new ConductorHostRunner({
+      daemon,
+      intervalMs: 1000,
+      scheduler: new FakeScheduler(),
+      onStop,
+    });
+
+    await runner.stop();
+    await runner.stop();
+
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(() => runner.start()).toThrow(/already been stopped/i);
   });
 
   it('skips a beat while a prior tick is still in flight (re-entrancy guard — no overlap)', async () => {
@@ -364,6 +392,46 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     await flush();
     expect(ticks).toHaveLength(2);
   });
+
+  it('stop() waits for an in-flight tick before running teardown', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const pane = await hostPane(engine, pty, makeIdentity('impl-x', projectId, cwd));
+    seedActionableMail(projectId, 'impl-x');
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+    });
+    const scheduler = new FakeScheduler();
+    const onStop = vi.fn();
+    const runner = new ConductorHostRunner({
+      daemon,
+      intervalMs: 1000,
+      scheduler,
+      onStop,
+    });
+    runner.start();
+
+    scheduler.fire();
+    await tick();
+    const stopP = runner.stop();
+    await tick();
+
+    expect(runner.started).toBe(false);
+    expect(scheduler.cleared).toBe(true);
+    expect(onStop).not.toHaveBeenCalled();
+
+    await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
+    await stopP;
+
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ── serveConductor wiring + the [host-live] handoff seams ─────────────────────
@@ -392,7 +460,26 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     expect(ticks).toHaveLength(1);
     expect(ticks[0]!.candidateCount).toBe(0); // empty project ⇒ nothing to drive
     expect(ticks[0]!.selected).toBeNull();
-    runner.stop();
+    await runner.stop();
+  });
+
+  it('default serve MCP paths copy provider auth into isolated pane homes', () => {
+    const home = mkdtempSync(join(tmpdir(), 'co-serve-home-'));
+    dataDirs.push(home);
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    writeFileSync(join(home, '.claude', '.credentials.json'), '{"claude":true}\n');
+    writeFileSync(join(home, '.codex', 'auth.json'), '{"codex":true}\n');
+
+    const paths = defaultServeCoMcpPaths({
+      argv: ['node', '/tmp/repo/packages/mcp/dist/bin.js'],
+      env: { CO_CLI_COMMAND: '/tmp/repo/packages/cli/dist/index.js' },
+      nodeCommand: '/usr/bin/node',
+      homeDir: home,
+    });
+
+    expect(paths.claudeCredentialsJson).toBe('{"claude":true}\n');
+    expect(paths.codexAuthJson).toBe('{"codex":true}\n');
   });
 
   it('autoStart:false builds without arming the cadence', async () => {
@@ -411,6 +498,65 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     });
     expect(runner.started).toBe(false);
     expect(scheduler.ms).toBeNull();
+    await runner.stop();
+  });
+
+  it('stop() closes warm panes owned by serveConductor', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const ensureP = engine.ensureHosted(makeIdentity('impl-stop', projectId, cwd));
+    const pane = pty.panes[0]!;
+    let exited = false;
+    pane.onExit(() => void (exited = true));
+    pane.emit(CLAUDE_READY);
+    await ensureP;
+
+    await runner.stop();
+
+    expect(exited).toBe(true);
+    expect(engine.isHosted(projectId, 'impl-stop')).toBe(false);
+    const sessions = openSessionStore(projectId);
+    try {
+      expect(sessions.getSession('impl-stop')).toBeUndefined();
+    } finally {
+      sessions.close();
+    }
+  });
+
+  it('reports tick errors to stderr when no onError seam is supplied', async () => {
+    const scheduler = new FakeScheduler();
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const runner = new ConductorHostRunner({
+      daemon: {
+        recover: () => [],
+        tick: async () => {
+          throw new Error('tick failed in test');
+        },
+      } as unknown as ConductorDaemon,
+      intervalMs: 1000,
+      scheduler,
+    });
+
+    runner.start();
+    scheduler.fire();
+    await flush();
+
+    expect(spy).toHaveBeenCalledWith('[co serve] tick error:', expect.any(Error));
+    spy.mockRestore();
+    await runner.stop();
   });
 
   it('wires the P3 control/observe surface: router + observe + the pause-skip predicate (§3d)', async () => {
@@ -471,7 +617,7 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     expect(x?.paused).toBe(true);
     expect(x?.outstandingMail).toBe(1);
 
-    runner.stop();
+    await runner.stop();
   });
 
   it('the default makeTransport is the [host-live] operator-handoff seam (fails loud)', () => {

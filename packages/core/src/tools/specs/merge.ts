@@ -210,7 +210,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
     'co_pr_merge path. @operator may use an audited override with a non-empty reason.',
   inputSchema: mergeInput,
   outputSchema: mergeOutput,
-  handler: (ctx, input): MergeOutput => {
+  handler: async (ctx, input): Promise<MergeOutput> => {
     if (!ctx.reviews) {
       throw new Error('co_merge: the mount did not inject a review store (ctx.reviews absent).');
     }
@@ -284,7 +284,10 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
           reviewerSpawnGate: ctx.reviewerSpawnGate,
         });
         const existingReq = ctx.reviews.getReviewRequest(into, input.branch);
-        const reviewId = existingReq?.reviewId ?? `rev-${Date.now().toString(36)}`;
+        const reviewId =
+          existingReq != null && verdict == null
+            ? existingReq.reviewId
+            : `rev-${Date.now().toString(36)}`;
         triggerGate.triggerReview({
           reviewId,
           target: into,
@@ -293,6 +296,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
           scope: 'worker_merge',
           projectId: ctx.projectId,
         });
+        await triggerGate.drainSpawns();
         return {
           merged: false,
           // The merge hasn't happened yet — the review is pending — so there is no commit to report.

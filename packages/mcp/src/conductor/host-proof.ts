@@ -1,50 +1,80 @@
 /**
  * P4 (Stage 10 · AC-S10-4·2) — the turnkey host-proof driver. Composes the LANDED building blocks
- * into the full operator proof: spawn → inject 1 mail → 1 turn → assert mail routed → SIGKILL →
- * `recoverProjectStore` → reconstruct → mid-turn `steer`.
+ * into the full operator proof: spawn → inject 1 mail → 1 turn → assert mail routed → warm-pane
+ * `steer` → SIGKILL → `recoverProjectStore` → reconstruct.
  *
  * IN-SANDBOX: runs against {@link FakePty} + the fake-provider transport (2a) + injected time
  * (deterministic). The FakePty pane and turn are driven externally by the test harness (emit
  * startup bytes, then turn bytes, then settle the quiet window).
  *
- * HOST-LIVE: the operator swaps in `NodePtyHost.create()` + the real stream transport (2a's
- * {@link createStreamTransportPair}) + real timers. That swap is the ONLY `[host-live]` part.
+ * HOST-LIVE: the operator swaps in `NodePtyHost.create()` + a socket bridge transport (the
+ * provider launches `co-mcp bridge <socket>`) + real timers. That swap is the ONLY `[host-live]` part.
  *
  * REGISTERS ZERO AGENT MCP TOOLS (Principle 4 + D4). The driver is operator-only.
  */
 import {
+  MAIL_CLARIFY_REQUEST,
+  OPERATOR,
+  buildPaneLaunchConfig,
+  normalizeStartupOutput,
   openMailStore,
   openRegistry,
   openSessionStore,
   recoverProjectStore,
+  toolsForRole,
   type DeliveredMail,
   type InjectMailOptions,
+  type MailRenderer,
   type ProjectId,
   type PtyHost,
   type SessionRecord,
+  type SpawnSpec,
 } from '@co/core';
+import { randomUUID } from 'node:crypto';
+import { dirname, join } from 'node:path';
 import { ConductorEngine, type TransportPair } from './engine.js';
 import type { HostedIdentity } from '../live-session-host.js';
+import {
+  CO_AGENT_ENV,
+  CO_MCP_BRIDGE_LOG_ENV,
+  CO_PARENT_ENV,
+  CO_PROJECT_ID_ENV,
+  CO_ROLE_ENV,
+} from '../context.js';
+import { defaultCoMcpPaths } from './host-launch-paths.js';
+import { providerAuthPrelaunchFiles } from './placement-launch.js';
 
 // ── Seams ─────────────────────────────────────────────────────────────────────
 
 /**
  * Injectable seams for {@link runHostProof}. In-sandbox, inject {@link FakePty},
- * {@link InMemoryTransport.createLinkedPair} (or {@link createStreamTransportPair}), a mutable
+ * {@link InMemoryTransport.createLinkedPair} (or a socket/stream transport pair), a mutable
  * counter clock, and a controllable settle seam. Host-live, inject {@link NodePtyHost.create},
- * {@link createStreamTransportPair}, {@link monotonicNowMs}, and {@link realQuietWindow}.
+ * {@link createSocketBridgeTransportPair}, {@link monotonicNowMs}, and {@link realQuietWindow}.
  */
 export interface HostProofSeams {
   /** Hosts panes. `FakePty` in-sandbox; `NodePtyHost` host-live. */
   readonly pty: PtyHost;
   /** Produces the linked transport pair for the engine's MCP bind. */
-  readonly makeTransport: () => TransportPair;
+  readonly makeTransport: (identity: HostedIdentity) => TransportPair;
+  /** Optional explicit tool surface for the hosted proof session. */
+  readonly sessionTools?: (identity: HostedIdentity) => ReturnType<typeof toolsForRole> | undefined;
   /** Monotonic ms source — DATA, never a wall clock. */
   readonly now: () => number;
   /** Byte-quiet window seam. */
   readonly quietWindow: (signal: AbortSignal) => Promise<void>;
   /** Extra inject options (e.g. a non-resolving `retryDelay` for sandbox determinism). */
   readonly injectOptions?: Omit<InjectMailOptions, 'provider'>;
+  /** Optional proof-specific renderer for the injected mail text. */
+  readonly renderMail?: MailRenderer;
+  /** Optional host-live settle after startup before injecting the proof turn. */
+  readonly afterReady?: () => Promise<void>;
+  /** Optional host-live settle after route proof before steering the still-running turn. */
+  readonly beforeSteer?: () => Promise<void>;
+  /** Optional pane transcript hook for host-live diagnostics. */
+  readonly onPaneData?: (chunk: string) => void;
+  /** Optional explicit provider spawn spec. Host-live uses this to attach provider MCP config. */
+  readonly spawnSpec?: SpawnSpec;
   /**
    * Called after the turn completes with the client-side transport so that in-sandbox tests can
    * connect a fake MCP Client and call `co_mail_send`, simulating what a real agent does during
@@ -54,6 +84,11 @@ export interface HostProofSeams {
    * Host-live: omit (the real agent calls `co_mail_send` naturally during the turn).
    */
   readonly awaitMailRouted?: (clientTransport: TransportPair[0]) => Promise<void>;
+  /**
+   * Optional per-run nonce that a routed proof mail must echo in its subject or body. Host-live uses this
+   * to prove the reply belongs to THIS proof run, not a stale same-sender item from an earlier attempt.
+   */
+  readonly expectedRouteNonce?: string;
 }
 
 // ── Result ────────────────────────────────────────────────────────────────────
@@ -64,12 +99,16 @@ export interface HostProofResult {
   readonly turnRan: boolean;
   /** True when the turn reached an idle boundary (byte-quiescence). */
   readonly turnIdle: boolean;
+  /** Turn error diagnostic when `turnRan` is false. */
+  readonly turnError?: string;
   /** True when `recoverProjectStore` + `openSessionStore().listSessions()` reconstructed the agent's session. */
   readonly sessionReconstructed: boolean;
   /** True when at least one mail item was routed to another agent during or after the turn. */
   readonly mailRouted: boolean;
   /** True when `engine.steer` succeeded on the (still-warm) hosted pane. */
   readonly steerCompleted: boolean;
+  /** True when the steer was sent before the turn promise settled. */
+  readonly steerMidTurn: boolean;
   /** The recovered session records (for caller inspection). */
   readonly recoveredSessions: readonly SessionRecord[];
 }
@@ -90,11 +129,10 @@ export interface HostProofResult {
  *       to prove the {@link LiveDelivery} routing path is live. Host-live: the real agent calls
  *       `co_mail_send` naturally during the turn, so this seam is omitted. Either way, the driver
  *       checks the parent's mail store for routed items and records `mailRouted`.
- *   4. `pane.kill('SIGKILL')` — simulate a crash.
- *   5. {@link recoverProjectStore} — holistic replay from the event log.
- *   6. {@link openSessionStore}.listSessions() — reconstruct the live set; assert the agent is there.
- *   7. {@link ConductorEngine.steer} — mid-turn `interrupt` on the still-hosted pane (the engine
- *      keeps the warm handle until explicit release; steer proves the routing path is live).
+ *   4. {@link ConductorEngine.steer} — interrupt on the still-hosted pane BEFORE crash simulation.
+ *   5. `pane.kill('SIGKILL')` — simulate a crash.
+ *   6. {@link recoverProjectStore} — holistic replay from the event log.
+ *   7. {@link openSessionStore}.listSessions() — reconstruct the live set; assert the agent is there.
  *
  * @param projectId - The project whose live set to drive.
  * @param identity  - The authoritative session identity (from the P2 session record).
@@ -110,75 +148,251 @@ export async function runHostProof(
   const engine = new ConductorEngine({
     pty: seams.pty,
     makeTransport: seams.makeTransport,
+    ...(seams.sessionTools != null ? { sessionTools: seams.sessionTools } : {}),
     now: seams.now,
     quietWindow: seams.quietWindow,
     ...(seams.injectOptions != null ? { injectOptions: seams.injectOptions } : {}),
+    ...(seams.renderMail != null ? { renderMail: seams.renderMail } : {}),
   });
 
-  // Step 2: spawn → driveToReady → bind MCP.
-  const hosted = await engine.ensureHosted(identity);
+  let unsubPaneData = noop;
+  try {
+    // Step 2: spawn → bind MCP → driveToReady.
+    const hosted = await engine.ensureHosted(identity, seams.spawnSpec);
+    if (seams.onPaneData != null) {
+      unsubPaneData = hosted.pane.onData(seams.onPaneData);
+    }
+    if (!hosted.startup.authed) {
+      const methods = hosted.startup.loginRequired?.methods.join(', ') || 'unknown methods';
+      throw new Error(
+        `runHostProof: provider '${identity.provider}' is not authenticated; login required ` +
+          `before host proof can inject a turn (${methods}).`,
+      );
+    }
+    await seams.afterReady?.();
 
-  // Step 3: inject mail → run EXACTLY ONE turn → detect idle.
-  const turn = await engine.runOneTurn(hosted, mail);
+    const beforeRouteSeq = parentInboxMaxSeq(projectId, identity.parent);
 
-  // Step 3b: prove emitted-mail routing through the live MCP surface.
-  // In-sandbox: the seam connects a fake MCP Client and calls co_mail_send, simulating what the
-  // real agent does during a turn. Host-live: omit the seam; the real agent calls co_mail_send
-  // naturally, and the mail is already in the store by the time the turn resolves.
-  await seams.awaitMailRouted?.(hosted.clientTransport);
+    // Step 3: inject mail → run EXACTLY ONE turn → detect idle. Keep the promise live so the steer can
+    // be sent before the turn settles whenever the routing proof arrives first.
+    let turnSettled = false;
+    const turnP = engine.runOneTurn(hosted, mail).finally(() => {
+      turnSettled = true;
+    });
+
+    // Step 3b: prove emitted-mail routing through the live MCP surface.
+    // In-sandbox: the seam connects a fake MCP Client and calls co_mail_send, simulating what the
+    // real agent does during a turn. Host-live: omit the seam; the driver polls for the real routed
+    // proof mail and races that with the turn boundary.
+    let mailRouted: boolean;
+    if (seams.awaitMailRouted != null) {
+      await seams.awaitMailRouted(hosted.clientTransport);
+      mailRouted = hasRoutedProofMail(
+        projectId,
+        identity,
+        beforeRouteSeq,
+        seams.expectedRouteNonce,
+      );
+    } else {
+      mailRouted = await waitForRouteOrTurn(turnP, () =>
+        hasRoutedProofMail(projectId, identity, beforeRouteSeq, seams.expectedRouteNonce),
+      );
+    }
+
+    // Step 4: steer the still-live warm pane before crash simulation. When routing proves before the
+    // turn settles, this is a true mid-turn steer (SF-2); otherwise it remains a fail-loud warm-pane
+    // steer before crash.
+    await seams.beforeSteer?.();
+    const steerMidTurn = !turnSettled;
+    await engine.steer(projectId, identity.agent, { kind: 'interrupt' });
+    const turn = await turnP;
+    if (!mailRouted) {
+      mailRouted = hasRoutedProofMail(
+        projectId,
+        identity,
+        beforeRouteSeq,
+        seams.expectedRouteNonce,
+      );
+    }
+
+    // Step 5: SIGKILL — simulate a provider crash.
+    hosted.pane.kill('SIGKILL');
+
+    // Step 6: holistic recovery — rebuild every read-model from the event log.
+    recoverProjectStore(projectId);
+
+    // Step 7: reconstruct the live set from the recovered projections.
+    const sessionStore = openSessionStore(projectId);
+    let recoveredSessions: readonly SessionRecord[];
+    try {
+      recoveredSessions = sessionStore.listSessions();
+    } finally {
+      sessionStore.close();
+    }
+    const sessionReconstructed = recoveredSessions.some((s) => s.agentId === identity.agent);
+
+    return {
+      turnRan: !turn.errored,
+      turnIdle: turn.turnEnd?.idle === true,
+      ...(turn.error != null ? { turnError: errorMessage(turn.error) } : {}),
+      mailRouted,
+      sessionReconstructed,
+      steerCompleted: true,
+      steerMidTurn,
+      recoveredSessions,
+    };
+  } finally {
+    unsubPaneData();
+    await engine.closeAll();
+  }
+}
+
+function parentInboxMaxSeq(projectId: ProjectId, parent: string): number {
+  const store = openMailStore(projectId);
+  try {
+    return Math.max(0, ...store.inbox(parent).map((item) => item.seq));
+  } finally {
+    store.close();
+  }
+}
+
+function hasRoutedProofMail(
+  projectId: ProjectId,
+  identity: HostedIdentity,
+  beforeRouteSeq: number,
+  expectedRouteNonce: string | undefined,
+): boolean {
   const routingStore = openMailStore(projectId);
-  let mailRouted: boolean;
   try {
     // Principle 9 — fail loud: assert the hosted agent itself sent a NEW reply to the parent,
     // NOT merely that the parent's queue is non-empty. The parent may already hold ≥1 item
     // before the turn runs (e.g. the injected test mail in the [host-live] path), so a plain
     // `.length > 0` check is unconditionally true and can never catch broken routing.
     // Matching by `sender === identity.agent` proves a NEW item arrived FROM the hosted agent.
-    mailRouted = routingStore
-      .outstanding(identity.parent)
-      .some((item) => item.sender === identity.agent);
+    return routingStore.inbox(identity.parent).some((item) => {
+      if (item.seq <= beforeRouteSeq) return false;
+      if (item.sender !== identity.agent) return false;
+      return (
+        expectedRouteNonce == null ||
+        item.subject.includes(expectedRouteNonce) ||
+        item.body.includes(expectedRouteNonce)
+      );
+    });
   } finally {
     routingStore.close();
   }
+}
 
-  // Step 4: SIGKILL — simulate a provider crash.
-  hosted.pane.kill('SIGKILL');
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
-  // Step 5: holistic recovery — rebuild every read-model from the event log.
-  recoverProjectStore(projectId);
+const noop = (): void => {};
 
-  // Step 6: reconstruct the live set from the recovered projections.
-  const sessionStore = openSessionStore(projectId);
-  let recoveredSessions: readonly SessionRecord[];
-  try {
-    recoveredSessions = sessionStore.listSessions();
-  } finally {
-    sessionStore.close();
+async function waitForRouteOrTurn(
+  turnP: Promise<unknown>,
+  hasRoute: () => boolean,
+): Promise<boolean> {
+  for (;;) {
+    if (hasRoute()) return true;
+    const settled = await Promise.race([
+      turnP.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    if (settled) return hasRoute();
   }
-  const sessionReconstructed = recoveredSessions.some((s) => s.agentId === identity.agent);
+}
 
-  // Step 7: mid-turn steer — interrupt on the still-hosted warm pane.
-  // The engine keeps the warm handle until explicit release; an interrupt writes the provider's
-  // interrupt key to the pane without a composer echo (no await on a pty read).
-  await engine.steer(projectId, identity.agent, { kind: 'interrupt' });
+// ── Provider launch config ───────────────────────────────────────────────────
 
-  await engine.closeAll();
+export interface HostProofLaunchPaths {
+  /** Isolated config/home dir for the proof pane. */
+  readonly isolatedHomeDir: string;
+  /** Absolute co MCP stdio command. */
+  readonly coMcpCommand: string;
+  /** Arguments for the co MCP stdio command. */
+  readonly coMcpArgs?: readonly string[];
+  /** Optional per-pane bridge socket path. */
+  readonly coMcpBridgeSocketPath?: (isolatedHomeDir: string, agent: string) => string;
+  /** Absolute co CLI command used by Codex hooks. */
+  readonly coCliCommand: string;
+  /** Optional host-copied Claude auth file contents for the isolated CLAUDE_CONFIG_DIR. */
+  readonly claudeCredentialsJson?: string;
+  /** Optional host-copied Codex auth file contents for the isolated CODEX_HOME. */
+  readonly codexAuthJson?: string;
+  /** Optional Codex hook CLI args, e.g. an absolute script path for `node <script>`. */
+  readonly coCliArgs?: readonly string[];
+}
+
+export function buildHostProofSpawnSpec(
+  identity: HostedIdentity,
+  paths: HostProofLaunchPaths,
+): SpawnSpec {
+  const mountedRole =
+    identity.subRole != null ? `${identity.role}:${identity.subRole}` : identity.role;
+  const bridgeSocketPath = paths.coMcpBridgeSocketPath?.(paths.isolatedHomeDir, identity.agent);
+  const coMcpArgs =
+    bridgeSocketPath == null
+      ? paths.coMcpArgs
+      : [...(paths.coMcpArgs ?? []), 'bridge', bridgeSocketPath];
+  const paneLaunchConfig = buildPaneLaunchConfig(identity.provider, {
+    cwd: identity.cwd,
+    isolatedHomeDir: paths.isolatedHomeDir,
+    ...(identity.provider === 'claude'
+      ? { coMcpConfig: `${paths.isolatedHomeDir.replace(/\/+$/u, '')}/mcp/co-mcp.json` }
+      : {}),
+    coMcpCommand: paths.coMcpCommand,
+    coMcpArgs,
+    coMcpEnv: {
+      [CO_AGENT_ENV]: identity.agent,
+      [CO_ROLE_ENV]: mountedRole,
+      [CO_PARENT_ENV]: identity.parent,
+      [CO_PROJECT_ID_ENV]: identity.projectId,
+      ...bridgeDiagnosticEnv(paths.isolatedHomeDir, bridgeSocketPath),
+    },
+    coCliCommand: paths.coCliCommand,
+    ...(paths.coCliArgs != null ? { coCliArgs: paths.coCliArgs } : {}),
+  });
 
   return {
-    turnRan: !turn.errored,
-    turnIdle: turn.turnEnd?.idle === true,
-    mailRouted,
-    sessionReconstructed,
-    steerCompleted: true,
-    recoveredSessions,
+    command: identity.provider,
+    args: [...paneLaunchConfig.args, ...codexBridgeSocketArgs(identity.provider, bridgeSocketPath)],
+    cwd: identity.cwd,
+    env: { ...paneLaunchConfig.env },
+    prelaunchFiles: [
+      ...(paneLaunchConfig.prelaunchFiles ?? []),
+      ...providerAuthPrelaunchFiles(identity.provider, paths.isolatedHomeDir, paths),
+    ],
   };
+}
+
+function bridgeDiagnosticEnv(
+  isolatedHomeDir: string,
+  bridgeSocketPath: string | undefined,
+): Record<string, string> {
+  if (bridgeSocketPath == null) return {};
+  return {
+    [CO_MCP_BRIDGE_LOG_ENV]: hostProofBridgeLogPath(isolatedHomeDir),
+  };
+}
+
+function hostProofBridgeLogPath(isolatedHomeDir: string): string {
+  return `${isolatedHomeDir.replace(/\/+$/u, '')}/mcp/bridge.log`;
+}
+
+function codexBridgeSocketArgs(
+  provider: 'claude' | 'codex',
+  bridgeSocketPath: string | undefined,
+): readonly string[] {
+  if (provider !== 'codex' || bridgeSocketPath == null) return [];
+  return ['--add-dir', dirname(bridgeSocketPath)];
 }
 
 // ── Operator entry ────────────────────────────────────────────────────────────
 
 /**
  * The `co-mcp host-proof <provider> [projectId]` operator entry. Runs {@link runHostProof} once
- * against the given provider using the `[host-live]` seams (real node-pty, real stream transport,
+ * against the given provider using the `[host-live]` seams (real node-pty, real socket bridge transport,
  * real timers). When `projectId` is omitted, it is resolved from the current working directory
  * via the project registry (the same lookup that `co doctor` / `co status` perform).
  *
@@ -213,63 +427,104 @@ export async function runHostProofCommand(argv: readonly string[]): Promise<void
       );
     }
   }
-  // [host-live] — import real seams at call-time (node-pty + real timers + stream transport).
+  // [host-live] — import real seams at call-time (node-pty + real timers + socket bridge transport).
   // These are NOT imported at module-load so the module is safe to import in-sandbox tests
   // without side-effects (node-pty is a native addon; its absence in sandbox must not crash).
   const { NodePtyHost } = await import('@co/core');
-  const { createStreamTransportPair } = await import('./real-transport.js');
+  const { createSocketBridgeTransportPair } = await import('./real-transport.js');
   const { monotonicNowMs, realQuietWindow } = await import('./host.js');
 
-  const mailStore = openMailStore(projectId);
-  let mail: DeliveredMail | undefined;
-  try {
-    const entries = mailStore.outstanding('@operator');
-    mail = entries[0];
-    if (mail == null) {
-      throw new Error(
-        `co-mcp host-proof: no outstanding @operator mail in project '${projectId}'. ` +
-          'Inject a test mail with `co mail send` before running the proof.',
-      );
-    }
-  } finally {
-    mailStore.close();
-  }
-
   const pty = await NodePtyHost.create();
+  const runId = randomUUID();
+  const nonce = `host-proof-${provider}-${runId}`;
+  const agent = `host-proof-${provider}-${runId}`;
+  const isolatedHomeDir = hostProofIsolatedHomeDir(projectId, agent);
 
   // [host-live] identity — build the correct discriminated ResumeHandle for the provider.
   const resume =
     provider === 'claude'
       ? ({ provider: 'claude', sessionId: `host-proof-session-${provider}` } as const)
-      : ({ provider: 'codex', codexHome: process.env.HOME ?? '/tmp' } as const);
+      : ({ provider: 'codex', codexHome: isolatedHomeDir } as const);
 
   const identity: HostedIdentity = {
-    agent: `host-proof-${provider}`,
+    agent,
     role: 'coordinator',
     parent: '@operator',
-    pane: `host-proof-pane-${provider}`,
+    pane: `host-proof-pane-${provider}-${runId}`,
     projectId,
     cwd: process.cwd(),
     provider,
     resume,
   };
 
+  const mcpPaths = defaultCoMcpPaths({ includeProviderAuth: true });
+  const socketPath = mcpPaths.coMcpBridgeSocketPath?.(isolatedHomeDir, identity.agent);
+  if (socketPath == null) {
+    throw new Error('co-mcp host-proof: default MCP paths did not provide a bridge socket path.');
+  }
+  const spawnSpec = buildHostProofSpawnSpec(identity, {
+    isolatedHomeDir,
+    ...mcpPaths,
+  });
+  const proofToolName = 'mcp__co__co_mail_send';
+  const proofTools = toolsForRole('coordinator').filter((tool) => tool.name === 'co_mail_send');
+  if (proofTools.length !== 1) {
+    throw new Error(
+      `co-mcp host-proof: expected exactly one co_mail_send proof tool, got ${proofTools.length}.`,
+    );
+  }
+  const bridgeLogPath = hostProofBridgeLogPath(isolatedHomeDir);
+
+  const mailStore = openMailStore(projectId);
+  let mail: DeliveredMail;
+  try {
+    mail = mailStore.send({
+      type: MAIL_CLARIFY_REQUEST,
+      to: identity.agent,
+      from: OPERATOR,
+      subject: `host-proof ${nonce}`,
+      body:
+        `Host proof nonce: ${nonce}\n\n` +
+        `Call the ${proofToolName} MCP tool exactly once. Do not use shell, Bash, node, or a ` +
+        `custom script. Send it to ${OPERATOR} with type ${MAIL_CLARIFY_REQUEST}. The subject ` +
+        `or body must include this nonce exactly: ${nonce}. After the tool call returns, print ` +
+        `this visible line in the chat: host-proof complete ${nonce}`,
+      idempotencyKey: nonce,
+    });
+  } finally {
+    mailStore.close();
+  }
+
   console.error(`[co host-proof] running against ${provider} in project '${projectId}'…`);
 
   const result = await runHostProof(projectId, identity, mail, {
     pty,
-    makeTransport: createStreamTransportPair,
+    makeTransport: () => createSocketBridgeTransportPair(socketPath, bridgeLogPath),
+    sessionTools: () => proofTools,
     now: monotonicNowMs,
     quietWindow: realQuietWindow,
+    injectOptions: { retryDelay: hostProofInjectRetryDelay, allowUnverifiedSubmit: true },
+    afterReady: hostProofReadySettle,
+    beforeSteer: hostProofBeforeSteerSettle,
+    ...(process.env.CO_HOST_PROOF_TRACE === '1' ? { onPaneData: hostProofTracePaneData } : {}),
+    renderMail: () =>
+      `Host proof nonce ${nonce}: call the ${proofToolName} MCP tool exactly once to ` +
+      `${OPERATOR} with type ${MAIL_CLARIFY_REQUEST}; include nonce ${nonce} in the subject ` +
+      'or body. Do not use shell, Bash, node, or a custom script. After the tool call returns, ' +
+      `print this visible line in the chat: host-proof complete ${nonce}`,
+    spawnSpec,
+    expectedRouteNonce: nonce,
   });
 
   console.error(
     `[co host-proof] result:\n` +
       `  turnRan=${result.turnRan}\n` +
       `  turnIdle=${result.turnIdle}\n` +
+      `  turnError=${result.turnError ?? '-'}\n` +
       `  mailRouted=${result.mailRouted}\n` +
       `  sessionReconstructed=${result.sessionReconstructed}\n` +
       `  steerCompleted=${result.steerCompleted}\n` +
+      `  steerMidTurn=${result.steerMidTurn}\n` +
       `  recoveredSessions=${result.recoveredSessions.length}`,
   );
 
@@ -278,7 +533,8 @@ export async function runHostProofCommand(argv: readonly string[]): Promise<void
     !result.turnIdle ||
     !result.mailRouted ||
     !result.sessionReconstructed ||
-    !result.steerCompleted
+    !result.steerCompleted ||
+    !result.steerMidTurn
   ) {
     throw new Error(
       '[co host-proof] FAIL — one or more proof steps did not pass (see output above).',
@@ -286,4 +542,42 @@ export async function runHostProofCommand(argv: readonly string[]): Promise<void
   }
 
   console.error('[co host-proof] PASS — all proof steps completed.');
+}
+
+function hostProofIsolatedHomeDir(projectId: ProjectId, agent: string): string {
+  const registry = openRegistry();
+  try {
+    return join(registry.dataDirFor(projectId), 'host-proof', agent);
+  } finally {
+    registry.close();
+  }
+}
+
+function hostProofInjectRetryDelay(signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, 2000);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+function hostProofReadySettle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 4000));
+}
+
+function hostProofBeforeSteerSettle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 1750));
+}
+
+function hostProofTracePaneData(chunk: string): void {
+  const normalized = normalizeStartupOutput(chunk);
+  if (normalized.length > 0) {
+    console.error(`[co host-proof trace] ${normalized}`);
+  }
 }

@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodePtyHost } from './node-pty-host.js';
@@ -152,6 +160,8 @@ describe('NodePtyHost — prelaunch artifacts', () => {
 
       expect(readFileSync(configPath, 'utf8')).toBe('sandbox_mode = "workspace-write"\n');
       expect(readFileSync(rulesPath, 'utf8')).toBe('{"version":1}\n');
+      expect(statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(statSync(rulesPath).mode & 0o777).toBe(0o600);
       expect(mod.calls).toHaveLength(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -175,6 +185,31 @@ describe('NodePtyHost — prelaunch artifacts', () => {
       ).toThrow();
 
       expect(mod.calls).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('tightens permissions when overwriting an existing prelaunch file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'co-node-pty-prelaunch-mode-'));
+    const mod = new FakeNodePty();
+    const authPath = join(dir, 'codex', 'auth.json');
+    try {
+      mkdirSync(join(dir, 'codex'), { recursive: true });
+      writeFileSync(authPath, '{"old":true}\n', { mode: 0o644 });
+      chmodSync(authPath, 0o644);
+
+      new NodePtyHost(mod).spawn({
+        command: 'codex',
+        args: [],
+        cwd: '/work/agent-1',
+        env: { CODEX_HOME: join(dir, 'codex') },
+        prelaunchFiles: [{ path: authPath, contents: '{"new":true}\n' }],
+      });
+
+      expect(readFileSync(authPath, 'utf8')).toBe('{"new":true}\n');
+      expect(statSync(authPath).mode & 0o777).toBe(0o600);
+      expect(mod.calls).toHaveLength(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

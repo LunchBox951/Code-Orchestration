@@ -511,6 +511,41 @@ describe('ConductorDaemon — deterministic: same injected inputs ⇒ same tick-
 
 // ── AC-S10-1 (5) / MNR #5: single launch authority — no duplicate host across ticks ─────────────
 describe('ConductorDaemon — single launch authority (MNR-5): warm reuse, never a second spawn', () => {
+  it('does not cold-launch a recovered session that is not warm in this engine process', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'impl-cold', role: 'implementer', parent: 'lead-1' });
+    const sessions = openSessionStore(projectId);
+    sessionStores.push(sessions);
+    sessions.recordSession({
+      agentId: 'impl-cold',
+      pane: 'pane-impl-cold',
+      cwd,
+      provider: 'claude',
+      resume: { provider: 'claude', sessionId: 'session-impl-cold' },
+    });
+    seedActionableMail(projectId, 'impl-cold');
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw, {
+      spawnSpecFor: () => {
+        throw new Error('cold launch should not happen from a recovered session');
+      },
+    });
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock);
+
+    const out = await daemon.tick();
+
+    expect(out.candidateCount).toBe(1);
+    expect(out.coldCandidates).toEqual(['impl-cold']);
+    expect(out.selected).toBeNull();
+    expect(out.cycle).toBeNull();
+    expect(pty.panes).toHaveLength(0);
+  });
+
   it('reuses the warm pane across two ticks and never spawns a second pane for one agent', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');

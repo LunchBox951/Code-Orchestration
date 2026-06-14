@@ -7,9 +7,9 @@
  * sandbox-proven requirement; this module drives its `tick()` on a REAL cadence (`setInterval`) with
  * REAL panes ({@link NodePtyHost}) and a real `now`/`quietWindow`. It is built and unit-tested with
  * `FakePty` + a CONTROLLABLE scheduler (the cadence loop, re-entrancy guard, and lifecycle are proven),
- * but it is NEVER executed against a real `claude`/`codex` binary in-sandbox — binding the co MCP
- * surface to a real pty-bound provider transport is the operator handoff (the default `makeTransport`
- * throws a clear `[host-live]` message, mirroring the `co unstick`/`co pause` router-seam discipline).
+ * but it is NEVER executed against a real `claude`/`codex` binary in-sandbox. The operator entry wires
+ * scoped provider MCP paths; direct `serveConductor` callers must inject `makeTransport` or hit the
+ * fail-loud default seam.
  *
  * REGISTERS ZERO AGENT MCP TOOLS (Principle 4 + D4). `co serve` is an OPERATOR-only launch (blessed
  * name, D6); it is exposed from the `@co/mcp` package (the daemon needs the MCP SDK, and `@co/cli`
@@ -41,6 +41,8 @@ import { EngineLiveStateProvider } from './live-observe.js';
 import type { HostedIdentity } from '../live-session-host.js';
 import { EngineReviewerSpawnGate } from './reviewer-gate.js';
 import { type CoMcpPaths } from './placement-launch.js';
+import { createSocketBridgeTransportPair } from './real-transport.js';
+import { defaultCoMcpPaths, type HostLaunchPathOptions } from './host-launch-paths.js';
 
 // ── The cadence scheduler seam (injected so the loop is FakePty-unit-testable) ──────────────────────
 
@@ -91,7 +93,7 @@ export interface ConductorHostRunnerDeps {
   /** Fail-loud seam: a tick that threw (e.g. the un-wired `[host-live]` transport). Never swallowed. */
   readonly onError?: (error: unknown) => void;
   /** Called by {@link ConductorHostRunner.stop} so callers can close resources tied to the runner's lifetime. */
-  readonly onStop?: () => void;
+  readonly onStop?: () => void | Promise<void>;
   /**
    * The operator control/observe surface (P3). Optional: the cadence runner works without it (existing
    * callers/tests are unchanged); {@link serveConductor} always wires it so the operator can control +
@@ -113,11 +115,12 @@ export class ConductorHostRunner {
   private readonly scheduler: IntervalScheduler;
   private readonly onTick: ((outcome: DaemonTickOutcome) => void) | undefined;
   private readonly onError: ((error: unknown) => void) | undefined;
-  private readonly onStop: (() => void) | undefined;
+  private readonly onStop: (() => void | Promise<void>) | undefined;
   /** The operator control/observe surface (P3), present when built by {@link serveConductor}. */
   readonly control: ConductorControlSurface | undefined;
   private handle: IntervalHandle | null = null;
-  private inFlight = false;
+  private inFlight: Promise<void> | null = null;
+  private stopped = false;
 
   constructor(deps: ConductorHostRunnerDeps) {
     this.daemon = deps.daemon;
@@ -140,6 +143,9 @@ export class ConductorHostRunner {
    * on a double-start (the cadence must have a single owner).
    */
   start(): readonly HostedIdentity[] {
+    if (this.stopped) {
+      throw new Error('ConductorHostRunner.start: runner has already been stopped.');
+    }
     if (this.handle != null) {
       throw new Error(
         'ConductorHostRunner.start: already started (Principle 9 — refuse a double-arm).',
@@ -151,24 +157,36 @@ export class ConductorHostRunner {
   }
 
   /** Disarm the cadence (idempotent) and invoke the stop hook (e.g. to close owned resources). */
-  stop(): void {
-    if (this.handle == null) return;
-    this.scheduler.clearInterval(this.handle);
-    this.handle = null;
-    this.onStop?.();
+  async stop(): Promise<void> {
+    if (this.handle != null) {
+      this.scheduler.clearInterval(this.handle);
+      this.handle = null;
+    }
+    if (this.stopped) return;
+    this.stopped = true;
+    await this.inFlight;
+    await this.onStop?.();
   }
 
   /** One cadence beat: run a tick unless a prior one is still in flight; report the outcome / error. */
   private async beat(): Promise<void> {
-    if (this.inFlight) return; // a prior tick is still running — skip this beat (no overlap)
-    this.inFlight = true;
+    if (this.inFlight != null) return; // a prior tick is still running — skip this beat (no overlap)
+    const run = this.runBeat();
+    this.inFlight = run;
+    try {
+      await run;
+    } finally {
+      if (this.inFlight === run) this.inFlight = null;
+    }
+  }
+
+  private async runBeat(): Promise<void> {
     try {
       const outcome = await this.daemon.tick();
       this.onTick?.(outcome);
     } catch (error) {
-      this.onError?.(error);
-    } finally {
-      this.inFlight = false;
+      if (this.onError != null) this.onError(error);
+      else console.error('[co serve] tick error:', error);
     }
   }
 }
@@ -196,10 +214,10 @@ export function realQuietWindow(signal: AbortSignal): Promise<void> {
 
 /**
  * The default `[host-live]` transport seam: binding the co MCP surface to a real pty-bound provider
- * transport is the operator handoff. Throws a clear message (mirrors the `co unstick` router seam) so
- * `co serve` recovers + idle-ticks fine, and fails loud ONLY the moment it must host a real provider.
+ * transport is an explicit host-live seam for direct `serveConductor` callers. Throws a clear message
+ * (mirrors the `co unstick` router seam) so tests and custom hosts never silently fabricate transport.
  */
-export const hostLiveTransportRequired: () => TransportPair = () => {
+export const hostLiveTransportRequired: (identity?: HostedIdentity) => TransportPair = () => {
   throw new Error(
     '[host-live] co serve: binding the co MCP surface to a real pty-bound provider transport is the ' +
       'operator handoff — inject `makeTransport` with the live pty transport pair. The deterministic ' +
@@ -237,7 +255,7 @@ export interface ServeConductorOptions {
   /** Pane host. Default: a real {@link NodePtyHost} (lazy node-pty import — host-side only). */
   readonly pty?: PtyHost;
   /** The pty-bound provider transport seam. Default: {@link hostLiveTransportRequired} (operator handoff). */
-  readonly makeTransport?: () => TransportPair;
+  readonly makeTransport?: (identity: HostedIdentity) => TransportPair;
   /** Monotonic ms clock. Default: {@link monotonicNowMs}. */
   readonly now?: () => number;
   /** Byte-quiet window seam. Default: {@link realQuietWindow}. */
@@ -282,23 +300,40 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   // [host-live] isolatedHomeDirFor: per-agent isolated home dir under the project data dir.
   let spawnGate: EngineReviewerSpawnGate | undefined;
   let ownedWtStore: ReturnType<typeof openWorktreeStore> | undefined;
+  let isolatedHomeDirFor: ((agent: string) => string) | undefined;
+  if (opts.coMcpPaths != null) {
+    const registry = openRegistry();
+    const dataDir = registry.dataDirFor(projectId);
+    registry.close();
+    isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+  }
+  const makeTransport =
+    opts.makeTransport ??
+    ((identity: HostedIdentity): TransportPair => {
+      if (opts.coMcpPaths == null || isolatedHomeDirFor == null) return hostLiveTransportRequired();
+      const isolatedHomeDir = isolatedHomeDirFor(identity.agent);
+      const socketPath = opts.coMcpPaths.coMcpBridgeSocketPath?.(isolatedHomeDir, identity.agent);
+      if (socketPath == null) {
+        throw new Error(
+          '[host-live] co serve: coMcpPaths.coMcpBridgeSocketPath is required when co serve owns ' +
+            'the real provider MCP bridge transport.',
+        );
+      }
+      return createSocketBridgeTransportPair(socketPath);
+    });
   const engine = new ConductorEngine({
     pty,
-    makeTransport: opts.makeTransport ?? hostLiveTransportRequired,
+    makeTransport,
     now,
     quietWindow: opts.quietWindow ?? realQuietWindow,
     reviewerSpawnGate: () => spawnGate,
   });
   if (opts.coMcpPaths != null) {
-    const registry = openRegistry();
-    const dataDir = registry.dataDirFor(projectId);
-    registry.close();
-    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
     ownedWtStore = openWorktreeStore(projectId);
     spawnGate = new EngineReviewerSpawnGate(
       engine,
       ownedWtStore,
-      isolatedHomeDirFor,
+      isolatedHomeDirFor!,
       opts.coMcpPaths,
     );
   }
@@ -341,11 +376,24 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     ...(opts.scheduler != null ? { scheduler: opts.scheduler } : {}),
     ...(opts.onTick != null ? { onTick: opts.onTick } : {}),
     ...(opts.onError != null ? { onError: opts.onError } : {}),
-    ...(wtStoreForStop != null ? { onStop: () => wtStoreForStop.close() } : {}),
+    onStop: async () => {
+      try {
+        await engine.closeAll();
+      } finally {
+        wtStoreForStop?.close();
+      }
+    },
   });
 
   if (opts.autoStart !== false) runner.start();
   return runner;
+}
+
+/** Default host-live MCP path resolution for `co serve`, including provider auth materialization. */
+export function defaultServeCoMcpPaths(
+  opts: Omit<HostLaunchPathOptions, 'includeProviderAuth'> = {},
+): CoMcpPaths {
+  return defaultCoMcpPaths({ ...opts, includeProviderAuth: true });
 }
 
 /**
@@ -363,16 +411,24 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   }
   const runner = await serveConductor({
     projectId,
+    coMcpPaths: defaultServeCoMcpPaths(),
     onTick: (o) =>
       console.error(
-        `[co serve] tick ${o.tick} candidates=${o.candidateCount} selected=${o.selected ?? '-'} ` +
-          `cadence=${o.cadenceFired}`,
+        `[co serve] tick ${o.tick} candidates=${o.candidateCount} ` +
+          `cold=${o.coldCandidates.length} selected=${o.selected ?? '-'} cadence=${o.cadenceFired}`,
       ),
     onError: (err) => console.error('[co serve] tick error:', err),
   });
   const shutdown = (): void => {
-    runner.stop();
-    process.exitCode = 0;
+    void runner
+      .stop()
+      .then(() => {
+        process.exitCode = 0;
+      })
+      .catch((error) => {
+        console.error('[co serve] shutdown error:', error);
+        process.exitCode = 1;
+      });
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

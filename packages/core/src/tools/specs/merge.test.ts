@@ -1199,7 +1199,7 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
   it('AC-S10-2.1: returns review_pending:true and fires spawn gate when reviewerSpawnGate is wired and no PASS exists', async () => {
     // Freeze time at epoch 0 so the 1970-epoch snapshot timestamps are fresh (not stale) when the
     // handler calls Date.now() to build the trigger gate's nowMs. A healthy snapshot → dispatch policy
-    // returns 'placed' → fireSpawn calls reviewerSpawnGate.spawn() synchronously (fire-and-forget).
+    // returns 'placed' → fireSpawn calls reviewerSpawnGate.spawn(), then co_merge drains the spawn.
     vi.useFakeTimers({ now: 0 });
     try {
       const repo = makeRepo();
@@ -1240,11 +1240,143 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
         })) as { merged: boolean; review_pending?: boolean };
         expect(out.merged).toBe(false);
         expect(out.review_pending).toBe(true);
-        // fireSpawn is fire-and-forget; spawn body runs synchronously before Promise.resolve() settles.
+        // The spawn body runs before co_merge returns review_pending.
         expect(spawned).toHaveLength(1);
         expect(spawned[0]!.projectId).toBe('p-merge-tool');
         // Assert the agent id (reviewer seat) so a wrong-key regression is caught (spy-key-value-blind-spot).
         expect(spawned[0]!.agent).toMatch(/^reviewer@rev-/);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC-S10-2.1b: an existing ISSUES verdict triggers a fresh reviewer spawn instead of reusing the stale review id', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          tests: [{ name: 'test-a', passed: true }],
+        },
+      );
+      reviewStore!.recordReviewRequested({
+        reviewId: 'rev-stale',
+        target: 'main',
+        branch: 'co/feature',
+        requestedBy: 'lead-2',
+        scope: 'worker_merge',
+      });
+      reviewStore!.recordVerdict({
+        reviewId: 'rev-stale',
+        target: 'main',
+        branch: 'co/feature',
+        reviewer: 'rev-7',
+        verdict: 'ISSUES',
+        blockers: [{ summary: 'needs work' }],
+        suggestions: [],
+        verification: {
+          commands_run: ['pnpm test'],
+          suite_result: 'pass',
+          baseline_compared: true,
+        },
+      });
+      const dispatch = openDispatchStore('p-merge-tool');
+      try {
+        dispatch.recordSnapshot({
+          provider: 'claude',
+          account: accountForProvider('claude'),
+          available: true,
+          source: 'test',
+          sampled_at: '1970-01-01T00:00:00.000Z',
+          windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+        });
+        const spawnCalls: string[] = [];
+        const spawnGate: ReviewerSpawnGate = {
+          spawn: async (_projectId, placement) => {
+            spawnCalls.push(placement.agent);
+          },
+        };
+        const toolCtx = {
+          ...ctx,
+          dispatch,
+          reviewerSpawnGate: spawnGate,
+        } as ToolContext;
+
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'land the feature' },
+        })) as { merged: boolean; review_pending?: boolean };
+        const placements = dispatch.readPlacements();
+
+        expect(out.review_pending).toBe(true);
+        expect(spawnCalls).toHaveLength(1);
+        expect(spawnCalls[0]).not.toContain('rev-stale');
+        expect(placements).toHaveLength(1);
+        expect(placements[0]!.reviewId).not.toBe('rev-stale');
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC-S10-2.1b: rejects when the live reviewer spawn gate fails', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const toolCtx = {
+        ...ctx,
+        dispatch,
+        reviewerSpawnGate: {
+          spawn: () => Promise.reject(new Error('reviewer spawn failed')),
+        } satisfies ReviewerSpawnGate,
+      };
+      try {
+        await expect(
+          invokeTool(reg, toolCtx, 'co_merge', {
+            branch: 'co/feature',
+            into: 'main',
+            intent: { summary: 'trigger a review' },
+          }),
+        ).rejects.toThrow(/reviewer spawn failed/);
       } finally {
         dispatch.close();
       }

@@ -41,8 +41,12 @@ export interface PaneIdentity {
   readonly coMcpCommand: string;
   /** Codex MCP server args. Defaults to none. */
   readonly coMcpArgs?: readonly string[];
+  /** Environment variables passed to the scoped co MCP stdio server. */
+  readonly coMcpEnv?: Readonly<Record<string, string>>;
   /** Codex hook CLI command. Must be a host-injected trusted absolute path. */
   readonly coCliCommand: string;
+  /** Optional trusted absolute arguments that precede the Codex hook subcommand. */
+  readonly coCliArgs?: readonly string[];
 }
 
 /**
@@ -75,6 +79,10 @@ export interface PaneLaunchConfig {
   readonly codexMcpArgs?: readonly string[];
   /** Codex only: trusted hook command expected in `config.toml`. */
   readonly codexHookCommand?: string;
+  /** Claude only: generated stdio MCP config content, when `coMcpConfig` is set. */
+  readonly claudeMcpConfigJson?: string;
+  /** Claude only: generated stdio MCP config destination path. */
+  readonly claudeMcpConfigPath?: string;
   /** Files the real host must materialize before spawning the pane. */
   readonly prelaunchFiles?: readonly PrelaunchFile[];
 }
@@ -160,14 +168,10 @@ function shellDoubleQuote(value: string): string {
 
 function requireAbsoluteCommand(name: string, command: string): string {
   if (!isAbsolute(command)) {
-    throw new Error(
-      `buildPaneLaunchConfig(codex): ${name} must be an absolute path, got '${command}'.`,
-    );
+    throw new Error(`buildPaneLaunchConfig: ${name} must be an absolute path, got '${command}'.`);
   }
   if (command.endsWith('/env')) {
-    throw new Error(
-      `buildPaneLaunchConfig(codex): ${name} must not delegate through /usr/bin/env.`,
-    );
+    throw new Error(`buildPaneLaunchConfig: ${name} must not delegate through /usr/bin/env.`);
   }
   return command;
 }
@@ -185,19 +189,23 @@ const CODEX_MCP_DELEGATING_COMMANDS = new Set([
   'tsx',
 ]);
 
-function requireTrustedMcpExecutableArgs(command: string, args: readonly string[]): void {
+function requireTrustedMcpExecutableArgs(
+  provider: Provider,
+  command: string,
+  args: readonly string[],
+): void {
   const executable = basename(command).replace(/\.exe$/iu, '');
   if (!CODEX_MCP_DELEGATING_COMMANDS.has(executable)) return;
   const delegatedExecutable = args.find((arg) => arg !== '--' && !arg.startsWith('-'));
   if (delegatedExecutable == null || !isAbsolute(delegatedExecutable)) {
     throw new Error(
-      'buildPaneLaunchConfig(codex): coMcpArgs must include an absolute path when ' +
+      `buildPaneLaunchConfig(${provider}): coMcpArgs must include an absolute path when ` +
         `coMcpCommand delegates through '${command}'.`,
     );
   }
   if (delegatedExecutable.endsWith('/env')) {
     throw new Error(
-      'buildPaneLaunchConfig(codex): coMcpArgs must not delegate through /usr/bin/env.',
+      `buildPaneLaunchConfig(${provider}): coMcpArgs must not delegate through /usr/bin/env.`,
     );
   }
 }
@@ -209,13 +217,39 @@ interface CodexConfigArtifacts {
   readonly codexHookCommand: string;
 }
 
+function sortedEnvEntries(
+  env: Readonly<Record<string, string>> | undefined,
+): Array<[string, string]> {
+  if (env == null) return [];
+  const entries = Object.entries(env).sort(([a], [b]) => a.localeCompare(b));
+  for (const [key] of entries) requireEnvVarName(key);
+  return entries;
+}
+
+const ENV_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+
+function requireEnvVarName(key: string): string {
+  if (!ENV_VAR_NAME.test(key)) {
+    throw new Error(
+      `buildPaneLaunchConfig: coMcpEnv key '${key}' is not a valid environment ` + 'variable name.',
+    );
+  }
+  return key;
+}
+
 function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts {
   const command = requireAbsoluteCommand('coMcpCommand', identity.coMcpCommand);
   const args = [...(identity.coMcpArgs ?? [])];
-  requireTrustedMcpExecutableArgs(command, args);
+  requireTrustedMcpExecutableArgs('codex', command, args);
   const rulesPath = buildCodexBlockListRulesPath(identity);
   const hookCli = requireAbsoluteCommand('coCliCommand', identity.coCliCommand);
-  const hookCommand = `${shellDoubleQuote(hookCli)} hook codex-block-list --rules ${shellDoubleQuote(rulesPath)}`;
+  const hookArgs = [...(identity.coCliArgs ?? [])];
+  requireTrustedHookExecutableArgs(hookArgs);
+  const hookExecutable = [hookCli, ...hookArgs].map(shellDoubleQuote).join(' ');
+  const hookCommand = `${hookExecutable} hook codex-block-list --rules ${shellDoubleQuote(rulesPath)}`;
+  const mcpEnvLines = sortedEnvEntries(identity.coMcpEnv).flatMap(([key, value]) => [
+    `${key} = "${tomlStringEscape(value)}"`,
+  ]);
   const lines: string[] = [
     'sandbox_mode = "workspace-write"',
     'approval_policy = "never"',
@@ -230,7 +264,10 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
     'type = "stdio"',
     `command = "${tomlStringEscape(command)}"`,
     `args = ${tomlArray(args)}`,
+    'required = true',
+    'startup_timeout_sec = 60',
     '',
+    ...(mcpEnvLines.length > 0 ? ['[mcp_servers.co.env]', ...mcpEnvLines, ''] : []),
     '[[hooks.PreToolUse]]',
     'matcher = "Bash"',
     '',
@@ -244,6 +281,20 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
     codexMcpArgs: args,
     codexHookCommand: hookCommand,
   };
+}
+
+function requireTrustedHookExecutableArgs(args: readonly string[]): void {
+  if (args.length === 0) return;
+  if (args.length > 1) {
+    throw new Error('buildPaneLaunchConfig: coCliArgs may contain at most one executable script.');
+  }
+  const [script] = args;
+  if (script == null || !isAbsolute(script)) {
+    throw new Error('buildPaneLaunchConfig: coCliArgs must contain an absolute script path.');
+  }
+  if (script.endsWith('/env')) {
+    throw new Error('buildPaneLaunchConfig: coCliArgs must not delegate through /usr/bin/env.');
+  }
 }
 
 function buildCodexBlockListRulesJson(blockList: readonly BlockRule[]): string {
@@ -273,6 +324,28 @@ function buildCodexConfigTomlPath(identity: PaneIdentity): string {
   return `${identity.isolatedHomeDir.replace(/\/+$/u, '')}/config.toml`;
 }
 
+function buildClaudeMcpConfigJson(identity: PaneIdentity): string {
+  const command = requireAbsoluteCommand('coMcpCommand', identity.coMcpCommand);
+  const args = [...(identity.coMcpArgs ?? [])];
+  requireTrustedMcpExecutableArgs('claude', command, args);
+  const envEntries = sortedEnvEntries(identity.coMcpEnv);
+  return (
+    JSON.stringify(
+      {
+        mcpServers: {
+          co: {
+            command,
+            args,
+            ...(envEntries.length > 0 ? { env: Object.fromEntries(envEntries) } : {}),
+          },
+        },
+      },
+      null,
+      2,
+    ) + '\n'
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Per-provider builders
 // ---------------------------------------------------------------------------
@@ -289,13 +362,22 @@ function buildClaudeLaunchConfig(
   if (patterns.length > 0) {
     args.push('--disallowedTools', patterns.join(','));
   }
-  if (identity.coMcpConfig != null) {
-    args.push('--mcp-config', identity.coMcpConfig);
+  const claudeMcpConfigPath = identity.coMcpConfig;
+  if (claudeMcpConfigPath != null) {
+    args.push('--mcp-config', claudeMcpConfigPath);
   }
-  return {
+  const base = {
     provider: 'claude',
     args,
     env: { CLAUDE_CONFIG_DIR: identity.isolatedHomeDir },
+  } satisfies PaneLaunchConfig;
+  if (claudeMcpConfigPath == null) return base;
+  const claudeMcpConfigJson = buildClaudeMcpConfigJson(identity);
+  return {
+    ...base,
+    claudeMcpConfigJson,
+    claudeMcpConfigPath,
+    prelaunchFiles: [{ path: claudeMcpConfigPath, contents: claudeMcpConfigJson }],
   };
 }
 

@@ -2,8 +2,8 @@
  * AC-S10-4·2 — the scripted host-proof driver: proves the FULL sequence deterministically over
  * `FakePty` + in-memory transport + injected time (no real binary, no real clock).
  *
- *   spawn → inject 1 mail → 1 turn idle → SIGKILL → recoverProjectStore → reconstruct session
- *   → mid-turn steer (interrupt)
+ *   spawn → inject 1 mail → 1 turn idle → live-pane steer → SIGKILL → recoverProjectStore
+ *   → reconstruct session
  *
  * Clone of the `engine.test.ts` harness pattern: the test drives the FakePty pane in parallel
  * with the async driver using scripted bytes + the controllable quiet window.
@@ -26,13 +26,22 @@ import {
   type ProjectRegistry,
   type RosterStore,
   type MailStore,
+  type SpawnSpec,
 } from '@co/core';
 import type { HostedIdentity } from '../live-session-host.js';
-import { runHostProof } from './host-proof.js';
+import { buildHostProofSpawnSpec, runHostProof } from './host-proof.js';
+import { createStreamTransportPair } from './real-transport.js';
 
 // ── Startup fixture ────────────────────────────────────────────────────────────
-const ESC = '';
+// ESC authored as a \u escape so the source holds no raw control byte.
+const ESC = '\u001B';
 const CLAUDE_READY = ESC + '[2J' + ESC + '[H' + '╭─ Welcome ─╮\r\n❯ \r\n  ? for shortcuts\r\n';
+const CLAUDE_OAUTH_LOGIN =
+  ESC +
+  '[2J' +
+  'Opening browser to sign in…\r\n' +
+  "Browser didn't open? Use the url below to sign in (c to copy)\r\n" +
+  'Paste code here if prompted >\r\n';
 
 // ── Cleanup state ──────────────────────────────────────────────────────────────
 const ORIGINAL_ENV = process.env;
@@ -78,14 +87,14 @@ afterEach(async () => {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-function makeProject(): { projectId: ProjectId; cwd: string } {
+function makeProject(): { projectId: ProjectId; cwd: string; dataDir: string } {
   const dataDir = mkdtempSync(join(tmpdir(), 'co-hp-'));
   dataDirs.push(dataDir);
   process.env.CO_DATA_DIR = dataDir;
   const registry = openRegistry();
   registries.push(registry);
   const cwd = join(dataDir, 'repo');
-  return { projectId: registry.register(cwd), cwd };
+  return { projectId: registry.register(cwd), cwd, dataDir };
 }
 
 function seedParentChain(projectId: ProjectId): void {
@@ -189,7 +198,7 @@ const neverResolve = (): Promise<void> => new Promise<void>(() => {});
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 describe('runHostProof — AC-S10-4·2: full sequence deterministically over FakePty + fakes', () => {
-  it('runs spawn → inject → 1 turn → SIGKILL → recover → reconstruct → steer deterministically', async () => {
+  it('runs spawn → inject → 1 turn → steer → SIGKILL → recover → reconstruct deterministically', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
     seedActionableMail(projectId, 'impl-hp');
@@ -199,6 +208,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const pty = new FakePty();
     const clock = makeClock();
     const qw = makeQuietWindow();
+    const paneRef: { current?: FakePty['panes'][number] } = {};
+    let beforeSteerSawInterrupt = false;
 
     // Start the driver — it will block at ensureHosted until the pane emits startup bytes.
     // awaitMailRouted: simulates the agent calling co_mail_send via the live MCP surface to
@@ -210,6 +221,10 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       now: clock.now,
       quietWindow: qw.quietWindow,
       injectOptions: { retryDelay: neverResolve },
+      beforeSteer: async () => {
+        beforeSteerSawInterrupt = paneRef.current?.written.includes(ESC) ?? false;
+      },
+      expectedRouteNonce: 'nonce-ok',
       awaitMailRouted: async (clientTransport) => {
         const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
         clients.push(c);
@@ -219,8 +234,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
           arguments: {
             to: 'coord-1',
             type: 'clarify_request',
-            subject: 'turn complete',
-            body: 'proof routing',
+            subject: 'turn complete nonce-ok',
+            body: 'proof routing nonce-ok',
           },
         });
       },
@@ -229,7 +244,12 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     // The pane is spawned synchronously before ensureHosted's first await.
     expect(pty.panes).toHaveLength(1);
     const pane = pty.panes[0]!;
+    paneRef.current = pane;
     expect(pane.spec.command).toBe('claude');
+    let hadInterruptBeforeCrash = false;
+    pane.onExit(() => {
+      hadInterruptBeforeCrash = pane.written.includes(ESC);
+    });
 
     // Drive startup to ready.
     pane.emit(CLAUDE_READY);
@@ -253,13 +273,165 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     expect(result.sessionReconstructed).toBe(true);
     expect(result.recoveredSessions.some((s) => s.agentId === 'impl-hp')).toBe(true);
 
-    // AC-S10-4·2 (3): mid-turn interrupt steer completed on the still-warm hosted pane.
+    // AC-S10-4·2 (3): interrupt steer completed before the simulated crash.
     expect(result.steerCompleted).toBe(true);
+    expect(result.steerMidTurn).toBe(true);
+    expect(beforeSteerSawInterrupt).toBe(false);
     // Interrupt key (ESC) was written to the pane.
     expect(pane.written).toContain(ESC);
+    expect(hadInterruptBeforeCrash).toBe(true);
 
     // EXACTLY one turn submitted: the composer received exactly one Enter.
     expect(pane.written.filter((w) => w === '\r')).toHaveLength(1);
+  });
+
+  it('uses the supplied SpawnSpec so host-live can attach provider MCP config', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+    const spawnSpec: SpawnSpec = {
+      command: 'claude',
+      args: ['--strict-mcp-config', '--mcp-config', '/tmp/host-proof-co-mcp.json'],
+      cwd,
+      env: { CLAUDE_CONFIG_DIR: '/tmp/host-proof-claude' },
+      prelaunchFiles: [{ path: '/tmp/host-proof-co-mcp.json', contents: '{"mcpServers":{}}\n' }],
+    };
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      spawnSpec,
+      expectedRouteNonce: 'spawn-spec-nonce',
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: 'clarify_request',
+            subject: 'turn complete spawn-spec-nonce',
+            body: 'proof routing spawn-spec-nonce',
+          },
+        });
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    expect(pane.spec).toEqual(spawnSpec);
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    expect(result.turnRan).toBe(true);
+    expect(result.mailRouted).toBe(true);
+    expect(result.steerMidTurn).toBe(true);
+  });
+
+  it('reports steerMidTurn=false if beforeSteer lets the turn settle before interrupt', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    let markBeforeSteer!: () => void;
+    const beforeSteerStarted = new Promise<void>((resolve) => {
+      markBeforeSteer = resolve;
+    });
+    let releaseBeforeSteer!: () => void;
+    const holdBeforeSteer = new Promise<void>((resolve) => {
+      releaseBeforeSteer = resolve;
+    });
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      beforeSteer: async () => {
+        markBeforeSteer();
+        await holdBeforeSteer;
+      },
+      expectedRouteNonce: 'before-steer-nonce',
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: 'clarify_request',
+            subject: 'turn complete before-steer-nonce',
+            body: 'proof routing before-steer-nonce',
+          },
+        });
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await beforeSteerStarted;
+    await driveTurnToIdle(pane, mail, clock, qw);
+    releaseBeforeSteer();
+
+    const result = await proofP;
+
+    expect(result.turnRan).toBe(true);
+    expect(result.turnIdle).toBe(true);
+    expect(result.mailRouted).toBe(true);
+    expect(result.steerCompleted).toBe(true);
+    expect(result.steerMidTurn).toBe(false);
+  });
+
+  it('fails before injection when startup surfaces login_required', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: async () => {}, maxEchoAttempts: 1 },
+    });
+    const proofRejects = expect(proofP).rejects.toThrow(/login required|not authenticated/i);
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_OAUTH_LOGIN);
+    await flush(6);
+    qw.settle();
+
+    await proofRejects;
+    expect(pane.written).toEqual([]);
   });
 
   it('returns mailRouted=false when the parent pre-holds an item but the hosted agent routes nothing (regression guard: old tautological check)', async () => {
@@ -308,5 +480,227 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     // mailRouted must be false: coord-1's only outstanding item has sender='unrelated-agent',
     // not 'impl-hp'. The old check (.length > 0) would have returned true here — silent failure.
     expect(result.mailRouted).toBe(false);
+  });
+
+  it('returns mailRouted=false when only a stale same-sender parent item exists', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const preStore = openMailStore(projectId);
+    mailStores.push(preStore);
+    preStore.send({
+      type: 'clarify_request',
+      to: 'coord-1',
+      from: 'impl-hp',
+      subject: 'stale same sender',
+      body: 'already in the queue before the turn',
+    });
+
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      expectedRouteNonce: 'fresh-nonce',
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    expect(result.mailRouted).toBe(false);
+  });
+
+  it('returns mailRouted=false when the hosted agent sends a new message without the proof nonce', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      expectedRouteNonce: 'fresh-nonce',
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: 'clarify_request',
+            subject: 'turn complete',
+            body: 'proof routing',
+          },
+        });
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    expect(result.mailRouted).toBe(false);
+  });
+
+  it('full proof can use the stream-backed transport pair, not only InMemoryTransport', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: createStreamTransportPair,
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      expectedRouteNonce: 'stream-nonce',
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: 'clarify_request',
+            subject: 'turn complete stream-nonce',
+            body: 'proof routing stream-nonce',
+          },
+        });
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    expect(result.turnRan).toBe(true);
+    expect(result.turnIdle).toBe(true);
+    expect(result.mailRouted).toBe(true);
+    expect(result.steerMidTurn).toBe(true);
+  });
+});
+
+describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
+  it('builds a Claude spawn spec with scoped stdio co-mcp JSON config', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const identity = {
+      ...makeIdentity('host-proof-claude', projectId, cwd),
+      role: 'coordinator',
+      parent: '@operator',
+    } satisfies HostedIdentity;
+
+    const spec = buildHostProofSpawnSpec(identity, {
+      isolatedHomeDir: join(dataDir, 'isolated', identity.agent),
+      coMcpCommand: '/usr/bin/node',
+      coMcpArgs: ['/repo/packages/mcp/dist/bin.js'],
+      coCliCommand: '/repo/packages/cli/dist/index.js',
+      claudeCredentialsJson: '{"claude":true}\n',
+    });
+
+    expect(spec.command).toBe('claude');
+    expect(spec.args).toContain('--mcp-config');
+    const configPath = spec.args[spec.args.indexOf('--mcp-config') + 1];
+    expect(configPath).toBe(`${dataDir}/isolated/host-proof-claude/mcp/co-mcp.json`);
+    const config = spec.prelaunchFiles?.find((file) => file.path === configPath);
+    expect(config).toBeDefined();
+    const parsed = JSON.parse(config!.contents) as {
+      mcpServers?: { co?: { command?: string; args?: string[]; env?: Record<string, string> } };
+    };
+    expect(parsed.mcpServers?.co).toEqual({
+      command: '/usr/bin/node',
+      args: ['/repo/packages/mcp/dist/bin.js'],
+      env: {
+        CO_AGENT: 'host-proof-claude',
+        CO_ROLE: 'coordinator',
+        CO_PARENT: '@operator',
+        CO_PROJECT_ID: projectId,
+      },
+    });
+    expect(spec.prelaunchFiles).toContainEqual({
+      path: `${dataDir}/isolated/host-proof-claude/.credentials.json`,
+      contents: '{"claude":true}\n',
+    });
+  });
+
+  it('builds a Codex spawn spec with scoped stdio co-mcp env in config.toml', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const identity: HostedIdentity = {
+      agent: 'host-proof-codex',
+      role: 'coordinator',
+      parent: '@operator',
+      pane: 'host-proof-pane-codex',
+      projectId,
+      cwd,
+      provider: 'codex',
+      resume: { provider: 'codex', codexHome: join(dataDir, 'isolated', 'host-proof-codex') },
+    };
+
+    const spec = buildHostProofSpawnSpec(identity, {
+      isolatedHomeDir: join(dataDir, 'isolated', identity.agent),
+      coMcpCommand: '/usr/bin/node',
+      coMcpArgs: ['/repo/packages/mcp/dist/bin.js'],
+      coMcpBridgeSocketPath: () => `${dataDir}/sockets/co.sock`,
+      coCliCommand: '/repo/packages/cli/dist/index.js',
+      codexAuthJson: '{"codex":true}\n',
+    });
+
+    expect(spec.command).toBe('codex');
+    expect(spec.args).toEqual(['--add-dir', `${dataDir}/sockets`]);
+    expect(spec.env['CODEX_HOME']).toBe(`${dataDir}/isolated/host-proof-codex`);
+    const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
+    expect(configToml).toBeDefined();
+    expect(configToml!.contents).toContain(
+      `args = ["/repo/packages/mcp/dist/bin.js", "bridge", "${dataDir}/sockets/co.sock"]`,
+    );
+    expect(configToml!.contents).toContain('[mcp_servers.co.env]');
+    expect(configToml!.contents).toContain('CO_AGENT = "host-proof-codex"');
+    expect(configToml!.contents).toContain('CO_ROLE = "coordinator"');
+    expect(configToml!.contents).toContain('CO_PARENT = "@operator"');
+    expect(configToml!.contents).toContain(`CO_PROJECT_ID = "${projectId}"`);
+    expect(configToml!.contents).toContain(
+      `CO_MCP_BRIDGE_LOG = "${dataDir}/isolated/host-proof-codex/mcp/bridge.log"`,
+    );
+    expect(spec.prelaunchFiles).toContainEqual({
+      path: `${dataDir}/isolated/host-proof-codex/auth.json`,
+      contents: '{"codex":true}\n',
+    });
   });
 });
