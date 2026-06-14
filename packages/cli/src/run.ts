@@ -642,9 +642,9 @@ export async function run(
     case 'doctor': {
       try {
         const useLive = rest.includes('--live');
-        const unknownFlags = rest.filter((a) => a.startsWith('--') && a !== '--live');
-        if (unknownFlags.length > 0) {
-          validateNoArgs('doctor', unknownFlags);
+        const unknownArgs = rest.filter((a) => a !== '--live');
+        if (unknownArgs.length > 0) {
+          validateNoArgs('doctor', unknownArgs);
         }
         // When --live is present, wire defaultProviderProbe (metadata-only: claude --version,
         // claude auth status --json, codex --version, codex doctor --json). The command seam

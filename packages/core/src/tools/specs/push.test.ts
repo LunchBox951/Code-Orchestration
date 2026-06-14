@@ -1434,3 +1434,35 @@ describe('co_push identity guard (AC-L6a-7)', () => {
     expect(readerCalled).toBe(false);
   });
 });
+
+describe('AC-S10-5(a) — co_push uses recorded worktree baseRef (MNR #3/#6)', () => {
+  it('resolves into from the recorded baseRef when input.into is omitted (contributor mode)', async () => {
+    const repo = makeRepo();
+    const { ctx, worktreeStore } = makeCtx(repo, fakeReader([]), { seedWorktree: false });
+
+    const cfg = openConfigStore();
+    configs.push(cfg);
+    cfg.setProjectOverride('p-push-guard', REPO_MODE_CONFIG_KEY, 'contributor');
+
+    // Record a worktree with a non-default baseRef that does NOT exist in the test repo.
+    worktreeStore.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'co/stage-x',
+        baseSha: FAKE_BASE_SHA,
+        path: '/fake',
+        parent: 'lead-x',
+      },
+      { branch: 'co/feature', baseRef: 'co/stage-x', baseSha: FAKE_BASE_SHA, tests: [] },
+    );
+
+    const reg = buildCoreRegistry();
+    // Without input.into, the tool must pick up worktree.baseRef = 'co/stage-x'.
+    // The identity-base lookup cannot resolve 'co/stage-x' (it doesn't exist), so the error
+    // names it. If detectIntegrationTarget fell back to 'main' instead, the merge-base would
+    // resolve cleanly and the error would be "no review verdict" — not naming 'co/stage-x'.
+    await expect(invokeTool(reg, ctx, 'co_push', { branch: 'co/feature' })).rejects.toThrow(
+      /co\/stage-x/,
+    );
+  });
+});
