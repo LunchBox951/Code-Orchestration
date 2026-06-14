@@ -85,6 +85,15 @@ export interface ConductorDaemonDeps {
   readonly openSessions?: (projectId: ProjectId) => SessionStore;
   /** Opens the roster store to join role/sub-role/parent onto each session. Default: {@link openRosterStore}. */
   readonly openRoster?: (projectId: ProjectId) => RosterStore;
+  /**
+   * Stage 10 P3 (§3c) — the OPERATOR-CONTROL candidate-skip predicate. Consulted when the daemon builds
+   * its candidate set; an agent for which this returns `true` is FILTERED OUT (not driven this tick). The
+   * daemon-backed router wires its paused ∪ stuck sets here (so `pause` actually takes effect and an
+   * `unstick`'d agent is driven again). ADDITIVE: the default never skips, so P1's loop is byte-for-byte
+   * unchanged when no router is wired. (Spec's illustrative name was `isPaused`; it also gates STUCK, so
+   * the accurate name is `isSkipped`.)
+   */
+  readonly isSkipped?: (projectId: ProjectId, agent: string) => boolean;
 }
 
 /**
@@ -127,6 +136,7 @@ export class ConductorDaemon {
   private readonly recoverFn: (projectId: ProjectId) => void;
   private readonly openSessions: (projectId: ProjectId) => SessionStore;
   private readonly openRoster: (projectId: ProjectId) => RosterStore;
+  private readonly isSkipped: (projectId: ProjectId, agent: string) => boolean;
   private tickCount = 0;
   private recovered = false;
 
@@ -145,6 +155,7 @@ export class ConductorDaemon {
     this.recoverFn = deps.recover ?? recoverProjectStore;
     this.openSessions = deps.openSessions ?? openSessionStore;
     this.openRoster = deps.openRoster ?? openRosterStore;
+    this.isSkipped = deps.isSkipped ?? (() => false);
   }
 
   /** How many ticks have run (for host introspection / tests). */
@@ -174,7 +185,10 @@ export class ConductorDaemon {
    *
    * A session with no roster record is a corrupt/partial recovered state — FAIL LOUD (Principle 9),
    * never silently drop it (a dropped agent would never be driven again). The engine's `selectEligible`
-   * does the "WAITING + outstanding actionable" filtering; the daemon just supplies the full live set.
+   * does the "WAITING + outstanding actionable" filtering; the daemon just supplies the full live set,
+   * MINUS any agent the operator-control surface suppresses ({@link ConductorDaemonDeps.isSkipped} — a
+   * paused or STUCK agent; §3c). Filtering a suppressed agent out of candidates is what makes `pause`
+   * actually take effect (not a silent no-op) and lets `unstick` re-drive a reverted agent next tick.
    */
   buildCandidates(): readonly HostedIdentity[] {
     const sessions = this.openSessions(this.projectId);
@@ -182,7 +196,10 @@ export class ConductorDaemon {
       const roster = this.openRoster(this.projectId);
       try {
         const byId = new Map<string, AgentRecord>(roster.listAgents().map((a) => [a.agentId, a]));
-        return sessions.listSessions().map((session) => this.toIdentity(session, byId));
+        return sessions
+          .listSessions()
+          .map((session) => this.toIdentity(session, byId))
+          .filter((identity) => !this.isSkipped(this.projectId, identity.agent));
       } finally {
         roster.close();
       }

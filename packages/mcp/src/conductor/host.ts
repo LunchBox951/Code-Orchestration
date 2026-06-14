@@ -24,8 +24,10 @@ import {
   openRegistry,
   openSessionStore,
   openWorktreeStore,
+  queryLiveObservability,
   QUIET_WINDOW_MS,
   type BreakSignal,
+  type LiveObservabilitySnapshot,
   type MarkStuck,
   type ProjectId,
   type PtyHost,
@@ -34,6 +36,8 @@ import {
 import { ReconcileLoop } from '@co/core';
 import { ConductorEngine, type TransportPair } from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
+import { DaemonBackedAgentRouter } from './agent-router.js';
+import { EngineLiveStateProvider } from './live-observe.js';
 import type { HostedIdentity } from '../live-session-host.js';
 import { EngineReviewerSpawnGate } from './reviewer-gate.js';
 import { type CoMcpPaths } from './placement-launch.js';
@@ -56,6 +60,22 @@ export const defaultScheduler: IntervalScheduler = {
     clearInterval(handle as unknown as Parameters<typeof clearInterval>[0]),
 };
 
+// ── The operator control/observe surface (Stage 10 P3 — CTL-OBS) ────────────────────────────────────
+
+/**
+ * The transport-agnostic operator surface for a running Conductor: CONTROL via the daemon-backed router
+ * (unstick/pause/stop/steer act on live agents) and OBSERVE via a live snapshot (static rollup ⊕ engine
+ * overlay). Built by {@link serveConductor} in the daemon process; the deferred cross-process IPC binding
+ * (separate CLI → `co serve`) ships these same calls over the wire next stage. Registers ZERO agent MCP
+ * tools — operator-only methods, never agent-callable (Principle 4 + D4).
+ */
+export interface ConductorControlSurface {
+  /** The daemon-backed router — `revertStuck`/`rewake`/`pause`/`stop` (+ `resume`/`steer`) on live agents. */
+  readonly router: DaemonBackedAgentRouter;
+  /** Snapshot the LIVE observability view (roster/cost ⊕ hosted/paused/stuck/outstanding-mail). */
+  readonly observe: () => LiveObservabilitySnapshot;
+}
+
 // ── The cadence runner ──────────────────────────────────────────────────────────────────────────────
 
 /** Constructor seams for the host runner. */
@@ -72,6 +92,12 @@ export interface ConductorHostRunnerDeps {
   readonly onError?: (error: unknown) => void;
   /** Called by {@link ConductorHostRunner.stop} so callers can close resources tied to the runner's lifetime. */
   readonly onStop?: () => void;
+  /**
+   * The operator control/observe surface (P3). Optional: the cadence runner works without it (existing
+   * callers/tests are unchanged); {@link serveConductor} always wires it so the operator can control +
+   * observe the running conductor via {@link ConductorHostRunner.control}.
+   */
+  readonly control?: ConductorControlSurface;
 }
 
 /**
@@ -88,6 +114,8 @@ export class ConductorHostRunner {
   private readonly onTick: ((outcome: DaemonTickOutcome) => void) | undefined;
   private readonly onError: ((error: unknown) => void) | undefined;
   private readonly onStop: (() => void) | undefined;
+  /** The operator control/observe surface (P3), present when built by {@link serveConductor}. */
+  readonly control: ConductorControlSurface | undefined;
   private handle: IntervalHandle | null = null;
   private inFlight = false;
 
@@ -98,6 +126,7 @@ export class ConductorHostRunner {
     this.onTick = deps.onTick;
     this.onError = deps.onError;
     this.onStop = deps.onStop;
+    this.control = deps.control;
   }
 
   /** Whether the cadence is currently armed. */
@@ -274,6 +303,10 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     );
   }
 
+  // P3 (CTL-OBS) — the operator control/observe surface, backed by the running engine.
+  const router = new DaemonBackedAgentRouter({ engine, projectId });
+  const liveProvider = new EngineLiveStateProvider({ engine, projectId, router });
+
   const reconcile = new ReconcileLoop({
     runningAgents: () => liveRunningAgents(projectId, engine),
     // [host-live]: the per-agent hosted-pane trace + `kill(pid, 0)` probe is the operator handoff;
@@ -281,7 +314,13 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     livenessInputFor: () => undefined,
     now,
     onBreak: opts.onBreak ?? (() => {}),
-    markStuck: opts.markStuck ?? (() => {}),
+    // P3 §3a/§3d — the router IS the host-side markStuck owner: a watchdog escalation lands in its
+    // STUCK set (so the daemon then skips the agent until `unstick`), and ALSO fans out to any
+    // operator-supplied markStuck seam (surfacing). `co unstick`'s revertStuck+rewake clear it.
+    markStuck: (agent) => {
+      router.markStuck(agent);
+      opts.markStuck?.(agent);
+    },
   });
 
   const daemon = new ConductorDaemon({
@@ -290,12 +329,15 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     projectId,
     now,
     reconcileEvery: opts.reconcileEvery ?? 5,
+    // P3 §3c — honor `pause`/STUCK: filter the router's suppressed agents out of candidate selection.
+    isSkipped: (pid, agent) => router.shouldSkip(pid, agent),
   });
 
   const wtStoreForStop = ownedWtStore;
   const runner = new ConductorHostRunner({
     daemon,
     intervalMs: opts.intervalMs ?? 1000,
+    control: { router, observe: () => queryLiveObservability(projectId, liveProvider) },
     ...(opts.scheduler != null ? { scheduler: opts.scheduler } : {}),
     ...(opts.onTick != null ? { onTick: opts.onTick } : {}),
     ...(opts.onError != null ? { onError: opts.onError } : {}),
