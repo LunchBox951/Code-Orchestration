@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
@@ -39,6 +40,7 @@ let dataDirs: string[] = [];
 let registries: ProjectRegistry[] = [];
 let mailStores: MailStore[] = [];
 let rosterStores: RosterStore[] = [];
+let clients: Client[] = [];
 
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
@@ -46,9 +48,17 @@ beforeEach(() => {
   registries = [];
   mailStores = [];
   rosterStores = [];
+  clients = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const client of clients) {
+    try {
+      await client.close();
+    } catch {
+      /* best-effort */
+    }
+  }
   for (const closeable of [...mailStores, ...rosterStores, ...registries]) {
     try {
       closeable.close();
@@ -191,12 +201,29 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const qw = makeQuietWindow();
 
     // Start the driver — it will block at ensureHosted until the pane emits startup bytes.
+    // awaitMailRouted: simulates the agent calling co_mail_send via the live MCP surface to
+    // prove LiveDelivery routing works (the FakePty architectural constraint means the pane
+    // can't make real MCP calls itself; this seam bridges that gap in-sandbox).
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
       makeTransport: () => InMemoryTransport.createLinkedPair(),
       now: clock.now,
       quietWindow: qw.quietWindow,
       injectOptions: { retryDelay: neverResolve },
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: 'clarify_request',
+            subject: 'turn complete',
+            body: 'proof routing',
+          },
+        });
+      },
     });
 
     // The pane is spawned synchronously before ensureHosted's first await.
@@ -217,6 +244,10 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     // AC-S10-4·2 (1): turn ran without error and reached an idle boundary.
     expect(result.turnRan).toBe(true);
     expect(result.turnIdle).toBe(true);
+
+    // AC-S10-4·2 (emitted mail routed): fake MCP client called co_mail_send → LiveDelivery routed
+    // it to coord-1's inbox through the real MCP surface (proven without a real binary).
+    expect(result.mailRouted).toBe(true);
 
     // AC-S10-4·2 (2): recoverProjectStore + listSessions reconstructed the agent's session.
     expect(result.sessionReconstructed).toBe(true);

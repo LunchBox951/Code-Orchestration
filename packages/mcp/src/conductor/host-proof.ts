@@ -13,6 +13,7 @@
  * REGISTERS ZERO AGENT MCP TOOLS (Principle 4 + D4). The driver is operator-only.
  */
 import {
+  openMailStore,
   openSessionStore,
   recoverProjectStore,
   type DeliveredMail,
@@ -43,6 +44,15 @@ export interface HostProofSeams {
   readonly quietWindow: (signal: AbortSignal) => Promise<void>;
   /** Extra inject options (e.g. a non-resolving `retryDelay` for sandbox determinism). */
   readonly injectOptions?: Omit<InjectMailOptions, 'provider'>;
+  /**
+   * Called after the turn completes with the client-side transport so that in-sandbox tests can
+   * connect a fake MCP Client and call `co_mail_send`, simulating what a real agent does during
+   * a turn. The driver awaits this before checking the mail store for routed items.
+   *
+   * In-sandbox: inject a fake-client function that calls `co_mail_send`.
+   * Host-live: omit (the real agent calls `co_mail_send` naturally during the turn).
+   */
+  readonly awaitMailRouted?: (clientTransport: TransportPair[0]) => Promise<void>;
 }
 
 // ── Result ────────────────────────────────────────────────────────────────────
@@ -55,6 +65,8 @@ export interface HostProofResult {
   readonly turnIdle: boolean;
   /** True when `recoverProjectStore` + `selectAllSessions` reconstructed the agent's session. */
   readonly sessionReconstructed: boolean;
+  /** True when at least one mail item was routed to another agent during or after the turn. */
+  readonly mailRouted: boolean;
   /** True when `engine.steer` succeeded on the (still-warm) hosted pane. */
   readonly steerCompleted: boolean;
   /** The recovered session records (for caller inspection). */
@@ -73,6 +85,10 @@ export interface HostProofResult {
  *   3. {@link ConductorEngine.runOneTurn} — inject `mail` into the warm pane and drive exactly
  *      one turn to its idle boundary.
  *      (In-sandbox: the test drives the byte trace and settles the quiet window in parallel.)
+ *   3b. `seams.awaitMailRouted` — in-sandbox, a fake MCP Client connects and calls `co_mail_send`
+ *       to prove the {@link LiveDelivery} routing path is live. Host-live: the real agent calls
+ *       `co_mail_send` naturally during the turn, so this seam is omitted. Either way, the driver
+ *       checks the parent's mail store for routed items and records `mailRouted`.
  *   4. `pane.kill('SIGKILL')` — simulate a crash.
  *   5. {@link recoverProjectStore} — holistic replay from the event log.
  *   6. {@link openSessionStore}.listSessions() — reconstruct the live set; assert the agent is there.
@@ -104,6 +120,19 @@ export async function runHostProof(
   // Step 3: inject mail → run EXACTLY ONE turn → detect idle.
   const turn = await engine.runOneTurn(hosted, mail);
 
+  // Step 3b: prove emitted-mail routing through the live MCP surface.
+  // In-sandbox: the seam connects a fake MCP Client and calls co_mail_send, simulating what the
+  // real agent does during a turn. Host-live: omit the seam; the real agent calls co_mail_send
+  // naturally, and the mail is already in the store by the time the turn resolves.
+  await seams.awaitMailRouted?.(hosted.clientTransport);
+  const routingStore = openMailStore(projectId);
+  let mailRouted: boolean;
+  try {
+    mailRouted = routingStore.outstanding(identity.parent).length > 0;
+  } finally {
+    routingStore.close();
+  }
+
   // Step 4: SIGKILL — simulate a provider crash.
   hosted.pane.kill('SIGKILL');
 
@@ -130,6 +159,7 @@ export async function runHostProof(
   return {
     turnRan: !turn.errored,
     turnIdle: turn.turnEnd?.idle === true,
+    mailRouted,
     sessionReconstructed,
     steerCompleted: true,
     recoveredSessions,
@@ -165,7 +195,7 @@ export async function runHostProofCommand(argv: readonly string[]): Promise<void
   // [host-live] — import real seams at call-time (node-pty + real timers + stream transport).
   // These are NOT imported at module-load so the module is safe to import in-sandbox tests
   // without side-effects (node-pty is a native addon; its absence in sandbox must not crash).
-  const { NodePtyHost, openMailStore } = await import('@co/core');
+  const { NodePtyHost } = await import('@co/core');
   const { createStreamTransportPair } = await import('./real-transport.js');
   const { monotonicNowMs, realQuietWindow } = await import('./host.js');
 
@@ -216,12 +246,18 @@ export async function runHostProofCommand(argv: readonly string[]): Promise<void
     `[co host-proof] result:\n` +
       `  turnRan=${result.turnRan}\n` +
       `  turnIdle=${result.turnIdle}\n` +
+      `  mailRouted=${result.mailRouted}\n` +
       `  sessionReconstructed=${result.sessionReconstructed}\n` +
       `  steerCompleted=${result.steerCompleted}\n` +
       `  recoveredSessions=${result.recoveredSessions.length}`,
   );
 
-  if (!result.turnRan || !result.sessionReconstructed || !result.steerCompleted) {
+  if (
+    !result.turnRan ||
+    !result.mailRouted ||
+    !result.sessionReconstructed ||
+    !result.steerCompleted
+  ) {
     throw new Error(
       '[co host-proof] FAIL — one or more proof steps did not pass (see output above).',
     );

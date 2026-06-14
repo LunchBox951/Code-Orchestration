@@ -73,6 +73,7 @@ This runs the scripted host-proof driver against the real binary:
 [co host-proof] result:
   turnRan=true
   turnIdle=true
+  mailRouted=true
   sessionReconstructed=true
   steerCompleted=true
   recoveredSessions=1
@@ -85,6 +86,7 @@ This runs the scripted host-proof driver against the real binary:
 |------|---------------|
 | Turn ran | `turnRan=true` (no error during `runOneTurn`) |
 | Turn idle | `turnIdle=true` (byte-quiescence reached) |
+| Mail routed | `mailRouted=true` (agent called `co_mail_send`; `LiveDelivery` routed it to parent's inbox) |
 | Recovery | `sessionReconstructed=true` (agent session in recovered state) |
 | Steer | `steerCompleted=true` (interrupt key sent without error) |
 
