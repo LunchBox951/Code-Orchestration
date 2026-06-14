@@ -63,7 +63,7 @@ export interface HostProofResult {
   readonly turnRan: boolean;
   /** True when the turn reached an idle boundary (byte-quiescence). */
   readonly turnIdle: boolean;
-  /** True when `recoverProjectStore` + `selectAllSessions` reconstructed the agent's session. */
+  /** True when `recoverProjectStore` + `openSessionStore().listSessions()` reconstructed the agent's session. */
   readonly sessionReconstructed: boolean;
   /** True when at least one mail item was routed to another agent during or after the turn. */
   readonly mailRouted: boolean;
