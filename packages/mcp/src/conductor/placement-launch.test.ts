@@ -519,20 +519,90 @@ describe('EngineReviewerSpawnGate — launches a reviewer pane from a placed rev
     );
   });
 
-  it('throws if reviewBranch is absent from the placement', async () => {
-    const { projectId } = makeProject();
-    const { engine } = makeEngine();
-    const wtStore = openWorktreeStore(projectId);
-    worktreeStores.push(wtStore);
+  it('spawn() resolves a slung child worktree by AGENT (no reviewBranch) and calls ensureHosted', async () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    seedParentChain(projectId);
+
+    // Slung implementer: worktree keyed to the child agent on a normal branch — NO reviewBranch.
+    // Proves the gate's generic fallback: listWorktrees().find(w => w.agent === record.agent).
+    const childAgent = 'impl-slung-g';
+    recordWorktree(projectId, childAgent, 'co/impl-slung-g', cwd);
+    const childPlacement = recordPlacement(projectId, childAgent, 'implementer', 'claude');
+
+    const { engine, pty } = makeEngine();
+    const wtStore = worktreeStores[worktreeStores.length - 1]!;
     const gate = new EngineReviewerSpawnGate(
       engine,
       wtStore,
-      (agent) => `/isolated/${agent}`,
+      (agent) => join(dataDir, 'isolated', agent),
       TEST_MCP_PATHS,
     );
 
-    const placement = recordPlacement(projectId, 'reviewer@rev-y', 'reviewer', 'claude');
-    // no reviewBranch in this placement
-    await expect(gate.spawn(projectId, placement)).rejects.toThrow(/no reviewBranch/);
+    // Drive the pane in parallel with spawn (agent-lookup path, not reviewBranch path)
+    const spawnPromise = gate.spawn(projectId, childPlacement);
+    await flush();
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await spawnPromise;
+
+    expect(engine.isHosted(projectId, childAgent)).toBe(true);
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    expect(roster.getAgent(childAgent)?.role).toBe('implementer');
+
+    const sessions = openSessionStore(projectId);
+    sessionStores.push(sessions);
+    expect(sessions.getSession(childAgent)?.agentId).toBe(childAgent);
+
+    // MNR-5 through the gate: a second spawn for the same child agent is refused.
+    await expect(gate.spawn(projectId, childPlacement)).rejects.toThrow(/already hosted.*MNR-5/);
+  });
+});
+
+// 7. Researcher seat + engine-wide single-launch authority (AC-S10-2.3 + AC-S10-2.4 / MNR-5)
+
+describe('researcher seat — engine-wide single-launch authority (AC-S10-2.3 + MNR-5 / AC-S10-2.4)', () => {
+  it('a placed researcher is hosted through the same role-agnostic launch path; MNR-5 refuses a second host', async () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    seedParentChain(projectId);
+
+    // PLACED RESEARCHER seat — no reviewer-specific fields (proves the launch path is role-agnostic,
+    // not reviewer-special-cased). A normal branch, NOT a reviewBranch.
+    const placement = recordPlacement(projectId, 'res-mnr5', 'researcher', 'claude');
+    const worktree = recordWorktree(projectId, 'res-mnr5', 'co/research-mnr5', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-mnr5');
+
+    const { identity, spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    expect(identity.role).toBe('researcher');
+
+    const { engine, pty } = makeEngine();
+    await hostPaneFromSpec(engine, pty, identity, spec);
+
+    // AC-S10-2.3: researcher pane is hosted; roster + session records carry role 'researcher'.
+    expect(engine.isHosted(projectId, 'res-mnr5')).toBe(true);
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    expect(roster.getAgent('res-mnr5')?.role).toBe('researcher');
+    const sessions = openSessionStore(projectId);
+    sessionStores.push(sessions);
+    expect(sessions.getSession('res-mnr5')?.agentId).toBe('res-mnr5');
+
+    // AC-S10-2.4 / MNR-5: a second ensureHosted for the SAME agent is REFUSED — the guard is keyed
+    // to the agent id, not the role. Proves the launch authority is engine-wide, not role-scoped.
+    const { identity: id2, spec: spec2 } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+    await expect(engine.ensureHosted(id2, spec2)).rejects.toThrow(/already hosted.*MNR-5/);
   });
 });

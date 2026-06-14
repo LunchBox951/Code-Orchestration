@@ -18,9 +18,12 @@
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  */
 import { performance } from 'node:perf_hooks';
+import { join } from 'node:path';
 import {
   NodePtyHost,
+  openRegistry,
   openSessionStore,
+  openWorktreeStore,
   QUIET_WINDOW_MS,
   type BreakSignal,
   type MarkStuck,
@@ -32,6 +35,8 @@ import { ReconcileLoop } from '@co/core';
 import { ConductorEngine, type TransportPair } from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
 import type { HostedIdentity } from '../live-session-host.js';
+import { EngineReviewerSpawnGate } from './reviewer-gate.js';
+import { type CoMcpPaths } from './placement-launch.js';
 
 // ── The cadence scheduler seam (injected so the loop is FakePty-unit-testable) ──────────────────────
 
@@ -65,6 +70,8 @@ export interface ConductorHostRunnerDeps {
   readonly onTick?: (outcome: DaemonTickOutcome) => void;
   /** Fail-loud seam: a tick that threw (e.g. the un-wired `[host-live]` transport). Never swallowed. */
   readonly onError?: (error: unknown) => void;
+  /** Called by {@link ConductorHostRunner.stop} so callers can close resources tied to the runner's lifetime. */
+  readonly onStop?: () => void;
 }
 
 /**
@@ -80,6 +87,7 @@ export class ConductorHostRunner {
   private readonly scheduler: IntervalScheduler;
   private readonly onTick: ((outcome: DaemonTickOutcome) => void) | undefined;
   private readonly onError: ((error: unknown) => void) | undefined;
+  private readonly onStop: (() => void) | undefined;
   private handle: IntervalHandle | null = null;
   private inFlight = false;
 
@@ -89,6 +97,7 @@ export class ConductorHostRunner {
     this.scheduler = deps.scheduler ?? defaultScheduler;
     this.onTick = deps.onTick;
     this.onError = deps.onError;
+    this.onStop = deps.onStop;
   }
 
   /** Whether the cadence is currently armed. */
@@ -112,11 +121,12 @@ export class ConductorHostRunner {
     return live;
   }
 
-  /** Disarm the cadence (idempotent). The engine's warm panes are torn down by the caller, not here. */
+  /** Disarm the cadence (idempotent) and invoke the stop hook (e.g. to close owned resources). */
   stop(): void {
     if (this.handle == null) return;
     this.scheduler.clearInterval(this.handle);
     this.handle = null;
+    this.onStop?.();
   }
 
   /** One cadence beat: run a tick unless a prior one is still in flight; report the outcome / error. */
@@ -215,6 +225,15 @@ export interface ServeConductorOptions {
   readonly markStuck?: MarkStuck;
   /** Whether to arm the cadence immediately. Default: true (an operator launch runs). */
   readonly autoStart?: boolean;
+  /**
+   * Co MCP + CLI binary paths for the `EngineReviewerSpawnGate` (P2 / AC-S10-2 / RG-4). When
+   * provided, a live `EngineReviewerSpawnGate` is wired into every hosted session's ctx so `co_merge`
+   * calls can trigger live reviewer spawns. When absent, no spawn gate is wired (headless path).
+   *
+   * [host-live] The real binary paths bind here at `co serve` time. For sandbox proofs, inject
+   * fixture paths (clone `TEST_MCP_PATHS` from `placement-launch.test.ts`).
+   */
+  readonly coMcpPaths?: CoMcpPaths;
 }
 
 /**
@@ -230,12 +249,30 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   const now = opts.now ?? monotonicNowMs;
   const pty = opts.pty ?? (await NodePtyHost.create());
 
+  // P2 / AC-S10-2 — lazy reviewer-spawn gate: breaks the construction cycle (gate wraps engine).
+  // [host-live] isolatedHomeDirFor: per-agent isolated home dir under the project data dir.
+  let spawnGate: EngineReviewerSpawnGate | undefined;
+  let ownedWtStore: ReturnType<typeof openWorktreeStore> | undefined;
   const engine = new ConductorEngine({
     pty,
     makeTransport: opts.makeTransport ?? hostLiveTransportRequired,
     now,
     quietWindow: opts.quietWindow ?? realQuietWindow,
+    reviewerSpawnGate: () => spawnGate,
   });
+  if (opts.coMcpPaths != null) {
+    const registry = openRegistry();
+    const dataDir = registry.dataDirFor(projectId);
+    registry.close();
+    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    ownedWtStore = openWorktreeStore(projectId);
+    spawnGate = new EngineReviewerSpawnGate(
+      engine,
+      ownedWtStore,
+      isolatedHomeDirFor,
+      opts.coMcpPaths,
+    );
+  }
 
   const reconcile = new ReconcileLoop({
     runningAgents: () => liveRunningAgents(projectId, engine),
@@ -255,12 +292,14 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     reconcileEvery: opts.reconcileEvery ?? 5,
   });
 
+  const wtStoreForStop = ownedWtStore;
   const runner = new ConductorHostRunner({
     daemon,
     intervalMs: opts.intervalMs ?? 1000,
     ...(opts.scheduler != null ? { scheduler: opts.scheduler } : {}),
     ...(opts.onTick != null ? { onTick: opts.onTick } : {}),
     ...(opts.onError != null ? { onError: opts.onError } : {}),
+    ...(wtStoreForStop != null ? { onStop: () => wtStoreForStop.close() } : {}),
   });
 
   if (opts.autoStart !== false) runner.start();

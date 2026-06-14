@@ -18,6 +18,7 @@ import { buildCoreRegistry } from '../core-registry.js';
 import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
 import { slingTool } from './sling.js';
+import type { ReviewerSpawnGate } from '../../review/merge.js';
 
 // AC-L3-1, headless through invokeTool (no MCP server, no Conductor): co_sling slings from the
 // auto-detected base, records the sandbox + a readable baseline, requires an explicit parent and a
@@ -818,5 +819,52 @@ describe('co_sling — L6b E4 child-cap (queue-as-WAITING for excess dispatches)
 
     expect(out.status).toBe('waiting');
     expect(ctx.worktrees?.getWorktree('co/non-reviewer-at-cap')).toBeUndefined();
+  });
+});
+
+// P2 / AC-S10-2 — spawn gate integration: co_sling fires the gate for placed children
+
+describe('co_sling — spawn gate integration (P2 / AC-S10-2)', () => {
+  it('placed: fires reviewerSpawnGate with the slung child agent id (spy-key-value discipline)', async () => {
+    const repo = makeMainRepo();
+    const spawned: Array<{ projectId: string; agent: string }> = [];
+    const spyGate: ReviewerSpawnGate = {
+      spawn: async (pId, record): Promise<void> => {
+        spawned.push({ projectId: pId, agent: record.agent });
+      },
+    };
+    const ctx = {
+      ...makeContextWithDispatch('lead-7', repo, healthySnapshot),
+      reviewerSpawnGate: spyGate,
+    };
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-sling-t',
+      branch: 'co/sling-t',
+    })) as { status: string };
+
+    // Fire-and-forget: allow the spawn microtask to resolve before asserting
+    await Promise.resolve();
+
+    expect(out.status).toBe('placed');
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]!.agent).toBe('impl-sling-t'); // key-value guard (review-spy blind-spot)
+    expect(spawned[0]!.projectId).toBe(ctx.projectId);
+  });
+
+  it('headless path (no reviewerSpawnGate): co_sling placed is byte-identical to before — gate never fires', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    // No reviewerSpawnGate on ctx — headless path must be unchanged.
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-headless-t',
+      branch: 'co/headless-t',
+    })) as { status: string };
+
+    expect(out.status).toBe('placed');
+    expect(ctx.worktrees?.getWorktree('co/headless-t')).toBeDefined();
   });
 });

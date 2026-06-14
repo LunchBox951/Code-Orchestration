@@ -15,6 +15,9 @@ import { openWorktreeStore, type WorktreeStore } from '../../worktrees/worktree-
 import { REPO_MODE_CONFIG_KEY } from '../../worktrees/repo-mode.js';
 import { worktreePathFor } from '../../worktrees/sling.js';
 import { openProjectStore } from '../../store/sqlite-store.js';
+import { openDispatchStore } from '../../dispatch/dispatch-store.js';
+import { accountForProvider } from '../../dispatch/provider-source.js';
+import type { ReviewerSpawnGate } from '../../review/merge.js';
 import { buildCoreRegistry } from '../core-registry.js';
 import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
@@ -1188,5 +1191,86 @@ describe('co_merge (AC-L5-1, AC-L5-3)', () => {
         intent: { summary: 'land the feature' },
       }),
     ).rejects.toThrow(/regression/);
+  });
+});
+
+// ── P2 / AC-S10-2 — live reviewer trigger path ───────────────────────────────────────────────────────
+describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
+  it('AC-S10-2.1: returns review_pending:true and fires spawn gate when reviewerSpawnGate is wired and no PASS exists', async () => {
+    // Freeze time at epoch 0 so the 1970-epoch snapshot timestamps are fresh (not stale) when the
+    // handler calls Date.now() to build the trigger gate's nowMs. A healthy snapshot → dispatch policy
+    // returns 'placed' → fireSpawn calls reviewerSpawnGate.spawn() synchronously (fire-and-forget).
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const spawned: Array<{ projectId: string; agent: string }> = [];
+      const spawnGate: ReviewerSpawnGate = {
+        spawn(projectId, placement) {
+          spawned.push({ projectId, agent: placement.agent });
+          return Promise.resolve();
+        },
+      };
+      const toolCtx = { ...ctx, dispatch, reviewerSpawnGate: spawnGate };
+      try {
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'trigger a review' },
+        })) as { merged: boolean; review_pending?: boolean };
+        expect(out.merged).toBe(false);
+        expect(out.review_pending).toBe(true);
+        // fireSpawn is fire-and-forget; spawn body runs synchronously before Promise.resolve() settles.
+        expect(spawned).toHaveLength(1);
+        expect(spawned[0]!.projectId).toBe('p-merge-tool');
+        // Assert the agent id (reviewer seat) so a wrong-key regression is caught (spy-key-value-blind-spot).
+        expect(spawned[0]!.agent).toMatch(/^reviewer@rev-/);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC-S10-2.2: headless path (no reviewerSpawnGate) merges normally on recorded PASS — unchanged', async () => {
+    // Confirms the P2 seam is purely ADDITIVE: absent gate → falls through to the existing merge gate.
+    const repo = makeRepo();
+    const reg = buildCoreRegistry();
+    const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+    recordPass(
+      reviewStore!,
+      worktreeStore!,
+      'lead-2',
+      'main',
+      git(repo, 'rev-parse', 'co/feature'),
+    );
+    const out = (await invokeTool(reg, ctx, 'co_merge', {
+      branch: 'co/feature',
+      into: 'main',
+      intent: { summary: 'land the feature' },
+    })) as { merged: boolean; review_pending?: boolean };
+    expect(out.merged).toBe(true);
+    expect(out.review_pending).toBeUndefined();
   });
 });
