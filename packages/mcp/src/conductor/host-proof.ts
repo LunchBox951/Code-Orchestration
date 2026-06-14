@@ -254,6 +254,7 @@ export async function runHostProofCommand(argv: readonly string[]): Promise<void
 
   if (
     !result.turnRan ||
+    !result.turnIdle ||
     !result.mailRouted ||
     !result.sessionReconstructed ||
     !result.steerCompleted

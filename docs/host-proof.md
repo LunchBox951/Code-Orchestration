@@ -16,9 +16,10 @@ in-sandbox proof (AC-S10-4 items 1–4) runs automatically as part of `pnpm test
 3. The target provider (`claude` or `codex`) installed and authenticated:
    - Claude: `claude auth status --json` shows `logged_in: true`.
    - Codex: `codex doctor --json` shows `authenticated: true`.
-4. At least one actionable mail in `@operator`'s inbox for the project:
+4. At least one actionable mail in `@operator`'s inbox for the project (the driver reads from
+   `@operator`'s outstanding queue):
    ```
-   co mail send --to <agentId> --type operator_message --subject "host-proof test" --body "prove it"
+   co mail send --to @operator --type operator_message --subject "host-proof test" --body "prove it"
    ```
    (Or seed it manually with `co mail send` before running the proof.)
 
