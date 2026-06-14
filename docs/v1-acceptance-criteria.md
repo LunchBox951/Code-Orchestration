@@ -160,10 +160,16 @@ These are the top-level conditions that, all met, *are* v1.
   as events in later layers. Evidence: L0 on `main` (PR #11); L1 on `dev`; L4 dispatch/cost in
   `co/l4-dispatch-cost`; L6b specs/plans in `co/l6b-core`; L6b issues/locator in
   `co/l6b-issues-locator`.
-- `ST-2` ☐ The system can be **reconstructed and recovered** from its record after a crash/restart;
-  stuck/zombie agents are reconciled back to WAITING (Principle 14, `STATE-and-RECOVERY`).
-- `ST-3` ☐ **No silent failures** — pre-flight (the doctor), in-flight (live stream monitoring),
-  post-hoc (observability); never-drop, fail-loud, degrade safely under pressure (Principle 9).
+- `ST-2` ◐ The system can be **reconstructed and recovered** from its record after a crash/restart;
+  stuck/zombie agents are reconciled back to WAITING (Principle 14, `STATE-and-RECOVERY`). Recovery +
+  reconcile landed + tested in-sandbox (P4/P5: `recoverProjectStore → selectAllSessions →
+  ReconcileLoop` integration test; MNR-2 errored-turn re-wake; errored_waiting break signal). Remaining:
+  the host-live crash/restart proof against the real conductor daemon (host-side handoff).
+- `ST-3` ◐ **No silent failures** — pre-flight (the doctor), in-flight (live stream monitoring),
+  post-hoc (observability); never-drop, fail-loud, degrade safely under pressure (Principle 9). Doctor/
+  observability/never-drop landed in-sandbox: L8-WDOG silent-stop watchdog + STUCK escalation; L8-B
+  doctor probes; MNR-2 errored-turn re-wake signal; SH-2 `.co/`-read guard (Principle 12). Remaining:
+  the host-live live-stream-monitoring proof.
 
 ## G. The agent surface — MCP & self-describing (P4, P5)
 

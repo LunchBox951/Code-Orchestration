@@ -6,6 +6,7 @@
  * and the recovered projections are byte-equal to the pre-crash projections (AC-L0-2).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -321,5 +322,53 @@ describe('buildProjectDecode — union schema coverage', () => {
     // buildProjectDecode() itself must not throw (no duplicates in the current schema set)
     expect(() => buildProjectDecode()).not.toThrow();
     expect(() => buildGlobalDecode()).not.toThrow();
+  });
+});
+
+// ── SH-2 guard — no product code reads .co/ (Principle 12 / SH-2) ─────────────────────────────────
+// The prototype writes .co/, but the PRODUCT must not read it (the invariant that enables the
+// migration commit in docs/migration.md). This test asserting the invariant cannot regress silently.
+
+describe('SH-2 guard — product code does not read .co/ (Principle 12 / SH-2 — AC-S10-5.4)', () => {
+  it('all .co/ mentions in packages/ non-test source are in comments/JSDoc — zero code-path reads', () => {
+    // packages/core/src/replay → 3 levels up → packages/
+    const packagesRoot = join(import.meta.dirname, '..', '..', '..');
+    let grepOutput = '';
+    try {
+      grepOutput = execFileSync(
+        'grep',
+        [
+          '-r',
+          '--include=*.ts',
+          '--exclude=*.test.ts',
+          '--exclude-dir=dist',
+          '-n',
+          '\\.co/',
+          packagesRoot,
+        ],
+        { encoding: 'utf8' },
+      );
+    } catch {
+      // grep exits 1 when there are no matches — trivially clean; grepOutput stays ''.
+    }
+
+    if (grepOutput.trim() === '') return; // no .co/ mentions at all
+
+    // Each matched line must be inside a comment or JSDoc — not an executable code path.
+    const violations: string[] = [];
+    for (const matchLine of grepOutput.trim().split('\n')) {
+      // grep -n output: "/abs/path/file.ts:42:   * .co/ note"
+      const firstColon = matchLine.indexOf(':');
+      const secondColon = matchLine.indexOf(':', firstColon + 1);
+      const lineContent = matchLine.slice(secondColon + 1).trim();
+      if (
+        !lineContent.startsWith('//') &&
+        !lineContent.startsWith('*') &&
+        !lineContent.startsWith('/*')
+      ) {
+        violations.push(matchLine);
+      }
+    }
+    expect(violations, 'no product code may read .co/ (SH-2 / Principle 12)').toEqual([]);
   });
 });
