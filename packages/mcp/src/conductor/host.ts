@@ -70,6 +70,8 @@ export interface ConductorHostRunnerDeps {
   readonly onTick?: (outcome: DaemonTickOutcome) => void;
   /** Fail-loud seam: a tick that threw (e.g. the un-wired `[host-live]` transport). Never swallowed. */
   readonly onError?: (error: unknown) => void;
+  /** Called by {@link ConductorHostRunner.stop} so callers can close resources tied to the runner's lifetime. */
+  readonly onStop?: () => void;
 }
 
 /**
@@ -85,6 +87,7 @@ export class ConductorHostRunner {
   private readonly scheduler: IntervalScheduler;
   private readonly onTick: ((outcome: DaemonTickOutcome) => void) | undefined;
   private readonly onError: ((error: unknown) => void) | undefined;
+  private readonly onStop: (() => void) | undefined;
   private handle: IntervalHandle | null = null;
   private inFlight = false;
 
@@ -94,6 +97,7 @@ export class ConductorHostRunner {
     this.scheduler = deps.scheduler ?? defaultScheduler;
     this.onTick = deps.onTick;
     this.onError = deps.onError;
+    this.onStop = deps.onStop;
   }
 
   /** Whether the cadence is currently armed. */
@@ -117,11 +121,12 @@ export class ConductorHostRunner {
     return live;
   }
 
-  /** Disarm the cadence (idempotent). The engine's warm panes are torn down by the caller, not here. */
+  /** Disarm the cadence (idempotent) and invoke the stop hook (e.g. to close owned resources). */
   stop(): void {
     if (this.handle == null) return;
     this.scheduler.clearInterval(this.handle);
     this.handle = null;
+    this.onStop?.();
   }
 
   /** One cadence beat: run a tick unless a prior one is still in flight; report the outcome / error. */
@@ -247,6 +252,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   // P2 / AC-S10-2 — lazy reviewer-spawn gate: breaks the construction cycle (gate wraps engine).
   // [host-live] isolatedHomeDirFor: per-agent isolated home dir under the project data dir.
   let spawnGate: EngineReviewerSpawnGate | undefined;
+  let ownedWtStore: ReturnType<typeof openWorktreeStore> | undefined;
   const engine = new ConductorEngine({
     pty,
     makeTransport: opts.makeTransport ?? hostLiveTransportRequired,
@@ -259,12 +265,10 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     const dataDir = registry.dataDirFor(projectId);
     registry.close();
     const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
-    // [host-live] The WorktreeStore opened here is held for the daemon's lifetime and closed at
-    // process exit. A proper close-on-stop hook requires a runner lifecycle extension — tracked
-    // as a [host-live] hardening item (no impact while the process is running).
+    ownedWtStore = openWorktreeStore(projectId);
     spawnGate = new EngineReviewerSpawnGate(
       engine,
-      openWorktreeStore(projectId),
+      ownedWtStore,
       isolatedHomeDirFor,
       opts.coMcpPaths,
     );
@@ -288,12 +292,14 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     reconcileEvery: opts.reconcileEvery ?? 5,
   });
 
+  const closedWtStore = ownedWtStore;
   const runner = new ConductorHostRunner({
     daemon,
     intervalMs: opts.intervalMs ?? 1000,
     ...(opts.scheduler != null ? { scheduler: opts.scheduler } : {}),
     ...(opts.onTick != null ? { onTick: opts.onTick } : {}),
     ...(opts.onError != null ? { onError: opts.onError } : {}),
+    ...(closedWtStore != null ? { onStop: () => closedWtStore.close() } : {}),
   });
 
   if (opts.autoStart !== false) runner.start();

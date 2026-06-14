@@ -518,23 +518,6 @@ describe('EngineReviewerSpawnGate — launches a reviewer pane from a placed rev
       /only a placed placement/,
     );
   });
-
-  it('throws if reviewBranch is absent from the placement', async () => {
-    const { projectId } = makeProject();
-    const { engine } = makeEngine();
-    const wtStore = openWorktreeStore(projectId);
-    worktreeStores.push(wtStore);
-    const gate = new EngineReviewerSpawnGate(
-      engine,
-      wtStore,
-      (agent) => `/isolated/${agent}`,
-      TEST_MCP_PATHS,
-    );
-
-    const placement = recordPlacement(projectId, 'reviewer@rev-y', 'reviewer', 'claude');
-    // no reviewBranch in this placement
-    await expect(gate.spawn(projectId, placement)).rejects.toThrow(/no reviewBranch/);
-  });
 });
 
 // 7. Researcher seat + engine-wide single-launch authority (AC-S10-2.3 + AC-S10-2.4 / MNR-5)

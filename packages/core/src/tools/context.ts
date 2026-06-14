@@ -116,12 +116,15 @@ export interface ToolContext {
    */
   readonly ghExec?: GhExec;
   /**
-   * OPTIONAL L7/P2 reviewer-spawn gate: wired by the Conductor host layer when running the live
-   * daemon (`co serve`). When present and a `co_merge` call finds no recorded PASS verdict for the
-   * branch, it triggers the review (recording a `review.requested` + a reviewer placement) and
-   * fires the spawn gate — the engine launches the reviewer pane (AC-S10-2 / RG-4). When absent
-   * (headless/tests/prototype), `co_merge` gates on an already-recorded verdict exactly as before
-   * (the seam is OPTIONAL + additive; the headless path is unchanged).
+   * OPTIONAL L7/P2 spawn gate: wired by the Conductor host layer when running the live daemon
+   * (`co serve`). Used by two call-sites symmetrically:
+   *   - `co_merge`: when no recorded PASS verdict exists, triggers the review (recording
+   *     `review.requested` + a reviewer placement) and fires the gate — the engine launches the
+   *     reviewer pane (AC-S10-2.1 / RG-4).
+   *   - `co_sling`: immediately after the placed child's worktree + placement are recorded, fires
+   *     the gate so the engine launches the child pane (AC-S10-2 / sling path).
+   * When absent (headless/tests/prototype), both tools behave exactly as before (the seam is
+   * OPTIONAL + additive; the headless paths are unchanged).
    */
   readonly reviewerSpawnGate?: ReviewerSpawnGate;
 }
