@@ -1273,4 +1273,46 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
     expect(out.merged).toBe(true);
     expect(out.review_pending).toBeUndefined();
   });
+
+  it('AC-S10-2.3: operator-override does not trigger the spawn gate even when reviewerSpawnGate is wired', async () => {
+    // Defensive invariant (nit-a): the spawn gate must NOT fire on the operator-override path.
+    // The operator bypasses the review gate entirely; spawning a reviewer would start an unwanted
+    // review for a merge that the operator has already decided to force through.
+    const repo = makeRepo();
+    const reg = buildCoreRegistry();
+    const { ctx, worktreeStore } = setup(OPERATOR, { cwd: repo, registerCaller: false });
+    worktreeStore!.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        path: '/tmp/fake',
+        parent: OPERATOR,
+      },
+      { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+    );
+
+    const spawned: Array<{ projectId: string; agent: string }> = [];
+    const spawnGate: ReviewerSpawnGate = {
+      spawn(projectId, placement) {
+        spawned.push({ projectId, agent: placement.agent });
+        return Promise.resolve();
+      },
+    };
+
+    const toolCtx = { ...ctx, reviewerSpawnGate: spawnGate };
+    const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+      branch: 'co/feature',
+      into: 'main',
+      intent: { summary: 'operator hotfix' },
+      operator_override: true,
+      reason: 'hotfix: prod down',
+    })) as { merged: boolean; review_pending?: boolean; overridden?: boolean };
+
+    expect(out.merged).toBe(true);
+    expect(out.overridden).toBe(true);
+    expect(out.review_pending).toBeUndefined();
+    // The spawn gate must NOT fire on the operator-override path.
+    expect(spawned).toHaveLength(0);
+  });
 });

@@ -559,7 +559,60 @@ describe('EngineReviewerSpawnGate — launches a reviewer pane from a placed rev
   });
 });
 
-// 7. Researcher seat + engine-wide single-launch authority (AC-S10-2.3 + AC-S10-2.4 / MNR-5)
+// 7. EngineReviewerSpawnGate — no-worktree fallback (nit-b)
+
+describe('EngineReviewerSpawnGate — no-worktree fallback throws cleanly', () => {
+  it('throws when no worktree is found for the placement agent via the generic agent-lookup path', async () => {
+    // Negative test: a placed placement with NO recorded worktree for its agent must throw with a
+    // descriptive error rather than silently doing nothing or crashing with a null-deref.
+    // This exercises the fallback branch:
+    //   listWorktrees().find(w => !w.removed && w.agent === record.agent) → undefined → throw.
+    const { projectId } = makeProject();
+    const { engine } = makeEngine();
+    const wtStore = openWorktreeStore(projectId);
+    worktreeStores.push(wtStore);
+    const gate = new EngineReviewerSpawnGate(
+      engine,
+      wtStore,
+      (agent) => `/isolated/${agent}`,
+      TEST_MCP_PATHS,
+    );
+
+    // A placed placement whose agent has NO worktree recorded → generic lookup returns undefined.
+    const placement = recordPlacement(projectId, 'impl-no-wt', 'implementer', 'claude');
+
+    await expect(gate.spawn(projectId, placement)).rejects.toThrow(/no worktree found.*impl-no-wt/);
+  });
+
+  it('throws when reviewBranch is set but no worktree is recorded for that branch', async () => {
+    // Exercises the reviewer branch-keyed lookup path:
+    //   worktrees.getWorktree(record.reviewBranch) → null → throw.
+    const { projectId } = makeProject();
+    const { engine } = makeEngine();
+    const wtStore = openWorktreeStore(projectId);
+    worktreeStores.push(wtStore);
+    const gate = new EngineReviewerSpawnGate(
+      engine,
+      wtStore,
+      (agent) => `/isolated/${agent}`,
+      TEST_MCP_PATHS,
+    );
+
+    // Reviewer placement referencing a branch that has no worktree on record.
+    const placement = recordPlacement(projectId, 'reviewer@rev-no-wt', 'reviewer', 'claude', {
+      reviewId: 'rev-no-wt',
+      reviewBranch: 'co/branch-that-does-not-exist',
+      reviewTarget: 'main',
+      reviewScope: 'worker_merge',
+    });
+
+    await expect(gate.spawn(projectId, placement)).rejects.toThrow(
+      /no worktree found.*reviewer@rev-no-wt/,
+    );
+  });
+});
+
+// 8. Researcher seat + engine-wide single-launch authority (AC-S10-2.3 + AC-S10-2.4 / MNR-5)
 
 describe('researcher seat — engine-wide single-launch authority (AC-S10-2.3 + MNR-5 / AC-S10-2.4)', () => {
   it('a placed researcher is hosted through the same role-agnostic launch path; MNR-5 refuses a second host', async () => {

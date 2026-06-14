@@ -269,7 +269,9 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
     // The identity pre-check below is skipped on this path (we are not merging; the reviewer will
     // verify the branch before any merge lands). The headless path (no reviewerSpawnGate) and the
     // re-call after a recorded PASS both fall through to the merge path below — byte-identical.
-    if (ctx.reviewerSpawnGate != null) {
+    // Guard: the spawn gate must not fire on the operator-override path — the operator bypasses
+    // the gate entirely; firing spawn here would start an unwanted review for an already-decided merge.
+    if (ctx.reviewerSpawnGate != null && !operatorOverride) {
       const verdict = ctx.reviews.getVerdict(into, input.branch);
       if (verdict?.verdict !== 'PASS') {
         const triggerGate = new CoReviewGate({
@@ -293,6 +295,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         });
         return {
           merged: false,
+          // The merge hasn't happened yet — the review is pending — so there is no commit to report.
           commit_sha: '',
           commit_message: '',
           mode: resolveRepoMode(ctx.projectId, repoCwd),
