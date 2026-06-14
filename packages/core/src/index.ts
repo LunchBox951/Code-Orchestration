@@ -835,8 +835,10 @@ export {
   makeAgentRegisteredEvent,
 } from './roles/events.js';
 // L6a roster projection: the `RosterProjector` folds `agent.registered` into a `roster` read-model
-// table; `openRosterStore` is the typed facade (record + read-back + replay-equal).
-export { RosterProjector } from './roles/roster-projector.js';
+// table; `openRosterStore` is the typed facade (record + read-back + replay-equal). The
+// `selectAllAgents`/`selectAgent` read-model selectors are exported so a post-recovery reader (the L7
+// Conductor daemon) can join the recovered roster to the recovered session set under one store handle.
+export { RosterProjector, selectAllAgents, selectAgent } from './roles/roster-projector.js';
 export type { RosterStore } from './roles/roster-store.js';
 export { openRosterStore } from './roles/roster-store.js';
 // L6a spawn rules: structural parent→child constraints from agent-roles.md. Pure static check —
@@ -1120,7 +1122,15 @@ export {
   makeSessionCreatedEvent,
   makeSessionEndedEvent,
 } from './session/events.js';
-export { SessionProjector } from './session/session-projector.js';
+// The `selectAllSessions`/`selectSession`/`rowToSessionRecord` read-model selectors are exported so a
+// post-recovery reader (the L7 Conductor daemon) can reconstruct the RUNNING set (not-yet-ended
+// sessions) from the recovered project store and join it to the roster.
+export {
+  SessionProjector,
+  selectAllSessions,
+  selectSession,
+  rowToSessionRecord,
+} from './session/session-projector.js';
 export type { SessionStore } from './session/session-store.js';
 export { openSessionStore } from './session/session-store.js';
 

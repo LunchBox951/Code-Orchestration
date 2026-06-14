@@ -33,3 +33,28 @@ export {
   type TurnOutcome,
   type CycleOutcome,
 } from './conductor/engine.js';
+// L7-LOOP (Stage 10 P1) — the Conductor DAEMON: the deterministic run-loop that turns the box of
+// landed L7/L8 components into a running `co` (recover → reconstruct the live set → drive ≤1 turn → on
+// cadence run the clarify-timeout tick + watchdog-reconcile sweep). NOT a tool, never agent-callable
+// (D4). The engine/reconcile are public so P3's operator control/observe surface builds ON the loop.
+export {
+  ConductorDaemon,
+  type ConductorDaemonDeps,
+  type DaemonTickOutcome,
+} from './conductor/daemon.js';
+// L7-LOOP [host-live] glue — the real-cadence runner (`setInterval` over `tick()` + `NodePtyHost`
+// panes) and the `co serve` operator launch. Built + FakePty-unit-tested; never run against a real
+// provider binary in-sandbox (binding a real pty-bound transport is the operator handoff).
+export {
+  ConductorHostRunner,
+  serveConductor,
+  runServeConductor,
+  defaultScheduler,
+  monotonicNowMs,
+  realQuietWindow,
+  hostLiveTransportRequired,
+  type ConductorHostRunnerDeps,
+  type ServeConductorOptions,
+  type IntervalScheduler,
+  type IntervalHandle,
+} from './conductor/host.js';
