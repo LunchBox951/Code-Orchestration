@@ -419,6 +419,8 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     // with the CHILD's agent id so the gate resolves the child's worktree and identity correctly.
     if (ctx.reviewerSpawnGate != null) {
       const childRecord = { ...placedRecord, agent: input.agent };
+      // A failed spawn is logged loud here; recovery is the ReconcileLoop watchdog (the child
+      // remains as a recorded placement with no live pane until the host-side reconcile restarts it).
       void ctx.reviewerSpawnGate.spawn(ctx.projectId, childRecord).catch((err: unknown) => {
         console.error(`co: child spawn for '${input.agent}' failed:`, err);
       });

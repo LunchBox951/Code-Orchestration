@@ -292,14 +292,14 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     reconcileEvery: opts.reconcileEvery ?? 5,
   });
 
-  const closedWtStore = ownedWtStore;
+  const wtStoreForStop = ownedWtStore;
   const runner = new ConductorHostRunner({
     daemon,
     intervalMs: opts.intervalMs ?? 1000,
     ...(opts.scheduler != null ? { scheduler: opts.scheduler } : {}),
     ...(opts.onTick != null ? { onTick: opts.onTick } : {}),
     ...(opts.onError != null ? { onError: opts.onError } : {}),
-    ...(closedWtStore != null ? { onStop: () => closedWtStore.close() } : {}),
+    ...(wtStoreForStop != null ? { onStop: () => wtStoreForStop.close() } : {}),
   });
 
   if (opts.autoStart !== false) runner.start();
