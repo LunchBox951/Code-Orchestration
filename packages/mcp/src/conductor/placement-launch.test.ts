@@ -536,3 +536,51 @@ describe('EngineReviewerSpawnGate — launches a reviewer pane from a placed rev
     await expect(gate.spawn(projectId, placement)).rejects.toThrow(/no reviewBranch/);
   });
 });
+
+// 7. Researcher seat + engine-wide single-launch authority (AC-S10-2.3 + AC-S10-2.4 / MNR-5)
+
+describe('researcher seat — engine-wide single-launch authority (AC-S10-2.3 + MNR-5 / AC-S10-2.4)', () => {
+  it('a placed researcher is hosted through the same role-agnostic launch path; MNR-5 refuses a second host', async () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    seedParentChain(projectId);
+
+    // PLACED RESEARCHER seat — no reviewer-specific fields (proves the launch path is role-agnostic,
+    // not reviewer-special-cased). A normal branch, NOT a reviewBranch.
+    const placement = recordPlacement(projectId, 'res-mnr5', 'researcher', 'claude');
+    const worktree = recordWorktree(projectId, 'res-mnr5', 'co/research-mnr5', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-mnr5');
+
+    const { identity, spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    expect(identity.role).toBe('researcher');
+
+    const { engine, pty } = makeEngine();
+    await hostPaneFromSpec(engine, pty, identity, spec);
+
+    // AC-S10-2.3: researcher pane is hosted; roster + session records carry role 'researcher'.
+    expect(engine.isHosted(projectId, 'res-mnr5')).toBe(true);
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    expect(roster.getAgent('res-mnr5')?.role).toBe('researcher');
+    const sessions = openSessionStore(projectId);
+    sessionStores.push(sessions);
+    expect(sessions.getSession('res-mnr5')?.agentId).toBe('res-mnr5');
+
+    // AC-S10-2.4 / MNR-5: a second ensureHosted for the SAME agent is REFUSED — the guard is keyed
+    // to the agent id, not the role. Proves the launch authority is engine-wide, not role-scoped.
+    const { identity: id2, spec: spec2 } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+    await expect(engine.ensureHosted(id2, spec2)).rejects.toThrow(/already hosted.*MNR-5/);
+  });
+});
