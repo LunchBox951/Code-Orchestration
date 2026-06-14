@@ -2,6 +2,7 @@ import type {
   CommitIdentityReader,
   GitConfigIdentityReader,
 } from '../permissions/identity-guard.js';
+import type { ReviewerSpawnGate } from '../review/merge.js';
 import type { MailStore } from '../mail/mail-store.js';
 import type { ProjectRegistry, ProjectId } from '../registry/registry.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
@@ -114,4 +115,13 @@ export interface ToolContext {
    * `gh pr create` runner; tests can inject a fake so PR creation remains headless.
    */
   readonly ghExec?: GhExec;
+  /**
+   * OPTIONAL L7/P2 reviewer-spawn gate: wired by the Conductor host layer when running the live
+   * daemon (`co serve`). When present and a `co_merge` call finds no recorded PASS verdict for the
+   * branch, it triggers the review (recording a `review.requested` + a reviewer placement) and
+   * fires the spawn gate — the engine launches the reviewer pane (AC-S10-2 / RG-4). When absent
+   * (headless/tests/prototype), `co_merge` gates on an already-recorded verdict exactly as before
+   * (the seam is OPTIONAL + additive; the headless path is unchanged).
+   */
+  readonly reviewerSpawnGate?: ReviewerSpawnGate;
 }

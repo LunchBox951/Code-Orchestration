@@ -18,9 +18,12 @@
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  */
 import { performance } from 'node:perf_hooks';
+import { join } from 'node:path';
 import {
   NodePtyHost,
+  openRegistry,
   openSessionStore,
+  openWorktreeStore,
   QUIET_WINDOW_MS,
   type BreakSignal,
   type MarkStuck,
@@ -32,6 +35,8 @@ import { ReconcileLoop } from '@co/core';
 import { ConductorEngine, type TransportPair } from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
 import type { HostedIdentity } from '../live-session-host.js';
+import { EngineReviewerSpawnGate } from './reviewer-gate.js';
+import { type CoMcpPaths } from './placement-launch.js';
 
 // ── The cadence scheduler seam (injected so the loop is FakePty-unit-testable) ──────────────────────
 
@@ -215,6 +220,15 @@ export interface ServeConductorOptions {
   readonly markStuck?: MarkStuck;
   /** Whether to arm the cadence immediately. Default: true (an operator launch runs). */
   readonly autoStart?: boolean;
+  /**
+   * Co MCP + CLI binary paths for the `EngineReviewerSpawnGate` (P2 / AC-S10-2 / RG-4). When
+   * provided, a live `EngineReviewerSpawnGate` is wired into every hosted session's ctx so `co_merge`
+   * calls can trigger live reviewer spawns. When absent, no spawn gate is wired (headless path).
+   *
+   * [host-live] The real binary paths bind here at `co serve` time. For sandbox proofs, inject
+   * fixture paths (clone `TEST_MCP_PATHS` from `placement-launch.test.ts`).
+   */
+  readonly coMcpPaths?: CoMcpPaths;
 }
 
 /**
@@ -230,12 +244,28 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   const now = opts.now ?? monotonicNowMs;
   const pty = opts.pty ?? (await NodePtyHost.create());
 
+  // P2 / AC-S10-2 — lazy reviewer-spawn gate: breaks the construction cycle (gate wraps engine).
+  // [host-live] isolatedHomeDirFor: per-agent isolated home dir under the project data dir.
+  let spawnGate: EngineReviewerSpawnGate | undefined;
   const engine = new ConductorEngine({
     pty,
     makeTransport: opts.makeTransport ?? hostLiveTransportRequired,
     now,
     quietWindow: opts.quietWindow ?? realQuietWindow,
+    reviewerSpawnGate: () => spawnGate,
   });
+  if (opts.coMcpPaths != null) {
+    const registry = openRegistry();
+    const dataDir = registry.dataDirFor(projectId);
+    registry.close();
+    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    spawnGate = new EngineReviewerSpawnGate(
+      engine,
+      openWorktreeStore(projectId),
+      isolatedHomeDirFor,
+      opts.coMcpPaths,
+    );
+  }
 
   const reconcile = new ReconcileLoop({
     runningAgents: () => liveRunningAgents(projectId, engine),

@@ -62,6 +62,7 @@ import {
   roleParentResolver,
   steerPane,
   waitingItems,
+  type ReviewerSpawnGate,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -152,6 +153,15 @@ export interface ConductorEngineDeps {
    * pending and re-tries on the next deliver (re-wake). Default: none (host-side logs/metrics).
    */
   readonly onRouteFailure?: (failure: RouteFailure) => void;
+  /**
+   * LAZY factory for the P2 reviewer-spawn gate (AC-S10-2 / RG-4). Called per `ensureHosted` to
+   * forward the gate into each hosted session's ctx so `co_merge` calls can trigger live reviewer
+   * spawns. LAZY (factory, not gate) to break the construction cycle: the gate wraps THIS engine, so
+   * it can only be constructed AFTER the engine is created. Absent ⇒ no spawn gate in hosted sessions
+   * (headless path; co_merge gates on recorded verdicts). Conditionally-spread in hostSession opts so
+   * an absent gate never passes an explicit `undefined` (exactOptionalPropertyTypes safe).
+   */
+  readonly reviewerSpawnGate?: () => ReviewerSpawnGate | undefined;
 }
 
 /** A routed live-delivery side-effect that failed post-persist (the {@link LiveDelivery} ledger re-tries). */
@@ -371,8 +381,10 @@ export class ConductorEngine {
       // P1b: thread the ROUTING delivery factory so this pane's emitted mail wakes + injects its
       // recipients' live panes (the `LiveDelivery` seams bind back to THIS engine's hosted-pane lookup).
       const [clientTransport, serverTransport] = this.deps.makeTransport();
+      const spawnGate = this.deps.reviewerSpawnGate?.();
       const session = await this.host.hostSession(identity, serverTransport, {
         deliveryFactory: this.routingDeliveryFactory(),
+        ...(spawnGate != null ? { reviewerSpawnGate: spawnGate } : {}),
       });
 
       // Track pane exit for the `dead` liveness signal (P1b). The subscription lives until release.
