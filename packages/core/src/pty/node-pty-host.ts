@@ -16,7 +16,7 @@
  * The real authed claude/codex reaching `ready` in a real node-pty is the operator's host-side proof
  * (AC-L7-1 `[host-live]`), not a sandbox job.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import type { Pane, PrelaunchFile, PtyExit, PtyHost, SpawnSpec } from './pty-host.js';
 
@@ -168,6 +168,7 @@ function materializePrelaunchFiles(files: readonly PrelaunchFile[]): void {
       encoding: 'utf8',
       mode: file.mode ?? 0o600,
     });
+    chmodSync(file.path, file.mode ?? 0o600);
     const installed = readFileSync(file.path, 'utf8');
     if (installed !== file.contents) {
       throw new Error(`NodePtyHost.spawn: prelaunch file verification failed for '${file.path}'`);

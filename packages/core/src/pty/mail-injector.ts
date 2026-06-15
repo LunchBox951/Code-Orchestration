@@ -51,6 +51,12 @@ export interface InjectMailOptions {
   readonly retryDelay?: (signal?: AbortSignal) => Promise<void>;
   /** Max echo-verify write attempts before failing loud (default {@link DEFAULT_MAX_ECHO_ATTEMPTS}). */
   readonly maxEchoAttempts?: number;
+  /**
+   * Host-live escape hatch for providers/versions whose TUI accepts input but does not echo composer
+   * contents to pty output. Defaults false; callers that enable it must verify a downstream side
+   * effect for the injected turn (e.g. a nonce-bearing MCP tool call) because echo proof is absent.
+   */
+  readonly allowUnverifiedSubmit?: boolean;
 }
 
 /**
@@ -131,12 +137,19 @@ export async function injectMail(
         break;
       }
       if (multiline) {
+        if (opts.allowUnverifiedSubmit) {
+          submitted = true;
+          break;
+        }
         throw new Error(
           'injectMail: multiline composer did not echo before the retry window; refusing an ' +
             'uncertain multiline retry',
         );
       }
       // else: the settle window elapsed with no echo — loop and re-write (retry).
+    }
+    if (!submitted) {
+      if (opts.allowUnverifiedSubmit) submitted = true;
     }
     if (!submitted) {
       throw new Error(

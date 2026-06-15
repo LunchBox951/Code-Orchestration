@@ -49,8 +49,11 @@ export type Liveness = 'alive' | 'wedged' | 'dead';
  */
 export const WEDGE_MS = 8000;
 
-/** A detected break that warrants escalation: a frozen pane, an exited pane, or a finish-before-yield. */
-export type BreakKind = 'wedged' | 'dead' | 'silent_stop';
+/**
+ * A detected break that warrants escalation: a frozen pane, an exited pane, a finish-before-yield,
+ * or an errored-turn with outstanding actionable mail (the MNR-2 re-wake signal).
+ */
+export type BreakKind = 'wedged' | 'dead' | 'silent_stop' | 'errored_waiting';
 
 /** The `finish-before-yield` nudge id (NUDGE_CATALOG) injected on a silent-stop break. */
 export const SILENT_STOP_TRIGGER = 'finish-before-yield';
@@ -86,6 +89,23 @@ export interface LivenessInput {
    * turn activity; zero bytes since this timestamp for the wedge window is a wedge.
    */
   readonly turnStartedAt?: number;
+  /**
+   * True when the PREVIOUS turn threw (errored) without consuming its mail (MNR-2 seam). When
+   * combined with `hasWaitingItems` + `hasOutstandingActionable`, the watchdog emits the
+   * `errored_waiting` re-wake signal so the conductor re-injects the outstanding mail.
+   * Additive/injected — defaults false, so existing reconcile tests are unaffected.
+   */
+  readonly lastTurnErrored?: boolean;
+  /**
+   * True when the agent has at least one unanswered `clarify_request` it raised (`waitingItems`
+   * from `mail/escalation.ts`). Injected by the host-side `livenessInputFor` seam.
+   */
+  readonly hasWaitingItems?: boolean;
+  /**
+   * True when the agent's inbox contains at least one outstanding (unresolved) actionable mail
+   * (`mail.outstanding(agent)` non-empty). Injected by the host-side `livenessInputFor` seam.
+   */
+  readonly hasOutstandingActionable?: boolean;
 }
 
 /** Classifier config. Extends the C2 detector config (provider/quiet window) with the wedge window. */
@@ -116,6 +136,26 @@ export function classifyLiveness(
     return {
       liveness: 'dead',
       break: { kind: 'dead', triggerId: undefined, reason: 'pane exited' },
+    };
+  }
+
+  // errored_waiting — the last turn threw without consuming its mail, the agent is waiting on
+  // an unanswered clarify, and it still has outstanding actionable mail. This is the MNR-2
+  // re-wake signal: surface it so the conductor re-injects the still-outstanding item. Checked
+  // before byte-silence signals because the agent may be healthy byte-wise; the outstanding mail
+  // is the reason to re-wake, not a liveness failure.
+  if (
+    input.lastTurnErrored === true &&
+    input.hasWaitingItems === true &&
+    input.hasOutstandingActionable === true
+  ) {
+    return {
+      liveness: 'alive',
+      break: {
+        kind: 'errored_waiting',
+        triggerId: undefined, // no pane nudge — the conductor re-injects the outstanding mail
+        reason: 'last turn errored; agent is waiting with outstanding actionable mail — re-inject',
+      },
     };
   }
 
@@ -239,6 +279,14 @@ export class LivenessWatchdog {
       if (this.signaled !== 'dead') {
         this.signaled = 'dead';
         this.onBreak(agent, detected); // emit once; the runtime reaps a dead pane (no nudge, no STUCK)
+      }
+      return verdict;
+    }
+
+    if (detected.kind === 'errored_waiting') {
+      if (this.signaled !== 'errored_waiting') {
+        this.signaled = 'errored_waiting';
+        this.onBreak(agent, detected); // emit once; the conductor re-injects the outstanding mail
       }
       return verdict;
     }

@@ -29,6 +29,7 @@ import {
   LiveSessionHostImpl,
   type HostedIdentity,
   type HostedSession,
+  type HostSessionOptions,
 } from './live-session-host.js';
 
 // ── Shared cleanup state ────────────────────────────────────────────────────
@@ -159,10 +160,11 @@ function seedParentChain(projectId: string, parent: string): void {
  */
 async function hostAndConnect(
   identity: HostedIdentity,
+  opts?: HostSessionOptions,
 ): Promise<{ client: Client; session: HostedSession }> {
   const host = new LiveSessionHostImpl();
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const session = await host.hostSession(identity, serverTransport);
+  const session = await host.hostSession(identity, serverTransport, opts);
   openedSessions.push(session);
   const client = new Client({ name: 'co-lsh-test', version: '0.0.0' });
   await client.connect(clientTransport);
@@ -194,6 +196,26 @@ describe('LiveSessionHostImpl — handshake + role-scoped surface', () => {
     expect(exposed.length).toBeGreaterThan(0);
     // Role-scoped: strictly fewer tools than the full registry.
     expect(exposed.length).toBeLessThan(buildCoreRegistry().list().length);
+  });
+
+  it('uses an explicit tool override when the engine supplies one', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-tool-override',
+      role: 'implementer',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+
+    const [mailSend] = toolsForRole('coordinator').filter((tool) => tool.name === 'co_mail_send');
+    expect(mailSend).toBeDefined();
+
+    const { client } = await hostAndConnect(identity, { tools: [mailSend!] });
+    const { tools } = await client.listTools();
+
+    expect(tools.map((tool) => tool.name)).toEqual(['co_mail_send']);
   });
 
   it('scopes each base role to exactly its own toolset', async () => {

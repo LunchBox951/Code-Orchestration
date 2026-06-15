@@ -181,7 +181,13 @@ export type { WorktreeInfo } from './tools/index.js';
 export { buildCoreRegistry, invokeTool, readWorktreeInfo } from './tools/index.js';
 // L2-B2 schema-exposure helpers: the zod `.shape` of a tool's input/output schemas, so the thin
 // MCP adapter mounts each tool's self-describing schema onto the SDK without importing zod itself.
-export { toolInputShape, toolOutputShape } from './tools/index.js';
+export type { ToolJsonSchemaObject } from './tools/index.js';
+export {
+  toolInputJsonSchema,
+  toolInputShape,
+  toolOutputJsonSchema,
+  toolOutputShape,
+} from './tools/index.js';
 // L2-C completeness gate (THE keystone, AC-L2-3): the no-stub assertion generalized from L1's
 // mail-type check to the WHOLE tool registry — flags any tool lacking a self-describing input
 // schema, a structured output schema, a real (non-`notImplemented`) handler, or mountability. A
@@ -835,8 +841,10 @@ export {
   makeAgentRegisteredEvent,
 } from './roles/events.js';
 // L6a roster projection: the `RosterProjector` folds `agent.registered` into a `roster` read-model
-// table; `openRosterStore` is the typed facade (record + read-back + replay-equal).
-export { RosterProjector } from './roles/roster-projector.js';
+// table; `openRosterStore` is the typed facade (record + read-back + replay-equal). The
+// `selectAllAgents`/`selectAgent` read-model selectors are exported so a post-recovery reader (the L7
+// Conductor daemon) can join the recovered roster to the recovered session set under one store handle.
+export { RosterProjector, selectAllAgents, selectAgent } from './roles/roster-projector.js';
 export type { RosterStore } from './roles/roster-store.js';
 export { openRosterStore } from './roles/roster-store.js';
 // L6a spawn rules: structural parent→child constraints from agent-roles.md. Pure static check —
@@ -1120,7 +1128,15 @@ export {
   makeSessionCreatedEvent,
   makeSessionEndedEvent,
 } from './session/events.js';
-export { SessionProjector } from './session/session-projector.js';
+// The `selectAllSessions`/`selectSession`/`rowToSessionRecord` read-model selectors are exported so a
+// post-recovery reader (the L7 Conductor daemon) can reconstruct the RUNNING set (not-yet-ended
+// sessions) from the recovered project store and join it to the roster.
+export {
+  SessionProjector,
+  selectAllSessions,
+  selectSession,
+  rowToSessionRecord,
+} from './session/session-projector.js';
 export type { SessionStore } from './session/session-store.js';
 export { openSessionStore } from './session/session-store.js';
 
@@ -1234,6 +1250,16 @@ export type {
 export { REQUIRED_CAPABILITIES, defaultProviderProbe, runDoctor } from './doctor/doctor.js';
 export type { ReviewSummary, ObservabilitySnapshot } from './doctor/observability.js';
 export { queryObservability } from './doctor/observability.js';
+// Stage 10 P3 (CTL-OBS) — the LIVE observability overlay: the static rollup ⊕ an engine-filled
+// {@link LiveStateProvider} seam (warm/paused/stuck + outstanding mail). The merge is core (transport-
+// agnostic, cli-callable); `@co/mcp` fills the seam in the daemon process. NOT an agent MCP tool.
+export type {
+  LiveAgentState,
+  LiveStateProvider,
+  AgentLiveView,
+  LiveObservabilitySnapshot,
+} from './doctor/observability.js';
+export { queryLiveObservability } from './doctor/observability.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

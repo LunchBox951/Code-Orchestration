@@ -4,7 +4,7 @@ import type { ToolSpec } from '../registry.js';
 import { defaultProviderAccounts } from '../../dispatch/balancer.js';
 import { refreshUsageForAccounts, runDispatchPolicy } from '../../dispatch/cli-render.js';
 import { providerSchema } from '../../dispatch/events.js';
-import type { PlacementDecided } from '../../dispatch/events.js';
+import type { PlacementDecided, PlacementRecord } from '../../dispatch/events.js';
 import {
   contextWindowSchema,
   effortSchema,
@@ -25,6 +25,7 @@ import {
   type CapChild,
 } from '../../plans/child-cap.js';
 import { branchMerged, resolveAgentBranch } from '../../plans/worker-branch.js';
+import type { WorktreeStore } from '../../worktrees/worktree-store.js';
 
 // Every input field carries a .describe() (Principle 5 — the schemas are the single syntax source).
 // The caller never supplies its own identity; `parent` is the SPAWNER this sandbox is for, a
@@ -410,8 +411,22 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       projectId: ctx.projectId,
     });
 
-    // Record a PLACED decision only after the sandbox exists; a git failure must not leave a false
-    // successful placement in the dispatch log.
+    // Symmetrical to co_merge's reviewer trigger: once the slung child's worktree + placement are
+    // recorded, the live spawn must succeed or the caller must see the failure. Returning `placed`
+    // while no pane exists would make launch failure invisible to recovery/operations.
+    if (ctx.reviewerSpawnGate != null) {
+      try {
+        await ctx.reviewerSpawnGate.spawn(
+          ctx.projectId,
+          provisionalPlacementRecord(input.agent, placedPayload),
+        );
+      } catch (cause) {
+        cleanupFailedSpawnWorktree(ctx.worktrees, input.branch, ctx.cwd);
+        throw cause;
+      }
+    }
+    // Record a PLACED decision only after the sandbox exists and the live launch has either succeeded
+    // or is intentionally headless. A git or spawn failure must not leave a false successful placement.
     ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
 
     return {
@@ -430,6 +445,38 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     };
   },
 };
+
+function provisionalPlacementRecord(agent: string, placement: PlacementDecided): PlacementRecord {
+  if (placement.kind !== 'placed') {
+    throw new Error('co_sling: cannot launch a non-placed dispatch decision.');
+  }
+  return {
+    seq: 0,
+    agent,
+    role: placement.role,
+    workSize: placement.work_size,
+    reasoningBudget: placement.reasoning_budget,
+    kind: 'placed',
+    provider: placement.provider,
+    ...(placement.account !== undefined ? { account: placement.account } : {}),
+    model: placement.model,
+    effort: placement.effort,
+    context: placement.context,
+    recordedTs: 0,
+  };
+}
+
+function cleanupFailedSpawnWorktree(
+  worktrees: WorktreeStore,
+  branch: string,
+  repoCwd: string,
+): void {
+  try {
+    worktrees.removeWorktree(branch, { repoCwd });
+  } catch {
+    // Preserve the spawn failure. Orphan detection can surface any cleanup residue later.
+  }
+}
 
 function withDiagnostics(
   resolution: DispatchResolution,

@@ -18,6 +18,7 @@ import {
   toolsForRole,
   type DeliveryFactory,
   type ProjectId,
+  type ReviewerSpawnGate,
   type Role,
   type ToolContext,
   type ToolSpec,
@@ -35,6 +36,9 @@ export const CO_PARENT_ENV = 'CO_PARENT';
 
 /** The launch-environment variable the mount may use when cwd is a slung, unregistered sandbox. */
 export const CO_PROJECT_ID_ENV = 'CO_PROJECT_ID';
+
+/** Optional bridge-process diagnostic log path, scoped to the isolated provider home. */
+export const CO_MCP_BRIDGE_LOG_ENV = 'CO_MCP_BRIDGE_LOG';
 
 const OPERATOR_TOOL_NAMES = new Set(['co_merge', 'co_push', 'co_pr_merge', 'co_spec_lock']);
 
@@ -123,6 +127,12 @@ export interface OpenContextStoresOptions {
    * default in-process writer. Absent ⇒ the in-process default (the stdio mount path is unchanged).
    */
   readonly deliveryFactory?: DeliveryFactory;
+  /**
+   * The P2 reviewer-spawn gate (AC-S10-2 / RG-4): when present, assembled into the ctx so that
+   * `co_merge` calls by this pane's agent can trigger live reviewer spawns. Absent ⇒ headless
+   * verdict-gate behaviour (unchanged).
+   */
+  readonly reviewerSpawnGate?: ReviewerSpawnGate;
 }
 
 /**
@@ -196,6 +206,7 @@ export function openContextStores(
       issues,
       research,
       usageSourceFactory: defaultUsageSourceFactory,
+      ...(opts?.reviewerSpawnGate != null ? { reviewerSpawnGate: opts.reviewerSpawnGate } : {}),
     };
     return { ctx, close: closeAll };
   } catch (e) {

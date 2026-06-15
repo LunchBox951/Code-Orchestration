@@ -6,7 +6,7 @@
  * the liveness watchdog, and `LiveSessionHostImpl` — but NOTHING drove them. This module is the
  * single-turn cycle that wires them into one deterministic loop:
  *
- *   select → ensure-hosted (spawn) → driveToReady → bind MCP → injectMail → run ONE turn →
+ *   select → ensure-hosted (spawn) → bind MCP → driveToReady → injectMail → run ONE turn →
  *   detectTurnEnd → yield.
  *
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -44,6 +44,7 @@ import {
   type SpawnSpec,
   type StartupOutcome,
   type Steer,
+  type ToolSpec,
   type TurnEndConfig,
   type TurnEndResult,
   CLARIFY_TIMEOUT_SECONDS_DEFAULT,
@@ -61,7 +62,9 @@ import {
   parseOsc0Titles,
   roleParentResolver,
   steerPane,
+  watchDialogs,
   waitingItems,
+  type ReviewerSpawnGate,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -75,7 +78,7 @@ import {
  * A linked transport pair for one MCP bind. The engine gives the SERVER side to
  * {@link LiveSessionHost.hostSession}; the CLIENT side is where the live provider (an MCP client)
  * attaches. In-sandbox this is `InMemoryTransport.createLinkedPair()` (returned `[client, server]`);
- * host-live ([host-live], deferred) it is the pty-bound transport pair the spawned provider connects to.
+ * host-live injects the transport pair supplied by the operator entry or host integration.
  */
 export type TransportPair = readonly [client: Transport, server: Transport];
 
@@ -92,7 +95,12 @@ export interface ConductorEngineDeps {
    * host-live injects the real pty-bound pair. Keeping it injected makes the [host-live] seam explicit
    * and keeps this module free of any sandbox-only transport dependency.
    */
-  readonly makeTransport: () => TransportPair;
+  readonly makeTransport: (identity: HostedIdentity) => TransportPair;
+  /**
+   * Optional per-session tool override. Omit for normal role-scoped sessions; host-proof uses this
+   * to offer the smallest surface needed for the binary proof.
+   */
+  readonly sessionTools?: (identity: HostedIdentity) => readonly ToolSpec[] | undefined;
   /**
    * Monotonic ms source — the `at` for synthesized {@link DetectorEvent}s and the `observedAt` for
    * {@link detectTurnEnd}. This is DATA, never a wall clock (the detector's replay-determinism rests on
@@ -152,6 +160,15 @@ export interface ConductorEngineDeps {
    * pending and re-tries on the next deliver (re-wake). Default: none (host-side logs/metrics).
    */
   readonly onRouteFailure?: (failure: RouteFailure) => void;
+  /**
+   * LAZY factory for the P2 reviewer-spawn gate (AC-S10-2 / RG-4). Called per `ensureHosted` to
+   * forward the gate into each hosted session's ctx so `co_merge` calls can trigger live reviewer
+   * spawns. LAZY (factory, not gate) to break the construction cycle: the gate wraps THIS engine, so
+   * it can only be constructed AFTER the engine is created. Absent ⇒ no spawn gate in hosted sessions
+   * (headless path; co_merge gates on recorded verdicts). Conditionally-spread in hostSession opts so
+   * an absent gate never passes an explicit `undefined` (exactOptionalPropertyTypes safe).
+   */
+  readonly reviewerSpawnGate?: () => ReviewerSpawnGate | undefined;
 }
 
 /** A routed live-delivery side-effect that failed post-persist (the {@link LiveDelivery} ledger re-tries). */
@@ -207,6 +224,11 @@ export interface TurnOutcome {
    * reconcile loop's job, not this in-turn classification's.
    */
   readonly liveness?: LivenessVerdict;
+}
+
+export interface RunOneTurnOptions {
+  /** Called after the mail has been submitted to the provider composer, before turn-end observation. */
+  readonly onInjected?: () => void;
 }
 
 /** The result of one {@link ConductorEngine.runCycle}: the hosted pane, the injected item, and the turn. */
@@ -327,8 +349,10 @@ export class ConductorEngine {
 
   /**
    * MNR-5 — LAUNCH AUTHORITY. Ensure `identity`'s pane is hosted by LAUNCHING it: spawn the pane →
-   * {@link driveToReady} through the interstitial state machine → bind the co MCP surface
-   * ({@link LiveSessionHost.hostSession}) under the authoritative identity. The Conductor is the single
+   * bind the co MCP surface ({@link LiveSessionHost.hostSession}) → {@link driveToReady} through the
+   * interstitial state machine. The MCP bind happens before startup completes so real providers can
+   * initialize their configured MCP server during their own startup handshake.
+   * The Conductor is the single
    * launch authority keyed to the agent (`WorktreeRecord.agent`): a second host request for an
    * already-hosted agent — OR for a pane id already claimed by another agent — is REFUSED here, BEFORE a
    * duplicate pane is spawned (the `LiveSessionHostImpl` static guard is the MCP-bind backstop). Warm
@@ -362,18 +386,31 @@ export class ConductorEngine {
     // directly (it already carries the isolated config from buildPlacementLaunchSpec); otherwise fall
     // back to the injected spawnSpecFor seam (the default minimal spec or a host-live override).
     const pane = this.deps.pty.spawn(spec ?? this.spawnSpecFor(identity));
+    const startupP = driveToReady(pane, identity.provider);
+    // The promise is awaited below, but attach a catch immediately so an early startup failure cannot
+    // surface as an unhandled rejection while the MCP bind is still being established.
+    void startupP.catch(() => {});
+    let session: HostedSession | undefined;
+    let clientTransport: Transport | undefined;
     try {
-      // Drive it through its startup interstitials to ready (or surface a terminal login menu);
-      // `driveToReady` rejects fail-loud (Principle 9) if the pty exits before ready.
-      const startup = await driveToReady(pane, identity.provider);
       // Bind the co MCP surface to the pane's transport under the AUTHORITATIVE identity (never the
       // client's). The engine hands the server side to the host; the client side is the provider's seam.
       // P1b: thread the ROUTING delivery factory so this pane's emitted mail wakes + injects its
       // recipients' live panes (the `LiveDelivery` seams bind back to THIS engine's hosted-pane lookup).
-      const [clientTransport, serverTransport] = this.deps.makeTransport();
-      const session = await this.host.hostSession(identity, serverTransport, {
+      const [transportClient, serverTransport] = this.deps.makeTransport(identity);
+      clientTransport = transportClient;
+      const spawnGate = this.deps.reviewerSpawnGate?.();
+      const sessionTools = this.deps.sessionTools?.(identity);
+      session = await this.host.hostSession(identity, serverTransport, {
         deliveryFactory: this.routingDeliveryFactory(),
+        ...(spawnGate != null ? { reviewerSpawnGate: spawnGate } : {}),
+        ...(sessionTools != null ? { tools: sessionTools } : {}),
       });
+
+      // Drive it through its startup interstitials to ready (or surface a terminal login menu).
+      // The detector was armed immediately after spawn so tests and real providers cannot lose early
+      // startup bytes while the MCP bind starts.
+      const startup = await startupP;
 
       // Track pane exit for the `dead` liveness signal (P1b). The subscription lives until release.
       this.paneExited.set(agentKey, false);
@@ -394,6 +431,8 @@ export class ConductorEngine {
       } catch {
         /* best-effort: the pty may already be gone (e.g. driveToReady rejected on exit) */
       }
+      await Promise.allSettled([session?.close(), clientTransport?.close?.()]);
+      await Promise.allSettled([startupP]);
       throw error;
     }
   }
@@ -410,13 +449,18 @@ export class ConductorEngine {
    * signal ONLY — work-completion stays keyed to `co_finish`/`worker_done`; the engine never treats idle
    * as "done". Exactly one turn is driven: one inject, one detect, then return.
    */
-  async runOneTurn(hosted: HostedPane, mail: DeliveredMail): Promise<TurnOutcome> {
+  async runOneTurn(
+    hosted: HostedPane,
+    mail: DeliveredMail,
+    opts: RunOneTurnOptions = {},
+  ): Promise<TurnOutcome> {
     try {
       const text = this.renderMail(mail);
       await injectMail(hosted.pane, text, {
         provider: hosted.identity.provider,
         ...this.deps.injectOptions,
       });
+      opts.onInjected?.();
       const { turnEnd, trace, observedAt } = await this.observeTurnEnd(hosted);
       // P1b: classify liveness over the SAME turn trace and surface it. The turn has yielded
       // (turnActive=false), so the classifier reads `dead` (pane exited) or a `silent_stop` break
@@ -455,6 +499,7 @@ export class ConductorEngine {
       for (const title of parseOsc0Titles(chunk)) record({ kind: 'osc0', at, title });
     });
     const unsubMcp = this.deps.mcpActivity?.(hosted.pane, record) ?? noop;
+    const unsubDialogs = watchDialogs(hosted.pane, { provider: hosted.identity.provider });
 
     try {
       for (;;) {
@@ -474,6 +519,7 @@ export class ConductorEngine {
     } finally {
       unsubData();
       unsubMcp();
+      unsubDialogs();
     }
   }
 
@@ -670,17 +716,31 @@ export class ConductorEngine {
   }
 
   /**
-   * Release a warm pane: close its MCP session (frees the host's stores + static guard) and drop it from
-   * the launch ledger. P1b layers liveness classification / yield-to-watchdog onto this same post-turn
-   * seam. No-op if the agent is not hosted.
+   * Release a warm pane: drop it from the launch ledger, stop its pane, then close its MCP session
+   * (frees the host's stores + static guard). P1b layers liveness classification / yield-to-watchdog
+   * onto this same post-turn seam. No-op if the agent is not hosted.
    */
-  async release(projectId: ProjectId, agent: string): Promise<void> {
+  async release(
+    projectId: ProjectId,
+    agent: string,
+    options: { readonly onPaneKillError?: (error: unknown) => void } = {},
+  ): Promise<void> {
     const agentKey = ConductorEngine.agentKey(projectId, agent);
     const hosted = this.hosted.get(agentKey);
     if (hosted == null) return;
     this.hosted.delete(agentKey);
     this.hostedPanes.delete(ConductorEngine.paneKey(projectId, hosted.identity.pane));
     this.dropExitTracking(agentKey);
+    try {
+      hosted.pane.kill();
+    } catch (error) {
+      try {
+        options.onPaneKillError?.(error);
+      } catch {
+        /* diagnostic callback failed; session cleanup must still run */
+      }
+      /* best-effort: pane may already be gone */
+    }
     await hosted.session.close();
   }
 
@@ -691,6 +751,11 @@ export class ConductorEngine {
     this.hostedPanes.clear();
     for (const [agentKey] of all) this.dropExitTracking(agentKey);
     for (const [, hosted] of all) {
+      try {
+        hosted.pane.kill();
+      } catch {
+        /* best-effort: pane may already be gone */
+      }
       try {
         await hosted.session.close();
       } catch {

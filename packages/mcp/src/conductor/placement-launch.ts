@@ -9,10 +9,25 @@
  * PURE — no I/O. Same inputs ⇒ same spec (replay-deterministic). The host-side write of the
  * codex config.toml / prelaunch files + credential copy is [host-live], deferred.
  */
-import type { PaneIdentity, PlacementRecord, ProjectId, SpawnSpec, WorktreeRecord } from '@co/core';
+import type {
+  PaneIdentity,
+  PlacementRecord,
+  PrelaunchFile,
+  ProjectId,
+  SpawnSpec,
+  WorktreeRecord,
+} from '@co/core';
 import { buildPaneLaunchConfig, parseSubRoleId } from '@co/core';
 import type { Role } from '@co/core';
+import { dirname } from 'node:path';
 import type { HostedIdentity } from '../live-session-host.js';
+import {
+  CO_AGENT_ENV,
+  CO_MCP_BRIDGE_LOG_ENV,
+  CO_PARENT_ENV,
+  CO_PROJECT_ID_ENV,
+  CO_ROLE_ENV,
+} from '../context.js';
 
 /** Co MCP + CLI command paths the pane needs for isolated config. Host-injected; always absolute. */
 export interface CoMcpPaths {
@@ -22,8 +37,79 @@ export interface CoMcpPaths {
   readonly coMcpCommand: string;
   /** Codex MCP server args. */
   readonly coMcpArgs?: readonly string[];
+  /**
+   * Optional per-pane bridge socket path. When present, provider config launches
+   * `co-mcp ... bridge <socket>` so the external stdio MCP process connects back to the
+   * Conductor-owned engine session for this pane.
+   */
+  readonly coMcpBridgeSocketPath?: (isolatedHomeDir: string, agent: string) => string;
   /** Codex hook CLI command (must be an absolute path — validated by buildPaneLaunchConfig). */
   readonly coCliCommand: string;
+  /** Optional Codex hook CLI args, e.g. an absolute script path for `node <script>`. */
+  readonly coCliArgs?: readonly string[];
+  /** Optional host-copied Claude auth file contents for the isolated CLAUDE_CONFIG_DIR. */
+  readonly claudeCredentialsJson?: string;
+  /** Optional host-copied Claude interactive state for the isolated CLAUDE_CONFIG_DIR. */
+  readonly claudeStateJson?: string;
+  /** Optional host-copied Codex auth file contents for the isolated CODEX_HOME. */
+  readonly codexAuthJson?: string;
+}
+
+export interface ProviderAuthPrelaunchPaths {
+  readonly claudeCredentialsJson?: string;
+  readonly claudeStateJson?: string;
+  readonly codexAuthJson?: string;
+}
+
+const CLAUDE_STATE_ALLOWLIST = [
+  'oauthAccount',
+  'hasCompletedOnboarding',
+  'lastOnboardingVersion',
+  'userID',
+  'migrationVersion',
+  'firstStartTime',
+  'opusProMigrationComplete',
+  'sonnet1m45MigrationComplete',
+] as const;
+
+export function sanitizeClaudeStateJson(raw: string): string | undefined {
+  const parsed = JSON.parse(raw) as unknown;
+  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const source = parsed as Record<string, unknown>;
+  const sanitized: Record<string, unknown> = {};
+  for (const key of CLAUDE_STATE_ALLOWLIST) {
+    if (Object.hasOwn(source, key)) {
+      sanitized[key] = source[key];
+    }
+  }
+  if (Object.keys(sanitized).length === 0) return undefined;
+  return `${JSON.stringify(sanitized, null, 2)}\n`;
+}
+
+export function providerAuthPrelaunchFiles(
+  provider: 'claude' | 'codex',
+  isolatedHomeDir: string,
+  paths: ProviderAuthPrelaunchPaths,
+): readonly PrelaunchFile[] {
+  const home = isolatedHomeDir.replace(/\/+$/u, '');
+  if (provider === 'claude') {
+    const claudeStateJson =
+      paths.claudeStateJson != null ? sanitizeClaudeStateJson(paths.claudeStateJson) : undefined;
+    return [
+      ...(paths.claudeCredentialsJson != null
+        ? [{ path: `${home}/.credentials.json`, contents: paths.claudeCredentialsJson }]
+        : []),
+      ...(claudeStateJson != null
+        ? [{ path: `${home}/.claude.json`, contents: claudeStateJson }]
+        : []),
+    ];
+  }
+  if (provider === 'codex' && paths.codexAuthJson != null) {
+    return [{ path: `${home}/auth.json`, contents: paths.codexAuthJson }];
+  }
+  return [];
 }
 
 /**
@@ -44,17 +130,36 @@ export function buildPlacementLaunchSpec(
   coMcpPaths: CoMcpPaths,
 ): { readonly identity: HostedIdentity; readonly spec: SpawnSpec } {
   const provider = record.provider as 'claude' | 'codex';
+  const parsed = parseSubRoleId(record.role);
+  const mountedRole = parsed.name != null ? `${parsed.baseRole}:${parsed.name}` : parsed.baseRole;
+  const bridgeSocketPath = coMcpPaths.coMcpBridgeSocketPath?.(isolatedHomeDir, record.agent);
+  const coMcpArgs =
+    bridgeSocketPath == null
+      ? coMcpPaths.coMcpArgs
+      : [...(coMcpPaths.coMcpArgs ?? []), 'bridge', bridgeSocketPath];
   const paneIdentity: PaneIdentity = {
     cwd: worktree.path,
     isolatedHomeDir,
-    coMcpConfig: coMcpPaths.coMcpConfig,
+    ...(provider === 'claude'
+      ? {
+          coMcpConfig:
+            coMcpPaths.coMcpConfig ?? `${isolatedHomeDir.replace(/\/+$/u, '')}/mcp/co-mcp.json`,
+        }
+      : {}),
     coMcpCommand: coMcpPaths.coMcpCommand,
-    coMcpArgs: coMcpPaths.coMcpArgs,
+    coMcpArgs,
+    coMcpEnv: {
+      [CO_AGENT_ENV]: record.agent,
+      [CO_ROLE_ENV]: mountedRole,
+      [CO_PARENT_ENV]: worktree.parent,
+      [CO_PROJECT_ID_ENV]: projectId,
+      ...bridgeDiagnosticEnv(isolatedHomeDir, bridgeSocketPath),
+    },
     coCliCommand: coMcpPaths.coCliCommand,
+    ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),
   };
   const paneLaunchConfig = buildPaneLaunchConfig(provider, paneIdentity);
 
-  const parsed = parseSubRoleId(record.role);
   const identity: HostedIdentity = {
     agent: record.agent,
     role: parsed.baseRole as Role,
@@ -72,11 +177,32 @@ export function buildPlacementLaunchSpec(
 
   const spec: SpawnSpec = {
     command: provider,
-    args: [...paneLaunchConfig.args],
+    args: [...paneLaunchConfig.args, ...codexBridgeSocketArgs(provider, bridgeSocketPath)],
     cwd: worktree.path,
     env: { ...paneLaunchConfig.env },
-    prelaunchFiles: paneLaunchConfig.prelaunchFiles,
+    prelaunchFiles: [
+      ...(paneLaunchConfig.prelaunchFiles ?? []),
+      ...providerAuthPrelaunchFiles(provider, isolatedHomeDir, coMcpPaths),
+    ],
   };
 
   return { identity, spec };
+}
+
+function bridgeDiagnosticEnv(
+  isolatedHomeDir: string,
+  bridgeSocketPath: string | undefined,
+): Record<string, string> {
+  if (bridgeSocketPath == null) return {};
+  return {
+    [CO_MCP_BRIDGE_LOG_ENV]: `${isolatedHomeDir.replace(/\/+$/u, '')}/mcp/bridge.log`,
+  };
+}
+
+function codexBridgeSocketArgs(
+  provider: 'claude' | 'codex',
+  bridgeSocketPath: string | undefined,
+): readonly string[] {
+  if (provider !== 'codex' || bridgeSocketPath == null) return [];
+  return ['--add-dir', dirname(bridgeSocketPath)];
 }

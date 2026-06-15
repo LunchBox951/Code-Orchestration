@@ -93,6 +93,23 @@ describe('injectMail — multi-line: bracketed paste + one submit', () => {
     await tick();
     expect(pane.written).toEqual([PASTE_START + text + PASTE_END]);
   });
+
+  it('can opt into one no-echo submit for host-live proof paths that verify a downstream side effect', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const { delay, release } = controllableDelay();
+    const text = 'first line\nsecond line';
+    const p = injectMail(pane, text, {
+      provider: 'claude',
+      retryDelay: delay,
+      allowUnverifiedSubmit: true,
+    });
+
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END]);
+    release();
+    await p;
+
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END, '\r']);
+  });
 });
 
 describe('injectMail — echo-verify retry (never blind-fire Enter)', () => {
@@ -147,6 +164,24 @@ describe('injectMail — echo-verify retry (never blind-fire Enter)', () => {
     await rejection;
 
     expect(pane.written).toEqual(['ping', CLEAR_COMPOSER + 'ping', CLEAR_COMPOSER + 'ping']); // 3 attempts, and NO submit Enter
+  });
+
+  it('can opt into one no-echo submit after bounded retries', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const { delay, release } = controllableDelay();
+    const p = injectMail(pane, 'ping', {
+      provider: 'claude',
+      retryDelay: delay,
+      maxEchoAttempts: 2,
+      allowUnverifiedSubmit: true,
+    });
+
+    release();
+    await tick();
+    release();
+    await p;
+
+    expect(pane.written).toEqual(['ping', CLEAR_COMPOSER + 'ping', '\r']);
   });
 });
 

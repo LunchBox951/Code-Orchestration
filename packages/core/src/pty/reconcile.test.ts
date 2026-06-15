@@ -472,3 +472,115 @@ describe('ReconcileLoop — wedged / dead / persistence / pruning / skip / isola
     expect(router.stuck).toEqual([]);
   });
 });
+
+// ── MNR-2 (#b) — errored_waiting break signal ────────────────────────────────────────────────────
+// AC-S10-5 (#b): an agent whose last turn errored + is waiting + has outstanding actionable mail
+// emits the `errored_waiting` break so the conductor can re-inject the still-outstanding item.
+
+/** The errored-waiting input: turn errored, has waiting items, has outstanding actionable mail. */
+function erroredWaitingInput(): LivenessInput {
+  return {
+    trace: idleNoCompletionTrace(),
+    exited: false,
+    pidAlive: true,
+    turnActive: false,
+    lastTurnErrored: true,
+    hasWaitingItems: true,
+    hasOutstandingActionable: true,
+  };
+}
+
+describe('ReconcileLoop — errored_waiting break (MNR-2 re-wake signal)', () => {
+  it('emits errored_waiting once when last turn errored + waiting + outstanding; no nudge, no STUCK', async () => {
+    const host = new FakePty();
+    const router = fakeRouter();
+    const loop = buildLoop(
+      {
+        runningAgents: () => [runningAgent('impl-err', host)],
+        livenessInputFor: () => erroredWaitingInput(),
+        now: () => IDLE_OBSERVED_AT,
+      },
+      router,
+    );
+
+    // Tick 1: the errored_waiting break is emitted — once, no nudge (re-inject, not a pane nudge).
+    const t1 = await loop.tick();
+    expect(t1.assessed[0]?.verdict.break?.kind).toBe('errored_waiting');
+    expect(router.breaks).toHaveLength(1);
+    expect(router.breaks[0]).toMatchObject({
+      agent: 'impl-err',
+      info: { kind: 'errored_waiting' },
+    });
+    expect(router.nudges).toEqual([]); // no pane nudge — conductor re-injects the outstanding item
+    expect(router.stuck).toEqual([]); // not escalated to STUCK — it needs re-injection, not unstick
+
+    // Tick 2: same conditions persist — NOT re-emitted (signaled flag set; break episode persists).
+    await loop.tick();
+    expect(router.breaks).toHaveLength(1); // still only once
+    expect(router.stuck).toEqual([]); // never STUCK from errored_waiting alone
+  });
+
+  it('the INVERSE: errored turn WITHOUT waiting/outstanding is NOT flagged as errored_waiting', async () => {
+    const host = new FakePty();
+    const router = fakeRouter();
+    const loop = buildLoop(
+      {
+        runningAgents: () => [runningAgent('impl-ok', host)],
+        livenessInputFor: () => ({
+          ...erroredWaitingInput(),
+          hasWaitingItems: false,
+          hasOutstandingActionable: false,
+        }),
+        now: () => IDLE_OBSERVED_AT,
+      },
+      router,
+    );
+
+    // An errored turn with no waiting/outstanding does not fire the errored_waiting break.
+    // It may fire silent_stop instead (same trace), but NOT errored_waiting.
+    const t = await loop.tick();
+    expect(t.assessed[0]?.verdict.break?.kind).not.toBe('errored_waiting');
+  });
+});
+
+// ── ST-2/ST-3 (#c) — crash → recover → reconcile integration test ─────────────────────────────────
+// AC-S10-5 (#c): recoverProjectStore → selectAllSessions → ReconcileLoop end-to-end integration test.
+// A crash is simulated by calling recoverProjectStore on an existing event log; the recovered RUNNING
+// set feeds ReconcileLoop, which drives a stuck/zombie agent back toward WAITING (silent-stop cure).
+
+describe('ST-2/ST-3 integration — crash→recover→reconcile end-to-end (AC-S10-5.3)', () => {
+  it('a crash-recovered RUNNING set feeds ReconcileLoop and a zombie agent escalates to STUCK-and-surfaced', async () => {
+    // recoverRunningSet seeds sessions, simulates crash + relaunch (recoverProjectStore), then
+    // queries selectAllSessions — exactly the crash→recover portion of ST-2/ST-3.
+    const running = recoverRunningSet();
+    // After recovery, only impl-1 is RUNNING (coord-1 ended its session — not a reconcile candidate).
+    expect(running.map((r) => r.agentId)).toEqual(['impl-1']);
+
+    // Feed the recovered RUNNING set into ReconcileLoop with a synthesized silent-stop trace
+    // (the canonical zombie: idle, no worker_done, pty-quiet — ST-2 reconcile half).
+    const router = fakeRouter();
+    let clock = IDLE_OBSERVED_AT;
+    const loop = buildLoop(
+      {
+        runningAgents: () => running,
+        livenessInputFor: () => silentStopInput(),
+        now: () => clock,
+      },
+      router,
+    );
+
+    // Tick 1: detect silent stop → break-signal + nudge. NOT stuck yet.
+    const t1 = await loop.tick();
+    expect(t1.assessed).toHaveLength(1);
+    expect(t1.assessed[0]?.agent).toBe('impl-1');
+    expect(t1.assessed[0]?.verdict.break?.kind).toBe('silent_stop');
+    expect(router.breaks).toHaveLength(1);
+    expect(router.nudges).toEqual([{ triggerId: SILENT_STOP_TRIGGER }]);
+    expect(router.stuck).toEqual([]);
+
+    // Tick 2: persisting silent stop → STUCK-and-surfaced (bounded: 2 ticks, AC-L7-5).
+    clock += 4000;
+    await loop.tick();
+    expect(router.stuck).toEqual(['impl-1']); // escalated — the canonical zombie cure (ST-3)
+  });
+});
