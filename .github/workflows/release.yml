@@ -1,13 +1,129 @@
-# PLACEHOLDER — wired once docs/governance/release-policy.md is resolved.
-# Two-track intent: promote dev -> main for a stable release; nightly prereleases are cut from dev.
-# No publish step yet (packages are private). Runs only on manual dispatch.
-name: Release (placeholder)
+name: Release
 
 on:
+  schedule:
+    - cron: '0 5 * * *'
   workflow_dispatch:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  noop:
+  nightly:
+    name: nightly
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Release automation is parked. See docs/governance/release-policy.md."
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm format:check
+      - run: pnpm --filter @co/desktop dist
+      - name: Prepare nightly AppImage
+        run: |
+          appimage="$(find apps/desktop/release -maxdepth 1 -type f -name '*.AppImage' | head -n 1)"
+          if [ -z "$appimage" ]; then
+            echo "No AppImage produced under apps/desktop/release."
+            exit 1
+          fi
+          cp "$appimage" co-nightly-linux-x64.AppImage
+      - name: Publish nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          gh release delete nightly --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          git push origin :refs/tags/nightly || true
+          gh release create nightly co-nightly-linux-x64.AppImage \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$sha" \
+            --title "co nightly" \
+            --notes "Nightly Linux AppImage from dev at ${sha}." \
+            --prerelease
+
+  stable:
+    name: stable
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - name: Require current main tip
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git fetch origin main --prune
+          main_sha="$(git rev-parse origin/main)"
+
+          echo "release_sha=${RELEASE_SHA}"
+          echo "origin_main=${main_sha}"
+
+          if [ "$RELEASE_SHA" = "$main_sha" ]; then
+            exit 0
+          fi
+
+          echo "Refusing to publish stable from a stale main workflow run."
+          echo "Only the current origin/main tip may update the stable channel."
+          exit 1
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm --filter @co/desktop dist
+      - name: Prepare stable AppImage
+        run: |
+          appimage="$(find apps/desktop/release -maxdepth 1 -type f -name '*.AppImage' | head -n 1)"
+          if [ -z "$appimage" ]; then
+            echo "No AppImage produced under apps/desktop/release."
+            exit 1
+          fi
+          cp "$appimage" co-stable-linux-x64.AppImage
+      - name: Publish stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          tag="stable-$(date -u +%Y%m%d)-${short_sha}"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" co-stable-linux-x64.AppImage \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$tag" co-stable-linux-x64.AppImage \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$sha" \
+              --title "co stable ${tag}" \
+              --notes "Stable Linux AppImage from main at ${sha}."
+          fi
+
+          git tag -f stable "$sha"
+          git push origin refs/tags/stable --force

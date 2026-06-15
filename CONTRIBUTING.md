@@ -8,8 +8,8 @@ orchestrates work. Read [`docs/README.md`](docs/README.md) and
 
 - Node ≥ 22 (see `.nvmrc`), **pnpm 10** — enable via `corepack enable` **or** `npm i -g pnpm@10`
   (corepack is optional).
-- `pnpm install`, then `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` — run all four before
-  considering a change done.
+- `pnpm install`, then `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and
+  `pnpm format:check` — run all five before considering a change done.
 
 ## How work is structured (the model)
 
@@ -26,12 +26,13 @@ The [Project board](docs/governance/project-board.md) tracks items across the li
 
 ## Branch & PR flow
 
-- Branch from `dev`; open PRs **against `dev`** (the integration line). `main` is the
-  stable release branch, updated only by a gated promotion PR from `dev`.
+- Branch from `dev`; open PRs **against `dev`** (the integration line). `main` is the stable release
+  branch, updated only by a gated promotion PR from same-repository `release/*` branches.
 - Keep PRs focused on one task/phase. Link the issue the PR closes; fill the acceptance-criteria
   checklist in the PR template.
 - A PR merges only after the review gate returns **PASS** and required checks are green. The blocker
-  bar tightens toward production: nits ride as suggestions into `dev`, become blockers at `main`.
+  bar tightens toward production: nits ride as suggestions into `dev`, become blockers in
+  `release/*` → `main` promotion.
 
 ## Commits
 

@@ -10,7 +10,8 @@ A second, smaller residue is the **prototype-era root docs** — `PORTING-CO.md`
 deliberately stay at the repo root until this teardown so nothing dangles mid-migration.
 
 When `co` can self-host (reads specs/state from its own program-data, no `.co/` dependency),
-perform the teardown as **one gated PR** `dev` → `main`, tracked by the `migration` issue:
+perform the teardown as **one selected stable promotion** through `release/*` → `main`, tracked by
+the `migration` issue:
 
 1. Confirm `co` no longer depends on `.co/` for any spec/plan/state.
 2. Remove the runtime footprint (tracked + on-disk):
@@ -30,4 +31,4 @@ perform the teardown as **one gated PR** `dev` → `main`, tracked by the `migra
 8. Archive `docs/v1-acceptance-criteria.md` — retiring the prototype _is_ the v1 bar (`SH-3`), so
    reaching this checklist means §A of that doc is met. Keep it as the historical v1 record (or seed
    a v2 acceptance doc).
-9. Open the PR, let it pass the gate, promote to `main`.
+9. Open the `release/*` → `main` PR, let it pass the gate, promote to `main`.

@@ -82,3 +82,6 @@
 - name: "migration"
   color: "fef2c0"
   description: "Prototype-footprint teardown"
+- name: "security:critical"
+  color: "b60205"
+  description: "Critical security promotion; permits skipping only the release soak gate"

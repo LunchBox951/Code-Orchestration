@@ -3,15 +3,22 @@ updates:
   - package-ecosystem: npm
     directory: '/'
     schedule:
-      interval: weekly
+      interval: daily
+      time: '03:00'
+      timezone: Etc/UTC
     target-branch: dev
     open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        dependency-type: development
     commit-message:
       prefix: chore
   - package-ecosystem: github-actions
     directory: '/'
     schedule:
-      interval: weekly
+      interval: daily
+      time: '03:30'
+      timezone: Etc/UTC
     target-branch: dev
     commit-message:
       prefix: ci

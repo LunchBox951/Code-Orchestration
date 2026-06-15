@@ -3,17 +3,18 @@ name: Main merge policy
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    types: [opened, synchronize, reopened, ready_for_review, edited, labeled, unlabeled]
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  require-dev-source:
-    name: require-dev-source
+  require-release-source:
+    name: require-release-source
     runs-on: ubuntu-latest
     steps:
-      - name: Enforce dev to main only
+      - name: Enforce release branch to main only
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
@@ -22,9 +23,134 @@ jobs:
         run: |
           echo "base=${BASE_REF} head=${HEAD_REPO}:${HEAD_REF}"
 
-          if [ "$BASE_REF" = "main" ] && [ "$HEAD_REF" = "dev" ] && [ "$HEAD_REPO" = "$REPOSITORY" ]; then
+          if [ "$BASE_REF" != "main" ]; then
+            echo "This policy only evaluates PRs targeting main."
+            exit 1
+          fi
+
+          if [ "$HEAD_REPO" != "$REPOSITORY" ]; then
+            echo "PRs into main must come from a release branch in this repository."
+            exit 1
+          fi
+
+          case "$HEAD_REF" in
+            release/*) exit 0 ;;
+            *)
+              echo "PRs into main must come from release/*, not ${HEAD_REF}."
+              exit 1
+              ;;
+          esac
+
+  require-current-main:
+    name: require-current-main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Require release branch to include main
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch origin main --prune
+
+          if git merge-base --is-ancestor origin/main "$HEAD_SHA"; then
+            echo "origin/main is an ancestor of ${HEAD_SHA}."
             exit 0
           fi
 
-          echo "PRs into main must come from this repository's dev branch."
+          echo "Release branches must include current origin/main before promotion."
+          echo "Update the release branch from main, rerun CI, and wait for the soak gate again."
+          exit 1
+
+  require-dev-provenance:
+    name: require-dev-provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Require release patches to exist on dev
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch origin main dev --prune
+
+          merge_commits="$(git rev-list --merges origin/main.."$HEAD_SHA")"
+          if [ -n "$merge_commits" ]; then
+            echo "Release branches must be linear cherry-pick branches; merge commits can hide release-only patches."
+            echo "$merge_commits"
+            exit 1
+          fi
+
+          unproven="$(
+            git cherry -v origin/dev "$HEAD_SHA" origin/main | awk '$1 == "+" { print }'
+          )"
+
+          if [ -z "$unproven" ]; then
+            echo "Every release patch already exists on dev by patch-id."
+            exit 0
+          fi
+
+          echo "Release branches may only promote patches that already exist on dev."
+          echo "The following release-only patches were not found on dev:"
+          echo "$unproven"
+          echo "Land these changes on dev first, then cherry-pick them into release/*."
+          exit 1
+
+  require-soak:
+    name: require-soak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Require 24 hour soak
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REQUIRED_SECONDS: '86400'
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          live_head_sha="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          live_updated_at="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq '.updated_at')"
+          security_critical="$(
+            gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" \
+              --jq '[.labels[].name] | contains(["security:critical"])'
+          )"
+
+          echo "head=${HEAD_SHA}"
+          echo "live_head=${live_head_sha}"
+          echo "pr_updated_at=${live_updated_at}"
+          echo "security_critical=${security_critical}"
+
+          if [ "$live_head_sha" != "$HEAD_SHA" ]; then
+            echo "The live PR head changed after this workflow started; rerun checks for the latest head."
+            exit 1
+          fi
+
+          if [ "$security_critical" = "true" ]; then
+            echo "security:critical label present; skipping the 24 hour soak for this critical security promotion."
+            exit 0
+          fi
+
+          updated_epoch="$(date -u -d "$live_updated_at" +%s)"
+          now_epoch="$(date -u +%s)"
+          age_seconds="$((now_epoch - updated_epoch))"
+
+          echo "now=$(date -u -d "@${now_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "age_seconds=${age_seconds}"
+          echo "required_seconds=${REQUIRED_SECONDS}"
+
+          if [ "$age_seconds" -ge "$REQUIRED_SECONDS" ]; then
+            exit 0
+          fi
+
+          remaining_seconds="$((REQUIRED_SECONDS - age_seconds))"
+          echo "Stable promotion PR has not soaked long enough since its latest update."
+          echo "Wait another ${remaining_seconds} seconds, then rerun this check."
           exit 1
