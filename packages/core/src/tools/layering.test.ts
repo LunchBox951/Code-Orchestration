@@ -16,9 +16,8 @@ const repoRoot = resolve(here, '../../../../'); // tools → src → core → pa
 
 const ADAPTERS = ['cli', 'mcp'] as const;
 
-/** Every `.ts` under an adapter's `src` (recursive), as absolute paths. */
-function adapterSources(pkg: string): string[] {
-  const root = join(repoRoot, 'packages', pkg, 'src');
+/** Every `.ts` under a source directory (recursive), as absolute paths. */
+function walkSources(root: string): string[] {
   const out: string[] = [];
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -29,6 +28,11 @@ function adapterSources(pkg: string): string[] {
   };
   walk(root);
   return out;
+}
+
+/** Every `.ts` under an adapter's `src` (recursive), as absolute paths. */
+function adapterSources(pkg: string): string[] {
+  return walkSources(join(repoRoot, 'packages', pkg, 'src'));
 }
 
 /** Extract the module specifiers of every static/dynamic import + re-export. */
@@ -82,6 +86,43 @@ describe('AC-L2-1 — cli/mcp are thin adapters: GREEN over the real sources', (
     expect(violations).toEqual([]);
     // The adapter must genuinely sit over core, not be an empty shell.
     expect(importsBarrel).toBe(true);
+  });
+});
+
+// ── AC-S11-2 structural proof: apps/desktop is a THIN adapter over @co/core + @co/mcp ──
+// Mirrors the cli/mcp guard: the desktop app must import only the public barrels,
+// never reach into core internals, and never open node:sqlite directly.
+
+describe('AC-S11-2 — apps/desktop is a thin adapter: GREEN over the real sources', () => {
+  it('apps/desktop imports ONLY the @co/core and @co/mcp public barrels', () => {
+    // Test files are excluded: they may import node:sqlite or Electron internals for
+    // capability assertions (e.g. native-abi.test.ts). The layering rule targets production code.
+    const files = walkSources(join(repoRoot, 'apps', 'desktop', 'src')).filter(
+      (f) => !f.endsWith('.test.ts'),
+    );
+    expect(files.length).toBeGreaterThan(0); // not a vacuous pass
+
+    const violations: string[] = [];
+    let importsBarrel = false;
+    for (const file of files) {
+      const source = readFileSync(file, 'utf8');
+      for (const spec of importSpecifiers(source)) {
+        if (spec === '@co/core' || spec === '@co/mcp') importsBarrel = true;
+        const reason = forbiddenReason(spec);
+        if (reason) violations.push(`${file}: ${reason}`);
+      }
+    }
+
+    expect(violations).toEqual([]);
+    expect(importsBarrel).toBe(true);
+  });
+
+  it('detector goes RED on a hypothetical deep @co/core import from desktop', () => {
+    expect(forbiddenReason('@co/core/store/sqlite-store.js')).toMatch(/deep @co\/core/);
+  });
+
+  it('detector goes RED on a hypothetical node:sqlite from desktop', () => {
+    expect(forbiddenReason('node:sqlite')).toMatch(/opens the store directly/);
   });
 });
 
