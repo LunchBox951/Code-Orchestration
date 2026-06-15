@@ -7,6 +7,38 @@ const here = dirname(fileURLToPath(import.meta.url));
 const rendererSource = readFileSync(join(here, 'renderer.ts'), 'utf8');
 const htmlSource = readFileSync(join(here, 'index.html'), 'utf8');
 
+describe('agents console', () => {
+  it('agents view markup has required structural elements', () => {
+    expect(htmlSource).toContain('id="agents-transcript"');
+    expect(htmlSource).toContain('aria-label="Agent transcript"');
+    expect(htmlSource).toContain('id="agents-roster"');
+    expect(htmlSource).toContain('role="listbox"');
+    expect(htmlSource).toContain('aria-label="Agents"');
+    expect(htmlSource).toContain('id="steer-input"');
+    expect(htmlSource).toContain('aria-label="Answer agent"');
+    expect(htmlSource).toContain('aria-label="Redirect agent"');
+    expect(htmlSource).toContain('aria-label="Interrupt agent"');
+  });
+
+  it('renderer wires agents console bridge methods and xterm', () => {
+    expect(rendererSource).toContain('bridge.agentsSteer(');
+    expect(rendererSource).toContain('bridge.agentsSelect(');
+    expect(rendererSource).toContain('window.Terminal');
+    expect(rendererSource).toContain('role="option"');
+    expect(rendererSource).toContain('aria-selected="${isSelected');
+  });
+
+  it('defers xterm open until the Agents view is visible', () => {
+    expect(rendererSource).toContain('function isAgentsViewActive()');
+    expect(rendererSource).toContain('if (!isAgentsViewActive()) return;');
+    expect(rendererSource).toContain("if (view === 'agents' && latestAgentsState != null)");
+  });
+
+  it('only enables steer controls for a selected warm live agent', () => {
+    expect(rendererSource).toContain("state.selectedStatus === 'warm'");
+  });
+});
+
 describe('renderer accessibility states', () => {
   it('surfaces active mail tab and bus state with ARIA attributes', () => {
     expect(htmlSource).toContain('role="tablist"');

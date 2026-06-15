@@ -17,6 +17,7 @@ import {
   assertNever,
   OPERATOR_IPC_METHODS,
   OPERATOR_IPC_TICK,
+  OPERATOR_IPC_TRANSCRIPT,
   queryObservability,
   type ApprovalReply,
   type DeliveredMail,
@@ -25,12 +26,14 @@ import {
   type OperatorIpcConnectionState,
   type OperatorIpcSurface,
   type OperatorIpcTick,
+  type OperatorIpcTranscript,
   type OperatorMailRef,
   type OperatorObservation,
   type OperatorUnavailableReason,
   type ProjectId,
   type ReplyDraft,
   type Steer,
+  type TranscriptTail,
 } from '@co/core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { SocketClientTransport } from '../conductor/real-transport.js';
@@ -66,6 +69,7 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
   private nextId = 1;
   private readonly pending = new Map<WireId, PendingCall>();
   private readonly tickListeners = new Set<(tick: OperatorIpcTick) => void>();
+  private readonly transcriptListeners = new Set<(transcript: OperatorIpcTranscript) => void>();
   private readonly closeListeners = new Set<() => void>();
   private closed = false;
   // Set the instant `close()` is entered (before its await), so a second concurrent close() — and any
@@ -138,10 +142,23 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     return result as unknown as DeliveredMail;
   }
 
+  /** Stage 12 C-P1 — fetch `agentId`'s bounded transcript tail on demand (mirrors {@link observe}). */
+  async transcript(agentId: string): Promise<TranscriptTail> {
+    return (await this.call(OPERATOR_IPC_METHODS.transcript, {
+      agentId,
+    })) as unknown as TranscriptTail;
+  }
+
   /** Subscribe to the per-tick `tick` push; returns an unsubscribe fn. */
   onTick(listener: (tick: OperatorIpcTick) => void): () => void {
     this.tickListeners.add(listener);
     return () => this.tickListeners.delete(listener);
+  }
+
+  /** Stage 12 C-P1 — subscribe to the `transcript:push` stream; returns an unsubscribe fn. */
+  onTranscript(listener: (transcript: OperatorIpcTranscript) => void): () => void {
+    this.transcriptListeners.add(listener);
+    return () => this.transcriptListeners.delete(listener);
   }
 
   /** Register a one-shot-style close listener (fired once when the socket goes away). */
@@ -193,7 +210,10 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
       case 'notification': {
         if (incoming.method === OPERATOR_IPC_TICK) {
           const tick = incoming.params as unknown as OperatorIpcTick;
-          for (const listener of [...this.tickListeners]) listener(tick);
+          this.fanOutTick(tick);
+        } else if (incoming.method === OPERATOR_IPC_TRANSCRIPT) {
+          const transcript = incoming.params as unknown as OperatorIpcTranscript;
+          this.fanOutTranscript(transcript);
         }
         return;
       }
@@ -206,6 +226,26 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     }
   }
 
+  private fanOutTick(tick: OperatorIpcTick): void {
+    for (const listener of [...this.tickListeners]) {
+      try {
+        listener(tick);
+      } catch {
+        /* push subscribers are app surfaces; one bad callback must not starve later listeners */
+      }
+    }
+  }
+
+  private fanOutTranscript(transcript: OperatorIpcTranscript): void {
+    for (const listener of [...this.transcriptListeners]) {
+      try {
+        listener(transcript);
+      } catch {
+        /* push subscribers are app surfaces; one bad callback must not starve later listeners */
+      }
+    }
+  }
+
   private handleClose(): void {
     if (this.closed) return;
     this.closed = true;
@@ -213,7 +253,13 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     const error = new Error('operator IPC: connection closed before the response arrived.');
     for (const pending of [...this.pending.values()]) pending.reject(error);
     this.pending.clear();
-    for (const listener of [...this.closeListeners]) listener();
+    for (const listener of [...this.closeListeners]) {
+      try {
+        listener();
+      } catch {
+        /* close subscribers are app surfaces; one bad callback must not starve later listeners */
+      }
+    }
   }
 }
 
@@ -270,6 +316,7 @@ export class OperatorIpcClient {
   private connection: OperatorIpcConnection | null = null;
   private connecting: Promise<OperatorIpcConnection | null> | null = null;
   private readonly tickListeners = new Set<(tick: OperatorIpcTick) => void>();
+  private readonly transcriptListeners = new Set<(transcript: OperatorIpcTranscript) => void>();
   private closed = false;
 
   constructor(deps: OperatorIpcClientDeps) {
@@ -347,10 +394,41 @@ export class OperatorIpcClient {
     return this.withConnection((c) => c.markRead(recipient, seq));
   }
 
+  /**
+   * Stage 12 C-P1 — fetch `agentId`'s bounded transcript tail. DEGRADES cleanly like a hybrid read
+   * (Principle 9 / MNR #3): with NO socket it returns an EMPTY tail (`{ agentId, offset: 0, tail: '' }`) rather
+   * than hanging or throwing — the renderer shows nothing until the Conductor is back. A live socket
+   * returns the daemon's bounded tail; an UNEXPECTED daemon-side fault is surfaced to `onError` (not
+   * masked as "down") while still degrading to an empty tail.
+   */
+  async transcript(agentId: string): Promise<TranscriptTail> {
+    const connection = await this.ensureConnection();
+    if (connection != null) {
+      try {
+        return await connection.transcript(agentId);
+      } catch (error) {
+        // A socket drop nulls the connection (an ordinary degrade — silent per D5/MNR #3). Any OTHER
+        // error is unexpected: surface it for diagnostics rather than masking a real fault. Either way
+        // fall through to an empty tail — never hang, never throw.
+        if (this.connection != null) this.report(error);
+      }
+    }
+    return { agentId, offset: 0, tail: '' };
+  }
+
   /** Subscribe to the per-tick push; survives reconnects. Returns an unsubscribe fn. */
   onTick(listener: (tick: OperatorIpcTick) => void): () => void {
     this.tickListeners.add(listener);
     return () => this.tickListeners.delete(listener);
+  }
+
+  /**
+   * Stage 12 C-P1 — subscribe to the live transcript push; survives reconnects (the listeners live on
+   * the facade, re-attached to each new connection). Returns an unsubscribe fn.
+   */
+  onTranscript(listener: (transcript: OperatorIpcTranscript) => void): () => void {
+    this.transcriptListeners.add(listener);
+    return () => this.transcriptListeners.delete(listener);
   }
 
   /** Close the facade and its connection; stops reconnecting. */
@@ -404,6 +482,7 @@ export class OperatorIpcClient {
         return null;
       }
       connection.onTick((tick) => this.fanOutTick(tick));
+      connection.onTranscript((transcript) => this.fanOutTranscript(transcript));
       connection.onClose(() => this.handleDisconnect(connection));
       this.connection = connection;
       this.emitState('connected');
@@ -423,7 +502,23 @@ export class OperatorIpcClient {
   }
 
   private fanOutTick(tick: OperatorIpcTick): void {
-    for (const listener of [...this.tickListeners]) listener(tick);
+    for (const listener of [...this.tickListeners]) {
+      try {
+        listener(tick);
+      } catch (error) {
+        this.report(error);
+      }
+    }
+  }
+
+  private fanOutTranscript(transcript: OperatorIpcTranscript): void {
+    for (const listener of [...this.transcriptListeners]) {
+      try {
+        listener(transcript);
+      } catch (error) {
+        this.report(error);
+      }
+    }
   }
 
   private emitState(state: OperatorIpcConnectionState): void {

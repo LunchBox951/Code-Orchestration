@@ -84,6 +84,33 @@ interface MailState {
   composer: ComposerState;
 }
 
+// ── Agents Console (inline — renderer is isolated from Node context) ──────────
+
+interface AgentConsoleRow {
+  agentId: string;
+  role: string;
+  parent: string;
+  status: AgentStatus;
+}
+
+interface AgentsConsoleState {
+  roster: readonly AgentConsoleRow[];
+  selectedAgentId: string | null;
+  selectedStatus: AgentStatus | null;
+  transcript: string;
+  connection: 'live' | 'degraded';
+}
+
+type Steer = { kind: 'answer' | 'redirect'; text: string } | { kind: 'interrupt' };
+
+interface XtermTerminal {
+  open(el: HTMLElement): void;
+  write(data: string): void;
+  reset(): void;
+  clear(): void;
+  dispose(): void;
+}
+
 // ── Limits / Cost (inline — renderer is isolated from Node context) ──────────
 
 interface LimitsCostHeadroom {
@@ -146,8 +173,13 @@ interface CoShellBridge {
   // ── Limits / Cost ─────────────────────────────────────────────────────────
   onLimitsCostState(listener: (state: LimitsCostState) => void): () => void;
   refreshLimitsCost(): Promise<LimitsCostState | null>;
+  // ── Agents Console ────────────────────────────────────────────────────────
+  onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
+  agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
+  agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
 }
 
 interface Window {
   coShell: CoShellBridge;
+  Terminal: new (opts?: unknown) => XtermTerminal;
 }

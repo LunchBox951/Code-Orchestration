@@ -4,6 +4,8 @@ type ConnectionState = unknown;
 type DashboardState = unknown;
 type LimitsCostState = unknown;
 type MailState = unknown;
+type AgentsConsoleState = unknown;
+type Steer = { kind: 'answer' | 'redirect'; text: string } | { kind: 'interrupt' };
 
 interface ContextBridgeLike {
   exposeInMainWorld(key: string, api: unknown): void;
@@ -52,6 +54,10 @@ interface CoShellBridge {
   // ── Limits / Cost ─────────────────────────────────────────────────────────
   onLimitsCostState(listener: (state: LimitsCostState) => void): () => void;
   refreshLimitsCost(): Promise<LimitsCostState | null>;
+  // ── Agents Console ────────────────────────────────────────────────────────
+  onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
+  agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
+  agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
 }
 
 const bridge: CoShellBridge = {
@@ -153,6 +159,18 @@ const bridge: CoShellBridge = {
   },
   async refreshLimitsCost(): Promise<LimitsCostState | null> {
     return ipcRenderer.invoke<LimitsCostState | null>('limitsCost:refresh');
+  },
+  // ── Agents Console ────────────────────────────────────────────────────────
+  onAgentsConsoleState(listener: (state: AgentsConsoleState) => void) {
+    const handler = (_event: unknown, state: AgentsConsoleState): void => listener(state);
+    ipcRenderer.on('agentsConsole:state', handler);
+    return () => ipcRenderer.removeListener('agentsConsole:state', handler);
+  },
+  async agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null> {
+    return ipcRenderer.invoke<AgentsConsoleState | null>('agents:select', agentId);
+  },
+  async agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agents:steer', agentId, steer);
   },
 };
 

@@ -80,6 +80,7 @@ class NodePtyPane implements Pane {
   readonly #pty: IPtyLike;
   #earlyDataSub: IDisposableLike | undefined;
   #earlyDataChunks: string[] = [];
+  #earlyReplay: string | undefined;
 
   constructor(id: string, pty: IPtyLike) {
     this.id = id;
@@ -95,13 +96,18 @@ class NodePtyPane implements Pane {
 
   onData(cb: (chunk: string) => void): () => void {
     const sub = this.#pty.onData(cb);
+    let replay = this.#earlyReplay;
     if (this.#earlyDataSub != null) {
-      const replay = this.#earlyDataChunks.join('');
+      replay = this.#earlyDataChunks.join('');
       this.#earlyDataChunks = [];
       this.#earlyDataSub.dispose();
       this.#earlyDataSub = undefined;
-      if (replay.length > 0) cb(replay);
+      this.#earlyReplay = replay;
+      queueMicrotask(() => {
+        if (this.#earlyReplay === replay) this.#earlyReplay = undefined;
+      });
     }
+    if (replay != null && replay.length > 0) cb(replay);
     return () => sub.dispose();
   }
 

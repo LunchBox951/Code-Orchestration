@@ -28,11 +28,13 @@ import { ConnectionVM } from '../shared/connection-vm.js';
 import { DashboardVM } from '../shared/dashboard-vm.js';
 import { LimitsCostVM } from '../shared/limits-cost-vm.js';
 import { MailVM } from '../shared/mail-vm.js';
+import { AgentsConsoleVM } from '../shared/agents-console-vm.js';
 import type { ConnectionState } from '../shared/connection-vm.js';
 import type { NavState } from '../shared/nav-vm.js';
 import type { DashboardState } from '../shared/dashboard-vm.js';
 import type { LimitsCostState } from '../shared/limits-cost-vm.js';
 import type { MailState } from '../shared/mail-vm.js';
+import type { AgentsConsoleState } from '../shared/agents-console-vm.js';
 
 /**
  * The canonical socket path the server listens on for a given project.
@@ -69,6 +71,7 @@ export interface AppShellDeps {
   readonly onMailState?: (state: MailState) => void;
   readonly onMailError?: (message: string) => void;
   readonly onLimitsCostState?: (state: LimitsCostState) => void;
+  readonly onAgentsConsoleState?: (state: AgentsConsoleState) => void;
 }
 
 export interface AppShell {
@@ -77,11 +80,13 @@ export interface AppShell {
   readonly dashboard: DashboardVM;
   readonly mail: MailVM;
   readonly limitsCost: LimitsCostVM;
+  readonly agentsConsole: AgentsConsoleVM;
   readonly client: OperatorIpcClient;
   start(): Promise<void>;
   close(): Promise<void>;
   refreshMail(busId?: string): void;
   refreshLimitsCost(): void;
+  selectAgent(agentId: string | null): void;
 }
 
 function buildRegistry(override?: RendererRegistry): RendererRegistry {
@@ -143,6 +148,41 @@ export function createAppShell(deps: AppShellDeps): AppShell {
 
   const dash = new DashboardVM();
   const limitsCostVm = new LimitsCostVM();
+  const agentsConsoleVm = new AgentsConsoleVM();
+  let transcriptRequestSeq = 0;
+  agentsConsoleVm.subscribe((state) => deps.onAgentsConsoleState?.(state));
+
+  function refreshSelectedTranscript(opts: { resetGeneration?: boolean } = {}): void {
+    const agentId = agentsConsoleVm.state.selectedAgentId;
+    if (agentId == null) return;
+    if (opts.resetGeneration === true) agentsConsoleVm.clearSelectedTranscript();
+    const requestSeq = ++transcriptRequestSeq;
+    void client
+      .transcript(agentId)
+      .then((tail) => {
+        if (
+          requestSeq === transcriptRequestSeq &&
+          agentsConsoleVm.state.selectedAgentId === agentId
+        ) {
+          agentsConsoleVm.setTranscriptTail(tail);
+        }
+      })
+      .catch(() => {});
+  }
+
+  function updateAgentsConsole(
+    observation: OperatorObservation | null,
+    backfill: 'none' | 'live' | 'live-transition',
+  ): void {
+    const wasLive = agentsConsoleVm.state.connection === 'live';
+    agentsConsoleVm.update(observation);
+    if (
+      observation?.kind === 'live' &&
+      (backfill === 'live' || (backfill === 'live-transition' && !wasLive))
+    ) {
+      refreshSelectedTranscript({ resetGeneration: true });
+    }
+  }
 
   function doRefreshLimitsCost(): void {
     limitsCostVm.update({
@@ -171,6 +211,8 @@ export function createAppShell(deps: AppShellDeps): AppShell {
         deps.onConnectionError?.(`operator IPC connection error: ${safeError(e)}`);
       },
     });
+
+  client.onTranscript((t) => agentsConsoleVm.appendChunk(t));
 
   const mailVm = new MailVM({
     registry: buildRegistry(deps.registry),
@@ -238,6 +280,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       deps.onConnectionState?.(state);
       dash.update(state.observation, readActionables());
       deps.onDashboardState?.(dash.state);
+      updateAgentsConsole(state.observation, 'live');
       doRefreshMail();
       doRefreshLimitsCost();
     },
@@ -245,6 +288,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       const liveObs: OperatorObservation = { kind: 'live', snapshot: tick.snapshot };
       dash.update(liveObs, readActionables());
       deps.onDashboardState?.(dash.state);
+      updateAgentsConsole(liveObs, 'live-transition');
       doRefreshMail();
       doRefreshLimitsCost();
     },
@@ -257,9 +301,14 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     dashboard: dash,
     mail: mailVm,
     limitsCost: limitsCostVm,
+    agentsConsole: agentsConsoleVm,
     client,
     refreshMail: doRefreshMail,
     refreshLimitsCost: doRefreshLimitsCost,
+    selectAgent(agentId: string | null): void {
+      agentsConsoleVm.selectAgent(agentId);
+      refreshSelectedTranscript();
+    },
     async start() {
       await connVm.start();
     },

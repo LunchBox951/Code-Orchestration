@@ -33,6 +33,7 @@ import {
 import {
   ConductorEngine,
   selectEligible,
+  TRANSCRIPT_TAIL_MAX_CHARS,
   type ConductorEngineDeps,
   type HostedPane,
   type RouteFailure,
@@ -1019,5 +1020,135 @@ describe('ConductorEngine — SF-2 steer: route a mid-turn steer to the warm pan
     await expect(engine.steer(projectId, 'nope', { kind: 'interrupt' })).rejects.toThrow(
       /not hosted/i,
     );
+  });
+});
+
+// ── Stage 12 C-P1 (TRANSCRIPT-SEAM) — the persistent transcript ring buffer ──────
+describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring buffer per agent', () => {
+  it('captures startup interstitial bytes in both the tail and live stream', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const seen: string[] = [];
+    const unsub = engine.onTranscript((pid, agent, chunk) => {
+      if (pid === projectId && agent === 'impl-x') seen.push(chunk);
+    });
+
+    const ensureP = engine.ensureHosted(identity);
+    const pane = pty.panes[pty.panes.length - 1]!;
+    pane.emit(CLAUDE_READY);
+    await ensureP;
+    unsub();
+
+    expect(engine.transcriptTail(projectId, 'impl-x')).toBe(CLAUDE_READY);
+    expect(seen).toEqual([CLAUDE_READY]);
+  });
+
+  it('accumulates a hosted pane’s output (ANSI/ESC bytes intact) into the tail', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    const chunks = ['first ', ESC + '[1msecond' + ESC + '[0m ', 'third'];
+    for (const c of chunks) pane.emit(c);
+
+    // The persistent onData observer concatenates every chunk, control bytes preserved verbatim.
+    expect(engine.transcriptTail(projectId, 'impl-x')).toBe(CLAUDE_READY + chunks.join(''));
+  });
+
+  it('bounds the tail to TRANSCRIPT_TAIL_MAX_CHARS, dropping the OLDEST bytes (keeps most-recent)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    // Emit past the cap: a full cap of 'A' (oldest), then 1000 'B' (newest). Total = cap + 1000.
+    pane.emit('A'.repeat(TRANSCRIPT_TAIL_MAX_CHARS));
+    pane.emit('B'.repeat(1000));
+
+    const tail = engine.transcriptTail(projectId, 'impl-x');
+    expect(tail).toHaveLength(TRANSCRIPT_TAIL_MAX_CHARS); // bounded exactly to the cap
+    // The 1000 oldest 'A's were dropped; the most-recent window survives in order.
+    expect(tail).toBe('A'.repeat(TRANSCRIPT_TAIL_MAX_CHARS - 1000) + 'B'.repeat(1000));
+    expect(tail.endsWith('B'.repeat(1000))).toBe(true); // the newest bytes are always kept
+  });
+
+  it('a single over-cap chunk is truncated to its most-recent TRANSCRIPT_TAIL_MAX_CHARS', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    pane.emit('x'.repeat(TRANSCRIPT_TAIL_MAX_CHARS) + 'TAIL');
+    const tail = engine.transcriptTail(projectId, 'impl-x');
+    expect(tail).toHaveLength(TRANSCRIPT_TAIL_MAX_CHARS);
+    expect(tail.endsWith('TAIL')).toBe(true);
+  });
+
+  it('returns the empty tail for an agent that is not hosted / has produced nothing', () => {
+    const { projectId } = makeProject();
+    const { engine } = makeEngine();
+    expect(engine.transcriptTail(projectId, 'nobody')).toBe('');
+  });
+
+  it('onTranscript fires (projectId, agent, chunk) on every chunk; unsubscribe stops it', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    const seen: Array<[ProjectId, string, string]> = [];
+    const unsub = engine.onTranscript((pid, agent, chunk) => seen.push([pid, agent, chunk]));
+    pane.emit('one');
+    pane.emit('two');
+    unsub();
+    pane.emit('three'); // after unsubscribe — not observed
+
+    expect(seen).toEqual([
+      [projectId, 'impl-x', 'one'],
+      [projectId, 'impl-x', 'two'],
+    ]);
+  });
+
+  it('isolates transcript listener failures so later listeners still receive the chunk', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    const seen: string[] = [];
+    engine.onTranscript(() => {
+      throw new Error('subscriber failed');
+    });
+    engine.onTranscript((_pid, _agent, chunk) => seen.push(chunk));
+
+    expect(() => pane.emit('still delivered')).not.toThrow();
+    expect(seen).toEqual(['still delivered']);
+  });
+
+  it('drops the tail + stops the stream once the pane is released', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    pane.emit('before release');
+    expect(engine.transcriptTail(projectId, 'impl-x')).toBe(CLAUDE_READY + 'before release');
+
+    const seen: string[] = [];
+    engine.onTranscript((_pid, _agent, chunk) => seen.push(chunk));
+    await engine.release(projectId, 'impl-x'); // tears down the persistent onData subscription + tail
+
+    pane.emit('after release'); // the pane is detached — no listener fires, no buffer grows
+    expect(seen).toHaveLength(0);
+    expect(engine.transcriptTail(projectId, 'impl-x')).toBe(''); // tail dropped on release
   });
 });

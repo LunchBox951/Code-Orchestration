@@ -15,7 +15,7 @@
  *   - MNR #2 — every WRITE (reply/approve) routes through the daemon's own store (single writer).
  *   - MNR #3 — a down→up daemon degrades to a clear state and a reconnect RESUMES the push stream.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -39,6 +39,7 @@ import {
   type DeliveredMail,
   type MailStore,
   type OperatorIpcTick,
+  type OperatorIpcTranscript,
   type ProjectId,
   type ProjectRegistry,
   type ReviewStore,
@@ -279,8 +280,30 @@ function makeControl(
   const control: ConductorControlSurface = {
     router,
     observe: () => queryLiveObservability(projectId, provider),
+    // Stage 12 C-P1 (TRANSCRIPT-SEAM) — wire the transcript accessors from the REAL engine, exactly as
+    // serveConductor does (host.ts): the tail is the engine's bounded buffer; onTranscript filters the
+    // engine's global stream to this project. The cross-process proofs run against these real accessors.
+    transcriptTail: (agentId) => engine.transcriptTailSnapshot(projectId, agentId),
+    onTranscript: (listener) =>
+      engine.onTranscript((pid, agent, chunk, offset) => {
+        if (pid === projectId) listener(agent, chunk, offset);
+      }),
   };
   return { router, control };
+}
+
+/**
+ * Wire the engine→IPC transcript push EXACTLY as serveConductor (host.ts) does: forward each chunk the
+ * control surface emits to `server.pushTranscript`. The cross-process push proofs use the REAL server +
+ * the REAL client over a REAL socket — only this one production-identical wiring line lives in the test.
+ */
+function wireTranscriptPush(
+  control: ConductorControlSurface,
+  server: OperatorIpcServer,
+): () => void {
+  return control.onTranscript((agentId, chunk, offset) =>
+    server.pushTranscript(agentId, chunk, offset),
+  );
 }
 
 /** A short, private socket path (well under the ~108-char Unix limit), cleaned in afterEach. */
@@ -503,6 +526,29 @@ describe('AC-S11-1 — cross-process observe + control over a 0o600 operator-onl
     expect(statSync(dirname(socketPath)).mode & 0o077).toBe(0); // private dir (no group/other access)
   });
 
+  it('closes the listening socket if chmod fails after transport start', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      chmodSocket: () => {
+        throw new Error('chmod failed in test');
+      },
+    });
+    servers.push(server);
+
+    await expect(server.start()).rejects.toThrow(/chmod failed in test/);
+    await expect(OperatorIpcConnection.connect(socketPath)).rejects.toThrow();
+  });
+
   it('daemon-down degrades reads to the static rollup and refuses control with a clear error', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
@@ -621,6 +667,289 @@ describe('AC-S11-1 — cross-process observe + control over a 0o600 operator-onl
 
     expect(pane.written.slice(before)).toEqual([ESC]); // claude ⇒ ESC; no text, no submit
     expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // steering never tears the pane down
+  });
+});
+
+// ── Stage 12 C-P1 (TRANSCRIPT-SEAM) — the live transcript stream over the operator IPC ──
+describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process (default client↔server path)', () => {
+  it('bounds server-side transcript push backpressure by coalescing while a write is in flight', async () => {
+    const { projectId } = makeProject();
+    let releaseFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const sent: Array<{ method?: string; params?: unknown }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message);
+        return sent.length === 1 ? firstSend : Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    server.pushTranscript('impl-x', 'one', 0);
+    server.pushTranscript('impl-x', 'two', 3);
+    server.pushTranscript('impl-x', 'three', 6);
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await flush();
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(2);
+    expect(sent[1]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', offset: 3, chunk: 'twothree' },
+    });
+  });
+
+  it('does not coalesce a pending transcript push across a same-agent offset reset', async () => {
+    const { projectId } = makeProject();
+    let releaseFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const sent: Array<{ method?: string; params?: unknown }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message);
+        return sent.length === 1 ? firstSend : Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    server.pushTranscript('impl-x', 'old-in-flight', 0);
+    server.pushTranscript('impl-x', 'old-pending', 'old-in-flight'.length);
+    server.pushTranscript('impl-x', 'new-generation', 0);
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await flush();
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(2);
+    expect(sent[1]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', offset: 0, chunk: 'new-generation' },
+    });
+  });
+
+  it('push: a hosted pane chunk (ANSI/ESC bytes intact) reaches the SEPARATE client EXACTLY', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    wireTranscriptPush(control, server); // the one production-identical line (host.ts wires this)
+    const client = makeClient(projectId, socketPath); // the DEFAULT facade: real connect + connection
+    expect(await client.connect()).toBe(true);
+
+    const got: OperatorIpcTranscript[] = [];
+    client.onTranscript((t) => got.push(t));
+
+    // A chunk carrying ANSI SGR + raw ESC control bytes (ESC via fromCharCode so the SOURCE is clean).
+    const chunk = ESC + '[32mhi' + ESC + '[0m world';
+    pane.emit(chunk);
+    await flush();
+
+    expect(got).toHaveLength(1);
+    expect(got[0]!.agentId).toBe('impl-x');
+    expect(got[0]!.offset).toBe(CLAUDE_READY.length);
+    // EXACT same string cross-process — a serialization / default-derivation bug MUST fail here.
+    expect(got[0]!.chunk).toBe(chunk);
+    expect(client.connected).toBe(true);
+  });
+
+  it('raw connection isolates transcript listener failures so later subscribers still receive the push', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    wireTranscriptPush(control, server);
+    const connection = await OperatorIpcConnection.connect(socketPath);
+    try {
+      const got: OperatorIpcTranscript[] = [];
+      connection.onTranscript(() => {
+        throw new Error('raw transcript listener failed');
+      });
+      connection.onTranscript((t) => got.push(t));
+
+      pane.emit('hello');
+      await flush();
+
+      expect(got.map((t) => t.chunk)).toEqual(['hello']);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('tail/backfill: transcript() returns the concatenated emitted bytes across the real socket', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const chunks = ['first ', ESC + '[1msecond' + ESC + '[0m ', 'third'];
+    for (const c of chunks) pane.emit(c);
+
+    // The request crosses the real socket; only the daemon-side engine holds the tail (the client has
+    // no engine), so an agreeing result proves the round-trip — not a local stub.
+    const tail = await client.transcript('impl-x');
+    expect(client.connected).toBe(true);
+    expect(tail.agentId).toBe('impl-x');
+    expect(tail.offset).toBe(0);
+    expect(tail.tail).toBe(CLAUDE_READY + chunks.join(''));
+  });
+
+  it('per-agent isolation: the push carries agentId — a B-filtered subscriber gets nothing when A emits', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const a = await hostPane(engine, pty, makeIdentity({ agent: 'impl-a', projectId, cwd }));
+    await hostPane(engine, pty, makeIdentity({ agent: 'impl-b', projectId, cwd }));
+
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    wireTranscriptPush(control, server);
+    const client = makeClient(projectId, socketPath);
+    expect(await client.connect()).toBe(true);
+
+    const forA: OperatorIpcTranscript[] = [];
+    const forB: OperatorIpcTranscript[] = [];
+    client.onTranscript((t) => {
+      if (t.agentId === 'impl-a') forA.push(t);
+    });
+    client.onTranscript((t) => {
+      if (t.agentId === 'impl-b') forB.push(t);
+    });
+
+    a.pane.emit('hello from A');
+    await flush();
+
+    expect(forA.map((t) => t.chunk)).toEqual(['hello from A']);
+    expect(forB).toHaveLength(0); // B's subscriber saw nothing — the stream is keyed by agentId
+  });
+
+  it('degrade + reconnect: transcript is empty while down, then the stream resumes after reconnect (Principle 9)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    const { control } = makeControl(engine, projectId);
+
+    // Register the listener while the daemon is DOWN (no server yet) — it must survive to reconnect.
+    const got: OperatorIpcTranscript[] = [];
+    const client = makeClient(projectId, socketPath);
+    client.onTranscript((t) => got.push(t));
+
+    // Down: transcript() degrades to an EMPTY tail; never hangs, never throws (Principle 9 / MNR #3).
+    expect(await client.transcript('impl-x')).toEqual({ agentId: 'impl-x', offset: 0, tail: '' });
+    expect(client.connected).toBe(false);
+
+    // Up: start the daemon on the same socket, wire the push, reconnect.
+    const server = await startServer(control, projectId, socketPath);
+    wireTranscriptPush(control, server);
+    expect(await client.connect()).toBe(true);
+
+    // A later pane chunk reaches the STILL-registered listener — the stream resumed across reconnect.
+    pane.emit('resumed bytes');
+    await flush();
+    expect(got.map((t) => t.chunk)).toContain('resumed bytes');
+
+    // And the on-demand tail is now live (no longer degraded).
+    const tail = await client.transcript('impl-x');
+    expect(tail.tail).toContain('resumed bytes');
+  });
+
+  it('facade isolates transcript listener failures so later UI subscribers still receive the push', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    wireTranscriptPush(control, server);
+    const errors: unknown[] = [];
+    const client = new OperatorIpcClient({ projectId, socketPath, onError: (e) => errors.push(e) });
+    clients.push(client);
+    const got: OperatorIpcTranscript[] = [];
+    client.onTranscript(() => {
+      throw new Error('facade transcript listener failed');
+    });
+    client.onTranscript((t) => got.push(t));
+    expect(await client.connect()).toBe(true);
+
+    pane.emit('facade bytes');
+    await flush();
+
+    expect(got.map((t) => t.chunk)).toEqual(['facade bytes']);
+    expect(errors).toHaveLength(1);
   });
 });
 
@@ -1096,6 +1425,60 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
     expect(states.filter((s) => s === 'connected')).toHaveLength(2);
   });
 
+  it('raw connection isolates tick listener failures so later subscribers still receive the push', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    const connection = await OperatorIpcConnection.connect(socketPath);
+    try {
+      const ticks: OperatorIpcTick[] = [];
+      connection.onTick(() => {
+        throw new Error('raw tick listener failed');
+      });
+      connection.onTick((t) => ticks.push(t));
+
+      server.pushTick(control.observe());
+      await flush();
+
+      expect(ticks).toHaveLength(1);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('raw connection isolates close listener failures so later subscribers still run', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const connection = await OperatorIpcConnection.connect(socketPath);
+    let sawSecondClose = false;
+    connection.onClose(() => {
+      throw new Error('raw close listener failed');
+    });
+    connection.onClose(() => {
+      sawSecondClose = true;
+    });
+
+    await connection.close();
+    await flush();
+
+    expect(sawSecondClose).toBe(true);
+  });
+
   it('client reconnects to the SAME running server after a client-side socket drop (app restart, daemon stays up)', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
@@ -1171,6 +1554,34 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
     await flush();
     expect(errors).toHaveLength(0);
   });
+
+  it('facade isolates tick listener failures so later UI subscribers still receive the push', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    const errors: unknown[] = [];
+    const client = new OperatorIpcClient({ projectId, socketPath, onError: (e) => errors.push(e) });
+    clients.push(client);
+    const ticks: OperatorIpcTick[] = [];
+    client.onTick(() => {
+      throw new Error('facade tick listener failed');
+    });
+    client.onTick((t) => ticks.push(t));
+    expect(await client.connect()).toBe(true);
+
+    server.pushTick(control.observe());
+    await flush();
+
+    expect(ticks).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+  });
 });
 
 // ── serveConductor wiring — `co serve` starts the IPC server alongside the runner ─
@@ -1196,6 +1607,14 @@ describe('serveConductor wiring — the IPC server rides the cadence runner (pus
     });
     runners.push(runner);
 
+    // C-P1 — serveConductor wires the transcript accessors into the control surface from the engine
+    // (an unknown agent has no warm pane → an empty tail; never a throw).
+    expect(runner.control?.transcriptTail('impl-x')).toEqual({
+      agentId: 'impl-x',
+      offset: 0,
+      tail: '',
+    });
+
     const client = makeClient(projectId, socketPath);
     const ticks: OperatorIpcTick[] = [];
     client.onTick((t) => ticks.push(t));
@@ -1209,6 +1628,79 @@ describe('serveConductor wiring — the IPC server rides the cadence runner (pus
     await runner.stop(); // the onStop seam closes the IPC server (socket torn down)
     await flush();
     expect((await client.observe()).kind).toBe('static'); // the app degrades cleanly once co serve stops
+  });
+
+  it('still pushes an IPC tick when the caller onTick hook throws', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const scheduler = new FakeScheduler();
+    const errors: unknown[] = [];
+    const runner = await serveConductor({
+      projectId,
+      pty: new FakePty(),
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      onTick: () => {
+        throw new Error('caller onTick failed');
+      },
+      onError: (error) => errors.push(error),
+      operatorIpc: { socketPath },
+    });
+    runners.push(runner);
+
+    const client = makeClient(projectId, socketPath);
+    const ticks: OperatorIpcTick[] = [];
+    client.onTick((t) => ticks.push(t));
+    expect(await client.connect()).toBe(true);
+
+    scheduler.fire();
+    await flush();
+
+    expect(ticks).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+  });
+
+  it('closes the IPC server if auto-start recovery fails after the socket starts', async () => {
+    const { projectId, cwd } = makeProject();
+    const sessions = openSessionStore(projectId);
+    try {
+      sessions.recordSession({
+        agentId: 'impl-orphan',
+        pane: 'pane-impl-orphan',
+        cwd,
+        provider: 'claude',
+        resume: { provider: 'claude', sessionId: 'session-impl-orphan' },
+      });
+    } finally {
+      sessions.close();
+    }
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    await expect(
+      serveConductor({
+        projectId,
+        pty: new FakePty(),
+        makeTransport: () => InMemoryTransport.createLinkedPair(),
+        now: clock.now,
+        quietWindow: qw.quietWindow,
+        scheduler: new FakeScheduler(),
+        reconcileEvery: 1,
+        operatorIpc: { socketPath },
+      }),
+    ).rejects.toThrow(/no roster record/i);
+
+    await expect(OperatorIpcConnection.connect(socketPath)).rejects.toThrow();
   });
 });
 
@@ -1230,6 +1722,7 @@ describe('AC-S11-6 — the operator IPC registers NO agent-facing MCP tool (Prin
       'reply',
       'approve',
       'tick',
+      'transcript',
       'ipc',
       'operator',
     ];
@@ -1277,6 +1770,8 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       observe: () => {
         throw new Error('observe boom in test');
       },
+      transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
     };
     await startServer(control, projectId, socketPath);
 

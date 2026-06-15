@@ -42,6 +42,8 @@ export const OPERATOR_IPC_METHODS = {
   approve: 'approve',
   /** Mark `recipient`'s informational mail at `seq` read (event-sourced — single writer). */
   markRead: 'markRead',
+  /** Fetch a hosted agent's bounded transcript tail (most-recent pane bytes) on demand. */
+  transcript: 'transcript',
 } as const;
 
 /** The set of operator-IPC request method names. */
@@ -53,6 +55,16 @@ export type OperatorIpcMethod = (typeof OPERATOR_IPC_METHODS)[keyof typeof OPERA
  * JSON-RPC notification (no id, no response).
  */
 export const OPERATOR_IPC_TICK = 'tick' as const;
+
+/**
+ * The server-push notification method for the LIVE TRANSCRIPT stream (Stage 12 C-P1). As a hosted
+ * agent's pane produces output bytes, the daemon forwards each chunk outward as a JSON-RPC notification
+ * (no id, no response). It is EVENT-DRIVEN — fired on each new chunk, NOT on the {@link OPERATOR_IPC_TICK}
+ * cadence — so it rides its own engine subscription rather than the tick. A DISTINCT string from the
+ * `transcript` request method ({@link OPERATOR_IPC_METHODS.transcript}) so the push and the on-demand
+ * tail request are unambiguous and self-documenting on the wire.
+ */
+export const OPERATOR_IPC_TRANSCRIPT = 'transcript:push' as const;
 
 /**
  * A locator for a mail being answered: its store `seq` plus whose inbox holds it. The cross-process
@@ -103,6 +115,8 @@ export interface OperatorIpcSurface {
   approve(approvalSeq: number, reply: ApprovalReply): Promise<DeliveredMail>;
   /** Mark `recipient`'s mail at `seq` read (event-sourced read-state — single writer, MNR #2). */
   markRead(recipient: string, seq: number): Promise<DeliveredMail>;
+  /** Fetch `agentId`'s bounded transcript tail (most-recent pane bytes; `''` if none/not hosted). */
+  transcript(agentId: string): Promise<TranscriptTail>;
 }
 
 /**
@@ -111,6 +125,33 @@ export interface OperatorIpcSurface {
  */
 export interface OperatorIpcTick {
   readonly snapshot: LiveObservabilitySnapshot;
+}
+
+/**
+ * The `transcript:push` ({@link OPERATOR_IPC_TRANSCRIPT}) server-push payload: one chunk of a hosted
+ * agent's live pane output, carried as the notification `params`. The chunk is the raw pane `string`
+ * with ANSI/ESC control bytes PRESERVED (xterm.js consumes the string directly; JSON round-trips a
+ * string exactly, escapes included). PINNED public shape — Console phases C-P2/C-P3 and the renderer
+ * consume it; do not rename.
+ */
+export interface OperatorIpcTranscript {
+  readonly agentId: string;
+  /** Absolute character offset where `chunk` starts in the agent's pane transcript stream. */
+  readonly offset: number;
+  readonly chunk: string;
+}
+
+/**
+ * The on-demand `transcript` ({@link OPERATOR_IPC_METHODS.transcript}) request result: a hosted agent's
+ * bounded transcript tail — the most-recent pane bytes, up to the engine's character bound. `tail` is
+ * `''` when the agent is not hosted or has produced no output yet (the read DEGRADES cleanly — never a
+ * hang/throw). PINNED public shape — Console phases C-P2/C-P3 and the renderer consume it; do not rename.
+ */
+export interface TranscriptTail {
+  readonly agentId: string;
+  /** Absolute character offset where `tail` starts in the agent's pane transcript stream. */
+  readonly offset: number;
+  readonly tail: string;
 }
 
 /** Why the live overlay is unavailable in a degraded (static) read. One reason for v1. */

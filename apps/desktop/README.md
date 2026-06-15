@@ -3,15 +3,17 @@
 The operator-facing **Cockpit** desktop shell. Shell decision: **Electron** (resolved Stage 11;
 see [`docs/research/language-and-stack.md`](../../docs/research/language-and-stack.md)).
 
-## What is built (Stage 11)
+## What is built (Stage 12)
 
 - **6-view nav shell** — header + 224px left rail + main panel, dark oklch palette.
   Nav views: **Dashboard**, **Agents**, **Mail**, **Review**, **Source**, **Cost**.
 - **Dashboard** — live/degraded conductor status, fleet stats, tree, and outstanding actions.
 - **Mail** — operator inbox/outbox, actionable approvals/replies, read-state refresh, and
   daemon-routed writes.
+- **Agents** — live roster, selected-agent transcript tail/backfill, event-driven transcript
+  streaming, and mid-turn steer controls over the daemon-owned IPC path.
 - **Cost** — usage headroom popover and cost rollups from the dispatch store.
-- **Agents**, **Review**, and **Source** remain nav stubs this stage.
+- **Review** and **Source** remain nav stubs this stage.
 - **Main process** (`src/main/`) — Node/Electron context. Imports `@co/core` (static
   reads) and the P1 `OperatorIpcClient` from `@co/mcp` (live conductor IPC). Creates
   the `BrowserWindow` and exposes the typed view-model bridge over `ipcMain`.
@@ -51,6 +53,11 @@ pnpm test   # vitest discovers apps/desktop/src/**/*.test.ts
 ```
 
 The native-addon ABI proof (`native-abi.test.ts`) asserts version compatibility
-in-sandbox (Electron 36 / Node ≥22.5 / `node:sqlite` available). Full runtime proof
-(launching the Electron binary headless, loading `node-pty` + `node:sqlite` under
-Electron's ABI) is an operator host-side handoff.
+in-sandbox (Electron 39 / Node ≥22.5 / `node:sqlite` available). When the
+Electron binary is installed, the host proof is:
+
+```sh
+ELECTRON_RUN_AS_NODE=1 pnpm --filter @co/desktop exec electron -e "require('node:sqlite'); const { createRequire } = require('node:module'); createRequire(require.resolve('@co/core'))('node-pty'); console.log('native-abi: ok')"
+```
+
+It must exit 0 and print `native-abi: ok`.

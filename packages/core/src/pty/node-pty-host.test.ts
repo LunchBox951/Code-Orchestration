@@ -251,6 +251,21 @@ describe('NodePtyHost — IPty → Pane adapter wiring', () => {
     expect(got).toEqual(['early prompt']);
   });
 
+  it('Pane.onData replays early output to multiple early subscribers', () => {
+    const mod = new FakeNodePty();
+    const pane = new NodePtyHost(mod).spawn(FULL_SPEC);
+
+    mod.pty.fireData('early prompt');
+
+    const transcript: string[] = [];
+    const startup: string[] = [];
+    pane.onData((c) => transcript.push(c));
+    pane.onData((c) => startup.push(c));
+
+    expect(transcript).toEqual(['early prompt']);
+    expect(startup).toEqual(['early prompt']);
+  });
+
   it('Pane.onExit maps {exitCode,signal} → {code,signal}; missing signal becomes null', () => {
     const mod = new FakeNodePty();
     const pane = new NodePtyHost(mod).spawn(FULL_SPEC);

@@ -1,20 +1,19 @@
 /**
  * Native-addon ABI proof (§3c — [host] handoff path).
  *
- * The Electron binary cannot execute in this CI sandbox (postinstall binary
- * download was skipped via --ignore-scripts). Full runtime proof (launching
- * electron headless, loading node-pty + node:sqlite under Electron's ABI) is
- * a [host] handoff to the operator.
+ * Some CI installs skip Electron's postinstall binary download, so the full runtime
+ * proof (launching Electron headless, loading node-pty + node:sqlite under Electron's
+ * ABI) remains a [host] handoff to the operator.
  *
  * This in-sandbox test asserts the VERSION COMPATIBILITY invariant that makes
- * the host proof meaningful: Electron 36.x bundles Node 22.14+ (≥22.5), which
- * includes node:sqlite built-in (added in Node 22.5) and ships compatible
- * node-pty prebuilds.
+ * the host proof meaningful: Electron 39 bundles Node 22.14+ (≥22.5), which
+ * includes node:sqlite built-in (added in Node 22.5) and node-pty support.
  *
  * Issue logged: electron-sandbox-exec (see co issue list).
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -40,20 +39,24 @@ function getElectronVersion(): string {
   }
 }
 
-/** Electron 36+ bundles Node 22.x (≥22.14.0) which has node:sqlite. */
-const ELECTRON_MIN_MAJOR = 36;
+/** Electron 39 bundles Node 22.x (≥22.14.0) which has node:sqlite. */
+const ELECTRON_MIN_MAJOR = 39;
 
 /** Node 22.5.0 introduced node:sqlite (DatabaseSync). */
 const NODE_SQLITE_MIN = { major: 22, minor: 5 };
 
-const HOST_HANDOFF_COMMAND =
-  "pnpm --filter @co/desktop exec electron -e \"const path = require('node:path'); " +
-  "require('node:sqlite'); " +
-  "require(require.resolve('node-pty', { paths: [process.cwd(), path.resolve(process.cwd(), '../..')] })); " +
-  "console.log('native-abi: ok')\"";
+function electronBinaryPath(): string | undefined {
+  try {
+    const electron = require('electron') as unknown;
+    if (typeof electron === 'string' && existsSync(electron)) return electron;
+  } catch {
+    // Electron binary was not installed in this environment.
+  }
+  return undefined;
+}
 
 describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
-  it('Electron version is ≥36 (bundles Node 22.x which has node:sqlite)', () => {
+  it('Electron version is ≥39 (bundles Node 22.x which has node:sqlite)', () => {
     const version = getElectronVersion();
     const major = parseInt(version.split('.')[0] ?? '0', 10);
     expect(major).toBeGreaterThanOrEqual(ELECTRON_MIN_MAJOR);
@@ -71,7 +74,7 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
   });
 
   it('node:sqlite DatabaseSync is importable in the current Node runtime', async () => {
-    // Confirms node:sqlite is live in this runtime — the Electron 36 main process
+    // Confirms node:sqlite is live in this runtime — the Electron main process
     // will have the same built-in (it uses Node 22.14+).
     const { DatabaseSync } = await import('node:sqlite');
     expect(DatabaseSync).toBeDefined();
@@ -84,9 +87,9 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
     db.close();
   });
 
-  it('node-pty version is ≥1.0 (supports Electron 36 / Node 22.x ABI via napi 9+)', () => {
-    // node-pty v1.x ships N-API 9 prebuilds that cover Electron 30–36 / Node 22.x.
-    // v0.x only targeted older Electron/Node pairs and lacks these prebuilds.
+  it('node-pty version is ≥1.0 (supports Electron 39 / Node 22.x ABI via napi 9+)', () => {
+    // node-pty v1.x supports the N-API surface needed by Electron 39 / Node 22.x.
+    // On Linux, electron-builder may rebuild it for the packaged Electron ABI.
     // This assertion mirrors the node:sqlite check above — if the version drifts
     // below the ABI floor, the host proof will fail before anyone catches it.
     try {
@@ -112,13 +115,23 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
     }
   });
 
-  // Operator TODO: run
-  // HOST_HANDOFF_COMMAND
-  // and confirm exit 0 with the sentinel "native-abi: ok".
-  it.todo('[host handoff] electron binary execution is not tested in this sandbox');
+  it('[host] Electron binary loads node:sqlite and node-pty when installed', () => {
+    // The Electron binary may be unavailable in CI installs that skip postinstall scripts.
+    // When it is present, run the same host proof operators use.
+    const version = getElectronVersion();
+    expect(version).toBeTruthy(); // package types are present
+    const electron = electronBinaryPath();
+    if (electron == null) return;
 
-  it('documents a host handoff command that resolves node-pty from the workspace root', () => {
-    expect(HOST_HANDOFF_COMMAND).toContain("require.resolve('node-pty'");
-    expect(HOST_HANDOFF_COMMAND).toContain("path.resolve(process.cwd(), '../..')");
+    const script =
+      "require('node:sqlite'); const { createRequire } = require('node:module'); " +
+      "createRequire(require.resolve('@co/core'))('node-pty'); console.log('native-abi: ok')";
+    const result = spawnSync(electron, ['-e', script], {
+      cwd: join(here, '../..'),
+      encoding: 'utf8',
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('native-abi: ok');
   });
 });

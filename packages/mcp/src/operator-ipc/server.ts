@@ -30,6 +30,7 @@ import {
   OPERATOR,
   OPERATOR_IPC_METHODS,
   OPERATOR_IPC_TICK,
+  OPERATOR_IPC_TRANSCRIPT,
   buildHumanReviewVerdict,
   openMailStore,
   openReviewStore,
@@ -77,9 +78,13 @@ export interface OperatorIpcServerDeps {
   readonly openReview?: (projectId: ProjectId) => ReviewStore;
   /** Diagnostic seam for server-side errors (a push to a gone client, a transport error). Default: none. */
   readonly onError?: (error: unknown) => void;
+  /** Locks the socket file after listen. Default: {@link chmodSync}. Injected for lifecycle tests. */
+  readonly chmodSocket?: (socketPath: string, mode: number) => void;
 }
 
 const OPERATOR_IPC_METHOD_SET = new Set<string>(Object.values(OPERATOR_IPC_METHODS));
+const TRANSCRIPT_PENDING_MAX_CHARS = 64 * 1024;
+const TRANSCRIPT_PENDING_MAX_AGENTS = 256;
 
 function isOperatorIpcMethod(method: string): method is OperatorIpcMethod {
   return OPERATOR_IPC_METHOD_SET.has(method);
@@ -166,7 +171,10 @@ export class OperatorIpcServer {
   private readonly openMail: (projectId: ProjectId) => MailStore;
   private readonly openReview: (projectId: ProjectId) => ReviewStore;
   private readonly onError: ((error: unknown) => void) | undefined;
+  private readonly chmodSocket: (socketPath: string, mode: number) => void;
   private readonly transport: SocketServerTransport;
+  private readonly pendingTranscriptPushes = new Map<string, { offset: number; chunk: string }>();
+  private transcriptPushInFlight = false;
   private started = false;
 
   constructor(deps: OperatorIpcServerDeps) {
@@ -176,6 +184,7 @@ export class OperatorIpcServer {
     this.openMail = deps.openMail ?? openMailStore;
     this.openReview = deps.openReview ?? openReviewStore;
     this.onError = deps.onError;
+    this.chmodSocket = deps.chmodSocket ?? chmodSync;
     this.transport = new SocketServerTransport(this.socketPath);
     this.transport.onmessage = (message): void => this.onMessage(message);
     this.transport.onerror = (error): void => this.report(error);
@@ -185,10 +194,20 @@ export class OperatorIpcServer {
   async start(): Promise<void> {
     if (this.started) throw new Error('OperatorIpcServer.start: already started.');
     this.started = true;
-    await this.transport.start();
-    // The socket DIR is `0o700` (ensurePrivateSocketDirectory, inside transport.start); now lock the
-    // socket FILE itself so only the operator uid can connect — never an app/agent responsibility.
-    chmodSync(this.socketPath, 0o600);
+    try {
+      await this.transport.start();
+      // The socket DIR is `0o700` (ensurePrivateSocketDirectory, inside transport.start); now lock the
+      // socket FILE itself so only the operator uid can connect — never an app/agent responsibility.
+      this.chmodSocket(this.socketPath, 0o600);
+    } catch (error) {
+      this.started = false;
+      try {
+        await this.transport.close();
+      } catch (cleanupError) {
+        this.report(cleanupError);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -199,6 +218,21 @@ export class OperatorIpcServer {
   pushTick(snapshot: LiveObservabilitySnapshot): void {
     if (!this.transport.connected) return;
     this.safeSend(makeNotification(OPERATOR_IPC_TICK, { snapshot } as unknown as WirePayload));
+  }
+
+  /**
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — forward one chunk of a hosted agent's live pane output as the
+   * `transcript:push` notification (mirrors {@link pushTick}). Event-driven, NOT on the tick cadence:
+   * `co serve` subscribes this to the engine's transcript stream. A no-op when no app is attached; a
+   * push that races a disconnect is reported, never thrown (must not crash the daemon — Principle 9).
+   */
+  pushTranscript(agentId: string, chunk: string, offset: number): void {
+    if (!this.transport.connected) return;
+    if (this.transcriptPushInFlight) {
+      this.queueTranscriptPush(agentId, chunk, offset);
+      return;
+    }
+    this.sendTranscriptPush(agentId, chunk, offset);
   }
 
   /** Tear the socket down (idempotent via the transport). */
@@ -263,6 +297,11 @@ export class OperatorIpcServer {
         return (await this.handleApprove(params)) as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.markRead:
         return (await this.handleMarkRead(params)) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.transcript:
+        // C-P1 — the on-demand bounded tail (operator backfill). Pure read off the control surface.
+        return this.control.transcriptTail(
+          requireString(params, 'agentId'),
+        ) as unknown as WirePayload;
       default:
         return assertNever(method);
     }
@@ -436,6 +475,68 @@ export class OperatorIpcServer {
   /** Send a message, routing a failure (e.g. a client that vanished mid-send) to `onError`. */
   private safeSend(message: JSONRPCMessage): void {
     this.transport.send(message).catch((error) => this.report(error));
+  }
+
+  private queueTranscriptPush(agentId: string, chunk: string, offset: number): void {
+    const pending = this.pendingTranscriptPushes.get(agentId);
+    const canCoalesce = pending != null && offset === pending.offset + pending.chunk.length;
+    const nextOffset = canCoalesce ? pending.offset : offset;
+    const next = canCoalesce ? pending.chunk + chunk : chunk;
+    if (next.length > TRANSCRIPT_PENDING_MAX_CHARS) {
+      const dropped = next.length - TRANSCRIPT_PENDING_MAX_CHARS;
+      this.pendingTranscriptPushes.set(agentId, {
+        offset: nextOffset + dropped,
+        chunk: next.slice(dropped),
+      });
+    } else {
+      this.pendingTranscriptPushes.set(agentId, { offset: nextOffset, chunk: next });
+    }
+
+    while (this.pendingTranscriptPushes.size > TRANSCRIPT_PENDING_MAX_AGENTS) {
+      const drop =
+        [...this.pendingTranscriptPushes.keys()].find((candidate) => candidate !== agentId) ??
+        this.pendingTranscriptPushes.keys().next().value;
+      if (drop == null) break;
+      this.pendingTranscriptPushes.delete(drop);
+    }
+  }
+
+  private sendTranscriptPush(agentId: string, chunk: string, offset: number): void {
+    this.transcriptPushInFlight = true;
+    this.transport
+      .send(
+        makeNotification(OPERATOR_IPC_TRANSCRIPT, {
+          agentId,
+          offset,
+          chunk,
+        } as unknown as WirePayload),
+      )
+      .then(
+        () => this.drainTranscriptPush(),
+        (error: unknown) => {
+          this.pendingTranscriptPushes.clear();
+          this.transcriptPushInFlight = false;
+          this.report(error);
+        },
+      );
+  }
+
+  private drainTranscriptPush(): void {
+    if (!this.transport.connected) {
+      this.pendingTranscriptPushes.clear();
+      this.transcriptPushInFlight = false;
+      return;
+    }
+    const next = this.pendingTranscriptPushes.entries().next().value as
+      | [agentId: string, transcript: { offset: number; chunk: string }]
+      | undefined;
+    if (next == null) {
+      this.transcriptPushInFlight = false;
+      return;
+    }
+    const [agentId, transcript] = next;
+    this.pendingTranscriptPushes.delete(agentId);
+    this.sendTranscriptPush(agentId, transcript.chunk, transcript.offset);
   }
 
   private report(error: unknown): void {

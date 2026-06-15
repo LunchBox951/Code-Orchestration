@@ -8,7 +8,9 @@
 import { cpSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
+const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, '../src/renderer');
 const dstDir = join(here, '../dist/renderer');
@@ -23,3 +25,8 @@ for (const name of readdirSync(srcDir)) {
     cpSync(srcPath, join(dstDir, name));
   }
 }
+
+// Vendor xterm UMD build + CSS (renderer uses window.Terminal global; no bundler).
+mkdirSync(join(dstDir, 'vendor'), { recursive: true });
+cpSync(require.resolve('@xterm/xterm/lib/xterm.js'), join(dstDir, 'vendor', 'xterm.js'));
+cpSync(require.resolve('@xterm/xterm/css/xterm.css'), join(dstDir, 'vendor', 'xterm.css'));
