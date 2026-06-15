@@ -71,6 +71,8 @@ interface ComposerState {
   type: string;
   subject: string;
   body: string;
+  pending: boolean;
+  idempotencyKey: string | null;
 }
 
 interface MailState {

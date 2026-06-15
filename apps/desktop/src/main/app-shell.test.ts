@@ -373,7 +373,7 @@ describe('createAppShell — mail VM bridge wiring', () => {
       'Re: Review merge',
     );
     shell.mail.updateComposerField('body', 'ISSUES\nneeds tests');
-    shell.mail.submitReply();
+    await shell.mail.submitReply();
 
     await vi.waitFor(() => {
       expect(client.reply).toHaveBeenCalledWith(

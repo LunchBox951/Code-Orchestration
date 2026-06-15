@@ -183,35 +183,33 @@ export function createAppShell(deps: AppShellDeps): AppShell {
           }
         });
     },
-    onReply: (target: OperatorMailRef, draft: ReplyDraft) => {
-      void client
-        .reply(target, draft)
-        .then(() => {
-          doRefreshMail();
-        })
-        .catch((e: unknown) => {
-          deps.onMailError?.(
-            e instanceof ConductorUnavailableError
-              ? 'Conductor not running — start `co serve` to send mail.'
-              : safeError(e),
-          );
-        });
+    onReply: async (target: OperatorMailRef, draft: ReplyDraft) => {
+      try {
+        await client.reply(target, draft);
+        doRefreshMail();
+      } catch (e: unknown) {
+        deps.onMailError?.(
+          e instanceof ConductorUnavailableError
+            ? 'Conductor not running — start `co serve` to send mail.'
+            : safeError(e),
+        );
+        throw e;
+      }
     },
-    onApprove: (approvalSeq: number, reply: ApprovalReply) => {
-      void client
-        .approve(approvalSeq, reply)
-        .then(() => {
-          doRefreshMail();
-          // Refresh dashboard to update outstandingCount after actionable clears.
-          void connVmRef.current?.refresh();
-        })
-        .catch((e: unknown) => {
-          deps.onMailError?.(
-            e instanceof ConductorUnavailableError
-              ? 'Conductor not running — start `co serve` to approve/decline.'
-              : safeError(e),
-          );
-        });
+    onApprove: async (approvalSeq: number, reply: ApprovalReply) => {
+      try {
+        await client.approve(approvalSeq, reply);
+        doRefreshMail();
+        // Refresh dashboard to update outstandingCount after actionable clears.
+        void connVmRef.current?.refresh();
+      } catch (e: unknown) {
+        deps.onMailError?.(
+          e instanceof ConductorUnavailableError
+            ? 'Conductor not running — start `co serve` to approve/decline.'
+            : safeError(e),
+        );
+        throw e;
+      }
     },
     onSelectBus: (busId: string) => {
       doRefreshMail(busId);

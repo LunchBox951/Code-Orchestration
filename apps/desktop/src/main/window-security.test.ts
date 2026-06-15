@@ -19,4 +19,11 @@ describe('Electron BrowserWindow security hardening', () => {
     expect(mainSource).toContain("'will-navigate'");
     expect(mainSource).toContain('preventDefault()');
   });
+
+  it('routes async window startup failures through fatal cleanup', () => {
+    expect(mainSource).toContain('function handleStartupFailure');
+    expect(mainSource).toContain('createWindow().catch(handleStartupFailure)');
+    expect(mainSource).not.toContain('void createWindow();');
+    expect(mainSource).not.toContain('if (mainWindow === null) void createWindow();');
+  });
 });

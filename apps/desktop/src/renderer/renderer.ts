@@ -240,6 +240,7 @@ function renderMailDetail(state: MailState): void {
   const isActionable = selected.kind === 'actionable';
   const isApproval = selected.type === 'approval';
   const isReviewComposer = composer.type === MAIL_REVIEW_RESPONSE;
+  const pendingAttr = composer.pending ? ' disabled' : '';
 
   let actionButtons = '';
   if (isApproval) {
@@ -266,13 +267,13 @@ function renderMailDetail(state: MailState): void {
 
   const composerFooter = isApproval
     ? [
-        `<button class="btn btn-secondary" data-action="close-composer">Cancel</button>`,
-        `<button class="btn btn-decline" data-action="decline-with-composer" data-seq="${selected.seq}">Decline with note</button>`,
-        `<button class="btn btn-approve" data-action="approve-with-composer" data-seq="${selected.seq}">Approve with note</button>`,
+        `<button class="btn btn-secondary" data-action="close-composer"${pendingAttr}>Cancel</button>`,
+        `<button class="btn btn-decline" data-action="decline-with-composer" data-seq="${selected.seq}"${pendingAttr}>Decline with note</button>`,
+        `<button class="btn btn-approve" data-action="approve-with-composer" data-seq="${selected.seq}"${pendingAttr}>Approve with note</button>`,
       ].join('')
     : [
-        `<button class="btn btn-secondary" data-action="close-composer">Cancel</button>`,
-        `<button class="btn btn-reply" data-action="submit-reply">${isReviewComposer ? 'Submit verdict' : 'Send'}</button>`,
+        `<button class="btn btn-secondary" data-action="close-composer"${pendingAttr}>Cancel</button>`,
+        `<button class="btn btn-reply" data-action="submit-reply"${pendingAttr}>${isReviewComposer ? 'Submit verdict' : 'Send'}</button>`,
       ].join('');
 
   const composerTitle = isApproval
@@ -285,10 +286,10 @@ function renderMailDetail(state: MailState): void {
     ? [
         `<div class="mail-composer">`,
         `<div class="mail-composer-header">${composerTitle}`,
-        `<button class="mail-composer-close" data-action="close-composer" aria-label="Close composer">×</button>`,
+        `<button class="mail-composer-close" data-action="close-composer" aria-label="Close composer"${pendingAttr}>×</button>`,
         `</div>`,
         `<div class="mail-composer-body">`,
-        `<textarea class="composer-textarea" id="composer-body" placeholder="${composerPlaceholder}">${esc(composer.body)}</textarea>`,
+        `<textarea class="composer-textarea" id="composer-body" placeholder="${composerPlaceholder}"${pendingAttr}>${esc(composer.body)}</textarea>`,
         `</div>`,
         `<div class="mail-composer-footer">`,
         composerFooter,

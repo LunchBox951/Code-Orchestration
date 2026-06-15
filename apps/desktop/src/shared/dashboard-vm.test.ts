@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { DashboardVM } from './dashboard-vm.js';
+import { DashboardVM, type TreeNode } from './dashboard-vm.js';
 import type {
   OperatorObservation,
   ObservabilitySnapshot,
@@ -66,6 +66,10 @@ const staticObs = (agents: readonly AgentRecord[]): OperatorObservation => ({
   snapshot: { ...emptyStatic, agents },
   reason: 'conductor-not-running',
 });
+
+function flattenTree(nodes: readonly TreeNode[]): string[] {
+  return nodes.flatMap((node) => [node.agentId, ...flattenTree(node.children)]);
+}
 
 // ── DashboardVM ───────────────────────────────────────────────────────────────
 
@@ -314,5 +318,14 @@ describe('DashboardVM — cycle safety', () => {
     // A → B → A (cycle), with C → A entering from outside
     const agents = [makeAgent('A', 'B'), makeAgent('B', 'A'), makeAgent('C', 'ghost')];
     expect(() => vm.update(liveObs(agents), [])).not.toThrow();
+  });
+
+  it('surfaces agents trapped in a cyclic rootless graph', () => {
+    const vm = new DashboardVM();
+    const agents = [makeAgent('A', 'B'), makeAgent('B', 'A'), makeAgent('C', 'ghost')];
+
+    vm.update(liveObs(agents), []);
+
+    expect(flattenTree(vm.state.tree)).toEqual(expect.arrayContaining(['A', 'B', 'C']));
   });
 });

@@ -1337,6 +1337,68 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
     }
   });
 
+  it('AC-S10-2.1b: same-millisecond live review triggers use distinct review ids', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      for (const branch of ['co/feature-a', 'co/feature-b'] as const) {
+        worktreeStore!.recordWorktreeAndBaseline(
+          {
+            branch,
+            baseRef: branch === 'co/feature-a' ? 'main' : 'co/target-b',
+            baseSha: FAKE_SHA,
+            path: `/tmp/${branch.replaceAll('/', '-')}`,
+            parent: 'lead-2',
+          },
+          {
+            branch,
+            baseRef: branch === 'co/feature-a' ? 'main' : 'co/target-b',
+            baseSha: FAKE_SHA,
+            tests: [],
+          },
+        );
+      }
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const spawnGate: ReviewerSpawnGate = {
+        spawn: async () => {},
+      };
+      const toolCtx = { ...ctx, dispatch, reviewerSpawnGate: spawnGate } as ToolContext;
+      try {
+        await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature-a',
+          into: 'main',
+          intent: { summary: 'trigger first review' },
+        });
+        await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature-b',
+          into: 'co/target-b',
+          intent: { summary: 'trigger second review' },
+        });
+
+        const reviewIds = dispatch
+          .readPlacements()
+          .map((placement) => placement.reviewId)
+          .filter((reviewId): reviewId is string => reviewId !== undefined);
+        expect(reviewIds).toHaveLength(2);
+        expect(new Set(reviewIds).size).toBe(2);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('AC-S10-2.1b: rejects when the live reviewer spawn gate fails', async () => {
     vi.useFakeTimers({ now: 0 });
     try {

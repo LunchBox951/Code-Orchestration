@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createRendererRegistry } from '@co/core';
-import type { DeliveredMail, MailType } from '@co/core';
+import type { DeliveredMail, MailType, ReplyDraft } from '@co/core';
 import { MailVM } from './mail-vm.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -307,31 +307,32 @@ describe('MailVM — reply composer', () => {
     expect(vm.state.composer.active).toBe(false);
   });
 
-  it('submitReply fires onReply with correct target and draft', () => {
+  it('submitReply fires onReply with correct target and draft', async () => {
     const onReply = vi.fn();
     const vm = new MailVM({ registry: createRendererRegistry(), onReply });
     vm.openComposer(5, 'lead-1', 'clarify_response', 're: help');
     vm.updateComposerField('body', 'here is my answer');
-    vm.submitReply();
+    await vm.submitReply();
     expect(onReply).toHaveBeenCalledOnce();
     const [target, draft] = onReply.mock.calls[0] as [
       { seq: number; recipient: string },
-      { type: string; subject: string; body: string },
+      { type: string; subject: string; body: string; idempotencyKey?: string },
     ];
     expect(target.seq).toBe(5);
     expect(target.recipient).toBe('lead-1');
     expect(draft.type).toBe('clarify_response');
     expect(draft.subject).toBe('re: help');
     expect(draft.body).toBe('here is my answer');
+    expect(draft.idempotencyKey).toBe('desktop-reply:lead-1:5:clarify_response');
   });
 
-  it('submitReply adds reviewVerdict when sending a review_response', () => {
+  it('submitReply adds reviewVerdict when sending a review_response', async () => {
     const onReply = vi.fn();
     const vm = new MailVM({ registry: createRendererRegistry(), onReply });
     vm.openComposer(5, '@operator', 'review_response', 're: review');
     vm.updateComposerField('body', 'pass\nlooks good');
 
-    vm.submitReply();
+    await vm.submitReply();
 
     const [, draft] = onReply.mock.calls[0] as [
       { seq: number; recipient: string },
@@ -341,18 +342,52 @@ describe('MailVM — reply composer', () => {
     expect(draft.reviewVerdict).toBe('PASS');
   });
 
-  it('submitReply closes the composer after firing', () => {
+  it('submitReply closes the composer after firing', async () => {
     const vm = new MailVM({ registry: createRendererRegistry(), onReply: vi.fn() });
     vm.openComposer(5, 'lead-1', 'clarify_response', 're: X');
-    vm.submitReply();
+    await vm.submitReply();
     expect(vm.state.composer.active).toBe(false);
   });
 
-  it('submitReply is a no-op when composer is inactive', () => {
+  it('submitReply is a no-op when composer is inactive', async () => {
     const onReply = vi.fn();
     const vm = new MailVM({ registry: createRendererRegistry(), onReply });
-    vm.submitReply();
+    await vm.submitReply();
     expect(onReply).not.toHaveBeenCalled();
+  });
+
+  it('submitReply keeps the draft open after a failed async send and retries with the same key', async () => {
+    const keys: string[] = [];
+    let attempt = 0;
+    const onReply = vi.fn(async (_target, draft: ReplyDraft) => {
+      keys.push(draft.idempotencyKey ?? '<missing>');
+      attempt += 1;
+      if (attempt === 1) {
+        throw new Error('daemon down');
+      }
+    });
+    const vm = new MailVM({ registry: createRendererRegistry(), onReply });
+    vm.openComposer(5, 'lead-1', 'clarify_response', 're: help');
+    vm.updateComposerField('body', 'do not lose this');
+
+    await expect(vm.submitReply()).rejects.toThrow('daemon down');
+
+    expect(vm.state.composer).toEqual(
+      expect.objectContaining({
+        active: true,
+        pending: false,
+        body: 'do not lose this',
+        idempotencyKey: 'desktop-reply:lead-1:5:clarify_response',
+      }),
+    );
+
+    await vm.submitReply();
+
+    expect(keys).toEqual([
+      'desktop-reply:lead-1:5:clarify_response',
+      'desktop-reply:lead-1:5:clarify_response',
+    ]);
+    expect(vm.state.composer.active).toBe(false);
   });
 });
 
@@ -377,17 +412,36 @@ describe('MailVM — approve/decline quick-actions', () => {
     expect(reply.decision).toBe('decline');
   });
 
-  it('approveWithComposer uses composer body + closes composer', () => {
+  it('approveWithComposer uses composer body + closes composer', async () => {
     const onApprove = vi.fn();
     const vm = new MailVM({ registry: createRendererRegistry(), onApprove });
     vm.openComposer(20, '@operator', 'clarify_response', 'approve?');
     vm.updateComposerField('body', 'lgtm!');
-    vm.approveWithComposer(20);
+    await vm.approveWithComposer(20);
     const [seq, reply] = onApprove.mock.calls[0] as [number, { decision: string; body: string }];
     expect(seq).toBe(20);
     expect(reply.decision).toBe('approve');
     expect(reply.body).toBe('lgtm!');
     expect(vm.state.composer.active).toBe(false);
+  });
+
+  it('approveWithComposer keeps the note open after a failed async approval', async () => {
+    const onApprove = vi.fn(async () => {
+      throw new Error('daemon down');
+    });
+    const vm = new MailVM({ registry: createRendererRegistry(), onApprove });
+    vm.openComposer(20, '@operator', 'approval_response', 'approve?');
+    vm.updateComposerField('body', 'approval details');
+
+    await expect(vm.approveWithComposer(20)).rejects.toThrow('daemon down');
+
+    expect(vm.state.composer).toEqual(
+      expect.objectContaining({
+        active: true,
+        pending: false,
+        body: 'approval details',
+      }),
+    );
   });
 });
 

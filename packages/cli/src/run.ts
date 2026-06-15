@@ -450,6 +450,60 @@ function validateNoArgs(command: string, argv: string[]): void {
   throw new Error(`co ${command}: unexpected argument '${arg}'.`);
 }
 
+interface ParsedArgs {
+  readonly positionals: readonly string[];
+  readonly values: ReadonlyMap<string, string>;
+  readonly booleans: ReadonlySet<string>;
+}
+
+function parseStrictArgs(
+  argv: readonly string[],
+  opts: {
+    readonly maxPositionals: number;
+    readonly valueFlags?: readonly string[];
+    readonly booleanFlags?: readonly string[];
+  },
+): ParsedArgs {
+  const valueFlags = new Set(opts.valueFlags ?? []);
+  const booleanFlags = new Set(opts.booleanFlags ?? []);
+  const seen = new Set<string>();
+  const values = new Map<string, string>();
+  const booleans = new Set<string>();
+  const positionals: string[] = [];
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!;
+    if (!arg.startsWith('--')) {
+      positionals.push(arg);
+      if (positionals.length > opts.maxPositionals) {
+        throw new Error(`Unexpected argument '${arg}'.`);
+      }
+      continue;
+    }
+
+    if (!valueFlags.has(arg) && !booleanFlags.has(arg)) {
+      throw new Error(`Unknown option '${arg}'.`);
+    }
+    if (seen.has(arg)) {
+      throw new Error(`Duplicate option '${arg}'.`);
+    }
+    seen.add(arg);
+
+    if (valueFlags.has(arg)) {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--')) {
+        throw new Error(`Missing value for ${arg}.`);
+      }
+      values.set(arg, value);
+      i += 1;
+    } else {
+      booleans.add(arg);
+    }
+  }
+
+  return { positionals, values, booleans };
+}
+
 function parseAccounts(argv: string[]): readonly ProviderAccount[] | undefined {
   const raw = requiredArg(argv, '--account');
   if (raw === undefined) return undefined;
@@ -484,7 +538,11 @@ function runMailCommand(projectId: string, argv: string[]): RunResult {
 
   if (subcmd === 'read') {
     try {
-      const recipient = requiredArg(rest, '--recipient') ?? OPERATOR;
+      const parsed = parseStrictArgs(rest, {
+        maxPositionals: 0,
+        valueFlags: ['--recipient'],
+      });
+      const recipient = parsed.values.get('--recipient') ?? OPERATOR;
       const store = openMailStore(projectId);
       try {
         const mails = store.inbox(recipient);
@@ -500,16 +558,20 @@ function runMailCommand(projectId: string, argv: string[]): RunResult {
 
   if (subcmd === 'send') {
     try {
-      const to = requiredArg(rest, '--to');
+      const parsed = parseStrictArgs(rest, {
+        maxPositionals: 0,
+        valueFlags: ['--to', '--type', '--subject', '--body'],
+      });
+      const to = parsed.values.get('--to');
       if (!to) throw new Error('missing --to <recipient>.');
-      const rawType = requiredArg(rest, '--type');
+      const rawType = parsed.values.get('--type');
       if (!rawType) throw new Error('missing --type <type>.');
       if (!(MAIL_TYPES as readonly string[]).includes(rawType)) {
         throw new Error(`unknown mail type '${rawType}'. Valid types: ${MAIL_TYPES.join(', ')}.`);
       }
-      const subject = requiredArg(rest, '--subject');
+      const subject = parsed.values.get('--subject');
       if (!subject) throw new Error('missing --subject <subject>.');
-      const body = requiredArg(rest, '--body') ?? '';
+      const body = parsed.values.get('--body') ?? '';
 
       const envelope: MailEnvelope = {
         type: rawType as MailType,
@@ -676,7 +738,8 @@ export async function run(
 
     case 'spec': {
       try {
-        const taskId = rest.find((a) => !a.startsWith('--'));
+        const parsed = parseStrictArgs(rest, { maxPositionals: 1 });
+        const taskId = parsed.positionals[0];
         const store = openSpecStore(projectId);
         try {
           if (taskId !== undefined) {
@@ -698,7 +761,8 @@ export async function run(
 
     case 'plan': {
       try {
-        const taskId = rest.find((a) => !a.startsWith('--'));
+        const parsed = parseStrictArgs(rest, { maxPositionals: 1 });
+        const taskId = parsed.positionals[0];
         const store = openPlanStore(projectId);
         try {
           if (taskId !== undefined) {
@@ -720,7 +784,8 @@ export async function run(
 
     case 'phase': {
       try {
-        const taskId = rest.find((a) => !a.startsWith('--'));
+        const parsed = parseStrictArgs(rest, { maxPositionals: 1 });
+        const taskId = parsed.positionals[0];
         if (!taskId) {
           return { output: `co phase: missing <taskId> argument.\n`, exitCode: 1 };
         }
@@ -743,139 +808,159 @@ export async function run(
     // ── Recovery verbs (operator-only) ──────────────────────────────────────
 
     case 'cleanup': {
-      const branch = rest.find((a) => !a.startsWith('--'));
-      if (!branch) {
-        return { output: `co cleanup: missing <branch> argument.\n`, exitCode: 1 };
-      }
-      const execute = rest.includes('--execute');
-      const store = openWorktreeStore(projectId);
       try {
-        const gate = new CleanupGateImpl({
-          store,
-          repoCwd: cwd,
-          mergeProbe: buildMergeProbe(cwd),
-          repair: defaultRepair,
-          router: HOST_LIVE_ROUTER,
-          gitExec: defaultGitExec,
-          fs: defaultSandboxFs,
+        const parsed = parseStrictArgs(rest, {
+          maxPositionals: 1,
+          booleanFlags: ['--execute'],
         });
-        const report = gate.cleanup(branch, { dryRun: !execute });
-        return { output: renderCleanupReport(report), exitCode: 0 };
+        const branch = parsed.positionals[0];
+        if (!branch) {
+          return { output: `co cleanup: missing <branch> argument.\n`, exitCode: 1 };
+        }
+        const store = openWorktreeStore(projectId);
+        try {
+          const gate = new CleanupGateImpl({
+            store,
+            repoCwd: cwd,
+            mergeProbe: buildMergeProbe(cwd),
+            repair: defaultRepair,
+            router: HOST_LIVE_ROUTER,
+            gitExec: defaultGitExec,
+            fs: defaultSandboxFs,
+          });
+          const report = gate.cleanup(branch, { dryRun: !parsed.booleans.has('--execute') });
+          return { output: renderCleanupReport(report), exitCode: 0 };
+        } finally {
+          store.close();
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { output: `co cleanup: ${msg}\n`, exitCode: 1 };
-      } finally {
-        store.close();
       }
     }
 
     case 'unstick': {
-      const branch = rest.find((a) => !a.startsWith('--'));
-      if (!branch) {
-        return { output: `co unstick: missing <branch> argument.\n`, exitCode: 1 };
-      }
-      const store = openWorktreeStore(projectId);
       try {
-        const gate = new CleanupGateImpl({
-          store,
-          repoCwd: cwd,
-          mergeProbe: buildMergeProbe(cwd),
-          repair: defaultRepair,
-          router: HOST_LIVE_ROUTER,
-          gitExec: defaultGitExec,
-          fs: defaultSandboxFs,
-        });
-        const report = gate.unstick(branch, { repoCwd: cwd });
-        return { output: renderUnstickReport(report), exitCode: 0 };
+        const parsed = parseStrictArgs(rest, { maxPositionals: 1 });
+        const branch = parsed.positionals[0];
+        if (!branch) {
+          return { output: `co unstick: missing <branch> argument.\n`, exitCode: 1 };
+        }
+        const store = openWorktreeStore(projectId);
+        try {
+          const gate = new CleanupGateImpl({
+            store,
+            repoCwd: cwd,
+            mergeProbe: buildMergeProbe(cwd),
+            repair: defaultRepair,
+            router: HOST_LIVE_ROUTER,
+            gitExec: defaultGitExec,
+            fs: defaultSandboxFs,
+          });
+          const report = gate.unstick(branch, { repoCwd: cwd });
+          return { output: renderUnstickReport(report), exitCode: 0 };
+        } finally {
+          store.close();
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { output: `co unstick: ${msg}\n`, exitCode: 1 };
-      } finally {
-        store.close();
       }
     }
 
     case 'nuke': {
-      const branch = rest.find((a) => !a.startsWith('--'));
-      if (!branch) {
-        return { output: `co nuke: missing <branch> argument.\n`, exitCode: 1 };
-      }
-      if (!rest.includes('--confirm')) {
-        return {
-          output: `co nuke: explicit confirmation required. Pass --confirm to force-remove branch '${branch}'.\n`,
-          exitCode: 1,
-        };
-      }
-      const store = openWorktreeStore(projectId);
       try {
-        const gate = new CleanupGateImpl({
-          store,
-          repoCwd: cwd,
-          mergeProbe: buildMergeProbe(cwd),
-          repair: defaultRepair,
-          router: HOST_LIVE_ROUTER,
-          gitExec: defaultGitExec,
-          fs: defaultSandboxFs,
+        const parsed = parseStrictArgs(rest, {
+          maxPositionals: 1,
+          booleanFlags: ['--confirm'],
         });
-        const record = gate.nuke(branch, { confirm: true });
-        return { output: renderNukeRecord(record), exitCode: 0 };
+        const branch = parsed.positionals[0];
+        if (!branch) {
+          return { output: `co nuke: missing <branch> argument.\n`, exitCode: 1 };
+        }
+        if (!parsed.booleans.has('--confirm')) {
+          return {
+            output: `co nuke: explicit confirmation required. Pass --confirm to force-remove branch '${branch}'.\n`,
+            exitCode: 1,
+          };
+        }
+        const store = openWorktreeStore(projectId);
+        try {
+          const gate = new CleanupGateImpl({
+            store,
+            repoCwd: cwd,
+            mergeProbe: buildMergeProbe(cwd),
+            repair: defaultRepair,
+            router: HOST_LIVE_ROUTER,
+            gitExec: defaultGitExec,
+            fs: defaultSandboxFs,
+          });
+          const record = gate.nuke(branch, { confirm: true });
+          return { output: renderNukeRecord(record), exitCode: 0 };
+        } finally {
+          store.close();
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { output: `co nuke: ${msg}\n`, exitCode: 1 };
-      } finally {
-        store.close();
       }
     }
 
     case 'pause': {
-      const agentId = rest.find((a) => !a.startsWith('--'));
-      if (!agentId) {
-        return { output: `co pause: missing <agentId> argument.\n`, exitCode: 1 };
-      }
-      const store = openWorktreeStore(projectId);
       try {
-        const gate = new CleanupGateImpl({
-          store,
-          repoCwd: cwd,
-          mergeProbe: buildMergeProbe(cwd),
-          repair: defaultRepair,
-          router: HOST_LIVE_ROUTER,
-          gitExec: defaultGitExec,
-          fs: defaultSandboxFs,
-        });
-        gate.pause(agentId);
-        return { output: `pause: ${agentId} paused.\n`, exitCode: 0 };
+        const parsed = parseStrictArgs(rest, { maxPositionals: 1 });
+        const agentId = parsed.positionals[0];
+        if (!agentId) {
+          return { output: `co pause: missing <agentId> argument.\n`, exitCode: 1 };
+        }
+        const store = openWorktreeStore(projectId);
+        try {
+          const gate = new CleanupGateImpl({
+            store,
+            repoCwd: cwd,
+            mergeProbe: buildMergeProbe(cwd),
+            repair: defaultRepair,
+            router: HOST_LIVE_ROUTER,
+            gitExec: defaultGitExec,
+            fs: defaultSandboxFs,
+          });
+          gate.pause(agentId);
+          return { output: `pause: ${agentId} paused.\n`, exitCode: 0 };
+        } finally {
+          store.close();
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { output: `co pause: ${msg}\n`, exitCode: 1 };
-      } finally {
-        store.close();
       }
     }
 
     case 'stop': {
-      const agentId = rest.find((a) => !a.startsWith('--'));
-      if (!agentId) {
-        return { output: `co stop: missing <agentId> argument.\n`, exitCode: 1 };
-      }
-      const store = openWorktreeStore(projectId);
       try {
-        const gate = new CleanupGateImpl({
-          store,
-          repoCwd: cwd,
-          mergeProbe: buildMergeProbe(cwd),
-          repair: defaultRepair,
-          router: HOST_LIVE_ROUTER,
-          gitExec: defaultGitExec,
-          fs: defaultSandboxFs,
-        });
-        gate.stop(agentId);
-        return { output: `stop: ${agentId} stopped.\n`, exitCode: 0 };
+        const parsed = parseStrictArgs(rest, { maxPositionals: 1 });
+        const agentId = parsed.positionals[0];
+        if (!agentId) {
+          return { output: `co stop: missing <agentId> argument.\n`, exitCode: 1 };
+        }
+        const store = openWorktreeStore(projectId);
+        try {
+          const gate = new CleanupGateImpl({
+            store,
+            repoCwd: cwd,
+            mergeProbe: buildMergeProbe(cwd),
+            repair: defaultRepair,
+            router: HOST_LIVE_ROUTER,
+            gitExec: defaultGitExec,
+            fs: defaultSandboxFs,
+          });
+          gate.stop(agentId);
+          return { output: `stop: ${agentId} stopped.\n`, exitCode: 0 };
+        } finally {
+          store.close();
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { output: `co stop: ${msg}\n`, exitCode: 1 };
-      } finally {
-        store.close();
       }
     }
 
