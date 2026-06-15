@@ -473,7 +473,14 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   const onTick =
     ipcServer != null || opts.onTick != null
       ? (outcome: DaemonTickOutcome): void => {
-          opts.onTick?.(outcome);
+          try {
+            opts.onTick?.(outcome);
+          } catch (error) {
+            reportServeControlDiagnostic(
+              opts.onError,
+              new Error(`co serve: onTick hook failed: ${errorMessage(error)}`),
+            );
+          }
           if (ipcServer != null) ipcServer.pushTick(control.observe());
         }
       : undefined;

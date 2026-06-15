@@ -253,7 +253,13 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     const error = new Error('operator IPC: connection closed before the response arrived.');
     for (const pending of [...this.pending.values()]) pending.reject(error);
     this.pending.clear();
-    for (const listener of [...this.closeListeners]) listener();
+    for (const listener of [...this.closeListeners]) {
+      try {
+        listener();
+      } catch {
+        /* close subscribers are app surfaces; one bad callback must not starve later listeners */
+      }
+    }
   }
 }
 
