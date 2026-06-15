@@ -1,6 +1,7 @@
 import { operatorIpcSocketPath } from '@co/mcp';
 import type {
   ApprovalReply,
+  CostRollup,
   DeliveredMail,
   OperatorIpcTick,
   OperatorMailRef,
@@ -8,6 +9,8 @@ import type {
   ProjectId,
   RendererRegistry,
   ReplyDraft,
+  UsageAccountStatus,
+  UsageBucket,
 } from '@co/core';
 import {
   createRendererRegistry,
@@ -15,6 +18,7 @@ import {
   MAIL_CLARIFY_REQUEST,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
+  openDispatchStore,
   openMailStore,
   projectDataDir,
 } from '@co/core';
@@ -22,10 +26,12 @@ import { ConductorUnavailableError, OperatorIpcClient } from '@co/mcp';
 import { NavVM } from '../shared/nav-vm.js';
 import { ConnectionVM } from '../shared/connection-vm.js';
 import { DashboardVM } from '../shared/dashboard-vm.js';
+import { LimitsCostVM } from '../shared/limits-cost-vm.js';
 import { MailVM } from '../shared/mail-vm.js';
 import type { ConnectionState } from '../shared/connection-vm.js';
 import type { NavState } from '../shared/nav-vm.js';
 import type { DashboardState } from '../shared/dashboard-vm.js';
+import type { LimitsCostState } from '../shared/limits-cost-vm.js';
 import type { MailState } from '../shared/mail-vm.js';
 
 /**
@@ -50,11 +56,18 @@ export interface AppShellDeps {
   readonly outboxReader?: (sender: string) => readonly DeliveredMail[];
   /** Injectable for tests — provides the renderer registry (default: one with built-in type cards). */
   readonly registry?: RendererRegistry;
+  /** Injectable for tests — reads usage buckets (default: real DispatchStore). */
+  readonly bucketsReader?: () => readonly UsageBucket[];
+  /** Injectable for tests — reads account statuses (default: real DispatchStore). */
+  readonly accountStatusesReader?: () => readonly UsageAccountStatus[];
+  /** Injectable for tests — reads cost rollups (default: real DispatchStore). */
+  readonly rollupsReader?: () => readonly CostRollup[];
   readonly onNavState?: (state: NavState) => void;
   readonly onConnectionState?: (state: ConnectionState) => void;
   readonly onDashboardState?: (state: DashboardState) => void;
   readonly onMailState?: (state: MailState) => void;
   readonly onMailError?: (message: string) => void;
+  readonly onLimitsCostState?: (state: LimitsCostState) => void;
 }
 
 export interface AppShell {
@@ -62,10 +75,12 @@ export interface AppShell {
   readonly connection: ConnectionVM;
   readonly dashboard: DashboardVM;
   readonly mail: MailVM;
+  readonly limitsCost: LimitsCostVM;
   readonly client: OperatorIpcClient;
   start(): Promise<void>;
   close(): Promise<void>;
   refreshMail(busId?: string): void;
+  refreshLimitsCost(): void;
 }
 
 function buildRegistry(override?: RendererRegistry): RendererRegistry {
@@ -112,7 +127,30 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   const readOutbox: (s: string) => readonly DeliveredMail[] =
     deps.outboxReader ?? (ownedStore != null ? (s) => ownedStore.sentBy(s) : () => []);
 
+  // Open the dispatch store for usage/cost static reads (D5: daemon-down-safe pure reads).
+  // Opened when no readers are injected (production mode); tests inject reader fns directly.
+  const ownedDispatchStore = deps.bucketsReader == null ? openDispatchStore(deps.projectId) : null;
+  const readBuckets: () => readonly UsageBucket[] =
+    deps.bucketsReader ??
+    (ownedDispatchStore != null ? () => ownedDispatchStore.readBuckets() : () => []);
+  const readAccountStatuses: () => readonly UsageAccountStatus[] =
+    deps.accountStatusesReader ??
+    (ownedDispatchStore != null ? () => ownedDispatchStore.readAccountStatuses() : () => []);
+  const readRollups: () => readonly CostRollup[] =
+    deps.rollupsReader ??
+    (ownedDispatchStore != null ? () => ownedDispatchStore.readRollups() : () => []);
+
   const dash = new DashboardVM();
+  const limitsCostVm = new LimitsCostVM();
+
+  function doRefreshLimitsCost(): void {
+    limitsCostVm.update({
+      buckets: readBuckets(),
+      accountStatuses: readAccountStatuses(),
+      rollups: readRollups(),
+    });
+    deps.onLimitsCostState?.(limitsCostVm.state);
+  }
 
   // Declare the ref before the client so the onState closure is TDZ-safe and
   // refactor-safe: the handler always resolves through the ref, not the variable.
@@ -193,12 +231,14 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       dash.update(state.observation, readActionables());
       deps.onDashboardState?.(dash.state);
       doRefreshMail();
+      doRefreshLimitsCost();
     },
     onTick: (tick: OperatorIpcTick) => {
       const liveObs: OperatorObservation = { kind: 'live', snapshot: tick.snapshot };
       dash.update(liveObs, readActionables());
       deps.onDashboardState?.(dash.state);
       doRefreshMail();
+      doRefreshLimitsCost();
     },
   });
   connVmRef.current = connVm;
@@ -208,8 +248,10 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     connection: connVm,
     dashboard: dash,
     mail: mailVm,
+    limitsCost: limitsCostVm,
     client,
     refreshMail: doRefreshMail,
+    refreshLimitsCost: doRefreshLimitsCost,
     async start() {
       await connVm.start();
     },
@@ -217,6 +259,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       connVm.close();
       await client.close();
       ownedStore?.close();
+      ownedDispatchStore?.close();
     },
   };
 }

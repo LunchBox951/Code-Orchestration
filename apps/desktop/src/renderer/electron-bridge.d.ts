@@ -82,6 +82,37 @@ interface MailState {
   composer: ComposerState;
 }
 
+// ── Limits / Cost (inline — renderer is isolated from Node context) ──────────
+
+interface LimitsCostHeadroom {
+  kind: 'known';
+  used_pct: number;
+  reset_at: string;
+}
+
+interface LimitsCostHeadroomUnknown {
+  kind: 'unknown';
+  reason: string;
+}
+
+interface LimitsCostHeadroomRow {
+  provider: string;
+  account: string;
+  windowKind: string;
+  headroom: LimitsCostHeadroom | LimitsCostHeadroomUnknown;
+}
+
+interface LimitsCostCostRow {
+  id: string;
+  totalCostUsd: number;
+}
+
+interface LimitsCostState {
+  headroomRows: readonly LimitsCostHeadroomRow[];
+  agentCosts: readonly LimitsCostCostRow[];
+  taskCosts: readonly LimitsCostCostRow[];
+}
+
 interface CoShellBridge {
   navigate(view: NavView): void;
   refreshConnection(): Promise<ConnectionState | null>;
@@ -107,6 +138,9 @@ interface CoShellBridge {
   mailQuickApprove(approvalSeq: number): Promise<MailState | null>;
   mailQuickDecline(approvalSeq: number): Promise<MailState | null>;
   mailRefresh(): Promise<MailState | null>;
+  // ── Limits / Cost ─────────────────────────────────────────────────────────
+  onLimitsCostState(listener: (state: LimitsCostState) => void): () => void;
+  refreshLimitsCost(): Promise<LimitsCostState | null>;
 }
 
 interface Window {

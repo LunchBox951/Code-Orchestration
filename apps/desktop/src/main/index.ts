@@ -29,6 +29,7 @@ async function createWindow(): Promise<void> {
     onDashboardState: (state) => sendToRenderer('dashboard:state', state),
     onMailState: (state) => sendToRenderer('mail:state', state),
     onMailError: (message) => sendToRenderer('mail:error', message),
+    onLimitsCostState: (state) => sendToRenderer('limitsCost:state', state),
   });
 
   mainWindow = new BrowserWindow({
@@ -164,6 +165,13 @@ ipcMain.handle('mail:markRead', async (_event, recipient: string, seq: number) =
 ipcMain.handle('mail:refresh', () => {
   shell?.refreshMail();
   return shell?.mail.state ?? null;
+});
+
+// ── LimitsCost IPC channels ─────────────────────────────────────────────────
+
+ipcMain.handle('limitsCost:refresh', () => {
+  shell?.refreshLimitsCost();
+  return shell?.limitsCost.state ?? null;
 });
 
 app.whenReady().then(() => {
