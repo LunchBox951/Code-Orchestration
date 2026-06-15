@@ -42,7 +42,8 @@ track the [board](project-board.md) columns (the board's `Backlog` is the no-sta
 
 `good first issue` and `help wanted` are the conventional contributor-onboarding labels;
 `migration` tracks the temporary prototype-footprint teardown (see
-[`docs/migration.md`](../migration.md)).
+[`docs/migration.md`](../migration.md)); `security:critical` is reserved for critical security
+promotions and skips only the stable-release soak gate.
 
 ## Conventions
 

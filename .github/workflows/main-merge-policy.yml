@@ -3,7 +3,7 @@ name: Main merge policy
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    types: [opened, synchronize, reopened, ready_for_review, edited, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -63,6 +63,35 @@ jobs:
           echo "Update the release branch from main, rerun CI, and wait for the soak gate again."
           exit 1
 
+  require-dev-provenance:
+    name: require-dev-provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Require release patches to exist on dev
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch origin main dev --prune
+
+          unproven="$(
+            git cherry -v origin/dev "$HEAD_SHA" origin/main | awk '$1 == "+" { print }'
+          )"
+
+          if [ -z "$unproven" ]; then
+            echo "Every release patch already exists on dev by patch-id."
+            exit 0
+          fi
+
+          echo "Release branches may only promote patches that already exist on dev."
+          echo "The following release-only patches were not found on dev:"
+          echo "$unproven"
+          echo "Land these changes on dev first, then cherry-pick them into release/*."
+          exit 1
+
   require-soak:
     name: require-soak
     runs-on: ubuntu-latest
@@ -75,7 +104,13 @@ jobs:
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REQUIRED_SECONDS: '86400'
+          SECURITY_CRITICAL: ${{ contains(github.event.pull_request.labels.*.name, 'security:critical') }}
         run: |
+          if [ "$SECURITY_CRITICAL" = "true" ]; then
+            echo "security:critical label present; skipping the 24 hour soak for this critical security promotion."
+            exit 0
+          fi
+
           commit_epoch="$(git show -s --format=%ct "$HEAD_SHA")"
           now_epoch="$(date -u +%s)"
           age_seconds="$((now_epoch - commit_epoch))"

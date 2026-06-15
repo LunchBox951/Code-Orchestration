@@ -24,8 +24,8 @@
 3. Cut `release/YYYY-MM-DD` from current `main`.
 4. Cherry-pick only the tested changes selected for stable from `dev` into the release branch.
 5. Open `release/*` → `main`.
-6. The main gate requires green CI, `pnpm audit --audit-level high`, current `main` ancestry, and a
-   24-hour soak on the release branch head commit.
+6. The main gate requires green CI, `pnpm audit --audit-level high`, current `main` ancestry,
+   patch-equivalence to `dev`, and a 24-hour soak on the release branch head commit.
 7. Merge to `main`; the stable release workflow publishes the Linux AppImage for that exact commit.
 
 This keeps the nightly channel fast while avoiding all-or-nothing promotion from `dev` to `main`.
@@ -47,3 +47,13 @@ Repository settings must enforce what YAML cannot fully guarantee:
   `Main merge policy` jobs; block force pushes and direct pushes.
 - Tags `nightly` and `stable` must allow `GITHUB_TOKEN` updates from the release workflow, or the
   release workflow needs an equivalent repo-scoped token.
+
+## Critical Security Soak Bypass
+
+The 24-hour soak can be skipped only for critical security promotions by applying the
+`security:critical` PR label. That label does **not** skip CI, audit, same-repository `release/*`
+source validation, current-`main` ancestry, or the `dev` patch-equivalence check.
+
+Use the label only when delaying stable release would expose users to an active critical security
+risk. Remove it after the emergency release PR is closed or merged if it was applied only for that
+promotion.
