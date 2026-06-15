@@ -1,0 +1,854 @@
+/**
+ * Stage 11 P1 (OP-IPC) — [sandbox] acceptance for the cross-process operator-IPC binding.
+ *
+ * Harness = control-observe.test.ts (an in-process {@link ConductorEngine} + `FakePty` + injected
+ * clock/quietWindow + the daemon-backed router + the engine-backed live-observe) ⊕ real-transport.test.ts
+ * (a REAL Unix-domain socket pair; the client and server share no memory — they speak only over the
+ * socket, the faithfully-isolated cross-process proof the spec sanctions). NO live provider binary, NO
+ * wall clock in the engine path.
+ *
+ * The proofs (spec §5):
+ *   - AC-S11-1 — cross-process `observe()` returns the live snapshot; `pause`/`resume`/`stop`/`unstick`
+ *     reach the daemon and a follow-up `observe()` reflects the change; the socket is `0o600`
+ *     operator-only; a daemon-down read DEGRADES to the static `queryObservability` (never a hang/throw).
+ *   - AC-S11-6 — the IPC server + client add NO agent-facing MCP tool; `checkToolCompleteness` stays `[]`.
+ *   - MNR #2 — every WRITE (reply/approve) routes through the daemon's own store (single writer).
+ *   - MNR #3 — a down→up daemon degrades to a clear state and a reconnect RESUMES the push stream.
+ */
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { createServer } from 'node:net';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import {
+  approvalOutcome,
+  buildCoreRegistry,
+  checkToolCompleteness,
+  FakePty,
+  MAIL_APPROVAL_RESPONSE,
+  openMailStore,
+  openRegistry,
+  openRosterStore,
+  openSessionStore,
+  outwardApprovalEnvelope,
+  queryLiveObservability,
+  queryObservability,
+  type DeliveredMail,
+  type MailStore,
+  type OperatorIpcTick,
+  type ProjectId,
+  type ProjectRegistry,
+  type RosterStore,
+  type SessionStore,
+} from '@co/core';
+import { ConductorEngine, type ConductorEngineDeps, type HostedPane } from '../conductor/engine.js';
+import { DaemonBackedAgentRouter } from '../conductor/agent-router.js';
+import { EngineLiveStateProvider } from '../conductor/live-observe.js';
+import {
+  serveConductor,
+  type ConductorControlSurface,
+  type ConductorHostRunner,
+  type IntervalHandle,
+  type IntervalScheduler,
+} from '../conductor/host.js';
+import { SocketClientTransport } from '../conductor/real-transport.js';
+import type { HostedIdentity } from '../live-session-host.js';
+import { OperatorIpcServer } from './server.js';
+import { ConductorUnavailableError, OperatorIpcClient, OperatorIpcConnection } from './client.js';
+import { classifyIncoming, makeRequest } from './wire.js';
+
+// ── Scripted startup fixture. ESC/CR via fromCharCode so the SOURCE holds no raw control byte. ──
+const ESC = String.fromCharCode(0x1b);
+const CR = String.fromCharCode(0x0d);
+const CLAUDE_READY = ESC + '[2J' + ESC + '[H' + '╭─ Welcome ─╮\r\n❯ \r\n  ? for shortcuts\r\n';
+
+// ── Cleanup state ────────────────────────────────────────────────────────────
+const ORIGINAL_ENV = process.env;
+let dataDirs: string[] = [];
+let engines: ConductorEngine[] = [];
+let registries: ProjectRegistry[] = [];
+let mailStores: MailStore[] = [];
+let rosterStores: RosterStore[] = [];
+let sessionStores: SessionStore[] = [];
+let servers: OperatorIpcServer[] = [];
+let clients: OperatorIpcClient[] = [];
+let runners: ConductorHostRunner[] = [];
+
+beforeEach(() => {
+  process.env = { ...ORIGINAL_ENV };
+  dataDirs = [];
+  engines = [];
+  registries = [];
+  mailStores = [];
+  rosterStores = [];
+  sessionStores = [];
+  servers = [];
+  clients = [];
+  runners = [];
+});
+
+afterEach(async () => {
+  for (const runner of runners) {
+    try {
+      await runner.stop();
+    } catch {
+      /* best-effort */
+    }
+  }
+  for (const client of clients) {
+    try {
+      await client.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+  for (const server of servers) {
+    try {
+      await server.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+  for (const engine of engines) {
+    try {
+      await engine.closeAll();
+    } catch {
+      /* best-effort */
+    }
+  }
+  for (const closeable of [...mailStores, ...rosterStores, ...sessionStores, ...registries]) {
+    try {
+      closeable.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+  process.env = ORIGINAL_ENV;
+  for (const dir of dataDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+});
+
+// ── Helpers (mirroring control-observe.test.ts) ─────────────────────────────────
+const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+const flush = async (n = 4): Promise<void> => {
+  for (let i = 0; i < n; i++) await tick();
+};
+
+function makeProject(): { projectId: ProjectId; cwd: string } {
+  const dataDir = mkdtempSync(join(tmpdir(), 'co-opipc-'));
+  dataDirs.push(dataDir);
+  process.env.CO_DATA_DIR = dataDir;
+  const registry = openRegistry();
+  registries.push(registry);
+  const cwd = join(dataDir, 'repo');
+  return { projectId: registry.register(cwd), cwd };
+}
+
+function seedParentChain(projectId: ProjectId): void {
+  const roster = openRosterStore(projectId);
+  rosterStores.push(roster);
+  roster.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+  roster.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
+}
+
+function makeIdentity(
+  over: Partial<HostedIdentity> & Pick<HostedIdentity, 'agent' | 'projectId' | 'cwd'>,
+): HostedIdentity {
+  return {
+    role: 'implementer',
+    parent: 'lead-1',
+    pane: `pane-${over.agent}`,
+    provider: 'claude',
+    resume: { provider: 'claude', sessionId: `session-${over.agent}` },
+    ...over,
+  };
+}
+
+function seedActionableMail(projectId: ProjectId, agent: string, from = 'lead-1'): DeliveredMail {
+  const mail = openMailStore(projectId);
+  try {
+    return mail.send({
+      type: 'clarify_request',
+      to: agent,
+      from,
+      subject: 'do the thing',
+      body: 'please act',
+    });
+  } finally {
+    mail.close();
+  }
+}
+
+function inboxOf(projectId: ProjectId, agent: string): readonly DeliveredMail[] {
+  const store = openMailStore(projectId);
+  mailStores.push(store);
+  return store.inbox(agent);
+}
+
+function runningAgentIds(projectId: ProjectId): readonly string[] {
+  const store = openSessionStore(projectId);
+  sessionStores.push(store);
+  return store.listSessions().map((s) => s.agentId);
+}
+
+function makeClock(): { now: () => number; set: (t: number) => void } {
+  let t = 0;
+  return { now: () => t, set: (next) => void (t = next) };
+}
+
+function makeQuietWindow(): {
+  quietWindow: (signal: AbortSignal) => Promise<void>;
+  settle: () => void;
+} {
+  const waiters = new Set<() => void>();
+  return {
+    quietWindow: (signal) =>
+      new Promise<void>((resolve) => {
+        if (signal.aborted) return resolve();
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          waiters.delete(finish);
+          signal.removeEventListener('abort', finish);
+          resolve();
+        };
+        signal.addEventListener('abort', finish, { once: true });
+        waiters.add(finish);
+      }),
+    settle: () => {
+      for (const w of [...waiters]) w();
+    },
+  };
+}
+
+function makeEngine(
+  clock: ReturnType<typeof makeClock>,
+  qw: ReturnType<typeof makeQuietWindow>,
+  over: Partial<ConductorEngineDeps> = {},
+): { engine: ConductorEngine; pty: FakePty } {
+  const pty = new FakePty();
+  const engine = new ConductorEngine({
+    pty,
+    makeTransport: () => InMemoryTransport.createLinkedPair(),
+    now: clock.now,
+    quietWindow: qw.quietWindow,
+    injectOptions: { retryDelay: () => new Promise<void>(() => {}) },
+    ...over,
+  });
+  engines.push(engine);
+  return { engine, pty };
+}
+
+async function hostPane(
+  engine: ConductorEngine,
+  pty: FakePty,
+  identity: HostedIdentity,
+): Promise<{ hosted: HostedPane; pane: FakePty['panes'][number] }> {
+  const ensureP = engine.ensureHosted(identity);
+  const pane = pty.panes[pty.panes.length - 1]!;
+  pane.emit(CLAUDE_READY);
+  const hosted = await ensureP;
+  return { hosted, pane };
+}
+
+/** Build the operator control surface `co serve` wires (the daemon-backed router + live-observe). */
+function makeControl(
+  engine: ConductorEngine,
+  projectId: ProjectId,
+): { router: DaemonBackedAgentRouter; control: ConductorControlSurface } {
+  const router = new DaemonBackedAgentRouter({ engine, projectId });
+  const provider = new EngineLiveStateProvider({ engine, projectId, router });
+  const control: ConductorControlSurface = {
+    router,
+    observe: () => queryLiveObservability(projectId, provider),
+  };
+  return { router, control };
+}
+
+/** A short, private socket path (well under the ~108-char Unix limit), cleaned in afterEach. */
+function makeSocketPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'co-opsock-'));
+  dataDirs.push(dir);
+  return join(dir, 'control.sock');
+}
+
+/** Probe whether the sandbox can bind a Unix socket (some CI sandboxes refuse with EPERM). */
+async function unixSocketsAvailable(socketPath: string): Promise<boolean> {
+  mkdirSync(dirname(socketPath), { recursive: true });
+  try {
+    unlinkSync(socketPath);
+  } catch {
+    // Probe path did not exist.
+  }
+  const server = createServer();
+  return new Promise((resolve, reject) => {
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EPERM') resolve(false);
+      else reject(error);
+    });
+    server.listen(socketPath, () => {
+      server.close(() => {
+        try {
+          unlinkSync(socketPath);
+        } catch {
+          // Already removed.
+        }
+        resolve(true);
+      });
+    });
+  });
+}
+
+/** Start an {@link OperatorIpcServer} over `control` + a fresh client facade on `socketPath`. */
+async function startServer(
+  control: ConductorControlSurface,
+  projectId: ProjectId,
+  socketPath: string,
+  onError?: (error: unknown) => void,
+): Promise<OperatorIpcServer> {
+  const server = new OperatorIpcServer({
+    control,
+    projectId,
+    socketPath,
+    ...(onError != null ? { onError } : {}),
+  });
+  servers.push(server);
+  await server.start();
+  return server;
+}
+
+function makeClient(projectId: ProjectId, socketPath: string): OperatorIpcClient {
+  const client = new OperatorIpcClient({ projectId, socketPath });
+  clients.push(client);
+  return client;
+}
+
+/** A controllable scheduler: captures the cadence callback so a test fires daemon beats by hand. */
+class FakeScheduler implements IntervalScheduler {
+  private callback: (() => void) | null = null;
+  private handle: IntervalHandle | null = null;
+
+  setInterval(callback: () => void): IntervalHandle {
+    this.callback = callback;
+    this.handle = {};
+    return this.handle;
+  }
+
+  clearInterval(handle: IntervalHandle): void {
+    if (handle === this.handle) this.callback = null;
+  }
+
+  fire(): void {
+    this.callback?.();
+  }
+}
+
+// ── AC-S11-1 — the headline cross-process proof ─────────────────────────────────
+describe('AC-S11-1 — cross-process observe + control over a 0o600 operator-only socket', () => {
+  it('observe() returns the live snapshot (roster ⊕ warm/outstanding/cost) across the socket', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd })); // WARM
+    seedActionableMail(projectId, 'impl-x'); // 1 outstanding actionable item
+
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const obs = await client.observe();
+    expect(obs.kind).toBe('live');
+    if (obs.kind !== 'live') throw new Error('unreachable');
+    const byId = new Map(obs.snapshot.agents.map((a) => [a.agentId, a]));
+
+    // The WARM agent: hosted + its outstanding-mail count + role/parent/cost (the engine-only overlay).
+    const x = byId.get('impl-x')!;
+    expect(x.hosted).toBe(true);
+    expect(x.outstandingMail).toBe(1);
+    expect(x.role).toBe('implementer');
+    expect(x.parent).toBe('lead-1');
+    expect(typeof x.costUsd).toBe('number');
+
+    // A COLD roster agent rides along (not hosted, nothing outstanding).
+    const lead = byId.get('lead-1')!;
+    expect(lead.hosted).toBe(false);
+    expect(lead.outstandingMail).toBe(0);
+  });
+
+  it('pause/resume reach the daemon; a follow-up observe() reflects the change', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+
+    const { router, control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.pause('impl-x');
+    expect(router.isPaused('impl-x')).toBe(true); // the verb reached the daemon's live router
+    const paused = await client.observe();
+    expect(
+      paused.kind === 'live' && paused.snapshot.agents.find((a) => a.agentId === 'impl-x')?.paused,
+    ).toBe(true);
+
+    await client.resume('impl-x');
+    expect(router.isPaused('impl-x')).toBe(false);
+    const resumed = await client.observe();
+    expect(
+      resumed.kind === 'live' &&
+        resumed.snapshot.agents.find((a) => a.agentId === 'impl-x')?.paused,
+    ).toBe(false);
+  });
+
+  it('stop reaches the daemon: the warm pane is killed and observe() shows it cold', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    let exited = false;
+    pane.onExit(() => void (exited = true));
+
+    const { router, control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.stop('impl-x');
+    expect(exited).toBe(true); // engine.release kills the pane synchronously (before its await)
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(false);
+    expect(router.isStopped('impl-x')).toBe(true);
+
+    await router.drain(); // the async session-teardown tail
+    expect(runningAgentIds(projectId)).not.toContain('impl-x');
+    const after = await client.observe();
+    expect(
+      after.kind === 'live' && after.snapshot.agents.find((a) => a.agentId === 'impl-x')?.hosted,
+    ).toBe(false);
+  });
+
+  it('unstick reaches the daemon: a STUCK agent is reverted + re-woken (observe shows it un-stuck)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+
+    const { router, control } = makeControl(engine, projectId);
+    router.markStuck('impl-x'); // the watchdog escalation the operator will clear
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const before = await client.observe();
+    expect(
+      before.kind === 'live' && before.snapshot.agents.find((a) => a.agentId === 'impl-x')?.stuck,
+    ).toBe(true);
+
+    await client.unstick('impl-x');
+    expect(router.isStuck('impl-x')).toBe(false); // revertStuck + rewake reached the daemon (MNR #4)
+    const after = await client.observe();
+    expect(
+      after.kind === 'live' && after.snapshot.agents.find((a) => a.agentId === 'impl-x')?.stuck,
+    ).toBe(false);
+  });
+
+  it('the socket file is 0o600 operator-only and its directory is 0o700', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+
+    expect(statSync(socketPath).mode & 0o777).toBe(0o600); // operator-uid rw only, by OS permission
+    expect(statSync(dirname(socketPath)).mode & 0o077).toBe(0); // private dir (no group/other access)
+  });
+
+  it('daemon-down degrades reads to the static rollup and refuses control with a clear error', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    // No server is ever started on this socket — the Conductor is "down".
+    const client = makeClient(projectId, socketPath);
+
+    const obs = await client.observe();
+    expect(obs.kind).toBe('static'); // hybrid read (D5): fell back to queryObservability
+    if (obs.kind !== 'static') throw new Error('unreachable');
+    expect(obs.reason).toBe('conductor-not-running');
+    // The static snapshot is a real program-data read — the roster is present, never a hang.
+    expect(obs.snapshot.agents.map((a) => a.agentId).sort()).toEqual(
+      queryObservability(projectId)
+        .agents.map((a) => a.agentId)
+        .sort(),
+    );
+    expect(client.connected).toBe(false);
+
+    // Control + writes need the socket: a clear, catchable error — never a crash (Principle 9).
+    await expect(client.pause('impl-x')).rejects.toBeInstanceOf(ConductorUnavailableError);
+    await expect(
+      client.approve(1, { decision: 'approve', subject: 's', body: 'b' }),
+    ).rejects.toBeInstanceOf(ConductorUnavailableError);
+  });
+
+  it('propagates a daemon-side handler error across the socket (not masked as unavailable)', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    // steering a non-hosted agent fails loud on the daemon — the message must reach the operator.
+    await expect(client.steer('ghost', { kind: 'interrupt' })).rejects.toThrow(/not hosted/i);
+    expect(client.connected).toBe(true); // a handler error must not drop the connection
+  });
+
+  it('steer (answer) reaches the warm pane cross-process: the operator text + exactly one submit', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const steerP = client.steer('impl-x', { kind: 'answer', text: 'use claude' });
+    // Wait until the steer has crossed the socket and injectMail has written the text, then echo it
+    // (the composer echo is what unblocks the exactly-one-submit path) — robust to socket timing.
+    for (let i = 0; i < 50 && !pane.written.join('').includes('use claude'); i++) await tick();
+    pane.emit('use claude');
+    await steerP;
+
+    expect(pane.written.join('')).toContain('use claude');
+    expect(pane.written.filter((w) => w === CR)).toHaveLength(1); // exactly one submit
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // steering never tears the pane down
+  });
+});
+
+// ── MNR #2 — every write routes through the daemon (single writer) ────────────────
+describe('MNR #2 — mail writes execute in the daemon process against the daemon store', () => {
+  it('approve posts a structured approval_response through the daemon (app holds no store)', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    // Seed an outward approval addressed to @operator (operator-terminal by construction).
+    const seedStore = openMailStore(projectId);
+    let approval: DeliveredMail;
+    try {
+      approval = seedStore.send(
+        outwardApprovalEnvelope({ from: 'coord-1', subject: 'publish?', body: 'bless the push' }),
+      );
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const delivered = await client.approve(approval.seq, {
+      decision: 'approve',
+      subject: 're: publish?',
+      body: 'approved',
+    });
+    expect(delivered.type).toBe(MAIL_APPROVAL_RESPONSE);
+    expect(delivered.decision).toBe('approve');
+
+    // The write landed in the DAEMON's store (a fresh read sees it) and the gate now reads approved.
+    const verify = openMailStore(projectId);
+    mailStores.push(verify);
+    const response = verify.inbox('coord-1').find((m) => m.type === MAIL_APPROVAL_RESPONSE);
+    expect(response?.decision).toBe('approve');
+    expect(approvalOutcome(verify, approval)).toBe('approved');
+  });
+
+  it('reply answers an actionable item through the daemon (resolves it, threads to the asker)', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    // impl-x asked lead-1 a clarify question — the operator answers it on lead-1's behalf.
+    const ask = seedActionableMail(projectId, 'lead-1', 'impl-x');
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const delivered = await client.reply(
+      { seq: ask.seq, recipient: 'lead-1' },
+      { type: 'clarify_response', subject: 're: do the thing', body: 'use claude' },
+    );
+    expect(delivered.type).toBe('clarify_response');
+
+    // The reply (lead-1 → impl-x) is in impl-x's inbox, and the original ask is resolved (single writer).
+    expect(inboxOf(projectId, 'impl-x').some((m) => m.type === 'clarify_response')).toBe(true);
+    const lead = openMailStore(projectId);
+    mailStores.push(lead);
+    expect(lead.outstanding('lead-1')).toHaveLength(0);
+  });
+});
+
+// ── MNR #3 — degrade then reconnect; the push stream resumes ─────────────────────
+describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and resumes it', () => {
+  it('pushes a snapshot per tick; a reconnect after the daemon restarts resumes the stream', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+
+    const states: string[] = [];
+    const ticks: OperatorIpcTick[] = [];
+    const client = new OperatorIpcClient({
+      projectId,
+      socketPath,
+      onState: (s) => states.push(s),
+    });
+    clients.push(client);
+    client.onTick((t) => ticks.push(t));
+
+    // Up #1: connect + a tick push arrives.
+    const server1 = await startServer(control, projectId, socketPath);
+    expect(await client.connect()).toBe(true);
+    server1.pushTick(control.observe());
+    await flush();
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]!.snapshot.agents.some((a) => a.agentId === 'lead-1')).toBe(true);
+
+    // Down: the daemon stops → the client degrades; a read falls back to static, control refuses.
+    await server1.close();
+    await flush();
+    expect(states).toContain('disconnected');
+    expect((await client.observe()).kind).toBe('static');
+    expect(client.connected).toBe(false);
+
+    // Up #2: a fresh daemon on the same socket → reconnect → the push stream RESUMES.
+    const server2 = await startServer(control, projectId, socketPath);
+    expect(await client.connect()).toBe(true);
+    server2.pushTick(control.observe());
+    await flush();
+    expect(ticks).toHaveLength(2); // the reconnect resumed the per-tick push (not a one-shot)
+    expect(states.filter((s) => s === 'connected')).toHaveLength(2);
+  });
+
+  it('a tick push with no app attached is a silent no-op (never crashes the daemon)', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const errors: unknown[] = [];
+    const server = await startServer(control, projectId, socketPath, (e) => errors.push(e));
+
+    expect(() => server.pushTick(control.observe())).not.toThrow(); // no client connected
+    await flush();
+    expect(errors).toHaveLength(0);
+  });
+});
+
+// ── serveConductor wiring — `co serve` starts the IPC server alongside the runner ─
+describe('serveConductor wiring — the IPC server rides the cadence runner (push on tick, close on stop)', () => {
+  it('a daemon beat pushes a snapshot to a connected app; runner.stop() closes the socket', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const scheduler = new FakeScheduler();
+    const runner = await serveConductor({
+      projectId,
+      pty: new FakePty(),
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      operatorIpc: { socketPath },
+    });
+    runners.push(runner);
+
+    const client = makeClient(projectId, socketPath);
+    const ticks: OperatorIpcTick[] = [];
+    client.onTick((t) => ticks.push(t));
+    expect(await client.connect()).toBe(true);
+
+    scheduler.fire(); // one daemon.tick → the runner's onTick → ipcServer.pushTick
+    await flush();
+    expect(ticks.length).toBeGreaterThanOrEqual(1);
+    expect(ticks[0]!.snapshot.agents.some((a) => a.agentId === 'lead-1')).toBe(true);
+
+    await runner.stop(); // the onStop seam closes the IPC server (socket torn down)
+    await flush();
+    expect((await client.observe()).kind).toBe('static'); // the app degrades cleanly once co serve stops
+  });
+});
+
+// ── AC-S11-6 — the surface invariant: ZERO agent MCP tools ───────────────────────
+describe('AC-S11-6 — the operator IPC registers NO agent-facing MCP tool (Principle 4 + D4)', () => {
+  it('no ipc/observe/control verb appears in the canonical agent tool registry; completeness stays green', () => {
+    const names = buildCoreRegistry()
+      .list()
+      .map((t) => t.name.toLowerCase());
+
+    // None of the operator-IPC verbs (nor "ipc"/"operator"/"tick") may be an agent-callable MCP tool.
+    const forbidden = [
+      'observe',
+      'pause',
+      'resume',
+      'stop',
+      'unstick',
+      'steer',
+      'reply',
+      'approve',
+      'tick',
+      'ipc',
+      'operator',
+    ];
+    for (const verb of forbidden) {
+      expect(names.some((n) => n.includes(verb))).toBe(false);
+    }
+    // The server + client are plain classes, not ToolSpecs — the completeness gate is green by construction.
+    expect(checkToolCompleteness(buildCoreRegistry())).toEqual([]);
+  });
+});
+
+// ── Connection lifecycle + diagnostics (review hardening, round 1) ───────────────
+describe('operator-IPC client — close concurrency + unexpected-error diagnostics', () => {
+  it('OperatorIpcConnection.close() is idempotent + concurrency-safe (in-flight calls still reject)', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+
+    const connection = await OperatorIpcConnection.connect(socketPath);
+    // Two concurrent closes must both settle (the `closing` guard dedupes the single transport.close).
+    await Promise.all([connection.close(), connection.close()]);
+    await connection.close(); // a third, after-the-fact close is a no-op too
+    // A call after close rejects clearly — never a hang (Principle 9).
+    await expect(connection.observe()).rejects.toThrow(/closed/i);
+  });
+
+  it('observe() surfaces an UNEXPECTED daemon-side error to onError while still degrading to static', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    // A control surface whose observe() throws (a daemon-side fault, not a socket drop).
+    const control: ConductorControlSurface = {
+      router: new DaemonBackedAgentRouter({ engine, projectId }),
+      observe: () => {
+        throw new Error('observe boom in test');
+      },
+    };
+    await startServer(control, projectId, socketPath);
+
+    const errors: unknown[] = [];
+    const client = new OperatorIpcClient({ projectId, socketPath, onError: (e) => errors.push(e) });
+    clients.push(client);
+
+    const obs = await client.observe();
+    expect(obs.kind).toBe('static'); // still degrades — never hangs/throws
+    expect(client.connected).toBe(true); // a handler error is NOT a socket drop; the connection survives
+    expect(errors).toHaveLength(1); // the unexpected fault was SURFACED, not silently masked
+    expect((errors[0] as Error).message).toMatch(/observe boom/i);
+  });
+});
+
+// ── Wire robustness — the JSON-RPC envelope + unknown-method path ─────────────────
+describe('operator-IPC wire — JSON-RPC envelope compatibility + unknown-method error', () => {
+  it('answers an unknown method with a JSON-RPC error response over the strict-schema framing', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+
+    // A raw client transport (the reused framing) — proves our envelopes pass JSONRPCMessageSchema.
+    const transport = new SocketClientTransport(socketPath);
+    const got = new Promise<ReturnType<typeof classifyIncoming>>((resolve) => {
+      transport.onmessage = (message) => resolve(classifyIncoming(message));
+    });
+    await transport.start();
+    try {
+      await transport.send(makeRequest(7, 'no_such_method', {}));
+      const reply = await got;
+      expect(reply.kind).toBe('error');
+      if (reply.kind !== 'error') throw new Error('unreachable');
+      expect(reply.id).toBe(7);
+      expect(reply.error.message).toMatch(/unknown method/i);
+    } finally {
+      await transport.close();
+    }
+  });
+});
