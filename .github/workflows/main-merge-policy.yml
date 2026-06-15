@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   require-release-source:
@@ -111,20 +112,36 @@ jobs:
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REQUIRED_SECONDS: '86400'
-          SECURITY_CRITICAL: ${{ contains(github.event.pull_request.labels.*.name, 'security:critical') }}
-          PR_UPDATED_AT: ${{ github.event.pull_request.updated_at }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$SECURITY_CRITICAL" = "true" ]; then
+          live_head_sha="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          live_updated_at="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq '.updated_at')"
+          security_critical="$(
+            gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" \
+              --jq '[.labels[].name] | contains(["security:critical"])'
+          )"
+
+          echo "head=${HEAD_SHA}"
+          echo "live_head=${live_head_sha}"
+          echo "pr_updated_at=${live_updated_at}"
+          echo "security_critical=${security_critical}"
+
+          if [ "$live_head_sha" != "$HEAD_SHA" ]; then
+            echo "The live PR head changed after this workflow started; rerun checks for the latest head."
+            exit 1
+          fi
+
+          if [ "$security_critical" = "true" ]; then
             echo "security:critical label present; skipping the 24 hour soak for this critical security promotion."
             exit 0
           fi
 
-          updated_epoch="$(date -u -d "$PR_UPDATED_AT" +%s)"
+          updated_epoch="$(date -u -d "$live_updated_at" +%s)"
           now_epoch="$(date -u +%s)"
           age_seconds="$((now_epoch - updated_epoch))"
 
-          echo "head=${HEAD_SHA}"
-          echo "pr_updated_at=${PR_UPDATED_AT}"
           echo "now=$(date -u -d "@${now_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
           echo "age_seconds=${age_seconds}"
           echo "required_seconds=${REQUIRED_SECONDS}"
