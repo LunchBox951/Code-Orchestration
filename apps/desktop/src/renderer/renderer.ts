@@ -1,6 +1,8 @@
 // Renderer entry: wires DOM nav switching, connection-state, and dashboard
 // to the coShell bridge exposed by the preload via contextBridge.
 
+import { reviewDetailNeedsRebuild, reviewDetailSignature } from './review-render-helpers.js';
+
 const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'cost'] as const;
 type NavView = (typeof NAV_VIEWS)[number];
 
@@ -692,6 +694,7 @@ function renderReviewDetail(context: SelectedContext, composer: VerdictComposer)
 }
 
 function renderReview(state: ReviewState): void {
+  const prevState = latestReviewState;
   latestReviewState = state;
 
   // Update pending list
@@ -721,10 +724,20 @@ function renderReview(state: ReviewState): void {
     }
   }
 
-  // Update detail pane
+  // Update detail pane — but PRESERVE the caret while typing in the verdict composer (review #316
+  // follow-up): when the ONLY change is composer.body and that textarea is focused, skip the rebuild
+  // (the live textarea already holds the typed value). The list + badge still update.
   const detailPane = document.getElementById('review-detail-pane');
   if (detailPane) {
-    detailPane.innerHTML = renderReviewDetail(state.context, state.composer);
+    const composerFocused = document.activeElement?.id === 'review-composer-body';
+    const needsRebuild = reviewDetailNeedsRebuild(
+      prevState != null ? reviewDetailSignature(prevState) : null,
+      reviewDetailSignature(state),
+      composerFocused,
+    );
+    if (needsRebuild) {
+      detailPane.innerHTML = renderReviewDetail(state.context, state.composer);
+    }
   }
 
   // Update nav badge with pending count
