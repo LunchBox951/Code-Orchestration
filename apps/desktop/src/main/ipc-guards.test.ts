@@ -7,6 +7,7 @@ import {
   requireNavView,
   requireAgentId,
   requireNonEmptyString,
+  requireReviewVerdict,
   requireSteer,
 } from './ipc-guards.js';
 
@@ -51,6 +52,14 @@ describe('main IPC runtime guards', () => {
     expect(() => requireAgentId('')).toThrow(/agentId/i);
     expect(() => requireAgentId('   ')).toThrow(/agentId/i);
     expect(() => requireAgentId(42)).toThrow(/agentId/i);
+  });
+
+  it('accepts PASS/ISSUES verdicts and rejects arbitrary strings', () => {
+    expect(requireReviewVerdict('PASS')).toBe('PASS');
+    expect(requireReviewVerdict('ISSUES')).toBe('ISSUES');
+    expect(() => requireReviewVerdict('pass')).toThrow(/review verdict/i);
+    expect(() => requireReviewVerdict('OK')).toThrow(/review verdict/i);
+    expect(() => requireReviewVerdict(42)).toThrow(/review verdict/i);
   });
 
   it('accepts valid steer payloads', () => {

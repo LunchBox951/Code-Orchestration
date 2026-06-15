@@ -111,6 +111,58 @@ interface XtermTerminal {
   dispose(): void;
 }
 
+// ── Review (inline — renderer is isolated from Node context) ─────────────────
+
+interface ReviewRow {
+  reviewId: string;
+  seq: number;
+  sender: string;
+  subject: string;
+  ts: number;
+}
+
+type SelectedContext = { status: 'loading' } | { status: 'loaded'; value: ReviewContext } | null;
+
+interface VerdictComposer {
+  active: boolean;
+  verdict: 'PASS' | 'ISSUES';
+  body: string;
+  pending: boolean;
+}
+
+interface ReviewState {
+  pending: readonly ReviewRow[];
+  selectedReviewId: string | null;
+  context: SelectedContext;
+  composer: VerdictComposer;
+}
+
+type ReviewDiff =
+  | { kind: 'patch'; patch: string }
+  | { kind: 'unavailable'; reason: 'worktree-missing' | 'git-failed' };
+
+interface ReviewCriterion {
+  text: string;
+  verify?: string;
+}
+
+type ReviewCriteria =
+  | { kind: 'criteria'; specRef: string; criteria: readonly ReviewCriterion[] }
+  | { kind: 'no-locked-spec' };
+
+type ReviewContext =
+  | {
+      kind: 'resolved';
+      reviewId: string;
+      branch: string;
+      target: string;
+      scope: string;
+      diff: ReviewDiff;
+      criteria: ReviewCriteria;
+    }
+  | { kind: 'not-found'; reviewId: string }
+  | { kind: 'conductor-down'; reviewId: string };
+
 // ── Limits / Cost (inline — renderer is isolated from Node context) ──────────
 
 interface LimitsCostHeadroom {
@@ -177,6 +229,15 @@ interface CoShellBridge {
   onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
+  // ── Review ────────────────────────────────────────────────────────────────
+  onReviewState(listener: (state: ReviewState) => void): () => void;
+  onReviewError(listener: (message: string) => void): () => void;
+  reviewSelect(reviewId: string): Promise<ReviewState | null>;
+  reviewBeginVerdict(verdict: 'PASS' | 'ISSUES'): Promise<ReviewState | null>;
+  reviewUpdateComposerBody(text: string): Promise<ReviewState | null>;
+  reviewCancelVerdict(): Promise<ReviewState | null>;
+  reviewSubmitVerdict(): Promise<ReviewState | null>;
+  reviewRefresh(): Promise<ReviewState | null>;
 }
 
 interface Window {

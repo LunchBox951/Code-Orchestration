@@ -7,6 +7,39 @@ const here = dirname(fileURLToPath(import.meta.url));
 const rendererSource = readFileSync(join(here, 'renderer.ts'), 'utf8');
 const htmlSource = readFileSync(join(here, 'index.html'), 'utf8');
 
+describe('review view', () => {
+  it('review view markup has required structural elements', () => {
+    expect(htmlSource).toContain('id="view-review"');
+    expect(htmlSource).toContain('aria-label="Pending reviews"');
+    expect(htmlSource).toContain('aria-label="Review diff"');
+    expect(htmlSource).toContain('id="review-badge"');
+  });
+
+  it('renderer wires review bridge methods', () => {
+    expect(rendererSource).toContain('bridge.reviewSelect(');
+    expect(rendererSource).toContain('bridge.reviewSubmitVerdict(');
+    expect(rendererSource).toContain('bridge.reviewBeginVerdict(');
+    expect(rendererSource).toContain('bridge.reviewUpdateComposerBody(');
+    expect(rendererSource).toContain('bridge.reviewCancelVerdict(');
+    expect(rendererSource).toContain('bridge.reviewRefresh(');
+  });
+
+  it('review list rows use ARIA option roles', () => {
+    expect(rendererSource).toContain('role="option"');
+    expect(rendererSource).toContain("aria-selected=\"${isSelected ? 'true' : 'false'}\"");
+  });
+
+  it('review view has activate hook', () => {
+    expect(rendererSource).toContain("if (view === 'review' && latestReviewState != null)");
+    expect(rendererSource).toContain('renderReview(latestReviewState)');
+  });
+
+  it('verdict buttons have aria-labels', () => {
+    expect(rendererSource).toContain('aria-label="Submit PASS verdict"');
+    expect(rendererSource).toContain('aria-label="Submit ISSUES verdict"');
+  });
+});
+
 describe('agents console', () => {
   it('agents view markup has required structural elements', () => {
     expect(htmlSource).toContain('id="agents-transcript"');
