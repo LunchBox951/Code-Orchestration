@@ -15,7 +15,7 @@
     "@co/mcp": "workspace:*"
   },
   "devDependencies": {
-    "electron": "^36.4.0",
+    "electron": "^39.8.5",
     "electron-builder": "^26.0.0"
   }
 }

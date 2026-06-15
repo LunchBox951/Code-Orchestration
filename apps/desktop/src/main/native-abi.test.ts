@@ -7,7 +7,7 @@
  * a [host] handoff to the operator.
  *
  * This in-sandbox test asserts the VERSION COMPATIBILITY invariant that makes
- * the host proof meaningful: Electron 36.x bundles Node 22.14+ (≥22.5), which
+ * the host proof meaningful: Electron 36–39 bundles Node 22.14+ (≥22.5), which
  * includes node:sqlite built-in (added in Node 22.5) and ships compatible
  * node-pty prebuilds.
  *
@@ -71,7 +71,7 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
   });
 
   it('node:sqlite DatabaseSync is importable in the current Node runtime', async () => {
-    // Confirms node:sqlite is live in this runtime — the Electron 36 main process
+    // Confirms node:sqlite is live in this runtime — the Electron main process
     // will have the same built-in (it uses Node 22.14+).
     const { DatabaseSync } = await import('node:sqlite');
     expect(DatabaseSync).toBeDefined();
@@ -85,7 +85,7 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
   });
 
   it('node-pty version is ≥1.0 (supports Electron 36 / Node 22.x ABI via napi 9+)', () => {
-    // node-pty v1.x ships N-API 9 prebuilds that cover Electron 30–36 / Node 22.x.
+    // node-pty v1.x ships N-API 9 prebuilds that cover Electron 30–39 / Node 22.x.
     // v0.x only targeted older Electron/Node pairs and lacks these prebuilds.
     // This assertion mirrors the node:sqlite check above — if the version drifts
     // below the ABI floor, the host proof will fail before anyone catches it.
