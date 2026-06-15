@@ -4,7 +4,7 @@
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  * A JSON-RPC server over a Unix-domain socket that wraps an already-built `ConductorControlSurface`
  * (the daemon-backed router + the live-observe query) plus a {@link MailStore} for the two write
- * verbs, and forwards each daemon tick as a `tick` server-push notification. Started by `co serve`
+ * verbs, and forwards each daemon tick as a `tick` server-push notification. Started by `co-mcp serve`
  * alongside the cadence runner (host.ts wires it through {@link ConductorHostRunnerDeps.onTick} /
  * `onStop`).
  *
@@ -223,7 +223,7 @@ export class OperatorIpcServer {
   /**
    * Stage 12 C-P1 (TRANSCRIPT-SEAM) — forward one chunk of a hosted agent's live pane output as the
    * `transcript:push` notification (mirrors {@link pushTick}). Event-driven, NOT on the tick cadence:
-   * `co serve` subscribes this to the engine's transcript stream. A no-op when no app is attached; a
+   * `co-mcp serve` subscribes this to the engine's transcript stream. A no-op when no app is attached; a
    * push that races a disconnect is reported, never thrown (must not crash the daemon — Principle 9).
    */
   pushTranscript(agentId: string, chunk: string, offset: number): void {

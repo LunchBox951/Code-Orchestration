@@ -342,6 +342,7 @@ export {
   detectCurrentBranchTarget,
   detectIntegrationTarget,
   defaultGitReader,
+  defaultGitRawReader,
   resolveRefSha,
 } from './worktrees/detect-base.js';
 export type {
@@ -1263,7 +1264,7 @@ export type {
 export { queryLiveObservability } from './doctor/observability.js';
 
 // Stage 11 P1 (OP-IPC) — the TRANSPORT-AGNOSTIC operator-IPC contract: the request/response + push
-// notification shapes the cross-process desktop app and the `co serve` daemon agree on, referencing
+// notification shapes the cross-process desktop app and the `co-mcp serve` daemon agree on, referencing
 // ONLY core types. Pure types/interfaces + constant method maps — no I/O, no socket work (that is the
 // server/client in `@co/mcp`). Registers ZERO agent MCP tools — the IPC is filesystem-permissioned,
 // never an agent surface (Principle 4 + D4; AC-S11-6).

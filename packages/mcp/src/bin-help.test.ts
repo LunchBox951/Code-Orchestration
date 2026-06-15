@@ -6,6 +6,8 @@ import { renderCoMcpHelp } from './bin-help.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runbook = readFileSync(join(process.cwd(), 'docs', 'sh1-runbook.md'), 'utf8');
+const hostProof = readFileSync(join(process.cwd(), 'docs', 'host-proof.md'), 'utf8');
+const hostSource = readFileSync(join(here, 'conductor', 'host.ts'), 'utf8');
 
 describe('co-mcp binary help', () => {
   it('documents the operator serve invocation and other modes', () => {
@@ -25,9 +27,20 @@ describe('co-mcp binary help', () => {
     expect(runbook).toContain('co-mcp serve <projectId>');
     expect(runbook).toContain('does not yet auto-discover a freshly locked spec');
     expect(runbook).toMatch(/There is no public\s+`co spec lock` CLI command yet/);
+    expect(runbook).toContain('For SH-1 evidence, submit from the Review view');
     expect(runbook).not.toContain(
       'picks up the task on its next tick and drives the full lifecycle autonomously',
     );
+    expect(runbook).not.toContain('either the\n> Review view or the Mail view reply');
     expect(runbook).not.toContain('## Step 5 — Verify zero prototype involvement');
+  });
+
+  it('keeps host-live docs and runtime prefixes aligned with the co-mcp binary', () => {
+    expect(hostProof).toContain('## Running `co-mcp serve <projectId>` and observing the daemon');
+    expect(hostProof).toContain('[co-mcp serve] tick 1');
+    expect(hostProof).not.toContain('[co serve]');
+    expect(hostSource).not.toContain("console.error('[co serve]");
+    expect(hostSource).not.toContain('`[co serve] tick');
+    expect(hostSource).not.toContain("'co serve: a project id is required");
   });
 });

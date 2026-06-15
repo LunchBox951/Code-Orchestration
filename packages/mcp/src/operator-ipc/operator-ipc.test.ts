@@ -26,7 +26,7 @@ import {
   approvalOutcome,
   buildCoreRegistry,
   checkToolCompleteness,
-  defaultGitReader,
+  defaultGitRawReader,
   FakePty,
   MAIL_APPROVAL_RESPONSE,
   MAIL_REVIEW_REQUEST,
@@ -277,7 +277,7 @@ async function hostPane(
   return { hosted, pane };
 }
 
-/** Build the operator control surface `co serve` wires (the daemon-backed router + live-observe). */
+/** Build the operator control surface `co-mcp serve` wires (the daemon-backed router + live-observe). */
 function makeControl(
   engine: ConductorEngine,
   projectId: ProjectId,
@@ -1509,7 +1509,7 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
 
     // Use the injectable `connect` seam for two roles:
     //   1. Capture the live OperatorIpcConnection so the test can close the client side without
-    //      touching the server (simulates the app process exiting while `co serve` keeps running).
+    //      touching the server (simulates the app process exiting while `co-mcp serve` keeps running).
     //   2. Gate reconnection attempts via `allowReconnect` so that observe() degrades to static
     //      during the "dropped but server still up" window — proving the degraded-read path before
     //      re-enabling the seam for the explicit reconnect.
@@ -1600,7 +1600,7 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
   });
 });
 
-// ── serveConductor wiring — `co serve` starts the IPC server alongside the runner ─
+// ── serveConductor wiring — `co-mcp serve` starts the IPC server alongside the runner ─
 describe('serveConductor wiring — the IPC server rides the cadence runner (push on tick, close on stop)', () => {
   it('a daemon beat pushes a snapshot to a connected app; runner.stop() closes the socket', async () => {
     const { projectId } = makeProject();
@@ -1643,7 +1643,7 @@ describe('serveConductor wiring — the IPC server rides the cadence runner (pus
 
     await runner.stop(); // the onStop seam closes the IPC server (socket torn down)
     await flush();
-    expect((await client.observe()).kind).toBe('static'); // the app degrades cleanly once co serve stops
+    expect((await client.observe()).kind).toBe('static'); // the app degrades cleanly once co-mcp serve stops
   });
 
   it('still pushes an IPC tick when the caller onTick hook throws', async () => {
@@ -2008,7 +2008,7 @@ function realReviewContext(projectId: ProjectId): ConductorControlSurface['revie
         openReviews: () => openReviewStore(projectId),
         openSpecs: () => openSpecStore(projectId),
         openWorktrees: () => openWorktreeStore(projectId),
-        gitReader: defaultGitReader,
+        gitReader: defaultGitRawReader,
       },
       reviewId,
     );

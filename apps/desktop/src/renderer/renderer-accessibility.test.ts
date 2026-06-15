@@ -54,6 +54,13 @@ describe('review view', () => {
     expect(rendererSource).not.toContain('start \\`co serve\\`');
     expect(appShellSource).not.toContain('start `co serve`');
   });
+
+  it('only exposes verdict actions when the Review view has diff and locked criteria evidence', () => {
+    expect(rendererSource).toContain(
+      "const canSubmitVerdict = diff.kind === 'patch' && criteria.kind === 'criteria';",
+    );
+    expect(rendererSource).toContain('!composer.active && canSubmitVerdict');
+  });
 });
 
 describe('agents console', () => {

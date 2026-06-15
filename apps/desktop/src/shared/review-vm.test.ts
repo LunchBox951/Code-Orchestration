@@ -280,10 +280,33 @@ describe('ReviewVM — submitVerdict PASS', () => {
     const vm = new ReviewVM({ onSubmitVerdict: vi.fn() });
     vm.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
     vm.selectReview('rev-abc');
+    vm.setReviewContext('rev-abc', RESOLVED_CTX);
     vm.beginVerdict('PASS');
     await vm.submitVerdict();
     expect(vm.state.composer.active).toBe(false);
     expect(vm.state.composer.pending).toBe(false);
+  });
+
+  it('does NOT submit PASS until patch diff and locked criteria are loaded', async () => {
+    const unavailableContexts: ReviewContext[] = [
+      { kind: 'not-found', reviewId: 'rev-abc' },
+      { kind: 'conductor-down', reviewId: 'rev-abc' },
+      { ...RESOLVED_CTX, diff: { kind: 'unavailable', reason: 'git-failed' } },
+      { ...RESOLVED_CTX, criteria: { kind: 'no-locked-spec' } },
+    ];
+
+    for (const context of unavailableContexts) {
+      const onSubmit = vi.fn();
+      const vm = new ReviewVM({ onSubmitVerdict: onSubmit });
+      vm.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
+      vm.selectReview('rev-abc');
+      vm.setReviewContext('rev-abc', context);
+      vm.beginVerdict('PASS');
+
+      await vm.submitVerdict();
+
+      expect(onSubmit).not.toHaveBeenCalled();
+    }
   });
 });
 
@@ -350,6 +373,7 @@ describe('ReviewVM — pending guard', () => {
     const vm = new ReviewVM({ onSubmitVerdict: () => inflightPromise });
     vm.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
     vm.selectReview('rev-abc');
+    vm.setReviewContext('rev-abc', RESOLVED_CTX);
     vm.beginVerdict('PASS');
 
     const submitPromise = vm.submitVerdict();
@@ -360,6 +384,7 @@ describe('ReviewVM — pending guard', () => {
     const vm2 = new ReviewVM({ onSubmitVerdict: onSubmit2 });
     vm2.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
     vm2.selectReview('rev-abc');
+    vm2.setReviewContext('rev-abc', RESOLVED_CTX);
     vm2.beginVerdict('PASS');
     // manually set pending=true by starting a submit
     let resolve2!: () => void;
@@ -369,6 +394,7 @@ describe('ReviewVM — pending guard', () => {
     const vm2WithPending = new ReviewVM({ onSubmitVerdict: () => p2 });
     vm2WithPending.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
     vm2WithPending.selectReview('rev-abc');
+    vm2WithPending.setReviewContext('rev-abc', RESOLVED_CTX);
     vm2WithPending.beginVerdict('PASS');
     const firstSubmit = vm2WithPending.submitVerdict();
     expect(vm2WithPending.state.composer.pending).toBe(true);
@@ -392,6 +418,7 @@ describe('ReviewVM — error path', () => {
     const vm = new ReviewVM({ onSubmitVerdict: () => Promise.reject(err) });
     vm.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
     vm.selectReview('rev-abc');
+    vm.setReviewContext('rev-abc', RESOLVED_CTX);
     vm.beginVerdict('PASS');
 
     await expect(vm.submitVerdict()).rejects.toThrow('network failure');

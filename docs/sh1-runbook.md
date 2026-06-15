@@ -33,10 +33,11 @@ proof first if you have not already.
    confirms the repo is a registered project in program-data. There is no separate registration
    command — registration happens at first use from within the repo.
 
-4. **Desktop app built and running with the Reviews view available.** The Review view is the sole
-   path for submitting a PASS or ISSUES verdict (see Step 3). Build the app (`pnpm build` from
-   `apps/desktop`, or the appropriate desktop build command for your environment) and confirm the
-   **Reviews** nav item is visible before starting.
+4. **Desktop app built and running with the Reviews view available.** The Review view is required
+   for SH-1 evidence because it displays the diff and locked acceptance criteria before verdict
+   submission (see Step 3). Build the app (`pnpm build` from `apps/desktop`, or the appropriate
+   desktop build command for your environment) and confirm the **Reviews** nav item is visible before
+   starting.
 
 5. **Conductor daemon running.** Start it with:
 
@@ -136,8 +137,10 @@ Review the diff and criteria, then make a decision:
 - **ISSUES** — click **ISSUES**, enter notes describing what needs fixing, and submit. The verdict
   is recorded and the Lead kicks the worktree back to the implementer for another pass.
 
-> **Important:** submitting a verdict (PASS or ISSUES) requires the **desktop app** — either the
-> Review view or the Mail view reply. There is **no CLI path** to submit a verdict.
+> **Important:** For SH-1 evidence, submit from the Review view so the captured decision includes
+> the rendered diff and locked acceptance criteria. The desktop Mail view can also record a
+> structured `review_response`, but it does not display that evidence and is not the proof path for
+> this runbook. There is **no CLI path** to submit a verdict.
 > `co mail send --type review_response …` is rejected before a mail is stored; the CLI has no verdict
 > recording path. Human-review verdicts must be recorded through the operator-IPC server. See [Advanced: observe without the desktop app](#advanced-observe-without-the-desktop-app)
 > for CLI observation commands.

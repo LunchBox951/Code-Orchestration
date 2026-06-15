@@ -44,7 +44,7 @@ export {
   type DaemonTickOutcome,
 } from './conductor/daemon.js';
 // L7-LOOP [host-live] glue — the real-cadence runner (`setInterval` over `tick()` + `NodePtyHost`
-// panes) and the `co serve` operator launch. Built + FakePty-unit-tested; never run against a real
+// panes) and the `co-mcp serve` operator launch. Built + FakePty-unit-tested; never run against a real
 // provider binary in-sandbox (binding a real pty-bound transport is the operator handoff).
 export {
   ConductorHostRunner,
@@ -75,7 +75,7 @@ export {
   type EngineLiveStateProviderDeps,
 } from './conductor/live-observe.js';
 // Stage 11 P1 (OP-IPC) — the cross-process operator-IPC binding the desktop app drives. The SERVER
-// (started by `co serve`) wraps the `ConductorControlSurface` + a `MailStore` over a Unix-socket
+// (started by `co-mcp serve`) wraps the `ConductorControlSurface` + a `MailStore` over a Unix-socket
 // JSON-RPC channel and pushes a per-tick snapshot; the CLIENT is the app-facing degradation FACADE
 // (live overlay when up, static `queryObservability` fall-back when down; control + writes need the
 // socket). Operator-uid-only by socket permission; registers ZERO agent MCP tools (Principle 4 + D4).

@@ -180,6 +180,24 @@ describe('resolveReviewContext — every state surfaces a NAMED result (Principl
     expect(spies.closes).toEqual({ reviews: 1, specs: 1, worktrees: 1 });
   });
 
+  it.each(['draft', 'archived'] as const)(
+    'resolved + criteria ref but the spec record is %s: degrades to no-locked-spec',
+    async (state) => {
+      const spies = makeDeps({
+        request: reviewRecord(),
+        spec: specRecord({ state }),
+        worktree: worktreeRecord(),
+        git: () => PATCH,
+      });
+
+      const result = await resolveReviewContext(spies.deps, 'rev-1');
+
+      expect(result).toMatchObject({ kind: 'resolved', criteria: { kind: 'no-locked-spec' } });
+      expect(spies.taskIdsAsked).toEqual(['task-1']);
+      expect(spies.closes).toEqual({ reviews: 1, specs: 1, worktrees: 1 });
+    },
+  );
+
   it('resolved + worktree-missing (record removed): no git diff is attempted', async () => {
     const spies = makeDeps({
       request: reviewRecord(),

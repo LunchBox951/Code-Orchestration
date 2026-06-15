@@ -114,7 +114,7 @@ the durable audit trail, but the live session projection is cleaned up when the 
 engine. The proof does not reuse a stable agent id because stale mail from prior runs must never
 satisfy the current nonce.
 
-## Running `co serve` and observing the daemon
+## Running `co-mcp serve <projectId>` and observing the daemon
 
 For a longer-running proof:
 
@@ -125,13 +125,13 @@ co-mcp serve <projectId>
 Starts the `ConductorHostRunner` on a 1-second cadence. On each tick it logs:
 
 ```
-[co serve] tick 1 candidates=1 cold=0 selected=impl-abc123 cadence=false
-[co serve] tick 2 candidates=1 cold=1 selected=- cadence=false
+[co-mcp serve] tick 1 candidates=1 cold=0 selected=impl-abc123 cadence=false
+[co-mcp serve] tick 2 candidates=1 cold=1 selected=- cadence=false
 ```
 
-`cold=1 selected=-` means recovery found a RUNNING session record but this `co serve` process has
-not reattached a warm pane for it, so the daemon reports the cold candidate instead of injecting a
-turn. A mail injection on the next beat requires a warm hosted pane (`selected=<agent>` on a prior
+`cold=1 selected=-` means recovery found a RUNNING session record but this `co-mcp serve` process
+has not reattached a warm pane for it, so the daemon reports the cold candidate instead of injecting
+a turn. A mail injection on the next beat requires a warm hosted pane (`selected=<agent>` on a prior
 tick, or an agent this process has launched/hosted through the normal placement path).
 
 After an agent is warm/hosted, send it mail to trigger an injection on the next tick:

@@ -617,6 +617,7 @@ function renderReviewDetail(context: SelectedContext, composer: VerdictComposer)
 
   // kind === 'resolved'
   const { diff, criteria } = value;
+  const canSubmitVerdict = diff.kind === 'patch' && criteria.kind === 'criteria';
 
   let diffHtml: string;
   if (diff.kind === 'unavailable') {
@@ -647,7 +648,7 @@ function renderReviewDetail(context: SelectedContext, composer: VerdictComposer)
   const pendingAttr = composer.pending ? ' disabled' : '';
 
   let verdictBody = '';
-  if (composer.active) {
+  if (composer.active && canSubmitVerdict) {
     verdictBody = [
       `<div class="review-verdict-body">`,
       `<textarea class="review-body-textarea" id="review-composer-body"`,
@@ -663,15 +664,19 @@ function renderReviewDetail(context: SelectedContext, composer: VerdictComposer)
     ].join('');
   }
 
-  const verdictActions = !composer.active
-    ? [
-        `<div class="review-verdict-actions">`,
-        `<button class="btn btn-pass" data-review-action="begin-pass"`,
-        ` aria-label="Submit PASS verdict"${pendingAttr}>PASS</button>`,
-        `<button class="btn btn-issues" data-review-action="begin-issues"`,
-        ` aria-label="Submit ISSUES verdict"${pendingAttr}>ISSUES</button>`,
-        `</div>`,
-      ].join('')
+  const verdictActions =
+    !composer.active && canSubmitVerdict
+      ? [
+          `<div class="review-verdict-actions">`,
+          `<button class="btn btn-pass" data-review-action="begin-pass"`,
+          ` aria-label="Submit PASS verdict"${pendingAttr}>PASS</button>`,
+          `<button class="btn btn-issues" data-review-action="begin-issues"`,
+          ` aria-label="Submit ISSUES verdict"${pendingAttr}>ISSUES</button>`,
+          `</div>`,
+        ].join('')
+      : '';
+  const verdictUnavailable = !canSubmitVerdict
+    ? `<div class="empty-state">Verdict unavailable until diff and locked criteria load.</div>`
     : '';
 
   return [
@@ -688,6 +693,7 @@ function renderReviewDetail(context: SelectedContext, composer: VerdictComposer)
     `<div class="review-verdict-block">`,
     `<div class="review-verdict-header">Verdict</div>`,
     verdictActions,
+    verdictUnavailable,
     verdictBody,
     `</div>`,
   ].join('');

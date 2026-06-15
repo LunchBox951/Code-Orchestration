@@ -8,6 +8,7 @@ import {
   detectBaseRef,
   detectCurrentBranchTarget,
   detectIntegrationTarget,
+  defaultGitRawReader,
   resolveRefSha,
   type GitReader,
 } from './detect-base.js';
@@ -210,5 +211,19 @@ describe('AC-L3-1 — detectBaseRef over REAL repos (default read-only git)', ()
       detectBaseRef(repo);
       resolveRefSha(repo, 'main');
     });
+  });
+
+  it('raw git reader preserves trailing whitespace in diff output for Review rendering', () => {
+    const repo = makeRepo('main');
+    git(repo, 'checkout', '-q', '-b', 'feature');
+    writeFileSync(join(repo, 'README.md'), 'hello  \n');
+    git(repo, 'add', 'README.md');
+    git(repo, 'commit', '-m', 'change with trailing spaces');
+
+    const patch = defaultGitRawReader(repo, ['diff', 'main...feature']);
+
+    expect(patch).not.toBeNull();
+    expect(patch).toContain('+hello  \n');
+    expect(patch).not.toContain('+hello\n');
   });
 });

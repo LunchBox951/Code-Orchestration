@@ -13,18 +13,24 @@ import { execFileSync } from 'node:child_process';
  */
 export type GitReader = (cwd: string, args: readonly string[]) => string | null;
 
-/** The production {@link GitReader}: read-only git, `null` on a non-zero exit. */
-export const defaultGitReader: GitReader = (cwd, args) => {
+/** Raw read-only git stdout, `null` on a non-zero exit. Use this for byte-sensitive reads like diffs. */
+export const defaultGitRawReader: GitReader = (cwd, args) => {
   try {
     return execFileSync('git', ['--no-optional-locks', ...args], {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
+    });
   } catch {
     // Non-zero exit ⇒ the ref/branch is absent; the chain falls through to the next rung.
     return null;
   }
+};
+
+/** The production {@link GitReader}: read-only git, trimmed for ref/sha-oriented reads. */
+export const defaultGitReader: GitReader = (cwd, args) => {
+  const output = defaultGitRawReader(cwd, args);
+  return output == null ? null : output.trim();
 };
 
 const REMOTE_REF_PREFIX = 'refs/remotes/';

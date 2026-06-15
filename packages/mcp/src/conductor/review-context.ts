@@ -95,7 +95,7 @@ function resolveCriteria(deps: ReviewContextDeps, specRef: ReviewSpecRef): Revie
   const specs = deps.openSpecs();
   try {
     const spec = specs.getSpec(taskId);
-    if (spec == null) return { kind: 'no-locked-spec' };
+    if (spec == null || spec.state !== 'locked') return { kind: 'no-locked-spec' };
     return { kind: 'criteria', specRef: specRef.ref, criteria: spec.criteria };
   } finally {
     specs.close();

@@ -67,6 +67,15 @@ function deriveRows(inbox: readonly DeliveredMail[]): readonly ReviewRow[] {
   return rows;
 }
 
+function hasReviewEvidence(context: SelectedContext): boolean {
+  return (
+    context?.status === 'loaded' &&
+    context.value.kind === 'resolved' &&
+    context.value.diff.kind === 'patch' &&
+    context.value.criteria.kind === 'criteria'
+  );
+}
+
 export class ReviewVM {
   private _state: ReviewState = {
     pending: [],
@@ -141,6 +150,7 @@ export class ReviewVM {
   async submitVerdict(): Promise<void> {
     const c = this._state.composer;
     if (!c.active || c.pending) return;
+    if (!hasReviewEvidence(this._state.context)) return;
 
     const { selectedReviewId } = this._state;
     if (selectedReviewId == null) return;

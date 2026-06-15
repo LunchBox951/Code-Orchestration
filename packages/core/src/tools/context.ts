@@ -117,7 +117,7 @@ export interface ToolContext {
   readonly ghExec?: GhExec;
   /**
    * OPTIONAL L7/P2 spawn gate: wired by the Conductor host layer when running the live daemon
-   * (`co serve`). Used by two call-sites symmetrically:
+   * (`co-mcp serve`). Used by two call-sites symmetrically:
    *   - `co_merge`: when no recorded PASS verdict exists, triggers the review (recording
    *     `review.requested` + a reviewer placement) and fires the gate — the engine launches the
    *     reviewer pane (AC-S10-2.1 / RG-4).
