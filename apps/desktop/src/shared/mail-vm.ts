@@ -33,6 +33,8 @@ export interface ComposerState {
   readonly type: MailType;
   readonly subject: string;
   readonly body: string;
+  readonly pending: boolean;
+  readonly idempotencyKey: string | null;
 }
 
 export interface MailState {
@@ -51,6 +53,8 @@ const BLANK_COMPOSER: ComposerState = {
   type: 'clarify_response',
   subject: '',
   body: '',
+  pending: false,
+  idempotencyKey: null,
 };
 
 const INITIAL_STATE: MailState = {
@@ -69,12 +73,18 @@ function reviewVerdictFromBody(body: string): ReviewVerdictValue | undefined {
   return undefined;
 }
 
+function replyIdempotencyKey(targetRecipient: string, targetSeq: number, type: MailType): string {
+  return `desktop-reply:${targetRecipient}:${targetSeq}:${type}`;
+}
+
+type MaybePromise<T> = T | Promise<T>;
+
 export interface MailVMDeps {
   readonly registry: RendererRegistry;
   readonly initialBus?: string;
   readonly onMarkRead?: (recipient: string, seq: number) => void;
-  readonly onReply?: (target: OperatorMailRef, draft: ReplyDraft) => void;
-  readonly onApprove?: (approvalSeq: number, reply: ApprovalReply) => void;
+  readonly onReply?: (target: OperatorMailRef, draft: ReplyDraft) => MaybePromise<void>;
+  readonly onApprove?: (approvalSeq: number, reply: ApprovalReply) => MaybePromise<void>;
   readonly onSelectBus?: (busId: string) => void;
 }
 
@@ -87,8 +97,8 @@ export class MailVM {
   private _state: MailState;
   private readonly registry: RendererRegistry;
   private readonly cbMarkRead: ((r: string, seq: number) => void) | undefined;
-  private readonly cbReply: ((t: OperatorMailRef, d: ReplyDraft) => void) | undefined;
-  private readonly cbApprove: ((seq: number, r: ApprovalReply) => void) | undefined;
+  private readonly cbReply: ((t: OperatorMailRef, d: ReplyDraft) => MaybePromise<void>) | undefined;
+  private readonly cbApprove: ((seq: number, r: ApprovalReply) => MaybePromise<void>) | undefined;
   private readonly cbSelectBus: ((busId: string) => void) | undefined;
   private readonly listeners = new Set<(state: MailState) => void>();
   private _rawInbox: readonly DeliveredMail[] = [];
@@ -121,6 +131,7 @@ export class MailVM {
 
   /** Switch the active bus; fires onSelectBus so the main process re-fetches mail. */
   selectBus(busId: string): void {
+    if (this._state.composer.pending) return;
     this._rawInbox = [];
     this._rawOutbox = [];
     this._state = {
@@ -139,6 +150,7 @@ export class MailVM {
 
   /** Switch inbox/outbox tab; clears the selection. */
   selectTab(tab: 'inbox' | 'outbox'): void {
+    if (this._state.composer.pending) return;
     this._state = { ...this._state, tab, selected: null, composer: { ...BLANK_COMPOSER } };
     this._selectedSeq = null;
     this.emit();
@@ -150,6 +162,7 @@ export class MailVM {
    * sticky; agent-bus views are read-only).
    */
   selectMail(seq: number): void {
+    if (this._state.composer.pending) return;
     const currentList = this._state.tab === 'inbox' ? this._rawInbox : this._rawOutbox;
     const raw = currentList.find((m) => m.seq === seq);
     if (raw == null) return;
@@ -178,6 +191,7 @@ export class MailVM {
     replyType: MailType,
     subject: string,
   ): void {
+    if (this._state.composer.pending) return;
     this._state = {
       ...this._state,
       composer: {
@@ -187,72 +201,149 @@ export class MailVM {
         type: replyType,
         subject,
         body: '',
+        pending: false,
+        idempotencyKey: replyIdempotencyKey(targetRecipient, targetSeq, replyType),
       },
     };
     this.emit();
   }
 
   updateComposerField(field: 'type' | 'subject' | 'body', value: string): void {
+    if (this._state.composer.pending) return;
+    const current = this._state.composer;
+    const nextType = field === 'type' ? (value as MailType) : current.type;
     this._state = {
       ...this._state,
-      composer: { ...this._state.composer, [field]: value as MailType },
+      composer: {
+        ...current,
+        [field]: value as MailType,
+        idempotencyKey:
+          current.targetRecipient != null && current.targetSeq != null
+            ? replyIdempotencyKey(current.targetRecipient, current.targetSeq, nextType)
+            : current.idempotencyKey,
+      },
     };
     this.emit();
   }
 
   closeComposer(): void {
+    if (this._state.composer.pending) return;
+    this.resetComposer();
+  }
+
+  private resetComposer(): void {
     this._state = { ...this._state, composer: { ...BLANK_COMPOSER } };
     this.emit();
   }
 
-  /** Submit the reply composer — fires onReply then closes. No-op if composer inactive. */
-  submitReply(): void {
+  /** Submit the reply composer — awaits onReply then closes. No-op if composer inactive. */
+  async submitReply(): Promise<void> {
     const c = this._state.composer;
-    if (!c.active || c.targetSeq == null || c.targetRecipient == null) return;
+    if (!c.active || c.pending || c.targetSeq == null || c.targetRecipient == null) return;
+    const idempotencyKey =
+      c.idempotencyKey ?? replyIdempotencyKey(c.targetRecipient, c.targetSeq, c.type);
+    this._state = {
+      ...this._state,
+      composer: { ...c, pending: true, idempotencyKey },
+    };
+    this.emit();
     const reviewVerdict =
       c.type === MAIL_REVIEW_RESPONSE ? reviewVerdictFromBody(c.body) : undefined;
-    this.cbReply?.(
-      { seq: c.targetSeq, recipient: c.targetRecipient },
-      {
-        type: c.type,
-        subject: c.subject,
-        body: c.body,
-        ...(reviewVerdict != null ? { reviewVerdict } : {}),
-      },
-    );
-    this.closeComposer();
+    try {
+      await this.cbReply?.(
+        { seq: c.targetSeq, recipient: c.targetRecipient },
+        {
+          type: c.type,
+          subject: c.subject,
+          body: c.body,
+          idempotencyKey,
+          ...(reviewVerdict != null ? { reviewVerdict } : {}),
+        },
+      );
+      if (this._state.composer.idempotencyKey === idempotencyKey) {
+        this.resetComposer();
+      }
+    } catch (error) {
+      if (this._state.composer.idempotencyKey === idempotencyKey) {
+        this._state = {
+          ...this._state,
+          composer: { ...this._state.composer, pending: false },
+        };
+        this.emit();
+      }
+      throw error;
+    }
   }
 
   /** Quick-approve an approval mail with default prose (fires onApprove). */
-  approve(approvalSeq: number): void {
-    this.cbApprove?.(approvalSeq, { decision: 'approve', subject: 'Approved', body: 'Approved.' });
+  async approve(approvalSeq: number): Promise<void> {
+    if (this._state.composer.pending) return;
+    await this.cbApprove?.(approvalSeq, {
+      decision: 'approve',
+      subject: 'Approved',
+      body: 'Approved.',
+    });
   }
 
   /** Quick-decline an approval mail with default prose (fires onApprove). */
-  decline(approvalSeq: number): void {
-    this.cbApprove?.(approvalSeq, { decision: 'decline', subject: 'Declined', body: 'Declined.' });
-  }
-
-  /** Approve with custom prose from the composer (fires onApprove then closes composer). */
-  approveWithComposer(approvalSeq: number): void {
-    const c = this._state.composer;
-    this.cbApprove?.(approvalSeq, {
-      decision: 'approve',
-      subject: c.subject || 'Approved',
-      body: c.body || 'Approved.',
-    });
-    if (c.active) this.closeComposer();
-  }
-
-  /** Decline with custom prose from the composer (fires onApprove then closes composer). */
-  declineWithComposer(approvalSeq: number): void {
-    const c = this._state.composer;
-    this.cbApprove?.(approvalSeq, {
+  async decline(approvalSeq: number): Promise<void> {
+    if (this._state.composer.pending) return;
+    await this.cbApprove?.(approvalSeq, {
       decision: 'decline',
-      subject: c.subject || 'Declined',
-      body: c.body || 'Declined.',
+      subject: 'Declined',
+      body: 'Declined.',
     });
-    if (c.active) this.closeComposer();
+  }
+
+  /** Approve with custom prose from the composer (awaits onApprove then closes composer). */
+  async approveWithComposer(approvalSeq: number): Promise<void> {
+    await this.submitApprovalComposer(approvalSeq, 'approve', 'Approved', 'Approved.');
+  }
+
+  /** Decline with custom prose from the composer (awaits onApprove then closes composer). */
+  async declineWithComposer(approvalSeq: number): Promise<void> {
+    await this.submitApprovalComposer(approvalSeq, 'decline', 'Declined', 'Declined.');
+  }
+
+  private async submitApprovalComposer(
+    approvalSeq: number,
+    decision: ApprovalDecision,
+    defaultSubject: string,
+    defaultBody: string,
+  ): Promise<void> {
+    const c = this._state.composer;
+    if (c.pending) return;
+    const idempotencyKey =
+      c.idempotencyKey ??
+      (c.targetRecipient != null && c.targetSeq != null
+        ? replyIdempotencyKey(c.targetRecipient, c.targetSeq, c.type)
+        : null);
+    if (c.active) {
+      this._state = {
+        ...this._state,
+        composer: { ...c, pending: true, idempotencyKey },
+      };
+      this.emit();
+    }
+    try {
+      await this.cbApprove?.(approvalSeq, {
+        decision,
+        subject: c.subject || defaultSubject,
+        body: c.body || defaultBody,
+      });
+      if (c.active && this._state.composer.idempotencyKey === idempotencyKey) {
+        this.resetComposer();
+      }
+    } catch (error) {
+      if (c.active && this._state.composer.idempotencyKey === idempotencyKey) {
+        this._state = {
+          ...this._state,
+          composer: { ...this._state.composer, pending: false },
+        };
+        this.emit();
+      }
+      throw error;
+    }
   }
 
   subscribe(listener: (state: MailState) => void): () => void {

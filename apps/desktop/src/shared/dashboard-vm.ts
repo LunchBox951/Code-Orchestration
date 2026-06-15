@@ -67,8 +67,10 @@ function buildTree(
   }
 
   const roots = agents.filter((a) => !agentIds.has(a.parent));
+  const rendered = new Set<string>();
 
   function buildNode(a: AgentEntry, visited: ReadonlySet<string>): TreeNode {
+    rendered.add(a.agentId);
     if (visited.has(a.agentId)) {
       // Cycle detected — return a leaf to avoid infinite recursion (Principle 9: never throw)
       return {
@@ -92,7 +94,16 @@ function buildTree(
     };
   }
 
-  return roots.map((r) => buildNode(r, new Set()));
+  const tree: TreeNode[] = [];
+  for (const root of roots) {
+    tree.push(buildNode(root, new Set()));
+  }
+  for (const agent of agents) {
+    if (!rendered.has(agent.agentId)) {
+      tree.push(buildNode(agent, new Set()));
+    }
+  }
+  return tree;
 }
 
 function deriveFromObservation(observation: OperatorObservation | null): {

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import { OPERATOR } from '../../mail/events.js';
 import { roleParentResolver } from '../../mail/escalation.js';
 import {
@@ -285,9 +286,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         });
         const existingReq = ctx.reviews.getReviewRequest(into, input.branch);
         const reviewId =
-          existingReq != null && verdict == null
-            ? existingReq.reviewId
-            : `rev-${Date.now().toString(36)}`;
+          existingReq != null && verdict == null ? existingReq.reviewId : `rev-${randomUUID()}`;
         triggerGate.triggerReview({
           reviewId,
           target: into,

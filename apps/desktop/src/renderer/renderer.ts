@@ -62,6 +62,14 @@ function setLiveStatus(status: string): void {
   if (label) label.textContent = status === 'live' ? 'live' : 'offline';
 }
 
+function showAppError(message: string): void {
+  const toast = document.createElement('div');
+  toast.className = 'app-error-toast';
+  toast.textContent = message;
+  document.body.append(toast);
+  setTimeout(() => toast.remove(), 7000);
+}
+
 // ── Dashboard rendering ────────────────────────────────────────────────────────
 
 function statusDotHtml(status: AgentStatus): string {
@@ -240,16 +248,17 @@ function renderMailDetail(state: MailState): void {
   const isActionable = selected.kind === 'actionable';
   const isApproval = selected.type === 'approval';
   const isReviewComposer = composer.type === MAIL_REVIEW_RESPONSE;
+  const pendingAttr = composer.pending ? ' disabled' : '';
 
   let actionButtons = '';
   if (isApproval) {
     actionButtons = [
       `<div class="mail-card-actions">`,
-      `<button class="btn btn-approve" data-action="approve" data-seq="${selected.seq}">Approve</button>`,
-      `<button class="btn btn-decline" data-action="decline" data-seq="${selected.seq}">Decline</button>`,
+      `<button class="btn btn-approve" data-action="approve" data-seq="${selected.seq}"${pendingAttr}>Approve</button>`,
+      `<button class="btn btn-decline" data-action="decline" data-seq="${selected.seq}"${pendingAttr}>Decline</button>`,
       `<button class="btn btn-reply btn-secondary" data-action="open-composer"`,
       ` data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}"`,
-      ` data-type="approval_response" data-subject="${esc(`Re: ${selected.subject}`)}">Add note</button>`,
+      ` data-type="approval_response" data-subject="${esc(`Re: ${selected.subject}`)}"${pendingAttr}>Add note</button>`,
       `</div>`,
     ].join('');
   } else if (isActionable) {
@@ -259,20 +268,20 @@ function renderMailDetail(state: MailState): void {
       `<div class="mail-card-actions">`,
       `<button class="btn btn-reply" data-action="open-composer"`,
       ` data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}"`,
-      ` data-type="${replyType}" data-subject="${esc(`Re: ${selected.subject}`)}">${replyLabel}</button>`,
+      ` data-type="${replyType}" data-subject="${esc(`Re: ${selected.subject}`)}"${pendingAttr}>${replyLabel}</button>`,
       `</div>`,
     ].join('');
   }
 
   const composerFooter = isApproval
     ? [
-        `<button class="btn btn-secondary" data-action="close-composer">Cancel</button>`,
-        `<button class="btn btn-decline" data-action="decline-with-composer" data-seq="${selected.seq}">Decline with note</button>`,
-        `<button class="btn btn-approve" data-action="approve-with-composer" data-seq="${selected.seq}">Approve with note</button>`,
+        `<button class="btn btn-secondary" data-action="close-composer"${pendingAttr}>Cancel</button>`,
+        `<button class="btn btn-decline" data-action="decline-with-composer" data-seq="${selected.seq}"${pendingAttr}>Decline with note</button>`,
+        `<button class="btn btn-approve" data-action="approve-with-composer" data-seq="${selected.seq}"${pendingAttr}>Approve with note</button>`,
       ].join('')
     : [
-        `<button class="btn btn-secondary" data-action="close-composer">Cancel</button>`,
-        `<button class="btn btn-reply" data-action="submit-reply">${isReviewComposer ? 'Submit verdict' : 'Send'}</button>`,
+        `<button class="btn btn-secondary" data-action="close-composer"${pendingAttr}>Cancel</button>`,
+        `<button class="btn btn-reply" data-action="submit-reply"${pendingAttr}>${isReviewComposer ? 'Submit verdict' : 'Send'}</button>`,
       ].join('');
 
   const composerTitle = isApproval
@@ -285,10 +294,10 @@ function renderMailDetail(state: MailState): void {
     ? [
         `<div class="mail-composer">`,
         `<div class="mail-composer-header">${composerTitle}`,
-        `<button class="mail-composer-close" data-action="close-composer" aria-label="Close composer">×</button>`,
+        `<button class="mail-composer-close" data-action="close-composer" aria-label="Close composer"${pendingAttr}>×</button>`,
         `</div>`,
         `<div class="mail-composer-body">`,
-        `<textarea class="composer-textarea" id="composer-body" placeholder="${composerPlaceholder}">${esc(composer.body)}</textarea>`,
+        `<textarea class="composer-textarea" id="composer-body" placeholder="${composerPlaceholder}"${pendingAttr}>${esc(composer.body)}</textarea>`,
         `</div>`,
         `<div class="mail-composer-footer">`,
         composerFooter,
@@ -490,6 +499,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   bridge.onConnectionState((state) => {
     setLiveStatus(state.status);
+  });
+
+  bridge.onConnectionError((message) => {
+    showAppError(message);
   });
 
   bridge.onDashboardState((state) => {

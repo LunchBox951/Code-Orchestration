@@ -357,6 +357,51 @@ describe('co doctor', () => {
   });
 });
 
+describe('operator command argument strictness', () => {
+  it('rejects unknown flags for spec, plan, and phase commands', async () => {
+    const { dir } = makeRegisteredProject();
+
+    const spec = await run(['spec', '--bogus'], dir);
+    expect(spec.exitCode).toBe(1);
+    expect(spec.output).toMatch(/unknown option.*--bogus|--bogus.*unknown option/i);
+
+    const plan = await run(['plan', 'task-1', '--bogus'], dir);
+    expect(plan.exitCode).toBe(1);
+    expect(plan.output).toMatch(/unknown option.*--bogus|--bogus.*unknown option/i);
+
+    const phase = await run(['phase', 'task-1', '--bogus'], dir);
+    expect(phase.exitCode).toBe(1);
+    expect(phase.output).toMatch(/unknown option.*--bogus|--bogus.*unknown option/i);
+  });
+
+  it('rejects unknown flags for mail commands before reading or sending mail', async () => {
+    const { dir } = makeRegisteredProject();
+
+    const read = await run(['mail', 'read', '--bogus'], dir);
+    expect(read.exitCode).toBe(1);
+    expect(read.output).toMatch(/unknown option.*--bogus|--bogus.*unknown option/i);
+
+    const send = await run(
+      ['mail', 'send', '--to', 'lead-1', '--type', 'chat', '--subject', 'S', '--bogus'],
+      dir,
+    );
+    expect(send.exitCode).toBe(1);
+    expect(send.output).toMatch(/unknown option.*--bogus|--bogus.*unknown option/i);
+  });
+
+  it('rejects unknown flags for recovery commands before touching worktree state', async () => {
+    const { dir } = makeRegisteredProject();
+
+    const cleanup = await run(['cleanup', 'co/example', '--bogus'], dir);
+    expect(cleanup.exitCode).toBe(1);
+    expect(cleanup.output).toMatch(/unknown option.*--bogus|--bogus.*unknown option/i);
+
+    const nuke = await run(['nuke', 'co/example', '--confirm', '--bogus'], dir);
+    expect(nuke.exitCode).toBe(1);
+    expect(nuke.output).toMatch(/unknown option.*--bogus|--bogus.*unknown option/i);
+  });
+});
+
 describe('co sling --dry-run', () => {
   it('reports PLACED for a healthy provider', async () => {
     const { projectId, dir } = makeRegisteredProject();

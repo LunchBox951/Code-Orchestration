@@ -1290,6 +1290,28 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
     expect(errors).toHaveLength(1); // the unexpected fault was SURFACED, not silently masked
     expect((errors[0] as Error).message).toMatch(/observe boom/i);
   });
+
+  it('observe() surfaces unexpected connect failures instead of masking them as daemon-down', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const errors: unknown[] = [];
+    const denied = Object.assign(new Error('permission denied connecting to operator socket'), {
+      code: 'EACCES',
+    });
+    const client = new OperatorIpcClient({
+      projectId,
+      socketPath: '/tmp/co-opipc-denied.sock',
+      connect: () => Promise.reject(denied),
+      onError: (e) => errors.push(e),
+    });
+    clients.push(client);
+
+    const obs = await client.observe();
+
+    expect(obs.kind).toBe('static');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBe(denied);
+  });
 });
 
 // ── Wire robustness — the JSON-RPC envelope + unknown-method path ─────────────────

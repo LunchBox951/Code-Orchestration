@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { slingWorktree } from '../../worktrees/sling.js';
+import { defaultGitExec, slingWorktree } from '../../worktrees/sling.js';
 import type { ToolSpec } from '../registry.js';
 import { defaultProviderAccounts } from '../../dispatch/balancer.js';
 import { refreshUsageForAccounts, runDispatchPolicy } from '../../dispatch/cli-render.js';
@@ -475,6 +475,11 @@ function cleanupFailedSpawnWorktree(
     worktrees.removeWorktree(branch, { repoCwd });
   } catch {
     // Preserve the spawn failure. Orphan detection can surface any cleanup residue later.
+  }
+  try {
+    defaultGitExec(repoCwd, ['branch', '-D', branch]);
+  } catch {
+    // Preserve the spawn failure. A missing/locked branch can be surfaced by later cleanup.
   }
 }
 

@@ -36,6 +36,19 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { SocketClientTransport } from '../conductor/real-transport.js';
 import { classifyIncoming, makeRequest, type WireId, type WirePayload } from './wire.js';
 
+const EXPECTED_CONNECT_UNAVAILABLE_CODES = new Set(['ENOENT', 'ECONNREFUSED']);
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error != null && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function isExpectedConnectUnavailable(error: unknown): boolean {
+  const code = errorCode(error);
+  return code !== undefined && EXPECTED_CONNECT_UNAVAILABLE_CODES.has(code);
+}
+
 /** A pending in-flight request awaiting its response by id. */
 interface PendingCall {
   readonly resolve: (result: WirePayload) => void;
@@ -395,8 +408,9 @@ export class OperatorIpcClient {
       this.connection = connection;
       this.emitState('connected');
       return connection;
-    } catch {
+    } catch (error) {
       // Daemon down / socket absent — degraded, not an error (D5 / MNR #3).
+      if (!isExpectedConnectUnavailable(error)) this.report(error);
       return null;
     }
   }

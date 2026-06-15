@@ -71,6 +71,8 @@ interface ComposerState {
   type: string;
   subject: string;
   body: string;
+  pending: boolean;
+  idempotencyKey: string | null;
 }
 
 interface MailState {
@@ -118,6 +120,7 @@ interface CoShellBridge {
   refreshConnection(): Promise<ConnectionState | null>;
   onNavState(listener: (state: { activeView: NavView }) => void): () => void;
   onConnectionState(listener: (state: ConnectionState) => void): () => void;
+  onConnectionError(listener: (message: string) => void): () => void;
   onDashboardState(listener: (state: DashboardState) => void): () => void;
   refreshDashboard(): Promise<DashboardState | null>;
   // ── Mail ──────────────────────────────────────────────────────────────────

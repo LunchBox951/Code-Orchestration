@@ -22,6 +22,36 @@ function sendToRenderer(channel: string, data: unknown): void {
   mainWindow?.webContents?.send(channel, data);
 }
 
+function handleStartupFailure(error: unknown): void {
+  console.error('Failed to start CO desktop:', error);
+
+  const activeShell = shell;
+  shell = null;
+
+  if (mainWindow != null) {
+    mainWindow.destroy();
+    mainWindow = null;
+  }
+
+  if (activeShell == null) {
+    app.quit();
+    return;
+  }
+
+  void activeShell
+    .close()
+    .catch((closeError: unknown) => {
+      console.error('Failed to close CO desktop shell after startup failure:', closeError);
+    })
+    .finally(() => {
+      app.quit();
+    });
+}
+
+function openWindow(): void {
+  createWindow().catch(handleStartupFailure);
+}
+
 async function createWindow(): Promise<void> {
   const rawProjectId = process.env['CO_PROJECT_ID'];
   if (!rawProjectId) {
@@ -33,6 +63,7 @@ async function createWindow(): Promise<void> {
     projectId,
     onNavState: (state) => sendToRenderer('nav:state', state),
     onConnectionState: (state) => sendToRenderer('connection:state', state),
+    onConnectionError: (message) => sendToRenderer('connection:error', message),
     onDashboardState: (state) => sendToRenderer('dashboard:state', state),
     onMailState: (state) => sendToRenderer('mail:state', state),
     onMailError: (message) => sendToRenderer('mail:error', message),
@@ -176,8 +207,12 @@ ipcMain.handle('mail:closeComposer', () => {
   return shell?.mail.state ?? null;
 });
 
-ipcMain.handle('mail:submitReply', () => {
-  shell?.mail.submitReply();
+ipcMain.handle('mail:submitReply', async () => {
+  try {
+    await shell?.mail.submitReply();
+  } catch {
+    // createAppShell already emitted a user-visible mail:error; return current draft state.
+  }
   return shell?.mail.state ?? null;
 });
 
@@ -211,23 +246,39 @@ ipcMain.handle('mail:approve', async (_event, approvalSeq: unknown, reply: unkno
   }
 });
 
-ipcMain.handle('mail:quickApprove', (_event, approvalSeq: unknown) => {
-  shell?.mail.approve(requireFiniteSeq(approvalSeq, 'approval seq'));
+ipcMain.handle('mail:quickApprove', async (_event, approvalSeq: unknown) => {
+  try {
+    await shell?.mail.approve(requireFiniteSeq(approvalSeq, 'approval seq'));
+  } catch {
+    // createAppShell already emitted a user-visible mail:error.
+  }
   return shell?.mail.state ?? null;
 });
 
-ipcMain.handle('mail:quickDecline', (_event, approvalSeq: unknown) => {
-  shell?.mail.decline(requireFiniteSeq(approvalSeq, 'approval seq'));
+ipcMain.handle('mail:quickDecline', async (_event, approvalSeq: unknown) => {
+  try {
+    await shell?.mail.decline(requireFiniteSeq(approvalSeq, 'approval seq'));
+  } catch {
+    // createAppShell already emitted a user-visible mail:error.
+  }
   return shell?.mail.state ?? null;
 });
 
-ipcMain.handle('mail:approveWithComposer', (_event, approvalSeq: unknown) => {
-  shell?.mail.approveWithComposer(requireFiniteSeq(approvalSeq, 'approval seq'));
+ipcMain.handle('mail:approveWithComposer', async (_event, approvalSeq: unknown) => {
+  try {
+    await shell?.mail.approveWithComposer(requireFiniteSeq(approvalSeq, 'approval seq'));
+  } catch {
+    // createAppShell already emitted a user-visible mail:error; return current draft state.
+  }
   return shell?.mail.state ?? null;
 });
 
-ipcMain.handle('mail:declineWithComposer', (_event, approvalSeq: unknown) => {
-  shell?.mail.declineWithComposer(requireFiniteSeq(approvalSeq, 'approval seq'));
+ipcMain.handle('mail:declineWithComposer', async (_event, approvalSeq: unknown) => {
+  try {
+    await shell?.mail.declineWithComposer(requireFiniteSeq(approvalSeq, 'approval seq'));
+  } catch {
+    // createAppShell already emitted a user-visible mail:error; return current draft state.
+  }
   return shell?.mail.state ?? null;
 });
 
@@ -259,9 +310,7 @@ ipcMain.handle('limitsCost:refresh', () => {
   return shell?.limitsCost.state ?? null;
 });
 
-app.whenReady().then(() => {
-  void createWindow();
-});
+app.whenReady().then(openWindow).catch(handleStartupFailure);
 
 app.on('window-all-closed', () => {
   void shell?.close().then(() => {
@@ -270,5 +319,5 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (mainWindow === null) void createWindow();
+  if (mainWindow === null) openWindow();
 });
