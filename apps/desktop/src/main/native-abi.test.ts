@@ -78,6 +78,34 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
     db.close();
   });
 
+  it('node-pty version is ≥1.0 (supports Electron 36 / Node 22.x ABI via napi 9+)', () => {
+    // node-pty v1.x ships N-API 9 prebuilds that cover Electron 30–36 / Node 22.x.
+    // v0.x only targeted older Electron/Node pairs and lacks these prebuilds.
+    // This assertion mirrors the node:sqlite check above — if the version drifts
+    // below the ABI floor, the host proof will fail before anyone catches it.
+    try {
+      const pkg = JSON.parse(
+        readFileSync(
+          require.resolve('node-pty/package.json', {
+            paths: [join(here, '../../../../')],
+          }),
+          'utf8',
+        ),
+      ) as { version?: string };
+      const version = pkg.version ?? '0.0.0';
+      const major = parseInt(version.split('.')[0] ?? '0', 10);
+      expect(major).toBeGreaterThanOrEqual(1);
+    } catch {
+      // node-pty is in packages/core, not apps/desktop — resolve from monorepo root
+      const pkg = JSON.parse(
+        readFileSync(join(here, '../../../../node_modules/node-pty/package.json'), 'utf8'),
+      ) as { version?: string };
+      const version = pkg.version ?? '0.0.0';
+      const major = parseInt(version.split('.')[0] ?? '0', 10);
+      expect(major).toBeGreaterThanOrEqual(1);
+    }
+  });
+
   it('[host handoff] electron binary execution is not tested in this sandbox', () => {
     // The Electron binary was NOT downloaded (--ignore-scripts during pnpm install).
     // The host proof (launching `electron` headless, importing node-pty + node:sqlite

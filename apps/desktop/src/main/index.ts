@@ -15,9 +15,11 @@ function sendToRenderer(channel: string, data: unknown): void {
 }
 
 async function createWindow(): Promise<void> {
-  const projectId = (process.env['CO_PROJECT_ID'] ?? '') as Parameters<
-    typeof createAppShell
-  >[0]['projectId'];
+  const rawProjectId = process.env['CO_PROJECT_ID'];
+  if (!rawProjectId) {
+    throw new Error('CO_PROJECT_ID environment variable is required to identify the project');
+  }
+  const projectId = rawProjectId as Parameters<typeof createAppShell>[0]['projectId'];
 
   shell = createAppShell({
     projectId,

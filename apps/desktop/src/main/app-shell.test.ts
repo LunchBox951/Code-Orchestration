@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createAppShell } from './app-shell.js';
+import { createAppShell, defaultOperatorSocketPath } from './app-shell.js';
 import type { OperatorObservation } from '@co/core';
 import type { ProjectId } from '@co/core';
+import { projectDataDir } from '@co/core';
+import { operatorIpcSocketPath } from '@co/mcp';
 import type { OperatorIpcClient } from '@co/mcp';
 
 const FAKE_PROJECT_ID = 'test-project' as ProjectId;
@@ -36,6 +38,18 @@ function makeClient(obs: OperatorObservation = staticObs): OperatorIpcClient {
     close: vi.fn().mockResolvedValue(undefined),
   } as unknown as OperatorIpcClient;
 }
+
+describe('defaultOperatorSocketPath — client↔server path agreement', () => {
+  it('equals operatorIpcSocketPath(projectDataDir(projectId)) — the server formula', () => {
+    const projectId = 'a1b2c3d4-0000-0000-0000-000000000000' as ProjectId;
+    // The server calls operatorIpcSocketPath(registry.dataDirFor(projectId)),
+    // and dataDirFor returns projectDataDir(projectId). Assert the client uses
+    // the same formula so a mismatch breaks loudly rather than silently degrading.
+    expect(defaultOperatorSocketPath(projectId)).toBe(
+      operatorIpcSocketPath(projectDataDir(projectId)),
+    );
+  });
+});
 
 describe('createAppShell — view-model bridge wiring', () => {
   it('creates a NavVM starting on dashboard', () => {
