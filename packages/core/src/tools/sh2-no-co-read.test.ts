@@ -42,9 +42,8 @@ export function detectCoPaths(source: string): string[] {
     .replace(/\/\*[\s\S]*?\*\//g, '') // block comments (/** … */ and /* … */)
     .replace(/\/\/[^\n]*/g, ''); // line comments
   const literalRe = /\.co[\\/]+(specs|plans|issues)\b/g;
-  const segmentCallRe = /\b(?:path\.)?(?:join|resolve)\s*\(([^)]*)\)/g;
-  const coSegmentRe = /['"`]\.co['"`]\s*,\s*['"`](specs|plans|issues)['"`]/;
-  const coVariableSegmentRe = /['"`]\.co['"`]\s*,\s*([A-Za-z_$][\w$]*)/;
+  const coSegmentRe = /['"`]\.co['"`]\s*,\s*['"`](specs|plans|issues)['"`]/g;
+  const coVariableSegmentRe = /['"`]\.co['"`]\s*,\s*([A-Za-z_$][\w$]*)/g;
   const staticSectionRe =
     /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*['"`](specs|plans|issues)['"`]/g;
   const concatLiteralRe = /['"`]\.co[\\/]*['"`]\s*\+\s*['"`][\\/]*(specs|plans|issues)['"`]/g;
@@ -60,12 +59,10 @@ export function detectCoPaths(source: string): string[] {
     if (name != null && section != null) staticSections.set(name, section);
   }
   while ((m = literalRe.exec(stripped)) !== null) hits.push(m[0]);
-  while ((m = segmentCallRe.exec(stripped)) !== null) {
-    const args = m[1] ?? '';
-    const coSegment = coSegmentRe.exec(args);
-    const variableSegment = coVariableSegmentRe.exec(args);
-    const section = coSegment?.[1] ?? staticSections.get(variableSegment?.[1] ?? '');
-    if (section != null) hits.push(`${m[0].split('(')[0] ?? 'path'}(..., '.co', '${section}')`);
+  while ((m = coSegmentRe.exec(stripped)) !== null) hits.push(`'.co', '${m[1]}'`);
+  while ((m = coVariableSegmentRe.exec(stripped)) !== null) {
+    const section = staticSections.get(m[1] ?? '');
+    if (section != null) hits.push(`'.co', ${m[1]}`);
   }
   while ((m = concatLiteralRe.exec(stripped)) !== null) hits.push(`'.co/' + '${m[1]}'`);
   while ((m = concatVariableRe.exec(stripped)) !== null) {
@@ -156,6 +153,14 @@ describe('SH-2 — detectCoPaths goes RED on runtime path literals', () => {
 
   it("flags prefixed segmented path construction with resolve(cwd, '.co', 'issues')", () => {
     expect(detectCoPaths("const dir = resolve(cwd, '.co', 'issues');")).not.toEqual([]);
+  });
+
+  it("flags segmented path construction after a nested call with join(process.cwd(), '.co', 'specs')", () => {
+    expect(detectCoPaths("const dir = join(process.cwd(), '.co', 'specs');")).not.toEqual([]);
+  });
+
+  it("flags segmented path construction after a nested call with resolve(getRepoRoot(), '.co', 'plans')", () => {
+    expect(detectCoPaths("const dir = resolve(getRepoRoot(), '.co', 'plans');")).not.toEqual([]);
   });
 
   it('flags segmented path construction with a static section variable', () => {
