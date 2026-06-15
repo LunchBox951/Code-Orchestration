@@ -28,5 +28,5 @@ for (const name of readdirSync(srcDir)) {
 
 // Vendor xterm UMD build + CSS (renderer uses window.Terminal global; no bundler).
 mkdirSync(join(dstDir, 'vendor'), { recursive: true });
-cpSync(require.resolve('xterm/lib/xterm.js'), join(dstDir, 'vendor', 'xterm.js'));
-cpSync(require.resolve('xterm/css/xterm.css'), join(dstDir, 'vendor', 'xterm.css'));
+cpSync(require.resolve('@xterm/xterm/lib/xterm.js'), join(dstDir, 'vendor', 'xterm.js'));
+cpSync(require.resolve('@xterm/xterm/css/xterm.css'), join(dstDir, 'vendor', 'xterm.css'));

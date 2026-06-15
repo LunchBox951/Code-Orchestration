@@ -3,7 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAppShell, defaultOperatorSocketPath } from './app-shell.js';
-import type { OperatorObservation, DeliveredMail, OperatorIpcTick, CostRollup } from '@co/core';
+import type {
+  OperatorObservation,
+  DeliveredMail,
+  OperatorIpcTick,
+  OperatorIpcTranscript,
+  CostRollup,
+} from '@co/core';
 import type { ProjectId } from '@co/core';
 import { projectDataDir } from '@co/core';
 import { operatorIpcSocketPath } from '@co/mcp';
@@ -456,5 +462,139 @@ describe('createAppShell — mail VM bridge wiring', () => {
         }),
       );
     });
+  });
+});
+
+describe('createAppShell — agentsConsole VM wiring', () => {
+  it('roster from observation: tick with agents emits console state with roster', async () => {
+    const tickListeners: Array<(tick: OperatorIpcTick) => void> = [];
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockImplementation((cb: (tick: OperatorIpcTick) => void) => {
+        tickListeners.push(cb);
+        return () => {};
+      }),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript: vi.fn().mockResolvedValue({ agentId: 'impl-x', tail: 'hello world' }),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+    onAgentsConsoleState.mockClear();
+
+    const tick: OperatorIpcTick = {
+      snapshot: {
+        snapshot: emptyStatic,
+        agents: [
+          {
+            agentId: 'impl-x',
+            role: 'implementer',
+            parent: 'lead-1',
+            hosted: true,
+            outstandingMail: 0,
+            paused: false,
+            stuck: false,
+            costUsd: 0,
+          },
+        ],
+      },
+    };
+    tickListeners[0]?.(tick);
+
+    expect(onAgentsConsoleState).toHaveBeenCalledOnce();
+    expect(onAgentsConsoleState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        roster: expect.arrayContaining([
+          expect.objectContaining({ agentId: 'impl-x', status: 'warm' }),
+        ]),
+      }),
+    );
+  });
+
+  it('selectAgent backfill: calls transcript and sets selectedAgentId + transcript in state', async () => {
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript: vi.fn().mockResolvedValue({ agentId: 'impl-x', tail: 'hello world' }),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+
+    await vi.waitFor(() => {
+      expect(client.transcript).toHaveBeenCalledWith('impl-x');
+      const lastState = onAgentsConsoleState.mock.calls.at(-1)?.[0];
+      expect(lastState).toMatchObject({
+        selectedAgentId: 'impl-x',
+        transcript: 'hello world',
+      });
+    });
+  });
+
+  it('live append: onTranscript chunk appends for selected agent; different agentId is ignored', async () => {
+    const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockImplementation((cb: (t: OperatorIpcTranscript) => void) => {
+        transcriptListeners.push(cb);
+        return () => {};
+      }),
+      transcript: vi.fn().mockResolvedValue({ agentId: 'impl-x', tail: 'base' }),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    await vi.waitFor(() => {
+      const lastState = onAgentsConsoleState.mock.calls.at(-1)?.[0];
+      expect(lastState?.transcript).toBe('base');
+    });
+
+    onAgentsConsoleState.mockClear();
+
+    // Chunk for the selected agent appends
+    transcriptListeners[0]?.({ agentId: 'impl-x', chunk: ' chunk' });
+    expect(onAgentsConsoleState).toHaveBeenCalledOnce();
+    expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+      transcript: 'base chunk',
+    });
+
+    onAgentsConsoleState.mockClear();
+
+    // Chunk for a different agentId is ignored (per-agent isolation through the VM)
+    transcriptListeners[0]?.({ agentId: 'other-agent', chunk: ' ignored' });
+    expect(onAgentsConsoleState).not.toHaveBeenCalled();
   });
 });
