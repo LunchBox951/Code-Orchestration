@@ -1381,6 +1381,32 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
     }
   });
 
+  it('raw connection isolates close listener failures so later subscribers still run', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const connection = await OperatorIpcConnection.connect(socketPath);
+    let sawSecondClose = false;
+    connection.onClose(() => {
+      throw new Error('raw close listener failed');
+    });
+    connection.onClose(() => {
+      sawSecondClose = true;
+    });
+
+    await connection.close();
+    await flush();
+
+    expect(sawSecondClose).toBe(true);
+  });
+
   it('client reconnects to the SAME running server after a client-side socket drop (app restart, daemon stays up)', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
@@ -1526,6 +1552,44 @@ describe('serveConductor wiring — the IPC server rides the cadence runner (pus
     await runner.stop(); // the onStop seam closes the IPC server (socket torn down)
     await flush();
     expect((await client.observe()).kind).toBe('static'); // the app degrades cleanly once co serve stops
+  });
+
+  it('still pushes an IPC tick when the caller onTick hook throws', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const scheduler = new FakeScheduler();
+    const errors: unknown[] = [];
+    const runner = await serveConductor({
+      projectId,
+      pty: new FakePty(),
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      onTick: () => {
+        throw new Error('caller onTick failed');
+      },
+      onError: (error) => errors.push(error),
+      operatorIpc: { socketPath },
+    });
+    runners.push(runner);
+
+    const client = makeClient(projectId, socketPath);
+    const ticks: OperatorIpcTick[] = [];
+    client.onTick((t) => ticks.push(t));
+    expect(await client.connect()).toBe(true);
+
+    scheduler.fire();
+    await flush();
+
+    expect(ticks).toHaveLength(1);
+    expect(errors).toHaveLength(1);
   });
 
   it('closes the IPC server if auto-start recovery fails after the socket starts', async () => {
