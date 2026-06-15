@@ -173,7 +173,7 @@ export class OperatorIpcServer {
   private readonly onError: ((error: unknown) => void) | undefined;
   private readonly chmodSocket: (socketPath: string, mode: number) => void;
   private readonly transport: SocketServerTransport;
-  private readonly pendingTranscriptPushes = new Map<string, string>();
+  private readonly pendingTranscriptPushes = new Map<string, { offset: number; chunk: string }>();
   private transcriptPushInFlight = false;
   private started = false;
 
@@ -226,13 +226,13 @@ export class OperatorIpcServer {
    * `co serve` subscribes this to the engine's transcript stream. A no-op when no app is attached; a
    * push that races a disconnect is reported, never thrown (must not crash the daemon — Principle 9).
    */
-  pushTranscript(agentId: string, chunk: string): void {
+  pushTranscript(agentId: string, chunk: string, offset: number): void {
     if (!this.transport.connected) return;
     if (this.transcriptPushInFlight) {
-      this.queueTranscriptPush(agentId, chunk);
+      this.queueTranscriptPush(agentId, chunk, offset);
       return;
     }
-    this.sendTranscriptPush(agentId, chunk);
+    this.sendTranscriptPush(agentId, chunk, offset);
   }
 
   /** Tear the socket down (idempotent via the transport). */
@@ -477,14 +477,19 @@ export class OperatorIpcServer {
     this.transport.send(message).catch((error) => this.report(error));
   }
 
-  private queueTranscriptPush(agentId: string, chunk: string): void {
-    const next = (this.pendingTranscriptPushes.get(agentId) ?? '') + chunk;
-    this.pendingTranscriptPushes.set(
-      agentId,
-      next.length > TRANSCRIPT_PENDING_MAX_CHARS
-        ? next.slice(next.length - TRANSCRIPT_PENDING_MAX_CHARS)
-        : next,
-    );
+  private queueTranscriptPush(agentId: string, chunk: string, offset: number): void {
+    const pending = this.pendingTranscriptPushes.get(agentId);
+    const nextOffset = pending?.offset ?? offset;
+    const next = (pending?.chunk ?? '') + chunk;
+    if (next.length > TRANSCRIPT_PENDING_MAX_CHARS) {
+      const dropped = next.length - TRANSCRIPT_PENDING_MAX_CHARS;
+      this.pendingTranscriptPushes.set(agentId, {
+        offset: nextOffset + dropped,
+        chunk: next.slice(dropped),
+      });
+    } else {
+      this.pendingTranscriptPushes.set(agentId, { offset: nextOffset, chunk: next });
+    }
 
     while (this.pendingTranscriptPushes.size > TRANSCRIPT_PENDING_MAX_AGENTS) {
       const drop =
@@ -495,10 +500,16 @@ export class OperatorIpcServer {
     }
   }
 
-  private sendTranscriptPush(agentId: string, chunk: string): void {
+  private sendTranscriptPush(agentId: string, chunk: string, offset: number): void {
     this.transcriptPushInFlight = true;
     this.transport
-      .send(makeNotification(OPERATOR_IPC_TRANSCRIPT, { agentId, chunk } as unknown as WirePayload))
+      .send(
+        makeNotification(OPERATOR_IPC_TRANSCRIPT, {
+          agentId,
+          offset,
+          chunk,
+        } as unknown as WirePayload),
+      )
       .then(
         () => this.drainTranscriptPush(),
         (error: unknown) => {
@@ -516,15 +527,15 @@ export class OperatorIpcServer {
       return;
     }
     const next = this.pendingTranscriptPushes.entries().next().value as
-      | [agentId: string, chunk: string]
+      | [agentId: string, transcript: { offset: number; chunk: string }]
       | undefined;
     if (next == null) {
       this.transcriptPushInFlight = false;
       return;
     }
-    const [agentId, chunk] = next;
+    const [agentId, transcript] = next;
     this.pendingTranscriptPushes.delete(agentId);
-    this.sendTranscriptPush(agentId, chunk);
+    this.sendTranscriptPush(agentId, transcript.chunk, transcript.offset);
   }
 
   private report(error: unknown): void {

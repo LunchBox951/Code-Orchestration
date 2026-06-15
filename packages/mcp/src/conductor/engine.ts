@@ -44,6 +44,7 @@ import {
   type SpawnSpec,
   type StartupOutcome,
   type Steer,
+  type TranscriptTail,
   type ToolSpec,
   type TurnEndConfig,
   type TurnEndResult,
@@ -325,6 +326,8 @@ export class ConductorEngine {
    * read by {@link transcriptTail} for the operator's on-demand backfill. Dropped on release.
    */
   private readonly transcriptTails = new Map<string, string>();
+  private readonly transcriptTailOffsets = new Map<string, number>();
+  private readonly transcriptNextOffsets = new Map<string, number>();
   /**
    * Per-agent PERSISTENT onData unsubscribers for the transcript stream, keyed `${projectId}:${agent}`
    * (Stage 12 C-P1) — DISTINCT from the per-turn observer in {@link observeTurnEnd}. Torn down on
@@ -337,7 +340,7 @@ export class ConductorEngine {
    * subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
    */
   private readonly transcriptListeners = new Set<
-    (projectId: ProjectId, agent: string, chunk: string) => void
+    (projectId: ProjectId, agent: string, chunk: string, offset: number) => void
   >();
   /**
    * When each unresolved clarify was FIRST observed by a tick, keyed
@@ -387,13 +390,25 @@ export class ConductorEngine {
     return this.transcriptTails.get(ConductorEngine.agentKey(projectId, agent)) ?? '';
   }
 
+  /** Stage 12 C-P1 — the current bounded transcript tail plus its absolute start offset. */
+  transcriptTailSnapshot(projectId: ProjectId, agent: string): TranscriptTail {
+    const agentKey = ConductorEngine.agentKey(projectId, agent);
+    return {
+      agentId: agent,
+      offset: this.transcriptTailOffsets.get(agentKey) ?? 0,
+      tail: this.transcriptTails.get(agentKey) ?? '',
+    };
+  }
+
   /**
    * Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe to the live transcript stream: `listener` fires with
    * `(projectId, agent, chunk)` on EVERY new pane chunk from any hosted agent (the operator-IPC live
    * push fan-out). Returns an unsubscribe fn. Transport-agnostic, NO I/O, never throws. This is a
    * METHOD, not a tool (Principle D4 — the Conductor is never agent-callable).
    */
-  onTranscript(listener: (projectId: ProjectId, agent: string, chunk: string) => void): () => void {
+  onTranscript(
+    listener: (projectId: ProjectId, agent: string, chunk: string, offset: number) => void,
+  ): () => void {
     this.transcriptListeners.add(listener);
     return () => this.transcriptListeners.delete(listener);
   }
@@ -440,6 +455,8 @@ export class ConductorEngine {
     // Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe before startup driving so the operator tail and live
     // stream include early provider interstitials/login prompts as well as post-ready turn bytes.
     this.transcriptTails.set(agentKey, '');
+    this.transcriptTailOffsets.set(agentKey, 0);
+    this.transcriptNextOffsets.set(agentKey, 0);
     this.transcriptUnsub.set(
       agentKey,
       pane.onData((chunk) =>
@@ -838,16 +855,21 @@ export class ConductorEngine {
     agent: string,
     chunk: string,
   ): void {
+    const chunkOffset = this.transcriptNextOffsets.get(agentKey) ?? 0;
+    const tailOffset = this.transcriptTailOffsets.get(agentKey) ?? chunkOffset;
     const next = (this.transcriptTails.get(agentKey) ?? '') + chunk;
-    this.transcriptTails.set(
-      agentKey,
-      next.length > TRANSCRIPT_TAIL_MAX_CHARS
-        ? next.slice(next.length - TRANSCRIPT_TAIL_MAX_CHARS)
-        : next,
-    );
+    this.transcriptNextOffsets.set(agentKey, chunkOffset + chunk.length);
+    if (next.length > TRANSCRIPT_TAIL_MAX_CHARS) {
+      const dropped = next.length - TRANSCRIPT_TAIL_MAX_CHARS;
+      this.transcriptTails.set(agentKey, next.slice(dropped));
+      this.transcriptTailOffsets.set(agentKey, tailOffset + dropped);
+    } else {
+      this.transcriptTails.set(agentKey, next);
+      this.transcriptTailOffsets.set(agentKey, tailOffset);
+    }
     for (const listener of [...this.transcriptListeners]) {
       try {
-        listener(projectId, agent, chunk);
+        listener(projectId, agent, chunk, chunkOffset);
       } catch {
         /* transcript subscribers are diagnostic surfaces; pane output must keep flowing */
       }
@@ -862,6 +884,8 @@ export class ConductorEngine {
     this.transcriptUnsub.get(agentKey)?.();
     this.transcriptUnsub.delete(agentKey);
     this.transcriptTails.delete(agentKey);
+    this.transcriptTailOffsets.delete(agentKey);
+    this.transcriptNextOffsets.delete(agentKey);
   }
 }
 

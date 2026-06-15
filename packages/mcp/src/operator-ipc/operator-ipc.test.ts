@@ -283,10 +283,10 @@ function makeControl(
     // Stage 12 C-P1 (TRANSCRIPT-SEAM) — wire the transcript accessors from the REAL engine, exactly as
     // serveConductor does (host.ts): the tail is the engine's bounded buffer; onTranscript filters the
     // engine's global stream to this project. The cross-process proofs run against these real accessors.
-    transcriptTail: (agentId) => ({ agentId, tail: engine.transcriptTail(projectId, agentId) }),
+    transcriptTail: (agentId) => engine.transcriptTailSnapshot(projectId, agentId),
     onTranscript: (listener) =>
-      engine.onTranscript((pid, agent, chunk) => {
-        if (pid === projectId) listener(agent, chunk);
+      engine.onTranscript((pid, agent, chunk, offset) => {
+        if (pid === projectId) listener(agent, chunk, offset);
       }),
   };
   return { router, control };
@@ -301,7 +301,9 @@ function wireTranscriptPush(
   control: ConductorControlSurface,
   server: OperatorIpcServer,
 ): () => void {
-  return control.onTranscript((agentId, chunk) => server.pushTranscript(agentId, chunk));
+  return control.onTranscript((agentId, chunk, offset) =>
+    server.pushTranscript(agentId, chunk, offset),
+  );
 }
 
 /** A short, private socket path (well under the ~108-char Unix limit), cleaned in afterEach. */
@@ -690,7 +692,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     const fakeControl = {
       router: {} as DaemonBackedAgentRouter,
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
-      transcriptTail: (agentId: string) => ({ agentId, tail: '' }),
+      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
@@ -700,9 +702,9 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     });
     Object.defineProperty(server, 'transport', { value: fakeTransport });
 
-    server.pushTranscript('impl-x', 'one');
-    server.pushTranscript('impl-x', 'two');
-    server.pushTranscript('impl-x', 'three');
+    server.pushTranscript('impl-x', 'one', 0);
+    server.pushTranscript('impl-x', 'two', 3);
+    server.pushTranscript('impl-x', 'three', 6);
 
     expect(fakeTransport.send).toHaveBeenCalledTimes(1);
     releaseFirst();
@@ -711,7 +713,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     expect(fakeTransport.send).toHaveBeenCalledTimes(2);
     expect(sent[1]).toMatchObject({
       method: 'transcript:push',
-      params: { agentId: 'impl-x', chunk: 'twothree' },
+      params: { agentId: 'impl-x', offset: 3, chunk: 'twothree' },
     });
   });
 
@@ -742,6 +744,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
 
     expect(got).toHaveLength(1);
     expect(got[0]!.agentId).toBe('impl-x');
+    expect(got[0]!.offset).toBe(CLAUDE_READY.length);
     // EXACT same string cross-process — a serialization / default-derivation bug MUST fail here.
     expect(got[0]!.chunk).toBe(chunk);
     expect(client.connected).toBe(true);
@@ -800,6 +803,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     const tail = await client.transcript('impl-x');
     expect(client.connected).toBe(true);
     expect(tail.agentId).toBe('impl-x');
+    expect(tail.offset).toBe(0);
     expect(tail.tail).toBe(CLAUDE_READY + chunks.join(''));
   });
 
@@ -855,7 +859,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     client.onTranscript((t) => got.push(t));
 
     // Down: transcript() degrades to an EMPTY tail; never hangs, never throws (Principle 9 / MNR #3).
-    expect(await client.transcript('impl-x')).toEqual({ agentId: 'impl-x', tail: '' });
+    expect(await client.transcript('impl-x')).toEqual({ agentId: 'impl-x', offset: 0, tail: '' });
     expect(client.connected).toBe(false);
 
     // Up: start the daemon on the same socket, wire the push, reconnect.
@@ -1560,7 +1564,11 @@ describe('serveConductor wiring — the IPC server rides the cadence runner (pus
 
     // C-P1 — serveConductor wires the transcript accessors into the control surface from the engine
     // (an unknown agent has no warm pane → an empty tail; never a throw).
-    expect(runner.control?.transcriptTail('impl-x')).toEqual({ agentId: 'impl-x', tail: '' });
+    expect(runner.control?.transcriptTail('impl-x')).toEqual({
+      agentId: 'impl-x',
+      offset: 0,
+      tail: '',
+    });
 
     const client = makeClient(projectId, socketPath);
     const ticks: OperatorIpcTick[] = [];
@@ -1717,7 +1725,7 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       observe: () => {
         throw new Error('observe boom in test');
       },
-      transcriptTail: (agentId) => ({ agentId, tail: '' }),
+      transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
     };
     await startServer(control, projectId, socketPath);

@@ -53,6 +53,9 @@ const staticObs = (agents: readonly AgentRecord[]): OperatorObservation => ({
   reason: 'conductor-not-running',
 });
 
+const tail = (agentId: string, text: string, offset = 0) => ({ agentId, offset, tail: text });
+const push = (agentId: string, chunk: string, offset = 0) => ({ agentId, offset, chunk });
+
 // ── AgentsConsoleVM ───────────────────────────────────────────────────────────
 
 describe('AgentsConsoleVM — initial state', () => {
@@ -188,7 +191,7 @@ describe('AgentsConsoleVM — selectAgent', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'some text' });
+    vm.setTranscriptTail(tail('a1', 'some text'));
     vm.selectAgent('a1'); // no-op (same id)
     expect(vm.state.transcript).toBe('some text'); // unchanged — same agent
     vm.selectAgent(null);
@@ -199,7 +202,7 @@ describe('AgentsConsoleVM — selectAgent', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator'), makeAgent('a2', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'agent1 output' });
+    vm.setTranscriptTail(tail('a1', 'agent1 output'));
     vm.selectAgent('a2');
     expect(vm.state.transcript).toBe('');
     expect(vm.state.selectedAgentId).toBe('a2');
@@ -209,7 +212,7 @@ describe('AgentsConsoleVM — selectAgent', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'hello' });
+    vm.setTranscriptTail(tail('a1', 'hello'));
     vm.selectAgent(null);
     expect(vm.state.selectedAgentId).toBeNull();
     expect(vm.state.selectedStatus).toBeNull();
@@ -263,7 +266,7 @@ describe('AgentsConsoleVM — update does not clear selection or transcript', ()
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'my output' });
+    vm.setTranscriptTail(tail('a1', 'my output'));
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     expect(vm.state.transcript).toBe('my output');
   });
@@ -292,7 +295,7 @@ describe('AgentsConsoleVM — setTranscriptTail', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'hello world' });
+    vm.setTranscriptTail(tail('a1', 'hello world'));
     expect(vm.state.transcript).toBe('hello world');
   });
 
@@ -300,13 +303,13 @@ describe('AgentsConsoleVM — setTranscriptTail', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail({ agentId: 'a2', tail: 'stale backfill' });
+    vm.setTranscriptTail(tail('a2', 'stale backfill'));
     expect(vm.state.transcript).toBe('');
   });
 
   it('ignored when no agent is selected', () => {
     const vm = new AgentsConsoleVM();
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'text' });
+    vm.setTranscriptTail(tail('a1', 'text'));
     expect(vm.state.transcript).toBe('');
   });
 
@@ -314,21 +317,34 @@ describe('AgentsConsoleVM — setTranscriptTail', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.appendChunk({ agentId: 'a1', chunk: 'live chunk\n' });
+    vm.appendChunk(push('a1', 'live chunk\n', 'existing tail\n'.length));
 
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'existing tail\n' });
+    vm.setTranscriptTail(tail('a1', 'existing tail\n'));
 
     expect(vm.state.transcript).toBe('existing tail\nlive chunk\n');
+  });
+
+  it('preserves a live chunk even when stale backfill already ends with the same bytes', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    const backfill = 'older prompt\n';
+    const repeatedLive = 'prompt\n';
+
+    vm.appendChunk(push('a1', repeatedLive, backfill.length));
+    vm.setTranscriptTail(tail('a1', backfill));
+
+    expect(vm.state.transcript).toBe(backfill + repeatedLive);
   });
 
   it('deduplicates partial overlap when a backfill already contains the first live chunk', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.appendChunk({ agentId: 'a1', chunk: 'B' });
-    vm.appendChunk({ agentId: 'a1', chunk: 'C' });
+    vm.appendChunk(push('a1', 'B', 1));
+    vm.appendChunk(push('a1', 'C', 2));
 
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'AB' });
+    vm.setTranscriptTail(tail('a1', 'AB'));
 
     expect(vm.state.transcript).toBe('ABC');
   });
@@ -339,7 +355,7 @@ describe('AgentsConsoleVM — setTranscriptTail', () => {
     vm.selectAgent('a1');
     const listener = vi.fn();
     vm.subscribe(listener);
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'hi' });
+    vm.setTranscriptTail(tail('a1', 'hi'));
     expect(listener).toHaveBeenCalledOnce();
   });
 });
@@ -349,8 +365,8 @@ describe('AgentsConsoleVM — appendChunk', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'line1\n' });
-    vm.appendChunk({ agentId: 'a1', chunk: 'line2\n' });
+    vm.setTranscriptTail(tail('a1', 'line1\n'));
+    vm.appendChunk(push('a1', 'line2\n', 'line1\n'.length));
     expect(vm.state.transcript).toBe('line1\nline2\n');
   });
 
@@ -358,14 +374,14 @@ describe('AgentsConsoleVM — appendChunk', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail({ agentId: 'a1', tail: 'a1 output' });
-    vm.appendChunk({ agentId: 'a2', chunk: 'a2 push' });
+    vm.setTranscriptTail(tail('a1', 'a1 output'));
+    vm.appendChunk(push('a2', 'a2 push'));
     expect(vm.state.transcript).toBe('a1 output');
   });
 
   it('ignored when no agent is selected', () => {
     const vm = new AgentsConsoleVM();
-    vm.appendChunk({ agentId: 'a1', chunk: 'data' });
+    vm.appendChunk(push('a1', 'data'));
     expect(vm.state.transcript).toBe('');
   });
 
@@ -375,7 +391,7 @@ describe('AgentsConsoleVM — appendChunk', () => {
     vm.selectAgent('a1');
     const listener = vi.fn();
     vm.subscribe(listener);
-    vm.appendChunk({ agentId: 'a1', chunk: 'x' });
+    vm.appendChunk(push('a1', 'x'));
     expect(listener).toHaveBeenCalledOnce();
   });
 
@@ -385,10 +401,10 @@ describe('AgentsConsoleVM — appendChunk', () => {
     vm.selectAgent('a1');
     // Fill to exactly the limit
     const base = 'A'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS);
-    vm.setTranscriptTail({ agentId: 'a1', tail: base });
+    vm.setTranscriptTail(tail('a1', base));
     // Append a chunk that pushes past the limit
     const chunk = 'BBBB';
-    vm.appendChunk({ agentId: 'a1', chunk });
+    vm.appendChunk(push('a1', chunk, base.length));
     expect(vm.state.transcript).toHaveLength(CONSOLE_TRANSCRIPT_MAX_CHARS);
     // The tail must end with the new chunk (most-recent preserved)
     expect(vm.state.transcript.endsWith(chunk)).toBe(true);
@@ -404,7 +420,7 @@ describe('AgentsConsoleVM — appendChunk', () => {
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
     const oversize = 'X'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS + 100);
-    vm.setTranscriptTail({ agentId: 'a1', tail: oversize });
+    vm.setTranscriptTail(tail('a1', oversize));
     expect(vm.state.transcript).toHaveLength(CONSOLE_TRANSCRIPT_MAX_CHARS);
     expect(vm.state.transcript.endsWith('X')).toBe(true);
   });

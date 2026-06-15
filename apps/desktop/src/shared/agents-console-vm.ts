@@ -38,18 +38,9 @@ function boundTranscript(text: string): string {
   return text.slice(text.length - CONSOLE_TRANSCRIPT_MAX_CHARS);
 }
 
-function mergeTranscriptBackfill(backfill: string, current: string): string {
-  if (current.length === 0) return boundTranscript(backfill);
-  if (backfill.length === 0) return boundTranscript(current);
-  if (backfill.endsWith(current)) return boundTranscript(backfill);
-  if (current.startsWith(backfill)) return boundTranscript(current);
-  const maxOverlap = Math.min(backfill.length, current.length);
-  for (let n = maxOverlap; n > 0; n--) {
-    if (backfill.endsWith(current.slice(0, n))) {
-      return boundTranscript(backfill + current.slice(n));
-    }
-  }
-  return boundTranscript(backfill + current);
+interface TranscriptSegment {
+  offset: number;
+  text: string;
 }
 
 export class AgentsConsoleVM {
@@ -61,6 +52,7 @@ export class AgentsConsoleVM {
     connection: 'degraded',
   };
   private readonly listeners = new Set<(state: AgentsConsoleState) => void>();
+  private transcriptSegments: TranscriptSegment[] = [];
 
   get state(): AgentsConsoleState {
     return this._state;
@@ -132,23 +124,58 @@ export class AgentsConsoleVM {
       selectedStatus,
       transcript: '',
     };
+    this.transcriptSegments = [];
     this.emit();
   }
 
   setTranscriptTail(tail: TranscriptTail): void {
     if (tail.agentId !== this._state.selectedAgentId) return;
-    this._state = {
-      ...this._state,
-      transcript: mergeTranscriptBackfill(tail.tail, this._state.transcript),
-    };
-    this.emit();
+    this.applyTranscriptSegment(tail.offset, tail.tail);
   }
 
   appendChunk(chunk: OperatorIpcTranscript): void {
     if (chunk.agentId !== this._state.selectedAgentId) return;
+    this.applyTranscriptSegment(chunk.offset, chunk.chunk);
+  }
+
+  private applyTranscriptSegment(offset: number, text: string): void {
+    if (text.length === 0) return;
+    const segments = [...this.transcriptSegments, { offset, text }]
+      .filter((segment) => segment.text.length > 0)
+      .sort((a, b) => a.offset - b.offset);
+    const merged: TranscriptSegment[] = [];
+    for (const segment of segments) {
+      const last = merged.at(-1);
+      if (last == null) {
+        merged.push({ ...segment });
+        continue;
+      }
+      const lastEnd = last.offset + last.text.length;
+      if (segment.offset <= lastEnd) {
+        const overlap = lastEnd - segment.offset;
+        if (overlap < segment.text.length) {
+          last.text += segment.text.slice(overlap);
+        }
+      } else {
+        merged.push({ ...segment });
+      }
+    }
+
+    let total = merged.reduce((sum, segment) => sum + segment.text.length, 0);
+    while (total > CONSOLE_TRANSCRIPT_MAX_CHARS && merged.length > 0) {
+      const first = merged[0]!;
+      const drop = Math.min(first.text.length, total - CONSOLE_TRANSCRIPT_MAX_CHARS);
+      first.offset += drop;
+      first.text = first.text.slice(drop);
+      total -= drop;
+      if (first.text.length === 0) merged.shift();
+    }
+
+    const transcript = merged.map((segment) => segment.text).join('');
+    this.transcriptSegments = merged;
     this._state = {
       ...this._state,
-      transcript: boundTranscript(this._state.transcript + chunk.chunk),
+      transcript: boundTranscript(transcript),
     };
     this.emit();
   }

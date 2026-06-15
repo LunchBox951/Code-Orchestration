@@ -9,6 +9,7 @@ import type {
   OperatorIpcTick,
   OperatorIpcTranscript,
   CostRollup,
+  TranscriptTail,
 } from '@co/core';
 import type { ProjectId } from '@co/core';
 import { projectDataDir } from '@co/core';
@@ -39,6 +40,17 @@ const liveObs: OperatorObservation = {
 };
 
 const flushPromises = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+const transcriptTail = (agentId: string, tail: string, offset = 0): TranscriptTail => ({
+  agentId,
+  offset,
+  tail,
+});
+const transcriptPush = (agentId: string, chunk: string, offset = 0): OperatorIpcTranscript => ({
+  agentId,
+  offset,
+  chunk,
+});
 
 function makeClient(obs: OperatorObservation = staticObs): OperatorIpcClient {
   return {
@@ -479,7 +491,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
         return () => {};
       }),
       onTranscript: vi.fn().mockReturnValue(() => {}),
-      transcript: vi.fn().mockResolvedValue({ agentId: 'impl-x', tail: 'hello world' }),
+      transcript: vi.fn().mockResolvedValue(transcriptTail('impl-x', 'hello world')),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as OperatorIpcClient;
 
@@ -529,7 +541,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
       observe: vi.fn().mockResolvedValue(staticObs),
       onTick: vi.fn().mockReturnValue(() => {}),
       onTranscript: vi.fn().mockReturnValue(() => {}),
-      transcript: vi.fn().mockResolvedValue({ agentId: 'impl-x', tail: 'hello world' }),
+      transcript: vi.fn().mockResolvedValue(transcriptTail('impl-x', 'hello world')),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as OperatorIpcClient;
 
@@ -565,7 +577,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
         transcriptListeners.push(cb);
         return () => {};
       }),
-      transcript: vi.fn().mockResolvedValue({ agentId: 'impl-x', tail: 'base' }),
+      transcript: vi.fn().mockResolvedValue(transcriptTail('impl-x', 'base')),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as OperatorIpcClient;
 
@@ -587,7 +599,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     onAgentsConsoleState.mockClear();
 
     // Chunk for the selected agent appends
-    transcriptListeners[0]?.({ agentId: 'impl-x', chunk: ' chunk' });
+    transcriptListeners[0]?.(transcriptPush('impl-x', ' chunk', 'base'.length));
     expect(onAgentsConsoleState).toHaveBeenCalledOnce();
     expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
       transcript: 'base chunk',
@@ -596,14 +608,14 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     onAgentsConsoleState.mockClear();
 
     // Chunk for a different agentId is ignored (per-agent isolation through the VM)
-    transcriptListeners[0]?.({ agentId: 'other-agent', chunk: ' ignored' });
+    transcriptListeners[0]?.(transcriptPush('other-agent', ' ignored'));
     expect(onAgentsConsoleState).not.toHaveBeenCalled();
   });
 
   it('selectAgent backfill preserves live chunks that arrive before transcript() resolves', async () => {
     const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
-    let resolveTranscript!: (tail: { agentId: string; tail: string }) => void;
-    const transcriptP = new Promise<{ agentId: string; tail: string }>((resolve) => {
+    let resolveTranscript!: (tail: TranscriptTail) => void;
+    const transcriptP = new Promise<TranscriptTail>((resolve) => {
       resolveTranscript = resolve;
     });
     const client = {
@@ -629,13 +641,13 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     await shell.start();
 
     shell.selectAgent('impl-x');
-    transcriptListeners[0]?.({ agentId: 'impl-x', chunk: 'live chunk\n' });
+    transcriptListeners[0]?.(transcriptPush('impl-x', 'live chunk\n', 'existing tail\n'.length));
     expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
       selectedAgentId: 'impl-x',
       transcript: 'live chunk\n',
     });
 
-    resolveTranscript({ agentId: 'impl-x', tail: 'existing tail\n' });
+    resolveTranscript(transcriptTail('impl-x', 'existing tail\n'));
 
     await vi.waitFor(() => {
       expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
@@ -645,13 +657,53 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     });
   });
 
+  it('selectAgent preserves repeated live bytes when stale backfill ends with the same text', async () => {
+    const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
+    let resolveTranscript!: (tail: TranscriptTail) => void;
+    const transcriptP = new Promise<TranscriptTail>((resolve) => {
+      resolveTranscript = resolve;
+    });
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockImplementation((cb: (t: OperatorIpcTranscript) => void) => {
+        transcriptListeners.push(cb);
+        return () => {};
+      }),
+      transcript: vi.fn().mockReturnValue(transcriptP),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    transcriptListeners[0]?.(transcriptPush('impl-x', 'prompt\n', 'older prompt\n'.length));
+    resolveTranscript(transcriptTail('impl-x', 'older prompt\n'));
+
+    await vi.waitFor(() => {
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        selectedAgentId: 'impl-x',
+        transcript: 'older prompt\nprompt\n',
+      });
+    });
+  });
+
   it('ignores an older same-agent backfill after selecting away and back', async () => {
-    let resolveFirst!: (tail: { agentId: string; tail: string }) => void;
-    let resolveSecond!: (tail: { agentId: string; tail: string }) => void;
-    const firstP = new Promise<{ agentId: string; tail: string }>((resolve) => {
+    let resolveFirst!: (tail: TranscriptTail) => void;
+    let resolveSecond!: (tail: TranscriptTail) => void;
+    const firstP = new Promise<TranscriptTail>((resolve) => {
       resolveFirst = resolve;
     });
-    const secondP = new Promise<{ agentId: string; tail: string }>((resolve) => {
+    const secondP = new Promise<TranscriptTail>((resolve) => {
       resolveSecond = resolve;
     });
     const client = {
@@ -676,7 +728,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     shell.selectAgent('impl-x');
     shell.selectAgent(null);
     shell.selectAgent('impl-x');
-    resolveSecond({ agentId: 'impl-x', tail: 'fresh tail\n' });
+    resolveSecond(transcriptTail('impl-x', 'fresh tail\n'));
 
     await vi.waitFor(() => {
       expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
@@ -685,7 +737,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
       });
     });
 
-    resolveFirst({ agentId: 'impl-x', tail: 'stale tail\n' });
+    resolveFirst(transcriptTail('impl-x', 'stale tail\n'));
     await flushPromises();
 
     expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({

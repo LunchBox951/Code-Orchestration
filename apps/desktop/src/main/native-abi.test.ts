@@ -78,8 +78,8 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
   });
 
   it('node-pty version is ≥1.0 (supports Electron 36 / Node 22.x ABI via napi 9+)', () => {
-    // node-pty v1.x ships N-API 9 prebuilds that cover Electron 30–39 / Node 22.x.
-    // v0.x only targeted older Electron/Node pairs and lacks these prebuilds.
+    // node-pty v1.x supports the N-API surface needed by Electron 30–39 / Node 22.x.
+    // On Linux, electron-builder may rebuild it for the packaged Electron ABI.
     // This assertion mirrors the node:sqlite check above — if the version drifts
     // below the ABI floor, the host proof will fail before anyone catches it.
     try {
@@ -113,7 +113,7 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
     const version = getElectronVersion();
     expect(version).toBeTruthy(); // package types are present
     // Operator TODO: run
-    // `pnpm --filter @co/desktop exec electron -e "require('node:sqlite'); require('node-pty'); console.log('native-abi: ok')"`
+    // `ELECTRON_RUN_AS_NODE=1 pnpm --filter @co/desktop exec electron -e "require('node:sqlite'); const { createRequire } = require('node:module'); createRequire(require.resolve('@co/core'))('node-pty'); console.log('native-abi: ok')"`
     // and confirm exit 0 with the sentinel "native-abi: ok".
     expect(true).toBe(true);
   });

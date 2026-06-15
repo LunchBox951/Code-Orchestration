@@ -396,7 +396,7 @@ export class OperatorIpcClient {
 
   /**
    * Stage 12 C-P1 — fetch `agentId`'s bounded transcript tail. DEGRADES cleanly like a hybrid read
-   * (Principle 9 / MNR #3): with NO socket it returns an EMPTY tail (`{ agentId, tail: '' }`) rather
+   * (Principle 9 / MNR #3): with NO socket it returns an EMPTY tail (`{ agentId, offset: 0, tail: '' }`) rather
    * than hanging or throwing — the renderer shows nothing until the Conductor is back. A live socket
    * returns the daemon's bounded tail; an UNEXPECTED daemon-side fault is surfaced to `onError` (not
    * masked as "down") while still degrading to an empty tail.
@@ -413,7 +413,7 @@ export class OperatorIpcClient {
         if (this.connection != null) this.report(error);
       }
     }
-    return { agentId, tail: '' };
+    return { agentId, offset: 0, tail: '' };
   }
 
   /** Subscribe to the per-tick push; survives reconnects. Returns an unsubscribe fn. */

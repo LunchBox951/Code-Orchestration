@@ -89,7 +89,9 @@ export interface ConductorControlSurface {
    * fires with `(agentId, chunk)` on every new pane chunk. Returns an unsubscribe fn. The operator-IPC
    * server subscribes this to forward each chunk outward as the `transcript:push` notification.
    */
-  readonly onTranscript: (listener: (agentId: string, chunk: string) => void) => () => void;
+  readonly onTranscript: (
+    listener: (agentId: string, chunk: string, offset: number) => void,
+  ) => () => void;
 }
 
 // ── The cadence runner ──────────────────────────────────────────────────────────────────────────────
@@ -411,10 +413,10 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     // Stage 12 C-P1 (TRANSCRIPT-SEAM) — back the transcript accessors with the running engine, closing
     // over THIS project: the tail is the engine's bounded per-agent buffer; onTranscript filters the
     // engine's global stream down to this project before handing `(agentId, chunk)` to the listener.
-    transcriptTail: (agentId) => ({ agentId, tail: engine.transcriptTail(projectId, agentId) }),
+    transcriptTail: (agentId) => engine.transcriptTailSnapshot(projectId, agentId),
     onTranscript: (listener) =>
-      engine.onTranscript((pid, agent, chunk) => {
-        if (pid === projectId) listener(agent, chunk);
+      engine.onTranscript((pid, agent, chunk, offset) => {
+        if (pid === projectId) listener(agent, chunk, offset);
       }),
   };
 
@@ -436,8 +438,8 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     // `transcript:push` notification. This is EVENT-DRIVEN (not the tick cadence), so it rides its OWN
     // engine→IPC subscription rather than `onTick`; torn down in onStop alongside the server close.
     const server = ipcServer;
-    unsubTranscript = control.onTranscript((agentId, chunk) =>
-      server.pushTranscript(agentId, chunk),
+    unsubTranscript = control.onTranscript((agentId, chunk, offset) =>
+      server.pushTranscript(agentId, chunk, offset),
     );
   }
 
