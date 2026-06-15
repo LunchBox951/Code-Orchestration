@@ -1,9 +1,9 @@
 # Research → Decision: Language & Implementation Stack
 
-**Status: language DECIDED; desktop-shell sub-question still OPEN.** This resolves the
-*language* half of the parked implementation-stack question (`runtime-substrate.md` open
-question #7) and leaves the *shell framework* half explicitly parked under Principle 16 —
-decisions-deferred (see [`../principles.md`](../principles.md)).
+**Status: FULLY DECIDED — language TypeScript; desktop shell Electron.** The *language* half
+was settled 2026-06-01 (`runtime-substrate.md` open question #7). The *shell framework*
+sub-question is now resolved: **the shell is Electron** (decided Stage 11, 2026-06-15 —
+see *Shell decision* below). Both halves closed; Principle 16 — decisions-deferred satisfied.
 
 **Decided:** 2026-06-01.
 
@@ -17,8 +17,7 @@ decisions-deferred (see [`../principles.md`](../principles.md)).
 (Principle 4 — one-agent-surface; [`../architecture/mcp-tools.md`](../architecture/mcp-tools.md)) inside a
 single module graph with no cross-language seam.
 
-The runtime is Node.js. The desktop shell is **Electron, or Tauri with a Node sidecar** — that
-one sub-question stays open (see *Still open* below).
+The runtime is Node.js. The desktop shell is **Electron** (see *Shell decision* below for rationale).
 
 ## How the decision was reached
 
@@ -73,13 +72,14 @@ The decision is dominated by the project's hardest, highest-risk, explicitly-par
 ## Known costs (accepted, with mitigations)
 
 - **Electron footprint** — bundled Chromium + memory, multiplied by many live terminal panes.
-  *Mitigation:* lazy panes; or Tauri-with-Node-sidecar to shed the Chromium shell (at the cost of
-  splitting the core out of the renderer's process). Folds into the open shell question below.
+  *Mitigation:* lazy panes; keep the core in Electron's main process and expose only a narrow
+  contextBridge surface to the sandboxed renderer.
 - **No compiler-enforced safety floor** for a system whose promise is *no silent failures /
   recoverable* (Principles 9, 14). *Mitigation:* `strict` mode + runtime schema validation (Zod) at
   every adapter/MCP boundary — discipline, not the type system alone.
-- **Native-addon packaging** — `node-pty` / `better-sqlite3` need per-platform prebuilds across
-  Linux/macOS/Windows ([`../architecture/worktrees.md`](../architecture/worktrees.md),
+- **Native-addon packaging** — `node-pty` needs per-platform prebuilds across Linux/macOS/Windows;
+  the program-data store uses Electron's bundled `node:sqlite`, not `better-sqlite3`
+  ([`../architecture/worktrees.md`](../architecture/worktrees.md),
   [`../architecture/init-and-config.md`](../architecture/init-and-config.md) auto-update).
 - **Single-threaded by default** — large diff/event-replay must move to worker threads or it stalls
   the loop.
@@ -103,13 +103,23 @@ The decision is dominated by the project's hardest, highest-risk, explicitly-par
   forfeiting the single-core advantage that is the whole point. (Notably, Python was *available* to
   two of three constrained analyses and to the unconstrained one — and none chose it.)
 
-## Still open (folds into `runtime-substrate.md` #7)
+## Shell decision (Stage 11 — 2026-06-15)
 
-- **Desktop shell: Electron vs. Tauri-with-a-Node-sidecar.** Decide by evidence at spec-execution
-  time, together with the substrate questions it couples to (footprint under many live terminal
-  panes; how the sidecar pattern interacts with pty hosting and turn/idle detection). Measure before
-  committing — Principle 16 — decisions-deferred.
+**The desktop shell is Electron.** Rationale:
 
-> When the shell sub-question resolves, fold the answer here and into `runtime-substrate.md` item 7,
-> and update both status lines. Reading order & project framing:
-> [`../README.md`](../README.md).
+1. **Zero seam.** Electron's main process IS Node, so it `import`s the same `@co/core` +
+   `@co/mcp` with no serialization boundary, FFI, or sidecar — the "one core, thin adapters"
+   mandate (Principle 4) is satisfied by construction.
+2. **Battle-tested pty home.** `node-pty` + `xterm.js` is the exact combination VS Code's
+   integrated terminal and Hyper ship. The authentic-terminal keystone (Principle 2) becomes
+   integration against mature libraries, not pioneering thin prior art.
+3. **`node:sqlite` built-in.** Electron 36+ bundles Node 22.x (≥22.5), which includes
+   `node:sqlite` natively — the program-data store works in-process in the main process
+   with no extra native-addon packaging.
+4. **Tauri would add Rust + a Node sidecar.** Tauri pushes TypeScript for the UI but Rust for
+   the shell, yielding a two-language build with an IPC seam at the exact boundary the design
+   wants seamless. Forcing a Node sidecar for `@co/core` / pty access taxes the v1 keystone to
+   optimize distribution — a v1 non-goal.
+
+> Reading order & project framing: [`../README.md`](../README.md).
+> This decision is also recorded in `runtime-substrate.md` item 7 and `v1-acceptance-criteria.md` SF-5.

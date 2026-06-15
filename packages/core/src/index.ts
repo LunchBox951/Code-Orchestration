@@ -504,6 +504,7 @@ export {
   reviewReviewerKey,
   resolveReviewerKind,
   resolveReviewerKindFromConfig,
+  buildHumanReviewVerdict,
   reviewRequestOutcome,
   reviewRequestEnvelope,
   recordHumanVerdict,
@@ -1260,6 +1261,23 @@ export type {
   LiveObservabilitySnapshot,
 } from './doctor/observability.js';
 export { queryLiveObservability } from './doctor/observability.js';
+
+// Stage 11 P1 (OP-IPC) — the TRANSPORT-AGNOSTIC operator-IPC contract: the request/response + push
+// notification shapes the cross-process desktop app and the `co serve` daemon agree on, referencing
+// ONLY core types. Pure types/interfaces + constant method maps — no I/O, no socket work (that is the
+// server/client in `@co/mcp`). Registers ZERO agent MCP tools — the IPC is filesystem-permissioned,
+// never an agent surface (Principle 4 + D4; AC-S11-6).
+export type {
+  OperatorIpcMethod,
+  OperatorMailRef,
+  ApprovalReply,
+  OperatorIpcSurface,
+  OperatorIpcTick,
+  OperatorUnavailableReason,
+  OperatorObservation,
+  OperatorIpcConnectionState,
+} from './operator-ipc/contract.js';
+export { OPERATOR_IPC_METHODS, OPERATOR_IPC_TICK } from './operator-ipc/contract.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

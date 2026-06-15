@@ -43,6 +43,7 @@ import { EngineReviewerSpawnGate } from './reviewer-gate.js';
 import { type CoMcpPaths } from './placement-launch.js';
 import { createSocketBridgeTransportPair } from './real-transport.js';
 import { defaultCoMcpPaths, type HostLaunchPathOptions } from './host-launch-paths.js';
+import { OperatorIpcServer, operatorIpcSocketPath } from '../operator-ipc/server.js';
 
 // ── The cadence scheduler seam (injected so the loop is FakePty-unit-testable) ──────────────────────
 
@@ -67,9 +68,9 @@ export const defaultScheduler: IntervalScheduler = {
 /**
  * The transport-agnostic operator surface for a running Conductor: CONTROL via the daemon-backed router
  * (unstick/pause/stop/steer act on live agents) and OBSERVE via a live snapshot (static rollup ⊕ engine
- * overlay). Built by {@link serveConductor} in the daemon process; the deferred cross-process IPC binding
- * (separate CLI → `co serve`) ships these same calls over the wire next stage. Registers ZERO agent MCP
- * tools — operator-only methods, never agent-callable (Principle 4 + D4).
+ * overlay). Built by {@link serveConductor} in the daemon process; Stage 11's operator-IPC server ships
+ * these same calls over the app → daemon socket. Registers ZERO agent MCP tools — operator-only methods,
+ * never agent-callable (Principle 4 + D4).
  */
 export interface ConductorControlSurface {
   /** The daemon-backed router — `revertStuck`/`rewake`/`pause`/`stop` (+ `resume`/`steer`) on live agents. */
@@ -296,6 +297,22 @@ export interface ServeConductorOptions {
    * fixture paths (clone `TEST_MCP_PATHS` from `placement-launch.test.ts`).
    */
   readonly coMcpPaths?: CoMcpPaths;
+  /**
+   * Stage 11 P1 (OP-IPC) — when set, `co serve` also starts the cross-process operator-IPC server
+   * (the desktop-app binding) on a Unix socket under the project data dir: it forwards a fresh
+   * snapshot to a connected app each tick and is closed on runner stop. Absent ⇒ no IPC server (every
+   * existing caller/test is unchanged). The socket is operator-uid-only by OS permission; the server
+   * registers ZERO agent MCP tools (Principle 4 + D4).
+   */
+  readonly operatorIpc?: OperatorIpcServeConfig;
+}
+
+/** Stage 11 P1 (OP-IPC) — configuration for the operator-IPC server `co serve` starts (see above). */
+export interface OperatorIpcServeConfig {
+  /** Override the socket path. Default: {@link operatorIpcSocketPath} under the project data dir. */
+  readonly socketPath?: string;
+  /** Diagnostic seam for IPC server errors (a push to a vanished client, a transport error). */
+  readonly onError?: (error: unknown) => void;
 }
 
 /**
@@ -316,11 +333,17 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   let spawnGate: EngineReviewerSpawnGate | undefined;
   let ownedWtStore: ReturnType<typeof openWorktreeStore> | undefined;
   let isolatedHomeDirFor: ((agent: string) => string) | undefined;
-  if (opts.coMcpPaths != null) {
+  // The project data dir backs both the per-pane isolated homes (P2) and the operator-IPC socket
+  // (Stage 11 P1) — derive it once when either is needed.
+  let dataDir: string | undefined;
+  if (opts.coMcpPaths != null || opts.operatorIpc != null) {
     const registry = openRegistry();
-    const dataDir = registry.dataDirFor(projectId);
+    dataDir = registry.dataDirFor(projectId);
     registry.close();
-    isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+  }
+  if (opts.coMcpPaths != null && dataDir != null) {
+    const resolvedDataDir = dataDir;
+    isolatedHomeDirFor = (agent: string): string => join(resolvedDataDir, 'isolated', agent);
   }
   const makeTransport =
     opts.makeTransport ??
@@ -369,6 +392,25 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       ),
   });
   const liveProvider = new EngineLiveStateProvider({ engine, projectId, router });
+  const control: ConductorControlSurface = {
+    router,
+    observe: () => queryLiveObservability(projectId, liveProvider),
+  };
+
+  // Stage 11 P1 (OP-IPC) — the cross-process operator-IPC server, started alongside the cadence
+  // runner. It wraps this same `control` surface (+ opens the mail store per write), forwards each
+  // tick as a `tick` push (wired below), and is closed on runner stop. Operator-uid-only by socket
+  // permission; ZERO agent MCP tools.
+  let ipcServer: OperatorIpcServer | undefined;
+  if (opts.operatorIpc != null && dataDir != null) {
+    ipcServer = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath: opts.operatorIpc.socketPath ?? operatorIpcSocketPath(dataDir),
+      ...(opts.operatorIpc.onError != null ? { onError: opts.operatorIpc.onError } : {}),
+    });
+    await ipcServer.start();
+  }
 
   const reconcile = new ReconcileLoop({
     runningAgents: () => liveRunningAgents(projectId, engine),
@@ -397,14 +439,24 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   });
 
   const wtStoreForStop = ownedWtStore;
+  // Forward each tick as the operator-IPC `tick` push (D6 — the whole fresh snapshot) while still
+  // honoring any caller `onTick`. Built only when either is present, so existing callers are unchanged.
+  const onTick =
+    ipcServer != null || opts.onTick != null
+      ? (outcome: DaemonTickOutcome): void => {
+          opts.onTick?.(outcome);
+          if (ipcServer != null) ipcServer.pushTick(control.observe());
+        }
+      : undefined;
   const runner = new ConductorHostRunner({
     daemon,
     intervalMs: opts.intervalMs ?? 1000,
-    control: { router, observe: () => queryLiveObservability(projectId, liveProvider) },
+    control,
     ...(opts.scheduler != null ? { scheduler: opts.scheduler } : {}),
-    ...(opts.onTick != null ? { onTick: opts.onTick } : {}),
+    ...(onTick != null ? { onTick } : {}),
     ...(opts.onError != null ? { onError: opts.onError } : {}),
     onStop: async () => {
+      if (ipcServer != null) await ipcServer.close();
       try {
         await router.drain();
         await engine.closeAll();
@@ -441,6 +493,11 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   const runner = await serveConductor({
     projectId,
     coMcpPaths: defaultServeCoMcpPaths(),
+    // Stage 11 P1 (OP-IPC) — start the cross-process operator-IPC server so the desktop app can
+    // observe + control + write over the Unix socket (operator-uid-only). Errors go to stderr.
+    operatorIpc: {
+      onError: (err) => console.error('[co serve] operator-ipc error:', err),
+    },
     onTick: (o) =>
       console.error(
         `[co serve] tick ${o.tick} candidates=${o.candidateCount} ` +

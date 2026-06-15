@@ -5,9 +5,9 @@
   "packageManager": "pnpm@10.33.0",
   "engines": { "node": ">=24" },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node apps/desktop/scripts/copy-renderer-assets.mjs",
     "typecheck": "tsc -b && pnpm typecheck:test",
-    "typecheck:test": "tsc -p packages/core/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json && tsc -p packages/mcp/tsconfig.test.json",
+    "typecheck:test": "tsc -p packages/core/tsconfig.test.json && tsc -p packages/cli/tsconfig.test.json && tsc -p packages/mcp/tsconfig.test.json && tsc -p apps/desktop/tsconfig.test.json && tsc -p apps/desktop/tsconfig.renderer.test.json",
     "pretest": "pnpm build",
     "test": "vitest run --exclude \".co/**\"",
     "test:watch": "vitest --exclude \".co/**\"",

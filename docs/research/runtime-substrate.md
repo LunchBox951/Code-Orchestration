@@ -1,10 +1,11 @@
 # Research: Runtime Substrate
 
-**Status: open.** This is the keystone decision parked pending evidence (Principle 16 —
-decisions-deferred; see [`../principles.md`](../principles.md)). Everything *substrate-independent*
-is already settled across the [architecture docs](../architecture/); this file collects the questions that genuinely wait on the
-runtime substrate, so the deferral is explicit and every "waits on the research" reference in the
-design resolves to one place.
+**Status: item 7 (shell) RESOLVED — Electron (Stage 11, 2026-06-15); items 1–6 remain open.**
+This is the keystone decision parked pending evidence (Principle 16 — decisions-deferred; see
+[`../principles.md`](../principles.md)). Everything *substrate-independent* is already settled
+across the [architecture docs](../architecture/); this file collects the questions that genuinely
+wait on the runtime substrate, so the deferral is explicit and every "waits on the research"
+reference in the design resolves to one place.
 
 ## The operator directive (the fixed anchor)
 
@@ -41,9 +42,11 @@ Harvested from every topic that flagged a deferral:
    mail-injection, turn/idle detection, subscription auth, startup handling.
 7. **Implementation stack** — *language settled: TypeScript* (one core, thin MCP/app/CLI adapters;
    `node-pty` + `xterm.js` for the authentic-terminal keystone) — see
-   [`language-and-stack.md`](language-and-stack.md). Still open: the **desktop-app shell**
-   (Electron vs. Tauri-with-a-Node-sidecar), which stays coupled to whatever the questions above
-   resolve to.
+   [`language-and-stack.md`](language-and-stack.md). **Shell RESOLVED (Stage 11, 2026-06-15):
+   Electron.** Rationale: Electron's main process IS Node, so it `import`s `@co/core` and `@co/mcp`
+   with zero seam; `node-pty` + `xterm.js` is Electron's battle-tested home; Tauri would force a
+   Node sidecar + add Rust, taxing the v1 keystone to optimize distribution (a v1 non-goal). Full
+   rationale in [`language-and-stack.md`](language-and-stack.md) under *Shell decision*.
 
 ## Method
 

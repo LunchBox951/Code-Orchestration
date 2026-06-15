@@ -1,0 +1,1249 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'"
+    />
+    <title>co · Code Orchestration</title>
+    <style>
+      /* Design palette: dark oklch theme */
+      :root {
+        --bg: oklch(0.165 0.006 262);
+        --surface: oklch(0.185 0.007 262);
+        --card: oklch(0.205 0.007 262);
+        --border: oklch(0.31 0.009 262);
+        --text: oklch(0.83 0.006 262);
+        --heading: oklch(0.96 0.003 262);
+        --muted: oklch(0.65 0.009 262);
+        --accent: oklch(0.71 0.14 255);
+        --live: oklch(0.8 0.17 150);
+        --warm: oklch(0.8 0.17 150);
+        --waiting: oklch(0.8 0.15 85);
+        --stuck: oklch(0.65 0.22 25);
+        --paused: oklch(0.6 0.01 262);
+        --header-h: 52px;
+        --rail-w: 224px;
+        --radius: 8px;
+        font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+        font-size: 14px;
+        color: var(--text);
+        background: var(--bg);
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        height: 100vh;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* ── Header ─────────────────────────────────────────────── */
+      header {
+        height: var(--header-h);
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 16px;
+        gap: 12px;
+        flex-shrink: 0;
+        -webkit-app-region: drag;
+      }
+
+      .logo-tile {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-weight: 700;
+        font-size: 16px;
+        color: var(--accent);
+        letter-spacing: 0;
+        -webkit-app-region: no-drag;
+      }
+
+      .header-title {
+        font-size: 13px;
+        color: var(--muted);
+        flex: 1;
+      }
+
+      .live-pill {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 99px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        -webkit-app-region: no-drag;
+      }
+
+      .live-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--border);
+        flex-shrink: 0;
+        transition: background 0.3s;
+      }
+
+      .live-dot.live {
+        background: var(--live);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+
+      .avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        background: var(--accent);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        font-weight: 600;
+        color: #fff;
+        flex-shrink: 0;
+        -webkit-app-region: no-drag;
+      }
+
+      /* ── Body layout ─────────────────────────────────────────── */
+      .body {
+        flex: 1;
+        display: flex;
+        overflow: hidden;
+      }
+
+      /* ── Left rail ───────────────────────────────────────────── */
+      nav {
+        width: var(--rail-w);
+        background: var(--surface);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+        padding: 8px 0;
+      }
+
+      .rail-title {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 4px 16px 8px;
+      }
+
+      .nav-item {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        background: none;
+        border: 0;
+        padding: 8px 16px;
+        cursor: pointer;
+        border-radius: 0;
+        color: var(--muted);
+        user-select: none;
+        transition: color 0.15s;
+        font-size: 13px;
+        font-family: inherit;
+        text-align: left;
+      }
+
+      .nav-item:hover {
+        color: var(--text);
+        background: var(--card);
+      }
+
+      .nav-item.active {
+        color: var(--heading);
+      }
+
+      .nav-item.active::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 4px;
+        bottom: 4px;
+        width: 3px;
+        background: var(--accent);
+        border-radius: 0 3px 3px 0;
+      }
+
+      .nav-glyph {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 13px;
+        width: 16px;
+        text-align: center;
+        flex-shrink: 0;
+      }
+
+      .nav-badge {
+        margin-left: auto;
+        background: var(--accent);
+        color: #fff;
+        font-size: 10px;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 99px;
+        min-width: 18px;
+        text-align: center;
+      }
+
+      /* ── Main panel ──────────────────────────────────────────── */
+      main {
+        flex: 1;
+        overflow: auto;
+        padding: 20px;
+      }
+
+      .view {
+        display: none;
+        height: 100%;
+      }
+
+      .view.active {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .view-heading {
+        font-size: 18px;
+        font-weight: 600;
+        color: var(--heading);
+      }
+
+      .stub-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 40px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      /* ── Mission Control / Dashboard ─────────────────────────── */
+      .mc-header {
+        margin-bottom: 4px;
+      }
+
+      .mc-title {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--heading);
+        letter-spacing: 0;
+      }
+
+      .mc-subline {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+
+      .degraded-banner {
+        background: oklch(0.28 0.04 85);
+        border: 1px solid oklch(0.45 0.08 85);
+        border-radius: var(--radius);
+        padding: 8px 14px;
+        font-size: 12px;
+        color: oklch(0.88 0.12 85);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .stat-tiles {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 10px;
+      }
+
+      .stat-tile {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .stat-label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .stat-value {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 28px;
+        font-weight: 700;
+        color: var(--heading);
+        line-height: 1;
+      }
+
+      .tile-warm .stat-label {
+        color: var(--warm);
+      }
+      .tile-waiting .stat-label {
+        color: var(--waiting);
+      }
+      .tile-stuck .stat-label {
+        color: var(--stuck);
+      }
+      .tile-paused .stat-label {
+        color: var(--paused);
+      }
+
+      .section-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .section-heading {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .action-count {
+        background: var(--accent);
+        color: #fff;
+        font-size: 10px;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 99px;
+        min-width: 18px;
+        text-align: center;
+      }
+
+      .tree-view {
+        padding: 8px 0;
+        max-height: 280px;
+        overflow-y: auto;
+      }
+
+      .tree-node {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 14px;
+        font-size: 13px;
+      }
+
+      .tree-role {
+        color: var(--muted);
+        font-size: 11px;
+        flex-shrink: 0;
+      }
+
+      .tree-id {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 12px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* ── Status dots ─────────────────────────────────────────── */
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .dot-warm {
+        background: var(--warm);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      .dot-waiting {
+        background: var(--waiting);
+      }
+
+      .dot-stuck {
+        background: var(--stuck);
+      }
+
+      .dot-paused {
+        background: var(--paused);
+      }
+
+      .dot-unknown {
+        background: var(--border);
+      }
+
+      /* ── Action-required panel ───────────────────────────────── */
+      .action-panel {
+        border-color: oklch(0.45 0.08 85 / 0.5);
+      }
+
+      .action-panel .section-heading {
+        color: oklch(0.88 0.12 85);
+        border-bottom-color: oklch(0.45 0.08 85 / 0.5);
+      }
+
+      .actionable-list {
+        max-height: 240px;
+        overflow-y: auto;
+      }
+
+      .actionable-row {
+        display: grid;
+        grid-template-columns: 140px 1fr 120px 48px;
+        gap: 10px;
+        align-items: center;
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+      }
+
+      .actionable-row:last-child {
+        border-bottom: none;
+      }
+
+      .action-type {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        font-weight: 600;
+        color: oklch(0.88 0.12 85);
+        background: oklch(0.28 0.04 85);
+        padding: 2px 6px;
+        border-radius: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .action-subject {
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .action-sender {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .action-age {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        text-align: right;
+      }
+
+      .empty-state {
+        padding: 24px 14px;
+        font-size: 12px;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      /* ── Mail view ───────────────────────────────────────── */
+      main:has(#view-mail.active) {
+        padding: 0;
+        overflow: hidden;
+      }
+
+      #view-mail.active {
+        height: 100%;
+        gap: 0;
+      }
+
+      .mail-layout {
+        display: flex;
+        height: 100%;
+        overflow: hidden;
+      }
+
+      .mail-sidebar {
+        width: 260px;
+        flex-shrink: 0;
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--surface);
+      }
+
+      .mail-bus-area {
+        padding: 12px 14px 8px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .mail-bus-label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      .bus-option {
+        display: block;
+        width: 100%;
+        padding: 4px 8px;
+        border: 0;
+        border-radius: 5px;
+        background: none;
+        cursor: pointer;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        text-align: left;
+        transition:
+          background 0.1s,
+          color 0.1s;
+      }
+
+      .bus-option:hover {
+        background: var(--border);
+        color: var(--text);
+      }
+
+      .bus-option.active {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .mail-tabs {
+        display: flex;
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+
+      .mail-tab {
+        flex: 1;
+        padding: 8px;
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--muted);
+        letter-spacing: 0;
+        text-transform: uppercase;
+        transition: color 0.15s;
+      }
+
+      .mail-tab:hover {
+        color: var(--text);
+      }
+
+      .mail-tab.active {
+        color: var(--accent);
+        box-shadow: inset 0 -2px 0 var(--accent);
+      }
+
+      .mail-list {
+        flex: 1;
+        overflow-y: auto;
+      }
+
+      .mail-row {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+
+      .mail-row:hover {
+        background: var(--card);
+      }
+
+      .mail-row.selected {
+        background: var(--card);
+        border-left: 3px solid var(--accent);
+        padding-left: 11px;
+      }
+
+      .mail-row.actionable {
+        border-left: 3px solid oklch(0.8 0.15 85);
+        padding-left: 11px;
+      }
+
+      .mail-row.actionable.selected {
+        border-left-color: var(--accent);
+      }
+
+      .mail-row-type {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--muted);
+        margin-bottom: 2px;
+        text-transform: uppercase;
+      }
+
+      .mail-row-type.actionable {
+        color: oklch(0.88 0.12 85);
+      }
+
+      .mail-row-subject {
+        font-size: 13px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 500;
+      }
+
+      .mail-row-subject.unread {
+        color: var(--heading);
+        font-weight: 600;
+      }
+
+      .mail-row-meta {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 3px;
+      }
+
+      .mail-row-sender {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .mail-row-age {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+
+      .mail-detail-pane {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      /* ── Mail cards (typed) ──────────────────────────────── */
+      .mail-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .mail-card-header {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .mail-card-type {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0;
+        color: var(--muted);
+      }
+
+      .mail-card-type.actionable {
+        color: oklch(0.88 0.12 85);
+      }
+
+      .mail-card-subject {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--heading);
+      }
+
+      .mail-card-meta {
+        font-size: 11px;
+        color: var(--muted);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .mail-card-body {
+        padding: 16px;
+        font-size: 13px;
+        color: var(--text);
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .mail-card.approval-card {
+        border-color: oklch(0.45 0.08 85 / 0.5);
+      }
+
+      .mail-card.approval-card .mail-card-type {
+        color: oklch(0.88 0.12 85);
+      }
+
+      .mail-card-actions {
+        display: flex;
+        gap: 10px;
+        padding: 12px 16px;
+        border-top: 1px solid var(--border);
+        background: var(--surface);
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .mail-card-actions .btn-reply {
+        margin-left: auto;
+      }
+
+      /* ── Buttons ─────────────────────────────────────────── */
+      .btn {
+        padding: 7px 18px;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+        transition: opacity 0.15s;
+        font-family: inherit;
+      }
+
+      .btn:hover {
+        opacity: 0.85;
+      }
+
+      .btn-approve {
+        background: var(--live);
+        color: oklch(0.1 0 0);
+      }
+
+      .btn-decline {
+        background: var(--stuck);
+        color: #fff;
+      }
+
+      .btn-reply {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .btn-secondary {
+        background: var(--card);
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+
+      /* ── Reply composer ──────────────────────────────────── */
+      .mail-composer {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .mail-composer-header {
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .mail-composer-close {
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 18px;
+        color: var(--muted);
+        line-height: 1;
+        padding: 0 2px;
+        font-family: inherit;
+      }
+
+      .mail-composer-close:hover {
+        color: var(--text);
+      }
+
+      .mail-composer-body {
+        padding: 12px 16px;
+      }
+
+      .composer-textarea {
+        width: 100%;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 12px;
+        padding: 8px 12px;
+        resize: none;
+        outline: none;
+        min-height: 100px;
+        line-height: 1.5;
+      }
+
+      .composer-textarea:focus {
+        border-color: var(--accent);
+      }
+
+      .mail-composer-footer {
+        padding: 10px 16px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      /* ── Error toast ─────────────────────────────────────── */
+      .mail-error-toast {
+        background: oklch(0.25 0.07 25);
+        border: 1px solid oklch(0.45 0.15 25);
+        border-radius: var(--radius);
+        padding: 10px 14px;
+        font-size: 12px;
+        color: oklch(0.88 0.18 25);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      /* ── Limits popover button ────────────────────────── */
+      .limits-wrapper {
+        position: relative;
+        -webkit-app-region: no-drag;
+      }
+
+      .limits-btn {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 99px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        cursor: pointer;
+        transition:
+          border-color 0.15s,
+          color 0.15s;
+      }
+
+      .limits-btn:hover {
+        border-color: var(--accent);
+        color: var(--text);
+      }
+
+      .limits-btn.open {
+        border-color: var(--accent);
+        color: var(--heading);
+      }
+
+      /* ── Limits popover panel ─────────────────────────── */
+      .limits-popover {
+        position: absolute;
+        top: calc(100% + 8px);
+        right: 0;
+        width: 340px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: 0 8px 24px oklch(0 0 0 / 0.4);
+        z-index: 100;
+        overflow: hidden;
+      }
+
+      .limits-popover-hdr {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--heading);
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+
+      .limits-popover-cap {
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--muted);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .limits-popover-body {
+        padding: 10px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        max-height: 360px;
+        overflow-y: auto;
+      }
+
+      .limits-provider-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+
+      .limits-provider-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--heading);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        text-transform: uppercase;
+        letter-spacing: 0;
+      }
+
+      .headroom-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .headroom-dot-low {
+        background: var(--warm);
+      }
+      .headroom-dot-mid {
+        background: var(--waiting);
+      }
+      .headroom-dot-high {
+        background: var(--stuck);
+      }
+      .headroom-dot-unknown {
+        background: var(--border);
+      }
+
+      .limits-bar-rows {
+        padding: 8px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .limits-bar-row {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .limits-bar-meta {
+        display: flex;
+        justify-content: space-between;
+        font-size: 10px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .limits-bar-label {
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0;
+      }
+
+      .limits-bar-pct {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .limits-bar-track {
+        height: 5px;
+        background: var(--border);
+        border-radius: 99px;
+        overflow: hidden;
+      }
+
+      .limits-bar-fill {
+        height: 100%;
+        border-radius: 99px;
+        background: var(--accent);
+        transition: width 0.3s;
+      }
+
+      .limits-bar-fill-high {
+        background: var(--stuck);
+      }
+      .limits-bar-fill-mid {
+        background: var(--waiting);
+      }
+
+      .limits-bar-reset {
+        font-size: 10px;
+        color: var(--muted);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .limits-unknown-row {
+        padding: 6px 12px;
+        font-size: 11px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      /* ── Cost view ────────────────────────────────────── */
+      .cost-sections {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        align-items: start;
+      }
+
+      .cost-section {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .cost-section-heading {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .cost-list {
+        padding: 4px 0;
+        max-height: 400px;
+        overflow-y: auto;
+      }
+
+      .cost-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 7px 14px;
+        border-bottom: 1px solid var(--border);
+        gap: 12px;
+      }
+
+      .cost-row:last-child {
+        border-bottom: none;
+      }
+
+      .cost-row-id {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .cost-row-usd {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--heading);
+        flex-shrink: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Header -->
+    <header>
+      <span class="logo-tile">co</span>
+      <span class="header-title">Code Orchestration · Conductor</span>
+      <div class="live-pill">
+        <span class="live-dot" id="live-dot"></span>
+        <span id="live-label">offline</span>
+      </div>
+      <div class="limits-wrapper" id="limits-wrapper">
+        <button
+          class="limits-btn"
+          id="limits-btn"
+          type="button"
+          aria-expanded="false"
+          aria-controls="limits-popover"
+          aria-haspopup="dialog"
+        >
+          <span>&#x25C8;</span>
+          <span id="limits-summary">Limits</span>
+        </button>
+        <div class="limits-popover" id="limits-popover" role="dialog" hidden>
+          <div class="limits-popover-hdr">
+            Subscription limits
+            <span class="limits-popover-cap">balancer paces on headroom</span>
+          </div>
+          <div class="limits-popover-body" id="limits-popover-body">
+            <div class="empty-state">No usage data</div>
+          </div>
+        </div>
+      </div>
+      <div class="avatar">OP</div>
+    </header>
+
+    <!-- Body -->
+    <div class="body">
+      <!-- Left rail nav -->
+      <nav id="nav-rail">
+        <div class="rail-title">Cockpit</div>
+        <button class="nav-item active" data-view="dashboard" type="button">
+          <span class="nav-glyph">◈</span>
+          Dashboard
+        </button>
+        <button class="nav-item" data-view="agents" type="button">
+          <span class="nav-glyph">⊕</span>
+          Agents
+        </button>
+        <button class="nav-item" data-view="mail" type="button">
+          <span class="nav-glyph">✉</span>
+          Mail
+          <span class="nav-badge" id="mail-badge" style="display: none">0</span>
+        </button>
+        <button class="nav-item" data-view="review" type="button">
+          <span class="nav-glyph">◎</span>
+          Review
+        </button>
+        <button class="nav-item" data-view="source" type="button">
+          <span class="nav-glyph">⊞</span>
+          Source
+        </button>
+        <button class="nav-item" data-view="cost" type="button">
+          <span class="nav-glyph">§</span>
+          Cost
+        </button>
+      </nav>
+
+      <!-- Main content area -->
+      <main>
+        <div class="view active" id="view-dashboard">
+          <div class="mc-header">
+            <div class="mc-title">Mission Control</div>
+            <div class="mc-subline">Connecting to conductor…</div>
+          </div>
+        </div>
+        <div class="view" id="view-agents">
+          <div class="view-heading">Agents</div>
+          <div class="stub-card">Coming in a later stage.</div>
+        </div>
+        <div class="view" id="view-mail">
+          <div class="mail-layout">
+            <!-- Left: bus selector + tabs + list -->
+            <div class="mail-sidebar">
+              <div class="mail-bus-area">
+                <div class="mail-bus-label">Viewing</div>
+                <div id="mail-bus-selector">
+                  <button
+                    class="bus-option active"
+                    data-bus="@operator"
+                    type="button"
+                    aria-pressed="true"
+                  >
+                    @operator
+                  </button>
+                </div>
+              </div>
+              <div class="mail-tabs" role="tablist">
+                <button
+                  class="mail-tab active"
+                  id="mail-tab-inbox"
+                  data-tab="inbox"
+                  type="button"
+                  role="tab"
+                  aria-selected="true"
+                >
+                  Inbox
+                </button>
+                <button
+                  class="mail-tab"
+                  id="mail-tab-outbox"
+                  data-tab="outbox"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                >
+                  Outbox
+                </button>
+              </div>
+              <div class="mail-list" id="mail-list">
+                <div class="empty-state">Loading…</div>
+              </div>
+            </div>
+            <!-- Right: message detail + composer -->
+            <div class="mail-detail-pane" id="mail-detail-pane">
+              <div class="empty-state">Select a message to read it</div>
+            </div>
+          </div>
+        </div>
+        <div class="view" id="view-review">
+          <div class="view-heading">Review</div>
+          <div class="stub-card">Coming in a later stage.</div>
+        </div>
+        <div class="view" id="view-source">
+          <div class="view-heading">Source</div>
+          <div class="stub-card">Coming in a later stage.</div>
+        </div>
+        <div class="view" id="view-cost">
+          <div class="view-heading">Cost</div>
+          <div id="cost-content">
+            <div class="empty-state">Loading cost data…</div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>
