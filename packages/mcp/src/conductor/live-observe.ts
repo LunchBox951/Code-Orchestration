@@ -4,8 +4,8 @@
  * The LIVE half of observability (which agents are WARM right now, their outstanding actionable mail,
  * and the operator-control state) can only be answered by the running engine + its control surface — so
  * it lives in `@co/mcp`, not `@co/core`. The SHAPE and the MERGE ({@link queryLiveObservability}) are in
- * core (transport-agnostic, cli-callable); this class fills the seam in the daemon process. The deferred
- * cross-process IPC binding is the next stage; here the daemon process calls it in-process.
+ * core (transport-agnostic, cli-callable); this class fills the seam in the daemon process. Stage 11's
+ * operator-IPC binding exposes the resulting snapshot across the app → daemon socket.
  *
  * Registers ZERO agent MCP tools — a plain provider class, operator-only (Principle 4 + D4).
  */

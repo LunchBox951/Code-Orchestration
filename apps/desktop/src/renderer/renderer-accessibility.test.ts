@@ -24,6 +24,10 @@ describe('renderer accessibility states', () => {
     expect(rendererSource).toContain("setAttribute('aria-expanded', 'false')");
   });
 
+  it('labels the icon-only composer close button', () => {
+    expect(rendererSource).toContain('aria-label="Close composer"');
+  });
+
   it('opens non-approval replies against the selected mail recipient inbox', () => {
     const nonApprovalBranch = rendererSource.slice(
       rendererSource.indexOf('} else if (isActionable)'),

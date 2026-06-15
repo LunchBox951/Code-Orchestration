@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.renderer.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "types": ["node", "vitest"]
+  },
+  "include": ["src/renderer/**/*.test.ts"],
+  "exclude": []
+}

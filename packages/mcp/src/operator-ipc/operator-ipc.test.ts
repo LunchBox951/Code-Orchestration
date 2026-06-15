@@ -812,6 +812,44 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     expect(responses).toHaveLength(1);
   });
 
+  it('reply rejects reusing an idempotency key for a different unresolved target', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const firstAsk = seedActionableMail(projectId, 'lead-1', 'impl-x');
+    const secondAsk = seedActionableMail(projectId, 'lead-1', 'impl-x');
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+    const draft = {
+      type: 'clarify_response' as const,
+      subject: 're: first',
+      body: 'use claude',
+      idempotencyKey: 'operator-ipc-reply:reuse',
+    };
+
+    await client.reply({ seq: firstAsk.seq, recipient: 'lead-1' }, draft);
+
+    await expect(client.reply({ seq: secondAsk.seq, recipient: 'lead-1' }, draft)).rejects.toThrow(
+      /already answers mail/i,
+    );
+
+    const responses = inboxOf(projectId, 'impl-x').filter(
+      (m) => m.type === 'clarify_response' && m.idempotencyKey === draft.idempotencyKey,
+    );
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.causationId).toBe(String(firstAsk.seq));
+    const lead = openMailStore(projectId);
+    mailStores.push(lead);
+    expect(lead.outstanding('lead-1').map((m) => m.seq)).toContain(secondAsk.seq);
+  });
+
   it('reply rejects a non-actionable target without appending a response', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
@@ -944,6 +982,70 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
       (m) => m.type === MAIL_REVIEW_RESPONSE && m.causationId === String(request.seq),
     );
     expect(response?.reviewVerdict).toBe('PASS');
+  });
+
+  it('reply treats exact review_response retries as idempotent and rejects changed verdicts', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const seedStore = openMailStore(projectId);
+    let request: DeliveredMail;
+    try {
+      request = seedStore.requestHumanReview(
+        {
+          type: 'review_request',
+          to: '@operator',
+          from: 'lead-review',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-opipc-review-retry',
+        },
+        {
+          reviewId: 'rev-opipc-review-retry',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead-review',
+          reviewerKind: 'human',
+        },
+      ).mail;
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+    const draft = {
+      type: MAIL_REVIEW_RESPONSE,
+      subject: 're: review requested',
+      body: 'passes',
+      reviewVerdict: 'PASS' as const,
+      idempotencyKey: 'operator-ipc-review-response:retry',
+    };
+
+    const first = await client.reply({ seq: request.seq, recipient: '@operator' }, draft);
+    const second = await client.reply({ seq: request.seq, recipient: '@operator' }, draft);
+
+    expect(second).toEqual(first);
+    await expect(
+      client.reply(
+        { seq: request.seq, recipient: '@operator' },
+        { ...draft, reviewVerdict: 'ISSUES' as const },
+      ),
+    ).rejects.toThrow(/review_verdict|review verdict|already resolved/i);
+    const responses = inboxOf(projectId, 'lead-review').filter(
+      (m) => m.type === MAIL_REVIEW_RESPONSE && m.idempotencyKey === draft.idempotencyKey,
+    );
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.reviewVerdict).toBe('PASS');
   });
 });
 

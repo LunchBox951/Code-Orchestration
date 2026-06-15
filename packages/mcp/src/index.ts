@@ -64,8 +64,8 @@ export {
 // L7-CTLOBS (Stage 10 P3) — the transport-agnostic operator CONTROL + OBSERVE surface over the running
 // engine: the daemon-backed `AgentRouterSeam` (unstick/pause/stop/steer act on LIVE agents, replacing
 // the CLI's `[host-live]` throws) and the engine-backed `LiveStateProvider` (the live half of
-// observability). Operator-only — registers ZERO agent MCP tools (Principle 4 + D4). The cross-process
-// CLI → daemon IPC binding is deferred to the app stage.
+// observability). Operator-only — registers ZERO agent MCP tools (Principle 4 + D4). Stage 11's
+// operator-IPC binding now carries this surface across the app → daemon boundary.
 export {
   DaemonBackedAgentRouter,
   type DaemonBackedAgentRouterDeps,

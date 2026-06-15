@@ -138,6 +138,20 @@ describe('MailVM — selectMail + MNR #1 (actionable stays sticky)', () => {
     expect(vm.state.selected?.seq).toBe(3);
   });
 
+  it('selecting another mail closes an active composer for the previous target', () => {
+    const vm = new MailVM({ registry: createRendererRegistry() });
+    vm.update([makeMail({ seq: 1 }), makeMail({ seq: 2 })], []);
+    vm.selectMail(1);
+    vm.openComposer(1, 'lead-1', 'clarify_response', 're: first');
+
+    vm.selectMail(2);
+
+    expect(vm.state.selected?.seq).toBe(2);
+    expect(vm.state.composer).toEqual(
+      expect.objectContaining({ active: false, targetSeq: null, targetRecipient: null }),
+    );
+  });
+
   it('informational mail in @operator inbox fires markRead on view', () => {
     const onMarkRead = vi.fn();
     const vm = new MailVM({ registry: createRendererRegistry(), onMarkRead });

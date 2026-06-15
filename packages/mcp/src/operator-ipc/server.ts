@@ -303,9 +303,9 @@ export class OperatorIpcServer {
       if (draft.type === MAIL_REVIEW_RESPONSE) {
         return this.handleReviewResponse(mail, found, draft);
       }
+      const existing = this.existingIdempotentReply(mail, found, draft);
+      if (existing != null) return existing;
       if (found.resolved) {
-        const existing = this.existingIdempotentReply(mail, found, draft);
-        if (existing != null) return existing;
         throw new Error(`operator IPC reply: mail seq=${seq} is already resolved.`);
       }
       return mail.reply(found, draft);
@@ -325,12 +325,15 @@ export class OperatorIpcServer {
       .inbox(answered.sender)
       .find(
         (m) =>
-          m.idempotencyKey === draft.idempotencyKey &&
-          m.sender === sender &&
-          m.type === draft.type &&
-          m.causationId === String(answered.seq),
+          m.idempotencyKey === draft.idempotencyKey && m.sender === sender && m.type === draft.type,
       );
     if (existing == null) return undefined;
+    if (existing.causationId !== String(answered.seq)) {
+      throw new Error(
+        `operator IPC reply: idempotency key already answers mail seq=${existing.causationId ?? '<unknown>'}; ` +
+          `it cannot answer mail seq=${answered.seq}.`,
+      );
+    }
     if (existing.subject !== draft.subject || existing.body !== draft.body) {
       throw new Error(
         `operator IPC reply: idempotent retry for mail seq=${answered.seq} changes subject/body.`,

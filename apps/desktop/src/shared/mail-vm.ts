@@ -149,7 +149,7 @@ export class MailVM {
 
     const row = this.toRow(raw);
     this._selectedSeq = seq;
-    this._state = { ...this._state, selected: row };
+    this._state = { ...this._state, selected: row, composer: { ...BLANK_COMPOSER } };
     this.emit();
 
     // MNR #1: only fire markRead for informational mail in @operator's own inbox.

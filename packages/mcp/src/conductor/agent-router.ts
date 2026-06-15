@@ -6,8 +6,8 @@
  * THE FINDING THIS CURES (Stage 9): `unstick`/`pause`/`stop` were typed seams that, with no Conductor
  * running, threw `[host-live]` — they never acted on a live agent. This class wires them to the running
  * {@link ConductorEngine} + a small in-memory control-state tracker, so in the daemon process they
- * actually kill/release a pane, pause selection, and re-wake a STUCK agent. The cross-process CLI →
- * daemon binding (the deferred IPC) is the next stage; this is the transport-agnostic core API it drives.
+ * actually kill/release a pane, pause selection, and re-wake a STUCK agent. Stage 11's operator-IPC
+ * binding drives this transport-agnostic API from the desktop app.
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  *
  * The verbs need COMPOSITION (there is no 1:1 engine method):

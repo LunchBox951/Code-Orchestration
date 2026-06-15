@@ -68,9 +68,9 @@ export const defaultScheduler: IntervalScheduler = {
 /**
  * The transport-agnostic operator surface for a running Conductor: CONTROL via the daemon-backed router
  * (unstick/pause/stop/steer act on live agents) and OBSERVE via a live snapshot (static rollup ⊕ engine
- * overlay). Built by {@link serveConductor} in the daemon process; the deferred cross-process IPC binding
- * (separate CLI → `co serve`) ships these same calls over the wire next stage. Registers ZERO agent MCP
- * tools — operator-only methods, never agent-callable (Principle 4 + D4).
+ * overlay). Built by {@link serveConductor} in the daemon process; Stage 11's operator-IPC server ships
+ * these same calls over the app → daemon socket. Registers ZERO agent MCP tools — operator-only methods,
+ * never agent-callable (Principle 4 + D4).
  */
 export interface ConductorControlSurface {
   /** The daemon-backed router — `revertStuck`/`rewake`/`pause`/`stop` (+ `resume`/`steer`) on live agents. */

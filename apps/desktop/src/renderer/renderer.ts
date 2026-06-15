@@ -247,7 +247,7 @@ function renderMailDetail(state: MailState): void {
     ? [
         `<div class="mail-composer">`,
         `<div class="mail-composer-header">${isApproval ? 'Decision note' : 'Reply'}`,
-        `<button class="mail-composer-close" data-action="close-composer">×</button>`,
+        `<button class="mail-composer-close" data-action="close-composer" aria-label="Close composer">×</button>`,
         `</div>`,
         `<div class="mail-composer-body">`,
         `<textarea class="composer-textarea" id="composer-body" placeholder="Type your reply…">${esc(composer.body)}</textarea>`,
