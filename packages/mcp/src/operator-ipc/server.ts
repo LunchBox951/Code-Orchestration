@@ -30,6 +30,7 @@ import {
   OPERATOR,
   OPERATOR_IPC_METHODS,
   OPERATOR_IPC_TICK,
+  OPERATOR_IPC_TRANSCRIPT,
   buildHumanReviewVerdict,
   openMailStore,
   openReviewStore,
@@ -201,6 +202,19 @@ export class OperatorIpcServer {
     this.safeSend(makeNotification(OPERATOR_IPC_TICK, { snapshot } as unknown as WirePayload));
   }
 
+  /**
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — forward one chunk of a hosted agent's live pane output as the
+   * `transcript:push` notification (mirrors {@link pushTick}). Event-driven, NOT on the tick cadence:
+   * `co serve` subscribes this to the engine's transcript stream. A no-op when no app is attached; a
+   * push that races a disconnect is reported, never thrown (must not crash the daemon — Principle 9).
+   */
+  pushTranscript(agentId: string, chunk: string): void {
+    if (!this.transport.connected) return;
+    this.safeSend(
+      makeNotification(OPERATOR_IPC_TRANSCRIPT, { agentId, chunk } as unknown as WirePayload),
+    );
+  }
+
   /** Tear the socket down (idempotent via the transport). */
   async close(): Promise<void> {
     await this.transport.close();
@@ -263,6 +277,11 @@ export class OperatorIpcServer {
         return (await this.handleApprove(params)) as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.markRead:
         return (await this.handleMarkRead(params)) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.transcript:
+        // C-P1 — the on-demand bounded tail (operator backfill). Pure read off the control surface.
+        return this.control.transcriptTail(
+          requireString(params, 'agentId'),
+        ) as unknown as WirePayload;
       default:
         return assertNever(method);
     }

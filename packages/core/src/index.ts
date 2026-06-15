@@ -1273,11 +1273,17 @@ export type {
   ApprovalReply,
   OperatorIpcSurface,
   OperatorIpcTick,
+  OperatorIpcTranscript,
+  TranscriptTail,
   OperatorUnavailableReason,
   OperatorObservation,
   OperatorIpcConnectionState,
 } from './operator-ipc/contract.js';
-export { OPERATOR_IPC_METHODS, OPERATOR_IPC_TICK } from './operator-ipc/contract.js';
+export {
+  OPERATOR_IPC_METHODS,
+  OPERATOR_IPC_TICK,
+  OPERATOR_IPC_TRANSCRIPT,
+} from './operator-ipc/contract.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

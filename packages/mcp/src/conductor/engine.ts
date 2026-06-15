@@ -83,6 +83,16 @@ import {
 export type TransportPair = readonly [client: Transport, server: Transport];
 
 /**
+ * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the character bound on a hosted agent's in-memory transcript tail.
+ * The engine keeps only the MOST-RECENT `TRANSCRIPT_TAIL_MAX_CHARS` characters of each pane's output per
+ * agent: when a new chunk pushes the buffer past the bound, the OLDEST characters are dropped so the
+ * live tail (what the operator wants to see now) is preserved. Pane bytes are `string` end-to-end
+ * (xterm.js consumes the string; JSON round-trips it exactly, ANSI/ESC included), so the bound is by
+ * character. 64 KiB is generous for a scrollback tail while keeping the per-agent footprint bounded.
+ */
+export const TRANSCRIPT_TAIL_MAX_CHARS = 64 * 1024;
+
+/**
  * The engine's constructor seams. Required seams have no default so the determinism / host-live
  * boundaries stay explicit; optional seams carry sandbox-safe defaults.
  */
@@ -310,6 +320,26 @@ export class ConductorEngine {
   /** Per-pane onExit unsubscribers, keyed `${projectId}:${agent}` — torn down on release. */
   private readonly paneExitUnsub = new Map<string, () => void>();
   /**
+   * Per-agent bounded transcript tail (most-recent pane bytes, ≤ {@link TRANSCRIPT_TAIL_MAX_CHARS}),
+   * keyed `${projectId}:${agent}` (Stage 12 C-P1). Fed by the persistent onData subscription below;
+   * read by {@link transcriptTail} for the operator's on-demand backfill. Dropped on release.
+   */
+  private readonly transcriptTails = new Map<string, string>();
+  /**
+   * Per-agent PERSISTENT onData unsubscribers for the transcript stream, keyed `${projectId}:${agent}`
+   * (Stage 12 C-P1) — DISTINCT from the per-turn observer in {@link observeTurnEnd}. Torn down on
+   * release (mirrors {@link paneExitUnsub}).
+   */
+  private readonly transcriptUnsub = new Map<string, () => void>();
+  /**
+   * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, chunk)` on every new
+   * pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A plain
+   * subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
+   */
+  private readonly transcriptListeners = new Set<
+    (projectId: ProjectId, agent: string, chunk: string) => void
+  >();
+  /**
    * When each unresolved clarify was FIRST observed by a tick, keyed
    * `${projectId}:${agent}:${seq}` → `now()`. The clarify-timeout ages against this injected-time
    * mark (never a wall clock), so the WHEN stays the Conductor's and replay-deterministic (P1b
@@ -345,6 +375,27 @@ export class ConductorEngine {
   /** The warm hosted handle for `agent`, or `undefined`. Use this to reuse a warm pane (no relaunch). */
   getHosted(projectId: ProjectId, agent: string): HostedPane | undefined {
     return this.hosted.get(ConductorEngine.agentKey(projectId, agent));
+  }
+
+  /**
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the current bounded transcript tail for `agent`: the most-recent
+   * pane bytes (≤ {@link TRANSCRIPT_TAIL_MAX_CHARS}), or `''` when the agent is not hosted or has
+   * produced no output yet. Transport-agnostic, NO I/O, never throws — a pure in-memory read backing the
+   * operator's on-demand backfill.
+   */
+  transcriptTail(projectId: ProjectId, agent: string): string {
+    return this.transcriptTails.get(ConductorEngine.agentKey(projectId, agent)) ?? '';
+  }
+
+  /**
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe to the live transcript stream: `listener` fires with
+   * `(projectId, agent, chunk)` on EVERY new pane chunk from any hosted agent (the operator-IPC live
+   * push fan-out). Returns an unsubscribe fn. Transport-agnostic, NO I/O, never throws. This is a
+   * METHOD, not a tool (Principle D4 — the Conductor is never agent-callable).
+   */
+  onTranscript(listener: (projectId: ProjectId, agent: string, chunk: string) => void): () => void {
+    this.transcriptListeners.add(listener);
+    return () => this.transcriptListeners.delete(listener);
   }
 
   /**
@@ -417,6 +468,20 @@ export class ConductorEngine {
       this.paneExitUnsub.set(
         agentKey,
         pane.onExit(() => this.paneExited.set(agentKey, true)),
+      );
+
+      // Stage 12 C-P1 (TRANSCRIPT-SEAM) — a NEW, PERSISTENT pane.onData subscription, distinct from the
+      // PER-TURN observer in observeTurnEnd (which is torn down on settle). Every chunk is appended to
+      // this agent's bounded tail and fanned out to the transcript listeners (the operator-IPC live
+      // push). It lives until release, mirroring the onExit tracking above. Startup interstitial bytes
+      // (consumed by driveToReady before this point) are intentionally not captured — the transcript
+      // begins at the ready pane.
+      this.transcriptTails.set(agentKey, '');
+      this.transcriptUnsub.set(
+        agentKey,
+        pane.onData((chunk) =>
+          this.appendTranscript(agentKey, identity.projectId, identity.agent, chunk),
+        ),
       );
 
       const hostedPane: HostedPane = { identity, pane, session, startup, clientTransport };
@@ -764,11 +829,37 @@ export class ConductorEngine {
     }
   }
 
-  /** Tear down a pane's exit subscription + flag (P1b). */
+  /**
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — append `chunk` to `agentKey`'s bounded tail (keeping the
+   * most-recent {@link TRANSCRIPT_TAIL_MAX_CHARS} characters; oldest dropped when over the bound) and
+   * fan the chunk out to the global transcript listeners. Runs in the pane's onData pump, so it does no
+   * I/O and never throws of its own accord (the registered listener — the operator-IPC push — is itself
+   * guarded against a vanished client).
+   */
+  private appendTranscript(
+    agentKey: string,
+    projectId: ProjectId,
+    agent: string,
+    chunk: string,
+  ): void {
+    const next = (this.transcriptTails.get(agentKey) ?? '') + chunk;
+    this.transcriptTails.set(
+      agentKey,
+      next.length > TRANSCRIPT_TAIL_MAX_CHARS
+        ? next.slice(next.length - TRANSCRIPT_TAIL_MAX_CHARS)
+        : next,
+    );
+    for (const listener of [...this.transcriptListeners]) listener(projectId, agent, chunk);
+  }
+
+  /** Tear down a pane's exit subscription + flag (P1b) and its transcript subscription + tail (C-P1). */
   private dropExitTracking(agentKey: string): void {
     this.paneExitUnsub.get(agentKey)?.();
     this.paneExitUnsub.delete(agentKey);
     this.paneExited.delete(agentKey);
+    this.transcriptUnsub.get(agentKey)?.();
+    this.transcriptUnsub.delete(agentKey);
+    this.transcriptTails.delete(agentKey);
   }
 }
 

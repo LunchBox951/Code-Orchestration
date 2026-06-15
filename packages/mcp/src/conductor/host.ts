@@ -32,6 +32,7 @@ import {
   type ProjectId,
   type PtyHost,
   type RunningAgent,
+  type TranscriptTail,
 } from '@co/core';
 import { ReconcileLoop } from '@co/core';
 import { ConductorEngine, type TransportPair } from './engine.js';
@@ -77,6 +78,18 @@ export interface ConductorControlSurface {
   readonly router: DaemonBackedAgentRouter;
   /** Snapshot the LIVE observability view (roster/cost ⊕ hosted/paused/stuck/outstanding-mail). */
   readonly observe: () => LiveObservabilitySnapshot;
+  /**
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — `agentId`'s bounded transcript tail (most-recent pane bytes;
+   * empty when not hosted / no output yet). Transport-agnostic, no I/O (project implicit, like
+   * {@link observe}).
+   */
+  readonly transcriptTail: (agentId: string) => TranscriptTail;
+  /**
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe to this project's live transcript stream: `listener`
+   * fires with `(agentId, chunk)` on every new pane chunk. Returns an unsubscribe fn. The operator-IPC
+   * server subscribes this to forward each chunk outward as the `transcript:push` notification.
+   */
+  readonly onTranscript: (listener: (agentId: string, chunk: string) => void) => () => void;
 }
 
 // ── The cadence runner ──────────────────────────────────────────────────────────────────────────────
@@ -395,6 +408,14 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   const control: ConductorControlSurface = {
     router,
     observe: () => queryLiveObservability(projectId, liveProvider),
+    // Stage 12 C-P1 (TRANSCRIPT-SEAM) — back the transcript accessors with the running engine, closing
+    // over THIS project: the tail is the engine's bounded per-agent buffer; onTranscript filters the
+    // engine's global stream down to this project before handing `(agentId, chunk)` to the listener.
+    transcriptTail: (agentId) => ({ agentId, tail: engine.transcriptTail(projectId, agentId) }),
+    onTranscript: (listener) =>
+      engine.onTranscript((pid, agent, chunk) => {
+        if (pid === projectId) listener(agent, chunk);
+      }),
   };
 
   // Stage 11 P1 (OP-IPC) — the cross-process operator-IPC server, started alongside the cadence
@@ -402,6 +423,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   // tick as a `tick` push (wired below), and is closed on runner stop. Operator-uid-only by socket
   // permission; ZERO agent MCP tools.
   let ipcServer: OperatorIpcServer | undefined;
+  let unsubTranscript: (() => void) | undefined;
   if (opts.operatorIpc != null && dataDir != null) {
     ipcServer = new OperatorIpcServer({
       control,
@@ -410,6 +432,13 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       ...(opts.operatorIpc.onError != null ? { onError: opts.operatorIpc.onError } : {}),
     });
     await ipcServer.start();
+    // Stage 12 C-P1 (TRANSCRIPT-SEAM) — forward each hosted pane's live bytes outward as the
+    // `transcript:push` notification. This is EVENT-DRIVEN (not the tick cadence), so it rides its OWN
+    // engine→IPC subscription rather than `onTick`; torn down in onStop alongside the server close.
+    const server = ipcServer;
+    unsubTranscript = control.onTranscript((agentId, chunk) =>
+      server.pushTranscript(agentId, chunk),
+    );
   }
 
   const reconcile = new ReconcileLoop({
@@ -456,6 +485,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     ...(onTick != null ? { onTick } : {}),
     ...(opts.onError != null ? { onError: opts.onError } : {}),
     onStop: async () => {
+      unsubTranscript?.(); // C-P1 — stop forwarding transcript pushes before tearing the socket down
       if (ipcServer != null) await ipcServer.close();
       try {
         await router.drain();
