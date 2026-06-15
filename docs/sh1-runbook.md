@@ -1,0 +1,224 @@
+# SH-1 Self-Host Proof Runbook
+
+This document is the operator guide for proving **`SH-1`**: `co` runs a real multi-phase change on
+the **`co` repo itself** start to finish (spec-lock → phases → worktrees → review gate → gated
+merge) with **zero prototype involvement**. The gated merge is approved through the in-app
+**Review view**, the Stage 13 deliverable that surfaces diffs and acceptance criteria for human
+sign-off.
+
+Everything in this runbook executes on the **operator's host machine** — not in a sandbox. This
+runbook builds on and assumes familiarity with [`docs/host-proof.md`](host-proof.md), which covers
+the lower-level Conductor plumbing proof (`co doctor --live`, `co-mcp host-proof`). Complete that
+proof first if you have not already.
+
+---
+
+## Prerequisites
+
+1. **Preflight green.** `co doctor --live` passes all four checks, including
+   `[ok] provider-compatibility`. See [`host-proof.md`](host-proof.md) for the expected output and
+   troubleshooting steps.
+
+2. **Binaries built and on `$PATH`.** `co` and `co-mcp` must be built (`pnpm build` in the repo
+   root) and shell-resolvable. If `co` is not on `$PATH`, set `CO_CLI_COMMAND` before proceeding.
+
+3. **The `co` repo registered.** `co doctor` should show `[ok] program-data-integrity`. This
+   confirms the repo is a registered project in program-data. There is no separate registration
+   command — registration happens at first use from within the repo.
+
+4. **Desktop app built and running with the Reviews view available.** The Review view is the sole
+   path for submitting a PASS or ISSUES verdict (see Step 3). Build the app (`pnpm build` from
+   `apps/desktop`, or the appropriate desktop build command for your environment) and confirm the
+   **Reviews** nav item is visible before starting.
+
+5. **Conductor daemon running.** Start it with:
+
+   ```sh
+   co-mcp serve <projectId>
+   ```
+
+   > **Host-live note:** `co-mcp serve` requires an explicit `<projectId>` (unlike
+   > `co-mcp host-proof`, which auto-detects from CWD). The project id is the registry id for the
+   > repo (e.g. `proj-…`), visible in `co doctor` output or your program-data store. Confirm the
+   > correct id and the exact `co-mcp serve` invocation against your built `co-mcp` at run time
+   > before proceeding.
+
+---
+
+## Step 1 — Draft and lock a small real `co` change
+
+**Role separation:** a **Coordinator** drafts the spec (`co_spec_draft` is a coordinator-only MCP
+tool; the operator cannot call it directly). Ask a coordinator agent to draft a small, self-contained
+change to the `co` repo — a documentation clarification, a minor fix, or a small enhancement. The
+change must be real (it will actually land on the repo via the gated merge), so keep scope minimal.
+
+Once the coordinator has drafted the spec and mailed you the task id:
+
+1. Review the draft spec (`co spec <taskId>`) and confirm each acceptance criterion carries a
+   `verify` command.
+2. Lock it:
+
+   ```sh
+   co spec <taskId>
+   # confirm the spec content, then lock:
+   # (the lock verb is co_spec_lock — invoke it through the coordinator or the MCP surface)
+   ```
+
+   The operator locks via `co_spec_lock` on the MCP surface (the coordinator exposes this as a
+   workflow step, or you can call it directly through the desktop app's MCP connection). Once
+   locked, the spec id is fixed — record it.
+
+3. Note the **task id** (shown by `co spec <taskId>` after lock). You will need it in Step 6.
+
+---
+
+## Step 2 — Conductor runs the loop
+
+With the daemon running and a locked spec in program-data, the Conductor picks up the task on its
+next tick and drives the full lifecycle autonomously:
+
+1. **Plan phase** — a Lead agent ingests the locked spec and decomposes it into phases.
+2. **Worktree phases** — Implementer agents are slung into isolated git worktrees; they build,
+   verify, and call `co_finish`.
+3. **Review gate** — when an implementer finishes, the Lead dispatches a Reviewer. The Reviewer
+   records a verdict. If the verdict is PASS, the Lead triggers the gated merge and queues a
+   **human review request** (`review_request` mail to `@operator`). If the verdict is ISSUES, the
+   implementer is kicked back.
+4. **Human gate** — a `review_request` lands in your operator inbox and the Review view surfaces
+   it. This is Step 3.
+
+### Watching progress
+
+Open the **Agents Console** in the desktop app (transcript + roster view) to observe agents as they
+run. To read an individual agent's mail stream from the CLI:
+
+```sh
+co mail read --recipient <agentId>
+```
+
+Replace `<agentId>` with the agent id shown in the roster (e.g. `impl-abc123`). To see the overall
+roster, phase, and cost snapshot:
+
+```sh
+co status
+```
+
+Do not proceed to Step 3 until the Review view shows a pending review for this task's worktree.
+
+---
+
+## Step 3 — Approve at the gate via the Review view
+
+When the gated merge is queued, the **Reviews** view in the desktop app shows the pending review.
+Open it to inspect:
+
+- The **unified diff** of the worktree against the integration branch.
+- The **acceptance criteria** from the locked spec, listed alongside their `verify` commands.
+
+Review the diff and criteria, then make a decision:
+
+- **PASS** — click **PASS** if the diff satisfies all criteria. The desktop app sends a
+  `review_response` through the operator-IPC server, which records the PASS verdict and
+  automatically unblocks the Lead's gated merge.
+- **ISSUES** — click **ISSUES**, enter notes describing what needs fixing, and submit. The verdict
+  is recorded and the Lead kicks the worktree back to the implementer for another pass.
+
+> **Important:** submitting a verdict (PASS or ISSUES) requires the **desktop app** — either the
+> Review view or the Mail view reply. There is **no CLI path** to submit a verdict.
+> `co mail send --type review_response …` stores a mail but does **not** record a verdict in the
+> IPC server, so the gated merge remains blocked. See [Advanced: observe without the desktop app](#advanced-observe-without-the-desktop-app)
+> for CLI observation commands.
+
+---
+
+## Step 4 — Gated merge lands automatically
+
+When you click PASS in Step 3, the Lead's internal `co_merge` runs automatically:
+
+- The worktree is merged into the integration branch.
+- The review is recorded with an audit trail.
+- No raw `git push` or `gh pr merge` is involved (SH-5).
+
+There is no operator command for this step. Watch the **Agents Console** for the merge log line and
+confirm the integration branch advances.
+
+---
+
+## Step 5 — Verify zero prototype involvement
+
+Run the SH-2 static guard to confirm no runtime `.co/` dependency remained in the code that just
+landed:
+
+```sh
+pnpm vitest run packages/core/src/tools/sh2-no-co-read.test.ts
+```
+
+This test walks `packages/*/src` and `apps/*/src`, strips comments, and fails loud on any
+`.co/(specs|plans|issues)` path literal. Green output means zero prototype read-paths are present
+in production code — satisfying Principle 12 (`pristine-repo`) for the landed change.
+
+If the guard fails, a source file introduced a literal `.co/` path that must be removed before the
+proof is valid.
+
+---
+
+## Step 6 — Capture SH-1 evidence
+
+Collect the following artifacts and record them as the evidence bundle for `SH-1`:
+
+| Evidence item | How to capture |
+|---|---|
+| Locked spec id | Noted in Step 1; also shown by `co spec <taskId>` |
+| Phase and worktree trail | Roster screenshot from Agents Console |
+| Review view PASS | Screenshot of the PASS confirmation in the Review view |
+| Gated-merge commit | `git log <integration-branch> --oneline -1` |
+| SH-2 guard green | Terminal output from Step 5 |
+
+With all five items captured, mark `SH-1` as met in `docs/v1-acceptance-criteria.md`:
+
+```
+- `SH-1` ☑ `co` runs a real multi-phase change on the **`co` repo itself** start to finish
+  (spec-lock → phases → worktrees → review gate → gated merge) with zero prototype involvement.
+  Evidence: <link or PR reference>
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| "Conductor not running" shown in Reviews | Start the daemon: `co-mcp serve <projectId>` |
+| No agents appear in the Agents Console | Daemon did not tick, or the spec is not yet locked; run `co status` and `co spec <taskId>` to confirm |
+| Reviews view empty / no pending review | The gated merge was not queued yet; wait for the Reviewer agent to finish (watch `co status`) |
+| "No locked spec" error from coordinator | Run `co spec <taskId>` and lock via `co_spec_lock` before the daemon can plan |
+| SH-2 guard fails | A `.co/` literal was introduced in production source; grep `packages/*/src` for the offending path and remove it |
+| Clicking PASS has no effect | Desktop app lost connection to the IPC server; restart `co-mcp serve <projectId>` and reload the app |
+| Gated merge blocked after PASS | IPC server restarted between verdict and merge; re-open the review in the desktop app and resubmit |
+
+---
+
+## Advanced: observe without the desktop app
+
+You can observe the system state from the CLI, but you **cannot submit a verdict from the CLI**.
+
+```sh
+# See the operator inbox (pending review_request mails appear here)
+co mail read
+
+# Filter to a specific agent's mail
+co mail read --recipient <agentId>
+
+# See the full roster, phase, review, and cost snapshot
+co status
+```
+
+A pending `review_request` in the inbox means the Review view is waiting for your PASS or ISSUES.
+To proceed, open the desktop app — **submitting a verdict requires the desktop app** (Review view
+or Mail view reply, both of which route through the operator-IPC server). There is no CLI
+verdict-submission path; `co mail send --type review_response …` stores a mail but does not record
+a verdict, and the gated merge will refuse with "no review verdict recorded".
+
+---
+
+*Ladders to: SH-1, SH-5, and via SH-2 the pristine-repo invariant (Principle 12 — `pristine-repo`).*
