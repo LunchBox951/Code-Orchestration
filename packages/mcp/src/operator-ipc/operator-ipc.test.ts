@@ -655,6 +655,46 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     expect(approvalOutcome(verify, approval)).toBe('approved');
   });
 
+  it('markRead records a read-receipt through the daemon (single writer — informational clears on view)', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    // Seed an informational mail addressed to @operator.
+    const seedStore = openMailStore(projectId);
+    let inform: DeliveredMail;
+    try {
+      inform = seedStore.send({
+        type: 'chat',
+        to: '@operator',
+        from: 'lead-1',
+        subject: 'hello',
+        body: 'world',
+      });
+    } finally {
+      seedStore.close();
+    }
+    expect(inform.read).toBeFalsy();
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    // Route markRead through the daemon — the app never writes the store directly (MNR #2).
+    const after = await client.markRead('@operator', inform.seq);
+    expect(after.read).toBe(true);
+
+    // Verify via a fresh store read — the read-receipt was persisted by the daemon.
+    const verify = openMailStore(projectId);
+    mailStores.push(verify);
+    const row = verify.inbox('@operator').find((m) => m.seq === inform.seq);
+    expect(row?.read).toBe(true);
+  });
+
   it('reply answers an actionable item through the daemon (resolves it, threads to the asker)', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);

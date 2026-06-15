@@ -40,6 +40,8 @@ export const OPERATOR_IPC_METHODS = {
   reply: 'reply',
   /** Approve/decline an outstanding `approval` as a structured `approval_response`. */
   approve: 'approve',
+  /** Mark `recipient`'s informational mail at `seq` read (event-sourced — single writer). */
+  markRead: 'markRead',
 } as const;
 
 /** The set of operator-IPC request method names. */
@@ -99,6 +101,8 @@ export interface OperatorIpcSurface {
   reply(target: OperatorMailRef, draft: ReplyDraft): Promise<DeliveredMail>;
   /** Approve/decline the `approval` at `approvalSeq` (operator-terminal; single writer). */
   approve(approvalSeq: number, reply: ApprovalReply): Promise<DeliveredMail>;
+  /** Mark `recipient`'s mail at `seq` read (event-sourced read-state — single writer, MNR #2). */
+  markRead(recipient: string, seq: number): Promise<DeliveredMail>;
 }
 
 /**
