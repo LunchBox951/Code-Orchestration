@@ -72,13 +72,14 @@ The decision is dominated by the project's hardest, highest-risk, explicitly-par
 ## Known costs (accepted, with mitigations)
 
 - **Electron footprint** — bundled Chromium + memory, multiplied by many live terminal panes.
-  *Mitigation:* lazy panes; or Tauri-with-Node-sidecar to shed the Chromium shell (at the cost of
-  splitting the core out of the renderer's process). Folds into the open shell question below.
+  *Mitigation:* lazy panes; keep the core in Electron's main process and expose only a narrow
+  contextBridge surface to the sandboxed renderer.
 - **No compiler-enforced safety floor** for a system whose promise is *no silent failures /
   recoverable* (Principles 9, 14). *Mitigation:* `strict` mode + runtime schema validation (Zod) at
   every adapter/MCP boundary — discipline, not the type system alone.
-- **Native-addon packaging** — `node-pty` / `better-sqlite3` need per-platform prebuilds across
-  Linux/macOS/Windows ([`../architecture/worktrees.md`](../architecture/worktrees.md),
+- **Native-addon packaging** — `node-pty` needs per-platform prebuilds across Linux/macOS/Windows;
+  the program-data store uses Electron's bundled `node:sqlite`, not `better-sqlite3`
+  ([`../architecture/worktrees.md`](../architecture/worktrees.md),
   [`../architecture/init-and-config.md`](../architecture/init-and-config.md) auto-update).
 - **Single-threaded by default** — large diff/event-replay must move to worker threads or it stalls
   the loop.

@@ -272,6 +272,14 @@ export class OperatorIpcServer {
       if (found == null) {
         throw new Error(`operator IPC reply: no mail seq=${seq} in '${recipient}' inbox.`);
       }
+      if (found.kind !== 'actionable') {
+        throw new Error(
+          `operator IPC reply: mail seq=${seq} is '${found.kind ?? '<unknown>'}', not actionable.`,
+        );
+      }
+      if (found.resolved) {
+        throw new Error(`operator IPC reply: mail seq=${seq} is already resolved.`);
+      }
       return mail.reply(found, draft);
     } finally {
       mail.close();
@@ -297,6 +305,9 @@ export class OperatorIpcServer {
         throw new Error(
           `operator IPC approve: mail seq=${approvalSeq} is '${approval.type}', not an approval.`,
         );
+      }
+      if (approval.resolved) {
+        throw new Error(`operator IPC approve: mail seq=${approvalSeq} is already resolved.`);
       }
       return mail.reply(approval, { type: MAIL_APPROVAL_RESPONSE, decision, subject, body });
     } finally {

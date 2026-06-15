@@ -114,7 +114,16 @@ export class MailVM {
 
   /** Switch the active bus; fires onSelectBus so the main process re-fetches mail. */
   selectBus(busId: string): void {
-    this._state = { ...this._state, activeBus: busId, selected: null, tab: 'inbox' };
+    this._rawInbox = [];
+    this._rawOutbox = [];
+    this._state = {
+      ...this._state,
+      activeBus: busId,
+      selected: null,
+      tab: 'inbox',
+      inbox: [],
+      outbox: [],
+    };
     this._selectedSeq = null;
     this.emit();
     this.cbSelectBus?.(busId);

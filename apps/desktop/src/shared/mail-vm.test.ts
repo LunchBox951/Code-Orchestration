@@ -207,6 +207,16 @@ describe('MailVM — selectBus (agent-bus toggle)', () => {
     expect(vm.state.selected).toBeNull();
   });
 
+  it('switching bus clears stale rows until the refreshed bus rows arrive', () => {
+    const vm = new MailVM({ registry: createRendererRegistry() });
+    vm.update([makeMail({ seq: 1 })], [makeMail({ seq: 2, sender: '@operator' })]);
+
+    vm.selectBus('agent-xyz');
+
+    expect(vm.state.inbox).toHaveLength(0);
+    expect(vm.state.outbox).toHaveLength(0);
+  });
+
   it('fires onSelectBus callback so the main process can re-fetch', () => {
     const onSelectBus = vi.fn();
     const vm = new MailVM({ registry: createRendererRegistry(), onSelectBus });

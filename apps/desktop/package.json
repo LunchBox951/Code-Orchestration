@@ -12,10 +12,10 @@
   },
   "dependencies": {
     "@co/core": "workspace:*",
-    "@co/mcp": "workspace:*",
-    "electron": "^36.4.0"
+    "@co/mcp": "workspace:*"
   },
   "devDependencies": {
+    "electron": "^36.4.0",
     "electron-builder": "^25.1.8"
   }
 }

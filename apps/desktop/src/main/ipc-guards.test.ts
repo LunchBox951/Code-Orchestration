@@ -5,6 +5,7 @@ import {
   requireMailTab,
   requireMailType,
   requireNavView,
+  requireNonEmptyString,
 } from './ipc-guards.js';
 
 describe('main IPC runtime guards', () => {
@@ -34,5 +35,11 @@ describe('main IPC runtime guards', () => {
   it('accepts composer fields and rejects arbitrary renderer strings', () => {
     expect(requireComposerField('body')).toBe('body');
     expect(() => requireComposerField('decision')).toThrow(/composer field/i);
+  });
+
+  it('accepts non-empty strings and rejects empty or non-string values', () => {
+    expect(requireNonEmptyString('@operator', 'mail bus')).toBe('@operator');
+    expect(() => requireNonEmptyString('', 'mail bus')).toThrow(/mail bus/i);
+    expect(() => requireNonEmptyString(42, 'mail bus')).toThrow(/mail bus/i);
   });
 });

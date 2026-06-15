@@ -48,8 +48,14 @@ async function createWindow(): Promise<void> {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       preload: join(__dirname, '../preload/preload.js'),
     },
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event) => {
+    event.preventDefault();
   });
 
   await mainWindow.loadFile(join(__dirname, '../renderer/index.html'));

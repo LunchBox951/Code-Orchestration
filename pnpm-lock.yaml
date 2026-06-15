@@ -41,10 +41,10 @@ importers:
       '@co/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
+    devDependencies:
       electron:
         specifier: ^36.4.0
         version: 36.9.5
-    devDependencies:
       electron-builder:
         specifier: ^25.1.8
         version: 25.1.8(electron-builder-squirrel-windows@25.1.8)

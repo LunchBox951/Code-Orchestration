@@ -1111,11 +1111,18 @@
         <span id="live-label">offline</span>
       </div>
       <div class="limits-wrapper" id="limits-wrapper">
-        <button class="limits-btn" id="limits-btn" type="button">
+        <button
+          class="limits-btn"
+          id="limits-btn"
+          type="button"
+          aria-expanded="false"
+          aria-controls="limits-popover"
+          aria-haspopup="dialog"
+        >
           <span>&#x25C8;</span>
           <span id="limits-summary">Limits</span>
         </button>
-        <div class="limits-popover" id="limits-popover" hidden>
+        <div class="limits-popover" id="limits-popover" role="dialog" hidden>
           <div class="limits-popover-hdr">
             Subscription limits
             <span class="limits-popover-cap">balancer paces on headroom</span>
@@ -1179,14 +1186,37 @@
               <div class="mail-bus-area">
                 <div class="mail-bus-label">Viewing</div>
                 <div id="mail-bus-selector">
-                  <button class="bus-option active" data-bus="@operator" type="button">
+                  <button
+                    class="bus-option active"
+                    data-bus="@operator"
+                    type="button"
+                    aria-pressed="true"
+                  >
                     @operator
                   </button>
                 </div>
               </div>
-              <div class="mail-tabs">
-                <button class="mail-tab active" id="mail-tab-inbox" data-tab="inbox">Inbox</button>
-                <button class="mail-tab" id="mail-tab-outbox" data-tab="outbox">Outbox</button>
+              <div class="mail-tabs" role="tablist">
+                <button
+                  class="mail-tab active"
+                  id="mail-tab-inbox"
+                  data-tab="inbox"
+                  type="button"
+                  role="tab"
+                  aria-selected="true"
+                >
+                  Inbox
+                </button>
+                <button
+                  class="mail-tab"
+                  id="mail-tab-outbox"
+                  data-tab="outbox"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                >
+                  Outbox
+                </button>
               </div>
               <div class="mail-list" id="mail-list">
                 <div class="empty-state">Loading…</div>

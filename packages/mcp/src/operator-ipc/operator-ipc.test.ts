@@ -655,6 +655,52 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     expect(approvalOutcome(verify, approval)).toBe('approved');
   });
 
+  it('approve rejects an already-resolved approval without appending a second response', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const seedStore = openMailStore(projectId);
+    let approval: DeliveredMail;
+    try {
+      approval = seedStore.send(
+        outwardApprovalEnvelope({ from: 'coord-1', subject: 'publish?', body: 'bless the push' }),
+      );
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.approve(approval.seq, {
+      decision: 'approve',
+      subject: 'approved',
+      body: 'yes',
+    });
+
+    await expect(
+      client.approve(approval.seq, {
+        decision: 'decline',
+        subject: 'declined',
+        body: 'no',
+      }),
+    ).rejects.toThrow(/already resolved/i);
+
+    const verify = openMailStore(projectId);
+    mailStores.push(verify);
+    const responses = verify
+      .inbox('coord-1')
+      .filter((m) => m.type === MAIL_APPROVAL_RESPONSE && m.causationId === String(approval.seq));
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.decision).toBe('approve');
+  });
+
   it('markRead records a read-receipt through the daemon (single writer — informational clears on view)', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
@@ -722,6 +768,80 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     const lead = openMailStore(projectId);
     mailStores.push(lead);
     expect(lead.outstanding('lead-1')).toHaveLength(0);
+  });
+
+  it('reply rejects a non-actionable target without appending a response', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const seedStore = openMailStore(projectId);
+    let info: DeliveredMail;
+    try {
+      info = seedStore.send({
+        type: 'chat',
+        to: 'lead-1',
+        from: 'impl-x',
+        subject: 'fyi',
+        body: 'not actionable',
+      });
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.reply(
+        { seq: info.seq, recipient: 'lead-1' },
+        { type: 'clarify_response', subject: 're: fyi', body: 'reply' },
+      ),
+    ).rejects.toThrow(/not actionable/i);
+
+    const responses = inboxOf(projectId, 'impl-x').filter(
+      (m) => m.type === 'clarify_response' && m.causationId === String(info.seq),
+    );
+    expect(responses).toHaveLength(0);
+  });
+
+  it('reply rejects an already-resolved target without appending a second response', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const ask = seedActionableMail(projectId, 'lead-1', 'impl-x');
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.reply(
+      { seq: ask.seq, recipient: 'lead-1' },
+      { type: 'clarify_response', subject: 're: first', body: 'use claude' },
+    );
+
+    await expect(
+      client.reply(
+        { seq: ask.seq, recipient: 'lead-1' },
+        { type: 'clarify_response', subject: 're: second', body: 'use codex' },
+      ),
+    ).rejects.toThrow(/already resolved/i);
+
+    const responses = inboxOf(projectId, 'impl-x').filter(
+      (m) => m.type === 'clarify_response' && m.causationId === String(ask.seq),
+    );
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.body).toBe('use claude');
   });
 });
 

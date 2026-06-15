@@ -156,13 +156,17 @@ function renderMailSidebar(state: MailState): void {
     busSelector.innerHTML = buses
       .map(
         (bus) =>
-          `<button class="bus-option${bus === state.activeBus ? ' active' : ''}" data-bus="${esc(bus)}" type="button">${esc(bus)}</button>`,
+          `<button class="bus-option${bus === state.activeBus ? ' active' : ''}" data-bus="${esc(bus)}" type="button" aria-pressed="${bus === state.activeBus ? 'true' : 'false'}">${esc(bus)}</button>`,
       )
       .join('');
   }
 
-  document.getElementById('mail-tab-inbox')?.classList.toggle('active', state.tab === 'inbox');
-  document.getElementById('mail-tab-outbox')?.classList.toggle('active', state.tab === 'outbox');
+  const inboxTab = document.getElementById('mail-tab-inbox');
+  const outboxTab = document.getElementById('mail-tab-outbox');
+  inboxTab?.classList.toggle('active', state.tab === 'inbox');
+  outboxTab?.classList.toggle('active', state.tab === 'outbox');
+  inboxTab?.setAttribute('aria-selected', state.tab === 'inbox' ? 'true' : 'false');
+  outboxTab?.setAttribute('aria-selected', state.tab === 'outbox' ? 'true' : 'false');
 
   const mailList = document.getElementById('mail-list');
   if (!mailList) return;
@@ -494,9 +498,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (isOpen) {
       limitsPopover?.setAttribute('hidden', '');
       limitsBtn.classList.remove('open');
+      limitsBtn.setAttribute('aria-expanded', 'false');
     } else {
       limitsPopover?.removeAttribute('hidden');
       limitsBtn.classList.add('open');
+      limitsBtn.setAttribute('aria-expanded', 'true');
     }
   });
 
@@ -507,6 +513,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!wrapper.contains(e.target as Node)) {
       limitsPopover.setAttribute('hidden', '');
       limitsBtn?.classList.remove('open');
+      limitsBtn?.setAttribute('aria-expanded', 'false');
     }
   });
 

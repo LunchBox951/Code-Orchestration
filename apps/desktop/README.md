@@ -3,17 +3,21 @@
 The operator-facing **Cockpit** desktop shell. Shell decision: **Electron** (resolved Stage 11;
 see [`docs/research/language-and-stack.md`](../../docs/research/language-and-stack.md)).
 
-## What is built (Stage 11 P2)
+## What is built (Stage 11)
 
 - **6-view nav shell** — header + 224px left rail + main panel, dark oklch palette.
   Nav views: **Dashboard**, **Agents**, **Mail**, **Review**, **Source**, **Cost**.
-  Dashboard, Mail, and Cost receive real data in later stages (P3/P4/P5); Agents,
-  Review, and Source are nav stubs this stage.
+- **Dashboard** — live/degraded conductor status, fleet stats, tree, and outstanding actions.
+- **Mail** — operator inbox/outbox, actionable approvals/replies, read-state refresh, and
+  daemon-routed writes.
+- **Cost** — usage headroom popover and cost rollups from the dispatch store.
+- **Agents**, **Review**, and **Source** remain nav stubs this stage.
 - **Main process** (`src/main/`) — Node/Electron context. Imports `@co/core` (static
   reads) and the P1 `OperatorIpcClient` from `@co/mcp` (live conductor IPC). Creates
   the `BrowserWindow` and exposes the typed view-model bridge over `ipcMain`.
 - **Preload** (`src/preload/preload.ts`) — `contextBridge` exposes `window.coShell`
-  (`CoShellBridge`) to the renderer; `contextIsolation: true`, `nodeIntegration: false`.
+  (`CoShellBridge`) to the renderer; `contextIsolation: true`, `nodeIntegration: false`,
+  `sandbox: true`.
 - **Renderer** (`src/renderer/`) — DOM-only; uses `window.coShell` for all data.
 - **Shared view-models** (`src/shared/`) — pure TypeScript, no DOM, no Electron.
   `NavVM` and `ConnectionVM` are headless-tested (vitest); pixels are the host smoke-test.
