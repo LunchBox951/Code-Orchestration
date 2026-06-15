@@ -6,6 +6,7 @@ import { createAppShell } from './app-shell.js';
 import {
   requireComposerField,
   requireFiniteSeq,
+  requireAgentId,
   requireMailTab,
   requireMailType,
   requireNavView,
@@ -315,7 +316,7 @@ ipcMain.handle('limitsCost:refresh', () => {
 // ── Agents Console IPC channels ─────────────────────────────────────────────
 
 ipcMain.handle('agents:select', (_event, agentId: unknown) => {
-  const id = agentId == null ? null : requireNonEmptyString(agentId, 'agentId');
+  const id = agentId == null ? null : requireAgentId(agentId);
   shell?.selectAgent(id);
   return shell?.agentsConsole.state ?? null;
 });
@@ -323,7 +324,7 @@ ipcMain.handle('agents:select', (_event, agentId: unknown) => {
 ipcMain.handle('agents:steer', async (_event, agentId: unknown, steer: unknown) => {
   if (shell == null) return { ok: false, error: 'shell not ready' };
   try {
-    await shell.client.steer(requireNonEmptyString(agentId, 'agentId'), requireSteer(steer));
+    await shell.client.steer(requireAgentId(agentId), requireSteer(steer));
     return { ok: true };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

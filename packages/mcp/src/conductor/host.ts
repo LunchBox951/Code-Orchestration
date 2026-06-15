@@ -496,7 +496,21 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     },
   });
 
-  if (opts.autoStart !== false) runner.start();
+  if (opts.autoStart !== false) {
+    try {
+      runner.start();
+    } catch (error) {
+      try {
+        await runner.stop();
+      } catch (cleanupError) {
+        reportServeControlDiagnostic(
+          opts.onError,
+          new Error(`co serve: cleanup after failed startup failed: ${errorMessage(cleanupError)}`),
+        );
+      }
+      throw error;
+    }
+  }
   return runner;
 }
 

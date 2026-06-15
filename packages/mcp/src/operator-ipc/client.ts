@@ -210,10 +210,10 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
       case 'notification': {
         if (incoming.method === OPERATOR_IPC_TICK) {
           const tick = incoming.params as unknown as OperatorIpcTick;
-          for (const listener of [...this.tickListeners]) listener(tick);
+          this.fanOutTick(tick);
         } else if (incoming.method === OPERATOR_IPC_TRANSCRIPT) {
           const transcript = incoming.params as unknown as OperatorIpcTranscript;
-          for (const listener of [...this.transcriptListeners]) listener(transcript);
+          this.fanOutTranscript(transcript);
         }
         return;
       }
@@ -223,6 +223,26 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
         return;
       default:
         return assertNever(incoming);
+    }
+  }
+
+  private fanOutTick(tick: OperatorIpcTick): void {
+    for (const listener of [...this.tickListeners]) {
+      try {
+        listener(tick);
+      } catch {
+        /* push subscribers are app surfaces; one bad callback must not starve later listeners */
+      }
+    }
+  }
+
+  private fanOutTranscript(transcript: OperatorIpcTranscript): void {
+    for (const listener of [...this.transcriptListeners]) {
+      try {
+        listener(transcript);
+      } catch {
+        /* push subscribers are app surfaces; one bad callback must not starve later listeners */
+      }
     }
   }
 
@@ -476,11 +496,23 @@ export class OperatorIpcClient {
   }
 
   private fanOutTick(tick: OperatorIpcTick): void {
-    for (const listener of [...this.tickListeners]) listener(tick);
+    for (const listener of [...this.tickListeners]) {
+      try {
+        listener(tick);
+      } catch (error) {
+        this.report(error);
+      }
+    }
   }
 
   private fanOutTranscript(transcript: OperatorIpcTranscript): void {
-    for (const listener of [...this.transcriptListeners]) listener(transcript);
+    for (const listener of [...this.transcriptListeners]) {
+      try {
+        listener(transcript);
+      } catch (error) {
+        this.report(error);
+      }
+    }
   }
 
   private emitState(state: OperatorIpcConnectionState): void {

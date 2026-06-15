@@ -12,6 +12,8 @@ describe('agents console', () => {
     expect(htmlSource).toContain('id="agents-transcript"');
     expect(htmlSource).toContain('aria-label="Agent transcript"');
     expect(htmlSource).toContain('id="agents-roster"');
+    expect(htmlSource).toContain('role="listbox"');
+    expect(htmlSource).toContain('aria-label="Agents"');
     expect(htmlSource).toContain('id="steer-input"');
     expect(htmlSource).toContain('aria-label="Answer agent"');
     expect(htmlSource).toContain('aria-label="Redirect agent"');
@@ -22,6 +24,7 @@ describe('agents console', () => {
     expect(rendererSource).toContain('bridge.agentsSteer(');
     expect(rendererSource).toContain('bridge.agentsSelect(');
     expect(rendererSource).toContain('window.Terminal');
+    expect(rendererSource).toContain('role="option"');
     expect(rendererSource).toContain('aria-selected="${isSelected');
   });
 

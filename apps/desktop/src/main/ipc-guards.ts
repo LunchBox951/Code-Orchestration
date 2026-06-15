@@ -51,6 +51,10 @@ function requireNonBlankString(value: unknown, label: string): string {
   throw new Error(`Invalid ${label}: expected a non-empty string.`);
 }
 
+export function requireAgentId(value: unknown): string {
+  return requireNonBlankString(value, 'agentId');
+}
+
 export function requireSteer(value: unknown): Steer {
   const obj = asRecord(value, 'steer');
   const kind = obj['kind'];

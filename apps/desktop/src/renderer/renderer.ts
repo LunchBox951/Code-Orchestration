@@ -532,7 +532,7 @@ function renderAgents(state: AgentsConsoleState): void {
           return [
             `<div class="agents-roster-row${isSelected ? ' selected' : ''}"`,
             ` data-agent-id="${esc(agent.agentId)}"`,
-            ` role="button" tabindex="0"`,
+            ` role="option" tabindex="0"`,
             ` aria-selected="${isSelected ? 'true' : 'false'}">`,
             statusDotHtml(agent.status),
             `<span class="agents-row-role">${esc(agent.role)}</span>`,

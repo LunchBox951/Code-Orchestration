@@ -43,6 +43,12 @@ function mergeTranscriptBackfill(backfill: string, current: string): string {
   if (backfill.length === 0) return boundTranscript(current);
   if (backfill.endsWith(current)) return boundTranscript(backfill);
   if (current.startsWith(backfill)) return boundTranscript(current);
+  const maxOverlap = Math.min(backfill.length, current.length);
+  for (let n = maxOverlap; n > 0; n--) {
+    if (backfill.endsWith(current.slice(0, n))) {
+      return boundTranscript(backfill + current.slice(n));
+    }
+  }
   return boundTranscript(backfill + current);
 }
 

@@ -5,6 +5,7 @@ import {
   requireMailTab,
   requireMailType,
   requireNavView,
+  requireAgentId,
   requireNonEmptyString,
   requireSteer,
 } from './ipc-guards.js';
@@ -42,6 +43,13 @@ describe('main IPC runtime guards', () => {
     expect(requireNonEmptyString('@operator', 'mail bus')).toBe('@operator');
     expect(() => requireNonEmptyString('', 'mail bus')).toThrow(/mail bus/i);
     expect(() => requireNonEmptyString(42, 'mail bus')).toThrow(/mail bus/i);
+  });
+
+  it('accepts nonblank agent ids and rejects whitespace-only values', () => {
+    expect(requireAgentId('impl-x')).toBe('impl-x');
+    expect(() => requireAgentId('')).toThrow(/agentId/i);
+    expect(() => requireAgentId('   ')).toThrow(/agentId/i);
+    expect(() => requireAgentId(42)).toThrow(/agentId/i);
   });
 
   it('accepts valid steer payloads', () => {

@@ -38,6 +38,8 @@ const liveObs: OperatorObservation = {
   snapshot: { snapshot: emptyStatic, agents: [] },
 };
 
+const flushPromises = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
 function makeClient(obs: OperatorObservation = staticObs): OperatorIpcClient {
   return {
     connected: obs.kind === 'live',
@@ -640,6 +642,55 @@ describe('createAppShell — agentsConsole VM wiring', () => {
         selectedAgentId: 'impl-x',
         transcript: 'existing tail\nlive chunk\n',
       });
+    });
+  });
+
+  it('ignores an older same-agent backfill after selecting away and back', async () => {
+    let resolveFirst!: (tail: { agentId: string; tail: string }) => void;
+    let resolveSecond!: (tail: { agentId: string; tail: string }) => void;
+    const firstP = new Promise<{ agentId: string; tail: string }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondP = new Promise<{ agentId: string; tail: string }>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript: vi.fn().mockReturnValueOnce(firstP).mockReturnValueOnce(secondP),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    shell.selectAgent(null);
+    shell.selectAgent('impl-x');
+    resolveSecond({ agentId: 'impl-x', tail: 'fresh tail\n' });
+
+    await vi.waitFor(() => {
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        selectedAgentId: 'impl-x',
+        transcript: 'fresh tail\n',
+      });
+    });
+
+    resolveFirst({ agentId: 'impl-x', tail: 'stale tail\n' });
+    await flushPromises();
+
+    expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+      selectedAgentId: 'impl-x',
+      transcript: 'fresh tail\n',
     });
   });
 });

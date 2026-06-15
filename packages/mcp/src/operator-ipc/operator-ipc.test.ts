@@ -724,6 +724,36 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     expect(client.connected).toBe(true);
   });
 
+  it('raw connection isolates transcript listener failures so later subscribers still receive the push', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    wireTranscriptPush(control, server);
+    const connection = await OperatorIpcConnection.connect(socketPath);
+    try {
+      const got: OperatorIpcTranscript[] = [];
+      connection.onTranscript(() => {
+        throw new Error('raw transcript listener failed');
+      });
+      connection.onTranscript((t) => got.push(t));
+
+      pane.emit('hello');
+      await flush();
+
+      expect(got.map((t) => t.chunk)).toEqual(['hello']);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it('tail/backfill: transcript() returns the concatenated emitted bytes across the real socket', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
@@ -818,6 +848,36 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     // And the on-demand tail is now live (no longer degraded).
     const tail = await client.transcript('impl-x');
     expect(tail.tail).toContain('resumed bytes');
+  });
+
+  it('facade isolates transcript listener failures so later UI subscribers still receive the push', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    wireTranscriptPush(control, server);
+    const errors: unknown[] = [];
+    const client = new OperatorIpcClient({ projectId, socketPath, onError: (e) => errors.push(e) });
+    clients.push(client);
+    const got: OperatorIpcTranscript[] = [];
+    client.onTranscript(() => {
+      throw new Error('facade transcript listener failed');
+    });
+    client.onTranscript((t) => got.push(t));
+    expect(await client.connect()).toBe(true);
+
+    pane.emit('facade bytes');
+    await flush();
+
+    expect(got.map((t) => t.chunk)).toEqual(['facade bytes']);
+    expect(errors).toHaveLength(1);
   });
 });
 
@@ -1293,6 +1353,34 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
     expect(states.filter((s) => s === 'connected')).toHaveLength(2);
   });
 
+  it('raw connection isolates tick listener failures so later subscribers still receive the push', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    const connection = await OperatorIpcConnection.connect(socketPath);
+    try {
+      const ticks: OperatorIpcTick[] = [];
+      connection.onTick(() => {
+        throw new Error('raw tick listener failed');
+      });
+      connection.onTick((t) => ticks.push(t));
+
+      server.pushTick(control.observe());
+      await flush();
+
+      expect(ticks).toHaveLength(1);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it('client reconnects to the SAME running server after a client-side socket drop (app restart, daemon stays up)', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
@@ -1368,6 +1456,34 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
     await flush();
     expect(errors).toHaveLength(0);
   });
+
+  it('facade isolates tick listener failures so later UI subscribers still receive the push', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+    const errors: unknown[] = [];
+    const client = new OperatorIpcClient({ projectId, socketPath, onError: (e) => errors.push(e) });
+    clients.push(client);
+    const ticks: OperatorIpcTick[] = [];
+    client.onTick(() => {
+      throw new Error('facade tick listener failed');
+    });
+    client.onTick((t) => ticks.push(t));
+    expect(await client.connect()).toBe(true);
+
+    server.pushTick(control.observe());
+    await flush();
+
+    expect(ticks).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+  });
 });
 
 // ── serveConductor wiring — `co serve` starts the IPC server alongside the runner ─
@@ -1410,6 +1526,41 @@ describe('serveConductor wiring — the IPC server rides the cadence runner (pus
     await runner.stop(); // the onStop seam closes the IPC server (socket torn down)
     await flush();
     expect((await client.observe()).kind).toBe('static'); // the app degrades cleanly once co serve stops
+  });
+
+  it('closes the IPC server if auto-start recovery fails after the socket starts', async () => {
+    const { projectId, cwd } = makeProject();
+    const sessions = openSessionStore(projectId);
+    try {
+      sessions.recordSession({
+        agentId: 'impl-orphan',
+        pane: 'pane-impl-orphan',
+        cwd,
+        provider: 'claude',
+        resume: { provider: 'claude', sessionId: 'session-impl-orphan' },
+      });
+    } finally {
+      sessions.close();
+    }
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    await expect(
+      serveConductor({
+        projectId,
+        pty: new FakePty(),
+        makeTransport: () => InMemoryTransport.createLinkedPair(),
+        now: clock.now,
+        quietWindow: qw.quietWindow,
+        scheduler: new FakeScheduler(),
+        reconcileEvery: 1,
+        operatorIpc: { socketPath },
+      }),
+    ).rejects.toThrow(/no roster record/i);
+
+    await expect(OperatorIpcConnection.connect(socketPath)).rejects.toThrow();
   });
 });
 

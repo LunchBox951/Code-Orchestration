@@ -321,6 +321,18 @@ describe('AgentsConsoleVM — setTranscriptTail', () => {
     expect(vm.state.transcript).toBe('existing tail\nlive chunk\n');
   });
 
+  it('deduplicates partial overlap when a backfill already contains the first live chunk', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.appendChunk({ agentId: 'a1', chunk: 'B' });
+    vm.appendChunk({ agentId: 'a1', chunk: 'C' });
+
+    vm.setTranscriptTail({ agentId: 'a1', tail: 'AB' });
+
+    expect(vm.state.transcript).toBe('ABC');
+  });
+
   it('emits after applying', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));

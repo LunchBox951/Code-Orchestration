@@ -149,6 +149,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   const dash = new DashboardVM();
   const limitsCostVm = new LimitsCostVM();
   const agentsConsoleVm = new AgentsConsoleVM();
+  let transcriptRequestSeq = 0;
   agentsConsoleVm.subscribe((state) => deps.onAgentsConsoleState?.(state));
 
   function doRefreshLimitsCost(): void {
@@ -273,11 +274,19 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     refreshMail: doRefreshMail,
     refreshLimitsCost: doRefreshLimitsCost,
     selectAgent(agentId: string | null): void {
+      const requestSeq = ++transcriptRequestSeq;
       agentsConsoleVm.selectAgent(agentId);
       if (agentId != null) {
         void client
           .transcript(agentId)
-          .then((tail) => agentsConsoleVm.setTranscriptTail(tail))
+          .then((tail) => {
+            if (
+              requestSeq === transcriptRequestSeq &&
+              agentsConsoleVm.state.selectedAgentId === agentId
+            ) {
+              agentsConsoleVm.setTranscriptTail(tail);
+            }
+          })
           .catch(() => {});
       }
     },
