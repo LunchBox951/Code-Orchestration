@@ -12,7 +12,7 @@ export default tseslint.config(
       'docs/**',
       '.goals/**',
       '.research/**',
-      'apps/**',
+      'apps/desktop/dist/**',
     ],
   },
   js.configs.recommended,
@@ -44,6 +44,40 @@ export default tseslint.config(
               name: 'node:sqlite',
               message:
                 'Adapters must not open the store directly — that is core logic (AC-L2-1 layering).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  // AC-S11-2 (MC-2) — the desktop app is a thin adapter: it imports @co/core and @co/mcp barrels
+  // only; the main process must never open node:sqlite directly (that is @co/core's job).
+  // Test files are excluded: capability tests (e.g. native-abi.test.ts) legitimately probe
+  // node:sqlite and electron internals directly.
+  {
+    files: ['apps/desktop/src/**/*.ts'],
+    ignores: ['apps/desktop/src/**/*.test.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@co/core/*', '@co/core/**'],
+              message:
+                'The desktop app imports ONLY the @co/core public barrel — no deep/internal imports (AC-S11-2 MC-2).',
+            },
+            {
+              group: ['**/packages/core/src/**', '**/packages/core/dist/**'],
+              message:
+                'The desktop app must not reach into core source/dist — import the @co/core barrel (AC-S11-2 MC-2).',
+            },
+          ],
+          paths: [
+            {
+              name: 'node:sqlite',
+              message:
+                'The desktop app must not open the store directly — all data access goes through @co/core (AC-S11-2 MC-2).',
             },
           ],
         },

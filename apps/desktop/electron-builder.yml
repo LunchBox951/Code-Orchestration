@@ -1,0 +1,20 @@
+appId: dev.co.desktop
+productName: co
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - node_modules/**/*
+  - package.json
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+
+# mac/win: host build-matrix handoff — prebuilds require the platform binary.
+# Run on the target host: pnpm --filter @co/desktop dist

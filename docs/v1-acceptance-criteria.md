@@ -67,8 +67,11 @@ These are the top-level conditions that, all met, *are* v1.
   first-class participant and escalations/approvals **filter up** to their inbox (Principles 1, 8). L1 delivers the typed, schema-validated, persisted mail bus over the L0 event log, with `@operator` first-class. Remaining: 'ONLY via mail' (no other channel) is enforced once the MCP surface (L2) + Conductor (L7) wire it.
 - `SF-4` ◐ Actionable mail is **un-loseable** (sticky until acted on); informational mail is not
   (Principle 8, `MAIL-BUS`). L1 delivers actionable-vs-informational with sticky-until-resolved as a tested REPLAY invariant + an outstanding-action-count projection. Remaining: the operator-facing inbox UX is the app (L9).
-- `SF-5` ⏸ A **desktop app** is the operator's one-stop surface — observe and steer all agents in
-  one place (Principle 15). *Couples to the parked shell decision (Electron vs Tauri).*
+- `SF-5` ◐ A **desktop app** is the operator's one-stop surface — observe and steer all agents in
+  one place (Principle 15). Stage 11 stands up the Electron shell (`apps/desktop`): the 6-view nav
+  shell, the main-process `@co/core` + P1 `OperatorIpcClient` wiring, and the contextBridge
+  view-model bridge. Remaining: the full view data (Dashboard, Mail, Cost — P3/P4/P5), the
+  agent-console pty pane, and the host-live proof (operator handoff).
 - `SF-6` ◐ Artifacts (mail, commit messages) are **rendered per audience** — structured under the
   hood, clean human view on top; provider voice stays out of artifacts (Principle 3). L1 ships the
   renderer-registry seam + a generic default renderer; L3 ships provider-deterministic commit /
@@ -220,7 +223,7 @@ These deferred decisions **must resolve before v1** (they gate `SF-1`, `SF-5`, `
 
 - **Runtime substrate** — how the Conductor drives a live interactive session (turn execution,
   spawn/transport, liveness, recovery). See [`research/runtime-substrate.md`](research/runtime-substrate.md).
-- **Desktop shell** — Electron vs Tauri-with-Node-sidecar. See
+- **Desktop shell** — ✅ RESOLVED: Electron (Stage 11, 2026-06-15). See
   [`research/language-and-stack.md`](research/language-and-stack.md).
 
 ## Lifecycle
