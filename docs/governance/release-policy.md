@@ -8,9 +8,10 @@
 
 - **`dev`** — the integration line, GitHub default branch, and source for the nightly channel.
   Feature/phase PRs land here after review. Experimental work may live here while it proves out.
-- **`release/*`** — selective stabilization branches cut from current `main`. Maintainers
+- **`release/*`** — selective, linear stabilization branches cut from current `main`. Maintainers
   cherry-pick the tested `dev` changes intended for stable release, leaving unrelated or early work
-  behind.
+  behind. Merge commits are rejected because they can hide release-only changes from
+  patch-equivalence checks.
 - **`main`** — stable, tagged releases only. Updated solely by a gated promotion PR from
   same-repository `release/*`; no direct pushes.
 - **`nightly`** — a moving GitHub prerelease built from `dev` at 05:00 UTC.
@@ -25,7 +26,8 @@
 4. Cherry-pick only the tested changes selected for stable from `dev` into the release branch.
 5. Open `release/*` → `main`.
 6. The main gate requires green CI, `pnpm audit --audit-level high`, current `main` ancestry,
-   patch-equivalence to `dev`, and a 24-hour soak on the release branch head commit.
+   patch-equivalence to `dev`, no merge commits, and a 24-hour soak after the latest promotion PR
+   update.
 7. Merge to `main`; the stable release workflow publishes the Linux AppImage for that exact commit.
 
 This keeps the nightly channel fast while avoiding all-or-nothing promotion from `dev` to `main`.
@@ -50,7 +52,7 @@ Repository settings must enforce what YAML cannot fully guarantee:
 
 ## Critical Security Soak Bypass
 
-The 24-hour soak can be skipped only for critical security promotions by applying the
+The 24-hour promotion-PR soak can be skipped only for critical security promotions by applying the
 `security:critical` PR label. That label does **not** skip CI, audit, same-repository `release/*`
 source validation, current-`main` ancestry, or the `dev` patch-equivalence check.
 

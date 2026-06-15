@@ -45,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # Stable promotion gets the stricter dependency gate. Nightly dependency
-      # churn stays on dev, where weekday Dependabot checks keep fixes flowing.
+      # churn stays on dev, where Dependabot checks keep fixes flowing.
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:

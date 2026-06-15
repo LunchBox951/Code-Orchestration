@@ -77,6 +77,13 @@ jobs:
         run: |
           git fetch origin main dev --prune
 
+          merge_commits="$(git rev-list --merges origin/main.."$HEAD_SHA")"
+          if [ -n "$merge_commits" ]; then
+            echo "Release branches must be linear cherry-pick branches; merge commits can hide release-only patches."
+            echo "$merge_commits"
+            exit 1
+          fi
+
           unproven="$(
             git cherry -v origin/dev "$HEAD_SHA" origin/main | awk '$1 == "+" { print }'
           )"
@@ -105,18 +112,19 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REQUIRED_SECONDS: '86400'
           SECURITY_CRITICAL: ${{ contains(github.event.pull_request.labels.*.name, 'security:critical') }}
+          PR_UPDATED_AT: ${{ github.event.pull_request.updated_at }}
         run: |
           if [ "$SECURITY_CRITICAL" = "true" ]; then
             echo "security:critical label present; skipping the 24 hour soak for this critical security promotion."
             exit 0
           fi
 
-          commit_epoch="$(git show -s --format=%ct "$HEAD_SHA")"
+          updated_epoch="$(date -u -d "$PR_UPDATED_AT" +%s)"
           now_epoch="$(date -u +%s)"
-          age_seconds="$((now_epoch - commit_epoch))"
+          age_seconds="$((now_epoch - updated_epoch))"
 
           echo "head=${HEAD_SHA}"
-          echo "commit_time=$(date -u -d "@${commit_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "pr_updated_at=${PR_UPDATED_AT}"
           echo "now=$(date -u -d "@${now_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
           echo "age_seconds=${age_seconds}"
           echo "required_seconds=${REQUIRED_SECONDS}"
@@ -126,6 +134,6 @@ jobs:
           fi
 
           remaining_seconds="$((REQUIRED_SECONDS - age_seconds))"
-          echo "Release branch head has not soaked long enough for stable promotion."
+          echo "Stable promotion PR has not soaked long enough since its latest update."
           echo "Wait another ${remaining_seconds} seconds, then rerun this check."
           exit 1

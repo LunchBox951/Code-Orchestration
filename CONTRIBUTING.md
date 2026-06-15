@@ -8,8 +8,8 @@ orchestrates work. Read [`docs/README.md`](docs/README.md) and
 
 - Node ≥ 22 (see `.nvmrc`), **pnpm 10** — enable via `corepack enable` **or** `npm i -g pnpm@10`
   (corepack is optional).
-- `pnpm install`, then `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` — run all four before
-  considering a change done.
+- `pnpm install`, then `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and
+  `pnpm format:check` — run all five before considering a change done.
 
 ## How work is structured (the model)
 
