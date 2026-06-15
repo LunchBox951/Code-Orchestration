@@ -16,6 +16,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  MAIL_CHAT,
+  OPERATOR,
   QUIET_WINDOW_MS,
   defaultMailRenderer,
   openMailStore,
@@ -29,7 +31,7 @@ import {
   type SpawnSpec,
 } from '@co/core';
 import type { HostedIdentity } from '../live-session-host.js';
-import { buildHostProofSpawnSpec, runHostProof } from './host-proof.js';
+import { buildHostProofSpawnSpec, hostProofMailRenderer, runHostProof } from './host-proof.js';
 import { createStreamTransportPair } from './real-transport.js';
 
 // ── Startup fixture ────────────────────────────────────────────────────────────
@@ -141,6 +143,14 @@ const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0
 /** A few ticks for steps with several chained internal awaits (e.g. MCP bind handshake). */
 const flush = async (n = 4): Promise<void> => {
   for (let i = 0; i < n; i++) await tick();
+};
+const waitUntil = async (predicate: () => boolean, timeoutMs = 1000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('timed out waiting for test predicate');
 };
 
 /** Mutable monotonic clock — DATA, never a wall clock. */
@@ -404,6 +414,235 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     expect(result.steerMidTurn).toBe(false);
   });
 
+  it('can prove routing idle on one turn and mid-turn steering on a separate warm-pane turn', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const paneRef: { current?: FakePty['panes'][number] } = {};
+    let beforeSteerRan = false;
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      separateSteerTurn: true,
+      steerTurnStartDelayMs: 0,
+      expectedRouteNonce: 'split-turn-nonce',
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: 'clarify_request',
+            subject: 'turn complete split-turn-nonce',
+            body: 'proof routing split-turn-nonce',
+          },
+        });
+      },
+      beforeSteer: async () => {
+        beforeSteerRan = true;
+        const store = openMailStore(projectId);
+        mailStores.push(store);
+        const pane = paneRef.current;
+        if (pane == null) throw new Error('test expected pane reference');
+        expect(
+          store
+            .outstanding('impl-hp')
+            .some((item) => item.subject.includes('host-proof steer split-turn-nonce')),
+        ).toBe(true);
+        expect(pane.written.filter((w) => w === '\r')).toHaveLength(2);
+        expect(pane.written).not.toContain(ESC);
+        setTimeout(() => {
+          clock.set(2000 + QUIET_WINDOW_MS + 1);
+          qw.settle();
+        }, 0);
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    paneRef.current = pane;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+    const store = openMailStore(projectId);
+    mailStores.push(store);
+    await waitUntil(() =>
+      store
+        .outstanding('impl-hp')
+        .some((item) => item.subject.includes('host-proof steer split-turn-nonce')),
+    );
+    const steerMail = store
+      .outstanding('impl-hp')
+      .find((item) => item.subject.includes('host-proof steer split-turn-nonce'));
+    if (steerMail == null) throw new Error('test expected seeded steer proof mail');
+    pane.emit(defaultMailRenderer(steerMail));
+    await tick();
+    clock.set(2000);
+    pane.emit('⠋ still working before interrupt\r\n');
+    await tick();
+
+    const result = await proofP;
+
+    expect(beforeSteerRan).toBe(true);
+    expect(result.turnRan).toBe(true);
+    expect(result.turnIdle).toBe(true);
+    expect(result.mailRouted).toBe(true);
+    expect(result.steerCompleted).toBe(true);
+    expect(result.steerMidTurn).toBe(true);
+    expect(pane.written.filter((w) => w === '\r')).toHaveLength(2);
+  });
+
+  it('waits for the separate steer mail to submit before interrupting fallback injection', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const paneRef: { current?: FakePty['panes'][number] } = {};
+    let retryAttempts = 0;
+    let releaseSecondRetry: (() => void) | undefined;
+    let beforeSteerRan = false;
+    const retryDelay = (signal?: AbortSignal): Promise<void> =>
+      new Promise<void>((resolve) => {
+        retryAttempts += 1;
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', finish);
+          resolve();
+        };
+        signal?.addEventListener('abort', finish, { once: true });
+        if (retryAttempts === 2) releaseSecondRetry = finish;
+      });
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay, allowUnverifiedSubmit: true },
+      separateSteerTurn: true,
+      steerTurnStartDelayMs: 0,
+      expectedRouteNonce: 'split-fallback-nonce',
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: 'clarify_request',
+            subject: 'turn complete split-fallback-nonce',
+            body: 'proof routing split-fallback-nonce',
+          },
+        });
+      },
+      beforeSteer: async () => {
+        beforeSteerRan = true;
+        const pane = paneRef.current;
+        if (pane == null) throw new Error('test expected pane reference');
+        expect(pane.written.filter((w) => w === '\r')).toHaveLength(2);
+        expect(pane.written).not.toContain(ESC);
+        clock.set(2000);
+        pane.emit('⠋ still working after fallback submit\r\n');
+        await tick();
+        setTimeout(() => {
+          clock.set(2000 + QUIET_WINDOW_MS + 1);
+          qw.settle();
+        }, 0);
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    paneRef.current = pane;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+    await waitUntil(() => retryAttempts >= 2);
+
+    expect(beforeSteerRan).toBe(false);
+    expect(pane.written.filter((w) => w === '\r')).toHaveLength(1);
+    releaseSecondRetry?.();
+
+    const result = await proofP;
+
+    expect(beforeSteerRan).toBe(true);
+    expect(result.turnRan).toBe(true);
+    expect(result.turnIdle).toBe(true);
+    expect(result.mailRouted).toBe(true);
+    expect(result.steerMidTurn).toBe(true);
+    expect(pane.written.filter((w) => w === '\r')).toHaveLength(2);
+    expect(pane.written).toContain(ESC);
+  });
+
+  it('fails loud if the separate steer turn errors before injection completes', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      separateSteerTurn: true,
+      steerTurnStartDelayMs: 0,
+      expectedRouteNonce: 'split-inject-fail-nonce',
+      renderMail: (item) =>
+        item.subject.includes('host-proof steer') ? ' ' : defaultMailRenderer(item),
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: 'clarify_request',
+            subject: 'turn complete split-inject-fail-nonce',
+            body: 'proof routing split-inject-fail-nonce',
+          },
+        });
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    await expect(proofP).rejects.toThrow(
+      /separate steer turn failed before injection completed.*empty/i,
+    );
+  });
+
   it('fails before injection when startup surfaces login_required', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
@@ -467,6 +706,7 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       now: clock.now,
       quietWindow: qw.quietWindow,
       injectOptions: { retryDelay: neverResolve },
+      routeTimeoutMs: 50,
     });
 
     expect(pty.panes).toHaveLength(1);
@@ -511,6 +751,7 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       quietWindow: qw.quietWindow,
       injectOptions: { retryDelay: neverResolve },
       expectedRouteNonce: 'fresh-nonce',
+      routeTimeoutMs: 50,
     });
 
     expect(pty.panes).toHaveLength(1);
@@ -569,6 +810,289 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     expect(result.mailRouted).toBe(false);
   });
 
+  it('waits briefly for a valid routed proof mail that arrives after byte-idle', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const routeStore = openMailStore(projectId);
+    mailStores.push(routeStore);
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      expectedRouteNonce: 'late-route-nonce',
+      routeTimeoutMs: 100,
+      routePostSettleGraceMs: 100,
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+    const routeLater = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        routeStore.send({
+          type: 'clarify_request',
+          to: 'coord-1',
+          from: 'impl-hp',
+          subject: 'late proof late-route-nonce',
+          body: 'routed after idle',
+        });
+        resolve();
+      }, 0);
+    });
+    await routeLater;
+
+    const result = await proofP;
+
+    expect(result.mailRouted).toBe(true);
+  });
+
+  it('does not wait for the full route timeout after a fast no-route turn settles', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      expectedRouteNonce: 'never-routed',
+      routeTimeoutMs: 750,
+      routePostSettleGraceMs: 10,
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    const started = Date.now();
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(result.mailRouted).toBe(false);
+  });
+
+  it('returns mailRouted=false when the hosted agent sends the proof nonce with the wrong mail type', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      expectedRouteNonce: 'wrong-type-nonce',
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: MAIL_CHAT,
+            subject: 'turn complete wrong-type-nonce',
+            body: 'proof routing wrong-type-nonce',
+          },
+        });
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    expect(result.mailRouted).toBe(false);
+  });
+
+  it('returns mailRouted=false when duplicate matching proof mails are sent', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      expectedRouteNonce: 'duplicate-nonce',
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        for (let i = 0; i < 2; i++) {
+          await c.callTool({
+            name: 'co_mail_send',
+            arguments: {
+              to: 'coord-1',
+              type: 'clarify_request',
+              subject: `turn complete duplicate-nonce ${i}`,
+              body: 'proof routing duplicate-nonce',
+            },
+          });
+        }
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    expect(result.mailRouted).toBe(false);
+  });
+
+  it('returns mailRouted=false when a valid proof mail is followed by an extra invalid mail', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      expectedRouteNonce: 'extra-invalid-nonce',
+      awaitMailRouted: async (clientTransport) => {
+        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
+        clients.push(c);
+        await c.connect(clientTransport);
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: 'clarify_request',
+            subject: 'turn complete extra-invalid-nonce',
+            body: 'proof routing extra-invalid-nonce',
+          },
+        });
+        await c.callTool({
+          name: 'co_mail_send',
+          arguments: {
+            to: 'coord-1',
+            type: MAIL_CHAT,
+            subject: 'extra chatter',
+            body: 'not part of the proof',
+          },
+        });
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    expect(result.mailRouted).toBe(false);
+  });
+
+  it('recomputes final proof-mail exactness after an early route and catches later duplicates', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const pty = new FakePty();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const routeStore = openMailStore(projectId);
+    mailStores.push(routeStore);
+    let beforeSteerStarted = false;
+
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      expectedRouteNonce: 'early-duplicate-nonce',
+      routeTimeoutMs: 500,
+      beforeSteer: async () => {
+        beforeSteerStarted = true;
+        routeStore.send({
+          type: 'clarify_request',
+          to: 'coord-1',
+          from: 'impl-hp',
+          subject: 'duplicate proof early-duplicate-nonce',
+          body: 'second matching proof mail',
+        });
+      },
+    });
+
+    expect(pty.panes).toHaveLength(1);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await flush(6);
+    routeStore.send({
+      type: 'clarify_request',
+      to: 'coord-1',
+      from: 'impl-hp',
+      subject: 'first proof early-duplicate-nonce',
+      body: 'first matching proof mail',
+    });
+    await waitUntil(() => beforeSteerStarted);
+    await driveTurnToIdle(pane, mail, clock, qw);
+
+    const result = await proofP;
+
+    expect(result.steerMidTurn).toBe(true);
+    expect(result.mailRouted).toBe(false);
+  });
+
   it('full proof can use the stream-backed transport pair, not only InMemoryTransport', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
@@ -619,6 +1143,35 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
 });
 
 describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
+  it('renders the tool-call prompt only for the route-proof mail, not the separate steer mail', () => {
+    const { projectId } = makeProject();
+    const store = openMailStore(projectId);
+    mailStores.push(store);
+    const renderer = hostProofMailRenderer('route-nonce', 'mcp__co__co_mail_send');
+    const routeMail = store.send({
+      type: 'clarify_request',
+      to: 'impl-hp',
+      from: OPERATOR,
+      subject: 'host-proof route-nonce',
+      body: 'route proof',
+    });
+    const steerMail = store.send({
+      type: 'clarify_request',
+      to: 'impl-hp',
+      from: OPERATOR,
+      subject: 'host-proof steer route-nonce',
+      body: 'Do not call tools. Keep the turn active briefly until interrupted.',
+    });
+
+    const renderedRoute = renderer(routeMail);
+    const renderedSteer = renderer(steerMail);
+
+    expect(renderedRoute).toContain('mcp__co__co_mail_send');
+    expect(renderedRoute).toContain('host-proof complete route-nonce');
+    expect(renderedSteer).toContain('Do not call tools');
+    expect(renderedSteer).not.toContain('mcp__co__co_mail_send');
+  });
+
   it('builds a Claude spawn spec with scoped stdio co-mcp JSON config', () => {
     const { projectId, cwd, dataDir } = makeProject();
     const identity = {
@@ -633,6 +1186,13 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
       coMcpArgs: ['/repo/packages/mcp/dist/bin.js'],
       coCliCommand: '/repo/packages/cli/dist/index.js',
       claudeCredentialsJson: '{"claude":true}\n',
+      claudeStateJson: JSON.stringify({
+        oauthAccount: true,
+        hasCompletedOnboarding: true,
+        projects: { '/repo': { allowedTools: ['Bash'] } },
+        mcpServers: { userConfigured: true },
+        history: ['do not copy'],
+      }),
     });
 
     expect(spec.command).toBe('claude');
@@ -657,6 +1217,12 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
     expect(spec.prelaunchFiles).toContainEqual({
       path: `${dataDir}/isolated/host-proof-claude/.credentials.json`,
       contents: '{"claude":true}\n',
+    });
+    const stateFile = spec.prelaunchFiles?.find((file) => file.path.endsWith('/.claude.json'));
+    expect(stateFile).toBeDefined();
+    expect(JSON.parse(stateFile!.contents)).toEqual({
+      oauthAccount: true,
+      hasCompletedOnboarding: true,
     });
   });
 

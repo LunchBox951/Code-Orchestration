@@ -212,6 +212,21 @@ export function realQuietWindow(signal: AbortSignal): Promise<void> {
   });
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function reportServeControlDiagnostic(
+  onError: ((error: unknown) => void) | undefined,
+  error: Error,
+): void {
+  if (onError != null) {
+    onError(error);
+  } else {
+    console.error('[co serve] control error:', error);
+  }
+}
+
 /**
  * The default `[host-live]` transport seam: binding the co MCP surface to a real pty-bound provider
  * transport is an explicit host-live seam for direct `serveConductor` callers. Throws a clear message
@@ -339,7 +354,20 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   }
 
   // P3 (CTL-OBS) — the operator control/observe surface, backed by the running engine.
-  const router = new DaemonBackedAgentRouter({ engine, projectId });
+  const router = new DaemonBackedAgentRouter({
+    engine,
+    projectId,
+    onStopUnhosted: (agent) =>
+      reportServeControlDiagnostic(
+        opts.onError,
+        new Error(`co serve: stop requested for '${agent}' but it is not hosted.`),
+      ),
+    onStopError: (agent, error) =>
+      reportServeControlDiagnostic(
+        opts.onError,
+        new Error(`co serve: stop teardown for '${agent}' failed: ${errorMessage(error)}`),
+      ),
+  });
   const liveProvider = new EngineLiveStateProvider({ engine, projectId, router });
 
   const reconcile = new ReconcileLoop({
@@ -378,6 +406,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     ...(opts.onError != null ? { onError: opts.onError } : {}),
     onStop: async () => {
       try {
+        await router.drain();
         await engine.closeAll();
       } finally {
         wtStoreForStop?.close();

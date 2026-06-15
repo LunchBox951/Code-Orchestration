@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, existsSync, readFileSync } from '
 import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-import type { CoMcpPaths } from './placement-launch.js';
+import { sanitizeClaudeStateJson, type CoMcpPaths } from './placement-launch.js';
 
 export interface HostLaunchPathOptions {
   readonly argv?: readonly string[];
@@ -30,6 +30,7 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
             'claudeCredentialsJson',
             join(homeDir, '.claude', '.credentials.json'),
           ),
+          ...readOptionalClaudeStateFile(join(homeDir, '.claude.json')),
           ...readOptionalAuthFile('codexAuthJson', join(homeDir, '.codex', 'auth.json')),
         }
       : {}),
@@ -104,12 +105,30 @@ function resolveCommandOnPath(command: string, env: NodeJS.ProcessEnv): string |
 }
 
 function readOptionalAuthFile(
-  key: 'claudeCredentialsJson' | 'codexAuthJson',
+  key: 'claudeCredentialsJson' | 'claudeStateJson' | 'codexAuthJson',
   path: string,
-): Partial<Pick<CoMcpPaths, 'claudeCredentialsJson' | 'codexAuthJson'>> {
+): Partial<Pick<CoMcpPaths, 'claudeCredentialsJson' | 'claudeStateJson' | 'codexAuthJson'>> {
   try {
     return { [key]: readFileSync(path, 'utf8') };
   } catch {
     return {};
+  }
+}
+
+function readOptionalClaudeStateFile(path: string): Partial<Pick<CoMcpPaths, 'claudeStateJson'>> {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return {};
+  }
+  try {
+    const claudeStateJson = sanitizeClaudeStateJson(raw);
+    return claudeStateJson == null ? {} : { claudeStateJson };
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    throw new Error(`co-mcp: failed to sanitize Claude state file '${path}': ${detail}`, {
+      cause,
+    });
   }
 }

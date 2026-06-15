@@ -226,6 +226,11 @@ export interface TurnOutcome {
   readonly liveness?: LivenessVerdict;
 }
 
+export interface RunOneTurnOptions {
+  /** Called after the mail has been submitted to the provider composer, before turn-end observation. */
+  readonly onInjected?: () => void;
+}
+
 /** The result of one {@link ConductorEngine.runCycle}: the hosted pane, the injected item, and the turn. */
 export interface CycleOutcome {
   readonly hosted: HostedPane;
@@ -426,19 +431,7 @@ export class ConductorEngine {
       } catch {
         /* best-effort: the pty may already be gone (e.g. driveToReady rejected on exit) */
       }
-      if (session != null) {
-        try {
-          await session.close();
-        } catch {
-          /* best-effort: the bind may be partially torn down already */
-        }
-      } else if (clientTransport != null) {
-        try {
-          await clientTransport.close?.();
-        } catch {
-          /* best-effort: the client transport may never have started */
-        }
-      }
+      await Promise.allSettled([session?.close(), clientTransport?.close?.()]);
       await Promise.allSettled([startupP]);
       throw error;
     }
@@ -456,13 +449,18 @@ export class ConductorEngine {
    * signal ONLY — work-completion stays keyed to `co_finish`/`worker_done`; the engine never treats idle
    * as "done". Exactly one turn is driven: one inject, one detect, then return.
    */
-  async runOneTurn(hosted: HostedPane, mail: DeliveredMail): Promise<TurnOutcome> {
+  async runOneTurn(
+    hosted: HostedPane,
+    mail: DeliveredMail,
+    opts: RunOneTurnOptions = {},
+  ): Promise<TurnOutcome> {
     try {
       const text = this.renderMail(mail);
       await injectMail(hosted.pane, text, {
         provider: hosted.identity.provider,
         ...this.deps.injectOptions,
       });
+      opts.onInjected?.();
       const { turnEnd, trace, observedAt } = await this.observeTurnEnd(hosted);
       // P1b: classify liveness over the SAME turn trace and surface it. The turn has yielded
       // (turnActive=false), so the classifier reads `dead` (pane exited) or a `silent_stop` break

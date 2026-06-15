@@ -28,15 +28,16 @@ export class EngineReviewerSpawnGate implements ReviewerSpawnGate {
           'only a placed placement can launch a pane.',
       );
     }
+    if (this.engine.isHosted(projectId, record.agent)) return;
     // Reviewers supply a reviewBranch (the branch being reviewed as the pane cwd); slung children
     // are resolved from their recorded worktree keyed by agent.
     const worktree =
       record.reviewBranch != null
         ? this.worktrees.getWorktree(record.reviewBranch)
         : this.worktrees.listWorktrees().find((w) => !w.removed && w.agent === record.agent);
-    if (worktree == null) {
+    if (worktree == null || worktree.removed) {
       throw new Error(
-        `EngineReviewerSpawnGate.spawn: no worktree found for '${record.agent}' ` +
+        `EngineReviewerSpawnGate.spawn: no live worktree found for '${record.agent}' ` +
           `(reviewBranch='${String(record.reviewBranch ?? '–')}') — cannot launch pane.`,
       );
     }

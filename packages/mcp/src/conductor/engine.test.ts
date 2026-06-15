@@ -565,6 +565,31 @@ describe('ConductorEngine — ensureHosted fails loud without leaking the pane',
     pty.panes[1]!.emit(CLAUDE_READY);
     await expect(reHostP).resolves.toBeDefined();
   });
+
+  it('closes the client transport when startup fails after the MCP session is bound', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    let clientCloseCount = 0;
+    const { engine, pty } = makeEngine({
+      makeTransport: () => {
+        const pair = InMemoryTransport.createLinkedPair();
+        const originalClose = pair[0].close?.bind(pair[0]);
+        pair[0].close = async () => {
+          clientCloseCount += 1;
+          await originalClose?.();
+        };
+        return pair;
+      },
+    });
+
+    const ensureP = engine.ensureHosted(identity);
+    await flush(); // let hostSession bind before startup fails
+    pty.panes[0]!.exit(1, null);
+
+    await expect(ensureP).rejects.toThrow(/exited|ready/i);
+    expect(clientCloseCount).toBeGreaterThanOrEqual(1);
+  });
 });
 
 // ── MNR-2 seam: an errored turn must not drop its mail ──────────────────────────

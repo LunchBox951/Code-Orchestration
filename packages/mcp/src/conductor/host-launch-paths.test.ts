@@ -41,6 +41,16 @@ describe('host launch path resolution', () => {
     mkdirSync(join(home, '.claude'), { recursive: true });
     mkdirSync(join(home, '.codex'), { recursive: true });
     writeFileSync(join(home, '.claude', '.credentials.json'), '{"claude":true}\n');
+    writeFileSync(
+      join(home, '.claude.json'),
+      JSON.stringify({
+        oauthAccount: true,
+        hasCompletedOnboarding: true,
+        projects: { '/repo': { allowedTools: ['Bash'] } },
+        mcpServers: { userConfigured: true },
+        history: ['do not copy'],
+      }) + '\n',
+    );
     writeFileSync(join(home, '.codex', 'auth.json'), '{"codex":true}\n');
 
     const paths = defaultCoMcpPaths({
@@ -52,6 +62,10 @@ describe('host launch path resolution', () => {
     });
 
     expect(paths.claudeCredentialsJson).toBe('{"claude":true}\n');
+    expect(JSON.parse(paths.claudeStateJson ?? '{}')).toEqual({
+      oauthAccount: true,
+      hasCompletedOnboarding: true,
+    });
     expect(paths.codexAuthJson).toBe('{"codex":true}\n');
   });
 

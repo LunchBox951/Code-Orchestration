@@ -536,6 +536,89 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     }
   });
 
+  it('stop() waits for pending router stop teardown before resolving', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const ensureP = engine.ensureHosted(makeIdentity('impl-drain', projectId, cwd));
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await ensureP;
+    const hosted = engine.getHosted(projectId, 'impl-drain')!;
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    let closeCompleted = false;
+    (hosted.session as { close: () => Promise<void> }).close = async () => {
+      await closeGate;
+      closeCompleted = true;
+    };
+
+    runner.control!.router.stop('impl-drain');
+    await flush();
+    let stopResolved = false;
+    const stopP = runner.stop().then(() => {
+      stopResolved = true;
+    });
+    await flush();
+
+    expect(stopResolved).toBe(false);
+    expect(closeCompleted).toBe(false);
+    releaseClose();
+    await stopP;
+    expect(stopResolved).toBe(true);
+    expect(closeCompleted).toBe(true);
+  });
+
+  it('serveConductor surfaces unhosted stops and release failures through onError', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const errors: string[] = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
+    runner.control!.router.stop('impl-missing');
+    expect(errors.some((e) => /impl-missing.*not hosted/i.test(e))).toBe(true);
+
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const ensureP = engine.ensureHosted(makeIdentity('impl-fail-close', projectId, cwd));
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await ensureP;
+    const hosted = engine.getHosted(projectId, 'impl-fail-close')!;
+    (hosted.session as { close: () => Promise<void> }).close = async () => {
+      throw new Error('session close failed');
+    };
+
+    runner.control!.router.stop('impl-fail-close');
+    await runner.control!.router.drain();
+
+    expect(errors.some((e) => /impl-fail-close.*session close failed/i.test(e))).toBe(true);
+    await runner.stop();
+  });
+
   it('reports tick errors to stderr when no onError seam is supplied', async () => {
     const scheduler = new FakeScheduler();
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});

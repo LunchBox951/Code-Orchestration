@@ -1,7 +1,7 @@
 /**
  * P4 (Stage 10 · AC-S10-4·2) — the turnkey host-proof driver. Composes the LANDED building blocks
- * into the full operator proof: spawn → inject 1 mail → 1 turn → assert mail routed → warm-pane
- * `steer` → SIGKILL → `recoverProjectStore` → reconstruct.
+ * into the full operator proof: spawn → inject route-proof mail → route+idle turn → assert mail
+ * routed → warm-pane `steer` proof → SIGKILL → `recoverProjectStore` → reconstruct.
  *
  * IN-SANDBOX: runs against {@link FakePty} + the fake-provider transport (2a) + injected time
  * (deterministic). The FakePty pane and turn are driven externally by the test harness (emit
@@ -16,6 +16,7 @@ import {
   MAIL_CLARIFY_REQUEST,
   OPERATOR,
   buildPaneLaunchConfig,
+  defaultMailRenderer,
   normalizeStartupOutput,
   openMailStore,
   openRegistry,
@@ -71,6 +72,18 @@ export interface HostProofSeams {
   readonly afterReady?: () => Promise<void>;
   /** Optional host-live settle after route proof before steering the still-running turn. */
   readonly beforeSteer?: () => Promise<void>;
+  /**
+   * When true, the routed proof turn is allowed to reach natural idle before a second short turn is
+   * used only to prove mid-turn steering. Host-live uses this because interrupting the routed turn can
+   * correctly prevent that same turn from reporting byte-idle.
+   */
+  readonly separateSteerTurn?: boolean;
+  /** Delay before steering the separate steer-proof turn, giving the provider time to start work. */
+  readonly steerTurnStartDelayMs?: number;
+  /** Max time to wait for routed proof mail when host-live routing is polling the mail store. */
+  readonly routeTimeoutMs?: number;
+  /** Max extra time to wait for routed proof mail after the turn has reached its byte-idle boundary. */
+  readonly routePostSettleGraceMs?: number;
   /** Optional pane transcript hook for host-live diagnostics. */
   readonly onPaneData?: (chunk: string) => void;
   /** Optional explicit provider spawn spec. Host-live uses this to attach provider MCP config. */
@@ -115,6 +128,11 @@ export interface HostProofResult {
 
 // ── Driver ────────────────────────────────────────────────────────────────────
 
+const DEFAULT_ROUTE_TIMEOUT_MS = 30_000;
+const DEFAULT_ROUTE_POST_SETTLE_GRACE_MS = 1_000;
+const DEFAULT_STEER_TURN_START_DELAY_MS = 1_000;
+const ROUTE_POLL_INTERVAL_MS = 250;
+
 /**
  * Run the FULL host-proof sequence against the injected `seams` and return the structured result.
  *
@@ -130,6 +148,11 @@ export interface HostProofResult {
  *       `co_mail_send` naturally during the turn, so this seam is omitted. Either way, the driver
  *       checks the parent's mail store for routed items and records `mailRouted`.
  *   4. {@link ConductorEngine.steer} — interrupt on the still-hosted pane BEFORE crash simulation.
+ *      Default/in-sandbox path steers the routed turn. With `separateSteerTurn`, the routed turn is
+ *      first allowed to reach idle; the driver then seeds a second no-tools steer mail, waits until
+ *      that mail has been submitted into the warm pane, and interrupts that second turn. This is the
+ *      host-live path because interrupting the route-proof turn can correctly prevent that same turn
+ *      from reporting byte-idle.
  *   5. `pane.kill('SIGKILL')` — simulate a crash.
  *   6. {@link recoverProjectStore} — holistic replay from the event log.
  *   7. {@link openSessionStore}.listSessions() — reconstruct the live set; assert the agent is there.
@@ -194,26 +217,72 @@ export async function runHostProof(
         seams.expectedRouteNonce,
       );
     } else {
-      mailRouted = await waitForRouteOrTurn(turnP, () =>
-        hasRoutedProofMail(projectId, identity, beforeRouteSeq, seams.expectedRouteNonce),
+      mailRouted = await waitForRouteOrTimeout(
+        () => turnSettled,
+        () => hasRoutedProofMail(projectId, identity, beforeRouteSeq, seams.expectedRouteNonce),
+        seams.routeTimeoutMs ?? DEFAULT_ROUTE_TIMEOUT_MS,
+        seams.routePostSettleGraceMs ?? DEFAULT_ROUTE_POST_SETTLE_GRACE_MS,
       );
+      if (!mailRouted && !turnSettled) {
+        throw new Error(
+          `runHostProof: routed proof mail was not observed within ` +
+            `${seams.routeTimeoutMs ?? DEFAULT_ROUTE_TIMEOUT_MS}ms while the turn was still active.`,
+        );
+      }
     }
 
-    // Step 4: steer the still-live warm pane before crash simulation. When routing proves before the
-    // turn settles, this is a true mid-turn steer (SF-2); otherwise it remains a fail-loud warm-pane
-    // steer before crash.
-    await seams.beforeSteer?.();
-    const steerMidTurn = !turnSettled;
-    await engine.steer(projectId, identity.agent, { kind: 'interrupt' });
-    const turn = await turnP;
-    if (!mailRouted) {
-      mailRouted = hasRoutedProofMail(
-        projectId,
-        identity,
-        beforeRouteSeq,
-        seams.expectedRouteNonce,
-      );
-    }
+    let steerMidTurn = false;
+    const turn = await (async () => {
+      if (seams.separateSteerTurn === true) {
+        const routedTurn = await turnP;
+        mailRouted = hasRoutedProofMail(
+          projectId,
+          identity,
+          beforeRouteSeq,
+          seams.expectedRouteNonce,
+        );
+        const steerMail = seedSteerProofMail(
+          projectId,
+          identity,
+          seams.expectedRouteNonce ?? randomUUID(),
+        );
+        let markSteerTurnInjected!: () => void;
+        const steerTurnInjected = new Promise<void>((resolve) => {
+          markSteerTurnInjected = resolve;
+        });
+        let steerTurnSettled = false;
+        const steerTurnP = engine
+          .runOneTurn(hosted, steerMail, { onInjected: markSteerTurnInjected })
+          .finally(() => {
+            steerTurnSettled = true;
+          });
+        const steerReady = await Promise.race([
+          steerTurnInjected.then(() => ({ injected: true }) as const),
+          steerTurnP.then((outcome) => ({ injected: false, outcome }) as const),
+        ]);
+        if (!steerReady.injected) {
+          throw new Error(
+            `runHostProof: separate steer turn failed before injection completed: ` +
+              errorMessage(steerReady.outcome.error),
+          );
+        }
+        await sleepMs(seams.steerTurnStartDelayMs ?? DEFAULT_STEER_TURN_START_DELAY_MS);
+        await seams.beforeSteer?.();
+        steerMidTurn = !steerTurnSettled;
+        await engine.steer(projectId, identity.agent, { kind: 'interrupt' });
+        await steerTurnP;
+        return routedTurn;
+      }
+
+      // Step 4: steer the still-live warm pane before crash simulation. When routing proves before the
+      // turn settles, this is a true mid-turn steer (SF-2); otherwise it remains a fail-loud warm-pane
+      // steer before crash.
+      await seams.beforeSteer?.();
+      steerMidTurn = !turnSettled;
+      await engine.steer(projectId, identity.agent, { kind: 'interrupt' });
+      return turnP;
+    })();
+    mailRouted = hasRoutedProofMail(projectId, identity, beforeRouteSeq, seams.expectedRouteNonce);
 
     // Step 5: SIGKILL — simulate a provider crash.
     hosted.pane.kill('SIGKILL');
@@ -247,6 +316,29 @@ export async function runHostProof(
   }
 }
 
+function seedSteerProofMail(
+  projectId: ProjectId,
+  identity: HostedIdentity,
+  nonce: string,
+): DeliveredMail {
+  const store = openMailStore(projectId);
+  try {
+    return store.send({
+      type: MAIL_CLARIFY_REQUEST,
+      to: identity.agent,
+      from: OPERATOR,
+      subject: `host-proof steer ${nonce}`,
+      body:
+        `Steer proof nonce: ${nonce}\n\n` +
+        'Do not call tools. Keep the turn active briefly until interrupted. If not interrupted, ' +
+        `print: host-proof steer complete ${nonce}`,
+      idempotencyKey: `${nonce}:steer`,
+    });
+  } finally {
+    store.close();
+  }
+}
+
 function parentInboxMaxSeq(projectId: ProjectId, parent: string): number {
   const store = openMailStore(projectId);
   try {
@@ -269,15 +361,19 @@ function hasRoutedProofMail(
     // before the turn runs (e.g. the injected test mail in the [host-live] path), so a plain
     // `.length > 0` check is unconditionally true and can never catch broken routing.
     // Matching by `sender === identity.agent` proves a NEW item arrived FROM the hosted agent.
-    return routingStore.inbox(identity.parent).some((item) => {
+    const routed = routingStore.inbox(identity.parent).filter((item) => {
       if (item.seq <= beforeRouteSeq) return false;
       if (item.sender !== identity.agent) return false;
-      return (
-        expectedRouteNonce == null ||
-        item.subject.includes(expectedRouteNonce) ||
-        item.body.includes(expectedRouteNonce)
-      );
+      return true;
     });
+    if (routed.length !== 1) return false;
+    const [item] = routed;
+    if (item == null || item.type !== MAIL_CLARIFY_REQUEST) return false;
+    return (
+      expectedRouteNonce == null ||
+      item.subject.includes(expectedRouteNonce) ||
+      item.body.includes(expectedRouteNonce)
+    );
   } finally {
     routingStore.close();
   }
@@ -289,18 +385,46 @@ function errorMessage(error: unknown): string {
 
 const noop = (): void => {};
 
-async function waitForRouteOrTurn(
-  turnP: Promise<unknown>,
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+async function waitForRouteOrTimeout(
+  turnSettled: () => boolean,
   hasRoute: () => boolean,
+  timeoutMs: number,
+  postSettleGraceMs: number,
 ): Promise<boolean> {
-  for (;;) {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  let postSettleDeadline: number | undefined;
+  while (Date.now() <= deadline) {
     if (hasRoute()) return true;
-    const settled = await Promise.race([
-      turnP.then(() => true),
-      new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
-    ]);
-    if (settled) return hasRoute();
+    if (turnSettled()) {
+      postSettleDeadline ??= Date.now() + Math.max(0, postSettleGraceMs);
+    }
+    const effectiveDeadline =
+      postSettleDeadline == null ? deadline : Math.min(deadline, postSettleDeadline);
+    const remaining = Math.max(0, effectiveDeadline - Date.now());
+    if (remaining === 0) break;
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.min(ROUTE_POLL_INTERVAL_MS, remaining)),
+    );
   }
+  return hasRoute();
+}
+
+export function hostProofMailRenderer(nonce: string, proofToolName: string): MailRenderer {
+  return (mail) => {
+    if (mail.sender === OPERATOR && mail.subject === `host-proof ${nonce}`) {
+      return (
+        `Host proof nonce ${nonce}: call the ${proofToolName} MCP tool exactly once to ` +
+        `${OPERATOR} with type ${MAIL_CLARIFY_REQUEST}; include nonce ${nonce} in the subject ` +
+        'or body. Do not use shell, Bash, node, or a custom script. After the tool call returns, ' +
+        `print this visible line in the chat: host-proof complete ${nonce}`
+      );
+    }
+    return defaultMailRenderer(mail);
+  };
 }
 
 // ── Provider launch config ───────────────────────────────────────────────────
@@ -318,6 +442,8 @@ export interface HostProofLaunchPaths {
   readonly coCliCommand: string;
   /** Optional host-copied Claude auth file contents for the isolated CLAUDE_CONFIG_DIR. */
   readonly claudeCredentialsJson?: string;
+  /** Optional host-copied Claude interactive state for the isolated CLAUDE_CONFIG_DIR. */
+  readonly claudeStateJson?: string;
   /** Optional host-copied Codex auth file contents for the isolated CODEX_HOME. */
   readonly codexAuthJson?: string;
   /** Optional Codex hook CLI args, e.g. an absolute script path for `node <script>`. */
@@ -505,15 +631,12 @@ export async function runHostProofCommand(argv: readonly string[]): Promise<void
     quietWindow: realQuietWindow,
     injectOptions: { retryDelay: hostProofInjectRetryDelay, allowUnverifiedSubmit: true },
     afterReady: hostProofReadySettle,
-    beforeSteer: hostProofBeforeSteerSettle,
     ...(process.env.CO_HOST_PROOF_TRACE === '1' ? { onPaneData: hostProofTracePaneData } : {}),
-    renderMail: () =>
-      `Host proof nonce ${nonce}: call the ${proofToolName} MCP tool exactly once to ` +
-      `${OPERATOR} with type ${MAIL_CLARIFY_REQUEST}; include nonce ${nonce} in the subject ` +
-      'or body. Do not use shell, Bash, node, or a custom script. After the tool call returns, ' +
-      `print this visible line in the chat: host-proof complete ${nonce}`,
+    renderMail: hostProofMailRenderer(nonce, proofToolName),
     spawnSpec,
     expectedRouteNonce: nonce,
+    separateSteerTurn: true,
+    routeTimeoutMs: DEFAULT_ROUTE_TIMEOUT_MS,
   });
 
   console.error(
@@ -569,10 +692,6 @@ function hostProofInjectRetryDelay(signal?: AbortSignal): Promise<void> {
 
 function hostProofReadySettle(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 4000));
-}
-
-function hostProofBeforeSteerSettle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 1750));
 }
 
 function hostProofTracePaneData(chunk: string): void {

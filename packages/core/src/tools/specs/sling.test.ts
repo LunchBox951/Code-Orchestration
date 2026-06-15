@@ -869,6 +869,9 @@ describe('co_sling — spawn gate integration (P2 / AC-S10-2)', () => {
         branch: 'co/sling-fail',
       }),
     ).rejects.toThrow(/spawn failed/i);
+
+    expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(0);
+    expect(ctx.worktrees?.getWorktree('co/sling-fail')?.removed).toBe(true);
   });
 
   it('headless path (no reviewerSpawnGate): co_sling placed is byte-identical to before — gate never fires', async () => {

@@ -648,8 +648,9 @@ describe('EngineReviewerSpawnGate — launches a reviewer pane from a placed rev
     sessionStores.push(sessions);
     expect(sessions.getSession(childAgent)?.agentId).toBe(childAgent);
 
-    // MNR-5 through the gate: a second spawn for the same child agent is refused.
-    await expect(gate.spawn(projectId, childPlacement)).rejects.toThrow(/already hosted.*MNR-5/);
+    // MNR-5 through the gate: a second spawn for the same child agent is an idempotent no-op.
+    await expect(gate.spawn(projectId, childPlacement)).resolves.toBeUndefined();
+    expect(pty.panes).toHaveLength(1);
   });
 });
 
@@ -675,7 +676,9 @@ describe('EngineReviewerSpawnGate — no-worktree fallback throws cleanly', () =
     // A placed placement whose agent has NO worktree recorded → generic lookup returns undefined.
     const placement = recordPlacement(projectId, 'impl-no-wt', 'implementer', 'claude');
 
-    await expect(gate.spawn(projectId, placement)).rejects.toThrow(/no worktree found.*impl-no-wt/);
+    await expect(gate.spawn(projectId, placement)).rejects.toThrow(
+      /no live worktree found.*impl-no-wt/,
+    );
   });
 
   it('throws when reviewBranch is set but no worktree is recorded for that branch', async () => {
@@ -701,7 +704,47 @@ describe('EngineReviewerSpawnGate — no-worktree fallback throws cleanly', () =
     });
 
     await expect(gate.spawn(projectId, placement)).rejects.toThrow(
-      /no worktree found.*reviewer@rev-no-wt/,
+      /no live worktree found.*reviewer@rev-no-wt/,
+    );
+  });
+
+  it('throws when reviewBranch points at a removed worktree record', async () => {
+    const { projectId, cwd } = makeProject();
+    const branch = 'co/removed-review-branch';
+    const projectDataDir = registries[registries.length - 1]!.dataDirFor(projectId);
+    recordWorktree(
+      projectId,
+      'impl-removed',
+      branch,
+      join(projectDataDir, 'worktrees', 'co', 'removed'),
+    );
+    const wtStore = worktreeStores[worktreeStores.length - 1]!;
+    wtStore.removeWorktree(branch, {
+      repoCwd: cwd,
+      gitExec: () => {},
+      fs: {
+        exists: () => false,
+        isSymlink: () => false,
+        realpath: (path) => path,
+        removeDir: () => {},
+      },
+    });
+    const { engine } = makeEngine();
+    const gate = new EngineReviewerSpawnGate(
+      engine,
+      wtStore,
+      (agent) => `/isolated/${agent}`,
+      TEST_MCP_PATHS,
+    );
+    const placement = recordPlacement(projectId, 'reviewer@rev-removed', 'reviewer', 'claude', {
+      reviewId: 'rev-removed',
+      reviewBranch: branch,
+      reviewTarget: 'main',
+      reviewScope: 'worker_merge',
+    });
+
+    await expect(gate.spawn(projectId, placement)).rejects.toThrow(
+      /no live worktree found.*reviewer@rev-removed/i,
     );
   });
 });

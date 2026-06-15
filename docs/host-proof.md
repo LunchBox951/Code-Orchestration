@@ -14,9 +14,12 @@ in-sandbox proof (AC-S10-4 items 1–4) runs automatically as part of `pnpm test
 1. `co` and `co-mcp` built (`pnpm build` in the repo root) and resolvable from the shell. If `co`
    is not on `$PATH`, set `CO_CLI_COMMAND=/absolute/path/to/co` before running Codex-backed proofs.
 2. A registered project (`co doctor` should show `ok` for program-data-integrity).
-3. The target provider (`claude` or `codex`) installed and authenticated:
+3. The target provider for `co-mcp host-proof <provider>` installed and authenticated:
    - Claude: `claude auth status --json` shows `logged_in: true`.
    - Codex: `codex doctor --json` shows `authenticated: true`.
+4. For the `co doctor --live` preflight, **both** monitored providers (`claude` and `codex`) must
+   be installed and authenticated. `doctor --live` probes the whole monitored provider set; run the
+   provider-specific `co-mcp host-proof <provider>` command when you only need to prove one target.
 
 ## Running `co doctor --live`
 
@@ -65,12 +68,14 @@ This runs the scripted host-proof driver against the real binary:
 2. **Spawn** — launches the provider in a pty via `NodePtyHost.create()`.
 3. **Bind + drive to ready** — the engine binds the MCP socket before awaiting provider startup,
    while `driveToReady` captures startup bytes from spawn time.
-4. **Inject 1 mail** — creates a nonce-bearing `clarify_request` to the proof agent and injects it.
-5. **1 turn** — runs `engine.runOneTurn`, observes byte output, detects idle boundary.
+4. **Inject route-proof mail** — creates a nonce-bearing `clarify_request` to the proof agent and
+   injects it.
+5. **Route-proof turn** — runs `engine.runOneTurn`, observes byte output, and detects the idle
+   boundary for the route-proof turn.
 6. **Mail route proof** — the real provider must call `co_mail_send` to `@operator` and echo the
    nonce in the subject or body; stale or wrong-sender mail does not count.
-7. **Steer live pane** — sends an interrupt steer while the pane is still warm and before crash
-   simulation.
+7. **Steer-proof turn** — seeds a second no-tools steer mail, waits until that mail is submitted
+   into the same warm pane, then sends an interrupt steer before that second turn settles.
 8. **SIGKILL** — sends `SIGKILL` to the provider pane, simulating a crash.
 9. **Recover** — calls `recoverProjectStore` to rebuild all read-models from the event log.
 10. **Reconstruct** — calls `listSessions()` to show the session record survived the crash.
@@ -95,12 +100,12 @@ This runs the scripted host-proof driver against the real binary:
 
 | Step | Pass condition |
 |------|---------------|
-| Turn ran | `turnRan=true` (no error during `runOneTurn`) |
-| Turn idle | `turnIdle=true` (byte-quiescence reached) |
+| Turn ran | `turnRan=true` (no error during the route-proof `runOneTurn`) |
+| Turn idle | `turnIdle=true` (the route-proof turn reached byte-quiescence) |
 | Mail routed | `mailRouted=true` (the real provider called scoped `co_mail_send` and echoed the proof nonce to the parent inbox) |
 | Recovery | `sessionReconstructed=true` (agent session in recovered state) |
 | Steer | `steerCompleted=true` (interrupt key sent before crash simulation) |
-| Mid-turn steer | `steerMidTurn=true` (interrupt was sent before the turn promise settled) |
+| Mid-turn steer | `steerMidTurn=true` (interrupt was sent after the steer-proof mail was submitted and before that second turn promise settled) |
 
 If any step fails, `co-mcp host-proof` exits non-zero with a descriptive error.
 

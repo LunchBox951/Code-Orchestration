@@ -1071,6 +1071,69 @@ describe('co_pr_merge identity guard (AC-L6a-7)', () => {
 });
 
 describe('AC-S10-5(a) — co_pr_merge uses recorded worktree baseRef (MNR #3/#6)', () => {
+  it('opens a PR against a real non-default recorded baseRef when input.into is omitted', async () => {
+    const repo = makeRepo();
+    git(repo, 'branch', 'co/stage-x', 'main');
+    const stageBase = git(repo, 'rev-parse', 'co/stage-x');
+    const featureHead = git(repo, 'rev-parse', 'co/feature');
+    const { ctx, worktreeStore, reviewStore } = makeCtxBundle(repo, fakeReader([]), {
+      seedWorktree: false,
+    });
+    const ghCalls: string[][] = [];
+    const toolCtx: ToolContext = {
+      ...ctx,
+      ghExec: (_cwd, args) => {
+        ghCalls.push([...args]);
+        return 'https://fake/pr/stage-base';
+      },
+    };
+
+    const cfg = openConfigStore();
+    configs.push(cfg);
+    cfg.setProjectOverride('p-prmerge-guard', REPO_MODE_CONFIG_KEY, 'contributor');
+
+    worktreeStore.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'co/stage-x',
+        baseSha: stageBase,
+        path: '/fake',
+        parent: 'lead-x',
+      },
+      { branch: 'co/feature', baseRef: 'co/stage-x', baseSha: stageBase, tests: [] },
+    );
+    worktreeStore.recordFinish({
+      branch: 'co/feature',
+      baseSha: stageBase,
+      commitSha: featureHead,
+      tests: [],
+    });
+    reviewStore.recordVerdict({
+      reviewId: 'rev-stage-base-pr',
+      target: 'co/stage-x',
+      branch: 'co/feature',
+      scope: 'pr_merge',
+      reviewer: 'reviewer-1',
+      verdict: 'PASS',
+      blockers: [],
+      suggestions: [],
+      verification: { commands_run: ['pnpm test'], suite_result: 'pass', baseline_compared: true },
+    });
+
+    const out = (await invokeTool(buildCoreRegistry(), toolCtx, 'co_pr_merge', {
+      branch: 'co/feature',
+      title: 'feat: my pr',
+      intent: SAMPLE_INTENT,
+    })) as { pr_url: string; mode: string };
+
+    expect(out.pr_url).toBe('https://fake/pr/stage-base');
+    expect(out.mode).toBe('contributor');
+    expect(ghCalls).toHaveLength(1);
+    const baseIndex = ghCalls[0]!.indexOf('--base');
+    expect(baseIndex).toBeGreaterThanOrEqual(0);
+    expect(ghCalls[0]![baseIndex + 1]).toBe('co/stage-x');
+  });
+
   it('resolves into from the recorded baseRef when input.into is omitted', async () => {
     const repo = makeRepo();
     const { ctx, worktreeStore } = makeCtxBundle(repo, fakeReader([]), { seedWorktree: false });

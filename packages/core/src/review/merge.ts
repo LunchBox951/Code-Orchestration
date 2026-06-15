@@ -847,8 +847,9 @@ export class CoReviewGate implements FinishReviewGate {
   /**
    * Resolve + record the reviewer placement for an AGENT review (AC-L5-11). Reads the scope→role map
    * (`reviewer_profiles`), runs the L4 dispatch policy (which calls the pure `placeAgentFromStore`),
-   * and records a `placement.decided` keyed on the reviewer seat. It NEVER launches — the live spawn
-   * is the L7 stub. A no-op when no dispatch store is wired (existing headless gate tests are unchanged).
+   * and records a `placement.decided` keyed on the reviewer seat. When a live spawn gate is wired, a
+   * placed reviewer record is also launched (or re-launched from an existing compatible placement after
+   * a prior transient launch failure). A no-op when no dispatch store is wired.
    */
   private recordReviewerPlacement(
     req: ReviewTriggerRequest,
@@ -866,7 +867,13 @@ export class CoReviewGate implements FinishReviewGate {
     const compatibleReviewerPlacements = existingReviewerPlacements.filter((placement) =>
       placementMatchesReview(placement, req, scope),
     );
-    if (compatibleReviewerPlacements.some((placement) => placement.kind === 'placed')) {
+    const compatiblePlaced = compatibleReviewerPlacements
+      .filter((placement) => placement.kind === 'placed')
+      .at(-1);
+    if (compatiblePlaced != null) {
+      if (this.deps.reviewerSpawnGate != null) {
+        this.fireSpawn(compatiblePlaced.agent, projectId, compatiblePlaced);
+      }
       return undefined;
     }
     const existingWaitingPlacement = compatibleReviewerPlacements
@@ -879,7 +886,13 @@ export class CoReviewGate implements FinishReviewGate {
     const seatPlacements = this.deps.dispatch
       .readPlacements(seat)
       .filter((placement) => placementMatchesReview(placement, req, scope));
-    if (seatPlacements.some((placement) => placement.kind === 'placed')) return undefined;
+    const seatPlaced = seatPlacements.filter((placement) => placement.kind === 'placed').at(-1);
+    if (seatPlaced != null) {
+      if (this.deps.reviewerSpawnGate != null) {
+        this.fireSpawn(seatPlaced.agent, projectId, seatPlaced);
+      }
+      return undefined;
+    }
     const accounts = this.deps.reviewerAccounts ?? defaultProviderAccounts();
     const nowMs = this.deps.nowMs ?? 0;
     // The reviewer seat this decision is for (L7 owns the live launch under this deterministic id).

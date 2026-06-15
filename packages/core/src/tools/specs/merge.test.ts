@@ -1385,6 +1385,68 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
     }
   });
 
+  it('AC-S10-2.1c: retries an already-recorded reviewer placement after a live spawn failure', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      let attempts = 0;
+      const toolCtx = {
+        ...ctx,
+        dispatch,
+        reviewerSpawnGate: {
+          spawn: async () => {
+            attempts += 1;
+            if (attempts === 1) throw new Error('transient spawn failed');
+          },
+        } satisfies ReviewerSpawnGate,
+      };
+      try {
+        await expect(
+          invokeTool(reg, toolCtx, 'co_merge', {
+            branch: 'co/feature',
+            into: 'main',
+            intent: { summary: 'trigger a review' },
+          }),
+        ).rejects.toThrow(/transient spawn failed/);
+
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'retry the same review placement' },
+        })) as { merged: boolean; review_pending?: boolean };
+
+        expect(out.merged).toBe(false);
+        expect(out.review_pending).toBe(true);
+        expect(attempts).toBe(2);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('AC-S10-2.2: headless path (no reviewerSpawnGate) merges normally on recorded PASS — unchanged', async () => {
     // Confirms the P2 seam is purely ADDITIVE: absent gate → falls through to the existing merge gate.
     const repo = makeRepo();
