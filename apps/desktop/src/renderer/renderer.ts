@@ -53,6 +53,9 @@ function activateView(view: NavView): void {
   for (const el of document.querySelectorAll('.view')) {
     el.classList.toggle('active', el.id === `view-${view}`);
   }
+  if (view === 'agents' && latestAgentsState != null) {
+    renderAgentsTranscript(latestAgentsState);
+  }
 }
 
 function setLiveStatus(status: string): void {
@@ -493,6 +496,10 @@ function getOrCreateTerm(): XtermTerminal {
   return term;
 }
 
+function isAgentsViewActive(): boolean {
+  return document.getElementById('view-agents')?.classList.contains('active') === true;
+}
+
 function showTranscriptError(message: string | undefined): void {
   const agentsMain = document.querySelector<HTMLElement>('#view-agents .agents-main');
   if (!agentsMain || !message) return;
@@ -539,6 +546,12 @@ function renderAgents(state: AgentsConsoleState): void {
 
   const composerEnabled = state.selectedAgentId != null && state.connection === 'live';
   setComposerEnabled(composerEnabled);
+
+  renderAgentsTranscript(state);
+}
+
+function renderAgentsTranscript(state: AgentsConsoleState): void {
+  if (!isAgentsViewActive()) return;
 
   const term = getOrCreateTerm();
   if (state.selectedAgentId !== lastAgentId) {

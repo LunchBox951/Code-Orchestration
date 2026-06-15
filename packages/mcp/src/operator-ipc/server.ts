@@ -81,6 +81,8 @@ export interface OperatorIpcServerDeps {
 }
 
 const OPERATOR_IPC_METHOD_SET = new Set<string>(Object.values(OPERATOR_IPC_METHODS));
+const TRANSCRIPT_PENDING_MAX_CHARS = 64 * 1024;
+const TRANSCRIPT_PENDING_MAX_AGENTS = 256;
 
 function isOperatorIpcMethod(method: string): method is OperatorIpcMethod {
   return OPERATOR_IPC_METHOD_SET.has(method);
@@ -168,6 +170,8 @@ export class OperatorIpcServer {
   private readonly openReview: (projectId: ProjectId) => ReviewStore;
   private readonly onError: ((error: unknown) => void) | undefined;
   private readonly transport: SocketServerTransport;
+  private readonly pendingTranscriptPushes = new Map<string, string>();
+  private transcriptPushInFlight = false;
   private started = false;
 
   constructor(deps: OperatorIpcServerDeps) {
@@ -210,9 +214,11 @@ export class OperatorIpcServer {
    */
   pushTranscript(agentId: string, chunk: string): void {
     if (!this.transport.connected) return;
-    this.safeSend(
-      makeNotification(OPERATOR_IPC_TRANSCRIPT, { agentId, chunk } as unknown as WirePayload),
-    );
+    if (this.transcriptPushInFlight) {
+      this.queueTranscriptPush(agentId, chunk);
+      return;
+    }
+    this.sendTranscriptPush(agentId, chunk);
   }
 
   /** Tear the socket down (idempotent via the transport). */
@@ -455,6 +461,56 @@ export class OperatorIpcServer {
   /** Send a message, routing a failure (e.g. a client that vanished mid-send) to `onError`. */
   private safeSend(message: JSONRPCMessage): void {
     this.transport.send(message).catch((error) => this.report(error));
+  }
+
+  private queueTranscriptPush(agentId: string, chunk: string): void {
+    const next = (this.pendingTranscriptPushes.get(agentId) ?? '') + chunk;
+    this.pendingTranscriptPushes.set(
+      agentId,
+      next.length > TRANSCRIPT_PENDING_MAX_CHARS
+        ? next.slice(next.length - TRANSCRIPT_PENDING_MAX_CHARS)
+        : next,
+    );
+
+    while (this.pendingTranscriptPushes.size > TRANSCRIPT_PENDING_MAX_AGENTS) {
+      const drop =
+        [...this.pendingTranscriptPushes.keys()].find((candidate) => candidate !== agentId) ??
+        this.pendingTranscriptPushes.keys().next().value;
+      if (drop == null) break;
+      this.pendingTranscriptPushes.delete(drop);
+    }
+  }
+
+  private sendTranscriptPush(agentId: string, chunk: string): void {
+    this.transcriptPushInFlight = true;
+    this.transport
+      .send(makeNotification(OPERATOR_IPC_TRANSCRIPT, { agentId, chunk } as unknown as WirePayload))
+      .then(
+        () => this.drainTranscriptPush(),
+        (error: unknown) => {
+          this.pendingTranscriptPushes.clear();
+          this.transcriptPushInFlight = false;
+          this.report(error);
+        },
+      );
+  }
+
+  private drainTranscriptPush(): void {
+    if (!this.transport.connected) {
+      this.pendingTranscriptPushes.clear();
+      this.transcriptPushInFlight = false;
+      return;
+    }
+    const next = this.pendingTranscriptPushes.entries().next().value as
+      | [agentId: string, chunk: string]
+      | undefined;
+    if (next == null) {
+      this.transcriptPushInFlight = false;
+      return;
+    }
+    const [agentId, chunk] = next;
+    this.pendingTranscriptPushes.delete(agentId);
+    this.sendTranscriptPush(agentId, chunk);
   }
 
   private report(error: unknown): void {

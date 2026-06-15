@@ -15,7 +15,7 @@
  *   - MNR #2 — every WRITE (reply/approve) routes through the daemon's own store (single writer).
  *   - MNR #3 — a down→up daemon degrades to a clear state and a reconnect RESUMES the push stream.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -647,6 +647,51 @@ describe('AC-S11-1 — cross-process observe + control over a 0o600 operator-onl
 
 // ── Stage 12 C-P1 (TRANSCRIPT-SEAM) — the live transcript stream over the operator IPC ──
 describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process (default client↔server path)', () => {
+  it('bounds server-side transcript push backpressure by coalescing while a write is in flight', async () => {
+    const { projectId } = makeProject();
+    let releaseFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const sent: Array<{ method?: string; params?: unknown }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message);
+        return sent.length === 1 ? firstSend : Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, tail: '' }),
+      onTranscript: () => () => {},
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    server.pushTranscript('impl-x', 'one');
+    server.pushTranscript('impl-x', 'two');
+    server.pushTranscript('impl-x', 'three');
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await flush();
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(2);
+    expect(sent[1]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', chunk: 'twothree' },
+    });
+  });
+
   it('push: a hosted pane chunk (ANSI/ESC bytes intact) reaches the SEPARATE client EXACTLY', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);

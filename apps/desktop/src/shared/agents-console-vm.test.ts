@@ -310,6 +310,17 @@ describe('AgentsConsoleVM — setTranscriptTail', () => {
     expect(vm.state.transcript).toBe('');
   });
 
+  it('preserves live chunks that arrived before the async backfill resolves', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.appendChunk({ agentId: 'a1', chunk: 'live chunk\n' });
+
+    vm.setTranscriptTail({ agentId: 'a1', tail: 'existing tail\n' });
+
+    expect(vm.state.transcript).toBe('existing tail\nlive chunk\n');
+  });
+
   it('emits after applying', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));

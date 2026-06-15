@@ -24,6 +24,12 @@ describe('agents console', () => {
     expect(rendererSource).toContain('window.Terminal');
     expect(rendererSource).toContain('aria-selected="${isSelected');
   });
+
+  it('defers xterm open until the Agents view is visible', () => {
+    expect(rendererSource).toContain('function isAgentsViewActive()');
+    expect(rendererSource).toContain('if (!isAgentsViewActive()) return;');
+    expect(rendererSource).toContain("if (view === 'agents' && latestAgentsState != null)");
+  });
 });
 
 describe('renderer accessibility states', () => {

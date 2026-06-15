@@ -8,22 +8,23 @@
 // strips block comments FIRST so those hits do not trip the guard.
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url)); // packages/core/src/tools
 const repoRoot = resolve(here, '../../../../'); // tools → src → core → packages → root
 const packagesRoot = join(repoRoot, 'packages');
+const appsRoot = join(repoRoot, 'apps');
 
-/** Walk a directory recursively, returning every `.ts` path. */
-function walkTs(root: string): string[] {
+/** Walk a directory recursively, returning every TypeScript-family source path. */
+function walkSource(root: string): string[] {
   const out: string[] = [];
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.name.endsWith('.ts')) out.push(full);
+      else if (/\.(c|m)?ts$/u.test(entry.name)) out.push(full);
     }
   };
   walk(root);
@@ -40,27 +41,37 @@ export function detectCoPaths(source: string): string[] {
   const stripped = source
     .replace(/\/\*[\s\S]*?\*\//g, '') // block comments (/** … */ and /* … */)
     .replace(/\/\/[^\n]*/g, ''); // line comments
-  const re = /\.co\/(specs|plans|issues)\b/g;
+  const literalRe = /\.co[\\/]+(specs|plans|issues)\b/g;
+  const joinRe = /\b(?:path\.)?join\s*\(\s*['"`]\.co['"`]\s*,\s*['"`](specs|plans|issues)['"`]/g;
   const hits: string[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(stripped)) !== null) hits.push(m[0]);
+  while ((m = literalRe.exec(stripped)) !== null) hits.push(m[0]);
+  while ((m = joinRe.exec(stripped)) !== null) hits.push(`join('.co', '${m[1]}')`);
   return hits;
+}
+
+function sourceRoots(): string[] {
+  const roots: string[] = [];
+  for (const base of [packagesRoot, appsRoot]) {
+    if (!existsSync(base)) continue;
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const srcDir = join(base, entry.name, 'src');
+      if (existsSync(srcDir)) roots.push(srcDir);
+    }
+  }
+  return roots;
 }
 
 // ── GREEN over the real production sources ────────────────────────────────────────────
 
 describe('SH-2 — no runtime .co/(specs|plans|issues) reads in production source', () => {
-  it('is GREEN over all packages/*/src production files (non-vacuous)', () => {
-    const pkgs = readdirSync(packagesRoot, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name);
-
+  it('is GREEN over all packages/*/src and apps/*/src production files (non-vacuous)', () => {
     const violations: string[] = [];
     let filesScanned = 0;
 
-    for (const pkg of pkgs) {
-      const srcDir = join(packagesRoot, pkg, 'src');
-      const files = walkTs(srcDir).filter((f) => !f.endsWith('.test.ts'));
+    for (const srcDir of sourceRoots()) {
+      const files = walkSource(srcDir).filter((f) => !f.endsWith('.test.ts'));
       filesScanned += files.length;
       for (const file of files) {
         const source = readFileSync(file, 'utf8');
@@ -95,6 +106,14 @@ describe('SH-2 — detectCoPaths goes RED on runtime path literals', () => {
 
   it('flags a string literal referencing .co/plans', () => {
     expect(detectCoPaths("const dir = '.co/plans';")).not.toEqual([]);
+  });
+
+  it('flags a string literal referencing a Windows .co\\issues path', () => {
+    expect(detectCoPaths("const dir = '.co\\\\issues';")).not.toEqual([]);
+  });
+
+  it("flags segmented path construction with join('.co', 'specs')", () => {
+    expect(detectCoPaths("const dir = join('.co', 'specs');")).not.toEqual([]);
   });
 
   it('does NOT flag a line comment mentioning .co/issues', () => {

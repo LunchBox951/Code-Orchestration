@@ -38,6 +38,14 @@ function boundTranscript(text: string): string {
   return text.slice(text.length - CONSOLE_TRANSCRIPT_MAX_CHARS);
 }
 
+function mergeTranscriptBackfill(backfill: string, current: string): string {
+  if (current.length === 0) return boundTranscript(backfill);
+  if (backfill.length === 0) return boundTranscript(current);
+  if (backfill.endsWith(current)) return boundTranscript(backfill);
+  if (current.startsWith(backfill)) return boundTranscript(current);
+  return boundTranscript(backfill + current);
+}
+
 export class AgentsConsoleVM {
   private _state: AgentsConsoleState = {
     roster: [],
@@ -125,7 +133,7 @@ export class AgentsConsoleVM {
     if (tail.agentId !== this._state.selectedAgentId) return;
     this._state = {
       ...this._state,
-      transcript: boundTranscript(tail.tail),
+      transcript: mergeTranscriptBackfill(tail.tail, this._state.transcript),
     };
     this.emit();
   }

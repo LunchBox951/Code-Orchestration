@@ -849,7 +849,13 @@ export class ConductorEngine {
         ? next.slice(next.length - TRANSCRIPT_TAIL_MAX_CHARS)
         : next,
     );
-    for (const listener of [...this.transcriptListeners]) listener(projectId, agent, chunk);
+    for (const listener of [...this.transcriptListeners]) {
+      try {
+        listener(projectId, agent, chunk);
+      } catch {
+        /* transcript subscribers are diagnostic surfaces; pane output must keep flowing */
+      }
+    }
   }
 
   /** Tear down a pane's exit subscription + flag (P1b) and its transcript subscription + tail (C-P1). */

@@ -46,11 +46,16 @@ function asRecord(value: unknown, label: string): Record<string, unknown> {
   throw new Error(`Invalid ${label}: expected an object.`);
 }
 
+function requireNonBlankString(value: unknown, label: string): string {
+  if (typeof value === 'string' && value.trim().length > 0) return value;
+  throw new Error(`Invalid ${label}: expected a non-empty string.`);
+}
+
 export function requireSteer(value: unknown): Steer {
   const obj = asRecord(value, 'steer');
   const kind = obj['kind'];
   if (kind === 'answer' || kind === 'redirect') {
-    const text = requireNonEmptyString(obj['text'], 'steer text');
+    const text = requireNonBlankString(obj['text'], 'steer text');
     return { kind, text };
   }
   if (kind === 'interrupt') {

@@ -597,4 +597,49 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     transcriptListeners[0]?.({ agentId: 'other-agent', chunk: ' ignored' });
     expect(onAgentsConsoleState).not.toHaveBeenCalled();
   });
+
+  it('selectAgent backfill preserves live chunks that arrive before transcript() resolves', async () => {
+    const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
+    let resolveTranscript!: (tail: { agentId: string; tail: string }) => void;
+    const transcriptP = new Promise<{ agentId: string; tail: string }>((resolve) => {
+      resolveTranscript = resolve;
+    });
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockImplementation((cb: (t: OperatorIpcTranscript) => void) => {
+        transcriptListeners.push(cb);
+        return () => {};
+      }),
+      transcript: vi.fn().mockReturnValue(transcriptP),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    transcriptListeners[0]?.({ agentId: 'impl-x', chunk: 'live chunk\n' });
+    expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+      selectedAgentId: 'impl-x',
+      transcript: 'live chunk\n',
+    });
+
+    resolveTranscript({ agentId: 'impl-x', tail: 'existing tail\n' });
+
+    await vi.waitFor(() => {
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        selectedAgentId: 'impl-x',
+        transcript: 'existing tail\nlive chunk\n',
+      });
+    });
+  });
 });

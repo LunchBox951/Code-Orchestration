@@ -1096,6 +1096,23 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     ]);
   });
 
+  it('isolates transcript listener failures so later listeners still receive the chunk', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    const seen: string[] = [];
+    engine.onTranscript(() => {
+      throw new Error('subscriber failed');
+    });
+    engine.onTranscript((_pid, _agent, chunk) => seen.push(chunk));
+
+    expect(() => pane.emit('still delivered')).not.toThrow();
+    expect(seen).toEqual(['still delivered']);
+  });
+
   it('drops the tail + stops the stream once the pane is released', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');

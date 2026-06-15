@@ -19,6 +19,17 @@ describe('desktop built-output script modes', () => {
     expect(renderer).toContain('export {};');
   });
 
+  it('vendors xterm assets referenced by the renderer HTML', () => {
+    const html = distFile('renderer', 'index.html');
+    const xtermJs = distFile('renderer', 'vendor', 'xterm.js');
+    const xtermCss = distFile('renderer', 'vendor', 'xterm.css');
+
+    expect(html).toContain('<link rel="stylesheet" href="./vendor/xterm.css" />');
+    expect(html).toContain('<script src="./vendor/xterm.js"></script>');
+    expect(xtermJs).toContain('Terminal');
+    expect(xtermCss).toContain('.xterm');
+  });
+
   it('emits sandbox-compatible preload JavaScript without static ESM syntax', () => {
     const preload = distFile('preload', 'preload.cjs');
 
