@@ -116,6 +116,14 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     return result as unknown as DeliveredMail;
   }
 
+  async markRead(recipient: string, seq: number): Promise<DeliveredMail> {
+    const result = await this.call(OPERATOR_IPC_METHODS.markRead, {
+      recipient,
+      seq,
+    } as unknown as WirePayload);
+    return result as unknown as DeliveredMail;
+  }
+
   /** Subscribe to the per-tick `tick` push; returns an unsubscribe fn. */
   onTick(listener: (tick: OperatorIpcTick) => void): () => void {
     this.tickListeners.add(listener);
@@ -316,6 +324,10 @@ export class OperatorIpcClient {
 
   approve(approvalSeq: number, reply: ApprovalReply): Promise<DeliveredMail> {
     return this.withConnection((c) => c.approve(approvalSeq, reply));
+  }
+
+  markRead(recipient: string, seq: number): Promise<DeliveredMail> {
+    return this.withConnection((c) => c.markRead(recipient, seq));
   }
 
   /** Subscribe to the per-tick push; survives reconnects. Returns an unsubscribe fn. */

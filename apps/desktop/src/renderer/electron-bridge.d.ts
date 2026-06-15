@@ -47,6 +47,41 @@ interface DashboardState {
   connection: 'live' | 'degraded';
 }
 
+type MailKind = 'actionable' | 'informational';
+
+interface MailRow {
+  seq: number;
+  type: string;
+  subject: string;
+  sender: string;
+  recipient: string;
+  ts: number;
+  renderedBody: string;
+  kind: MailKind;
+  read: boolean;
+  resolved: boolean;
+  decision?: string;
+  reviewVerdict?: string;
+}
+
+interface ComposerState {
+  active: boolean;
+  targetSeq: number | null;
+  targetRecipient: string | null;
+  type: string;
+  subject: string;
+  body: string;
+}
+
+interface MailState {
+  activeBus: string;
+  tab: 'inbox' | 'outbox';
+  inbox: readonly MailRow[];
+  outbox: readonly MailRow[];
+  selected: MailRow | null;
+  composer: ComposerState;
+}
+
 interface CoShellBridge {
   navigate(view: NavView): void;
   refreshConnection(): Promise<ConnectionState | null>;
@@ -54,6 +89,24 @@ interface CoShellBridge {
   onConnectionState(listener: (state: ConnectionState) => void): () => void;
   onDashboardState(listener: (state: DashboardState) => void): () => void;
   refreshDashboard(): Promise<DashboardState | null>;
+  // ── Mail ──────────────────────────────────────────────────────────────────
+  onMailState(listener: (state: MailState) => void): () => void;
+  onMailError(listener: (message: string) => void): () => void;
+  mailSelectBus(busId: string): Promise<MailState | null>;
+  mailSelectTab(tab: 'inbox' | 'outbox'): Promise<MailState | null>;
+  mailSelect(seq: number): Promise<MailState | null>;
+  mailOpenComposer(
+    targetSeq: number,
+    targetRecipient: string,
+    replyType: string,
+    subject: string,
+  ): Promise<MailState | null>;
+  mailUpdateComposer(field: 'type' | 'subject' | 'body', value: string): Promise<MailState | null>;
+  mailCloseComposer(): Promise<MailState | null>;
+  mailSubmitReply(): Promise<MailState | null>;
+  mailQuickApprove(approvalSeq: number): Promise<MailState | null>;
+  mailQuickDecline(approvalSeq: number): Promise<MailState | null>;
+  mailRefresh(): Promise<MailState | null>;
 }
 
 interface Window {

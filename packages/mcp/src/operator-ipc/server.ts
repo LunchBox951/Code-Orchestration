@@ -224,6 +224,8 @@ export class OperatorIpcServer {
         return (await this.handleReply(params)) as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.approve:
         return (await this.handleApprove(params)) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.markRead:
+        return (await this.handleMarkRead(params)) as unknown as WirePayload;
       default:
         return assertNever(method);
     }
@@ -280,6 +282,18 @@ export class OperatorIpcServer {
         );
       }
       return mail.reply(approval, { type: MAIL_APPROVAL_RESPONSE, decision, subject, body });
+    } finally {
+      mail.close();
+    }
+  }
+
+  /** Mark `recipient`'s informational mail at `seq` read, through the daemon's own store (single writer). */
+  private async handleMarkRead(params: WirePayload): Promise<DeliveredMail> {
+    const recipient = requireString(params, 'recipient');
+    const seq = requireNumber(params, 'seq');
+    const mail = this.openMail(this.projectId);
+    try {
+      return mail.markRead(recipient, seq);
     } finally {
       mail.close();
     }
