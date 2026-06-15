@@ -16,23 +16,29 @@
  *   - MNR #3 — a down→up daemon degrades to a clear state and a reconnect RESUMES the push stream.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createServer } from 'node:net';
+import { execFileSync } from 'node:child_process';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   approvalOutcome,
   buildCoreRegistry,
   checkToolCompleteness,
+  defaultGitReader,
   FakePty,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
+  OPERATOR,
   openMailStore,
   openRegistry,
   openReviewStore,
   openRosterStore,
   openSessionStore,
+  openSpecStore,
+  openWorktreeStore,
   outwardApprovalEnvelope,
   queryLiveObservability,
   queryObservability,
@@ -58,6 +64,7 @@ import {
 } from '../conductor/host.js';
 import { SocketClientTransport } from '../conductor/real-transport.js';
 import type { HostedIdentity } from '../live-session-host.js';
+import { resolveReviewContext } from '../conductor/review-context.js';
 import { OperatorIpcServer } from './server.js';
 import { ConductorUnavailableError, OperatorIpcClient, OperatorIpcConnection } from './client.js';
 import { classifyIncoming, makeRequest, WIRE_ERROR } from './wire.js';
@@ -274,6 +281,10 @@ async function hostPane(
 function makeControl(
   engine: ConductorEngine,
   projectId: ProjectId,
+  // Stage 13 R-A — the reviewContext accessor is injectable so the agreement proof can wire the REAL
+  // resolver over seeded stores; other tests get a harmless not-found stub (they never exercise it).
+  reviewContext: ConductorControlSurface['reviewContext'] = (reviewId) =>
+    Promise.resolve({ kind: 'not-found', reviewId }),
 ): { router: DaemonBackedAgentRouter; control: ConductorControlSurface } {
   const router = new DaemonBackedAgentRouter({ engine, projectId });
   const provider = new EngineLiveStateProvider({ engine, projectId, router });
@@ -288,6 +299,7 @@ function makeControl(
       engine.onTranscript((pid, agent, chunk, offset) => {
         if (pid === projectId) listener(agent, chunk, offset);
       }),
+    reviewContext,
   };
   return { router, control };
 }
@@ -694,6 +706,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
       transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -739,6 +753,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
       transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -1772,6 +1788,7 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       },
       transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
+      reviewContext: (reviewId) => Promise.resolve({ kind: 'not-found', reviewId }),
     };
     await startServer(control, projectId, socketPath);
 
@@ -1867,5 +1884,191 @@ describe('operator-IPC wire — JSON-RPC envelope compatibility + unknown-method
     } finally {
       await transport.close();
     }
+  });
+});
+
+// ── Stage 13 R-A — reviewContext across the PRODUCTION wire ─────────────────────────────────────
+//
+// The default-path agreement proof (memory: "Test the default path, not just seams"): the REAL
+// OperatorIpcServer + a REAL client facade over a REAL Unix socket, the control surface's
+// reviewContext running the REAL resolveReviewContext over REAL seeded stores + a REAL temp git repo.
+// This exercises the production serialization + wire that seam-only tests miss.
+
+/** Deterministic git in a throwaway repo (no global identity / signing needed; stderr silenced). */
+function reviewRepoGit(cwd: string, ...args: string[]): string {
+  return execFileSync(
+    'git',
+    [
+      '-c',
+      'user.email=t@example.com',
+      '-c',
+      'user.name=Test',
+      '-c',
+      'commit.gpgsign=false',
+      ...args,
+    ],
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+  ).trim();
+}
+
+/** A real temp git repo: a base commit on `main`, a MARKED change committed on `co/feature`. */
+function makeReviewRepo(): { dir: string; branch: string; target: string; baseSha: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'co-rc-repo-'));
+  dataDirs.push(dir); // cleaned in afterEach (rmSync)
+  execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'ignore' });
+  writeFileSync(join(dir, 'file.txt'), 'base\n');
+  reviewRepoGit(dir, 'add', '.');
+  reviewRepoGit(dir, 'commit', '-m', 'base');
+  const baseSha = reviewRepoGit(dir, 'rev-parse', 'HEAD');
+  reviewRepoGit(dir, 'checkout', '-b', 'co/feature');
+  writeFileSync(join(dir, 'file.txt'), 'base\nREVIEW_CONTEXT_MARKER\n');
+  reviewRepoGit(dir, 'add', '.');
+  reviewRepoGit(dir, 'commit', '-m', 'feature change');
+  return { dir, branch: 'co/feature', target: 'main', baseSha };
+}
+
+const REVIEW_CRITERIA = [
+  { text: 'expired tokens rejected (401)', verify: 'pnpm vitest run packages/core/x' },
+  { text: 'no silent failures' },
+] as const;
+
+/** Seed a locked spec, the recorded worktree, and a human review request (criteria spec-ref). */
+function seedReviewContext(
+  projectId: ProjectId,
+  opts: {
+    readonly reviewId: string;
+    readonly taskId: string;
+    readonly repoDir: string;
+    readonly branch: string;
+    readonly target: string;
+    readonly baseSha: string;
+  },
+): void {
+  const specs = openSpecStore(projectId);
+  try {
+    specs.recordDraft({
+      taskId: opts.taskId,
+      title: 'Stage 13 R-A',
+      goal: 'ship reviewContext',
+      criteria: [...REVIEW_CRITERIA],
+      body: '',
+      actor: 'lead-1',
+    });
+    specs.recordLock(opts.taskId, OPERATOR);
+  } finally {
+    specs.close();
+  }
+
+  const worktrees = openWorktreeStore(projectId);
+  try {
+    worktrees.recordWorktree({
+      branch: opts.branch,
+      baseRef: opts.target,
+      baseSha: opts.baseSha,
+      path: opts.repoDir,
+      parent: 'lead-1',
+    });
+  } finally {
+    worktrees.close();
+  }
+
+  const mail = openMailStore(projectId);
+  try {
+    // The production recorder: review.requested + actionable mail commit atomically (single writer).
+    mail.requestHumanReview(
+      {
+        type: MAIL_REVIEW_REQUEST,
+        to: OPERATOR,
+        from: 'lead-1',
+        subject: `review requested: '${opts.branch}' into '${opts.target}'`,
+        body: `Please review. (scope: pr_merge, reviewId: ${opts.reviewId})`,
+        idempotencyKey: `review-request:${opts.reviewId}`,
+      },
+      {
+        reviewId: opts.reviewId,
+        target: opts.target,
+        branch: opts.branch,
+        requestedBy: 'lead-1',
+        scope: 'pr_merge',
+        reviewerKind: 'human',
+        specRefKind: 'criteria',
+        specRefRef: `spec:${opts.taskId}#locked`,
+      },
+    );
+  } finally {
+    mail.close();
+  }
+}
+
+/** The production daemon-side accessor: resolveReviewContext over real per-call stores + real git. */
+function realReviewContext(projectId: ProjectId): ConductorControlSurface['reviewContext'] {
+  return (reviewId) =>
+    resolveReviewContext(
+      {
+        openReviews: () => openReviewStore(projectId),
+        openSpecs: () => openSpecStore(projectId),
+        openWorktrees: () => openWorktreeStore(projectId),
+        gitReader: defaultGitReader,
+      },
+      reviewId,
+    );
+}
+
+describe('Stage 13 R-A — reviewContext over the default socket (client↔server agreement)', () => {
+  it('resolved: the real diff + criteria + branch/target/scope round-trip across the production wire', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const repo = makeReviewRepo();
+    const reviewId = 'rev-s13-ra';
+    const taskId = 'task-s13-ra';
+    seedReviewContext(projectId, {
+      reviewId,
+      taskId,
+      repoDir: repo.dir,
+      branch: repo.branch,
+      target: repo.target,
+      baseSha: repo.baseSha,
+    });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId, realReviewContext(projectId));
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const result = await client.reviewContext(reviewId);
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind !== 'resolved') throw new Error(`expected resolved, got ${result.kind}`);
+    expect(result.reviewId).toBe(reviewId);
+    expect(result.branch).toBe(repo.branch);
+    expect(result.target).toBe(repo.target);
+    expect(result.scope).toBe('pr_merge');
+    // The REAL unified diff — computed `git diff main...co/feature` in the seeded sandbox.
+    expect(result.diff.kind).toBe('patch');
+    if (result.diff.kind === 'patch') {
+      expect(result.diff.patch).toContain('REVIEW_CONTEXT_MARKER');
+      expect(result.diff.patch).toContain('diff --git');
+    }
+    // The REAL acceptance criteria, sourced from the locked spec record, serialized intact.
+    expect(result.criteria).toEqual({
+      kind: 'criteria',
+      specRef: `spec:${taskId}#locked`,
+      criteria: [...REVIEW_CRITERIA],
+    });
+  });
+
+  it('degrade: a client with NO server returns the named conductor-down state (never hangs/throws)', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath(); // nothing is listening here
+    const client = makeClient(projectId, socketPath);
+
+    expect(await client.reviewContext('rev-absent')).toEqual({
+      kind: 'conductor-down',
+      reviewId: 'rev-absent',
+    });
   });
 });

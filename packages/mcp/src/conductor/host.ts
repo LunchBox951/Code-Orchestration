@@ -21,8 +21,11 @@ import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
 import {
   NodePtyHost,
+  defaultGitReader,
   openRegistry,
+  openReviewStore,
   openSessionStore,
+  openSpecStore,
   openWorktreeStore,
   queryLiveObservability,
   QUIET_WINDOW_MS,
@@ -31,6 +34,7 @@ import {
   type MarkStuck,
   type ProjectId,
   type PtyHost,
+  type ReviewContext,
   type RunningAgent,
   type TranscriptTail,
 } from '@co/core';
@@ -44,6 +48,7 @@ import { EngineReviewerSpawnGate } from './reviewer-gate.js';
 import { type CoMcpPaths } from './placement-launch.js';
 import { createSocketBridgeTransportPair } from './real-transport.js';
 import { defaultCoMcpPaths, type HostLaunchPathOptions } from './host-launch-paths.js';
+import { resolveReviewContext } from './review-context.js';
 import { OperatorIpcServer, operatorIpcSocketPath } from '../operator-ipc/server.js';
 
 // ── The cadence scheduler seam (injected so the loop is FakePty-unit-testable) ──────────────────────
@@ -92,6 +97,12 @@ export interface ConductorControlSurface {
   readonly onTranscript: (
     listener: (agentId: string, chunk: string, offset: number) => void,
   ) => () => void;
+  /**
+   * Stage 13 R-A (reviewContext) — resolve `reviewId`'s review context (diff + criteria + refs) for the
+   * in-app Review view. Async (it shells `git diff`); a READ — opens no long-lived handles, records NO
+   * events. DEGRADES EXPLICITLY (Principle 9) — every failure mode is a named state, never a throw.
+   */
+  readonly reviewContext: (reviewId: string) => Promise<ReviewContext>;
 }
 
 // ── The cadence runner ──────────────────────────────────────────────────────────────────────────────
@@ -418,6 +429,19 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       engine.onTranscript((pid, agent, chunk, offset) => {
         if (pid === projectId) listener(agent, chunk, offset);
       }),
+    // Stage 13 R-A (reviewContext) — resolve the in-app Review view's context daemon-side: a pure READ
+    // off the project's durable stores ⊕ a real `git diff`. Each store is opened PER CALL and closed by
+    // the resolver (mirrors the operator-IPC server's openMail per-write pattern — no leaked handles).
+    reviewContext: (reviewId) =>
+      resolveReviewContext(
+        {
+          openReviews: () => openReviewStore(projectId),
+          openSpecs: () => openSpecStore(projectId),
+          openWorktrees: () => openWorktreeStore(projectId),
+          gitReader: defaultGitReader,
+        },
+        reviewId,
+      ),
   };
 
   // Stage 11 P1 (OP-IPC) — the cross-process operator-IPC server, started alongside the cadence
