@@ -15,7 +15,7 @@ The acceptance model is split:
 
 - `[sandbox]` means the invariant is mechanically checked by the normal repo gate.
 - `[host-live]` means the invariant requires a real provider binary and subscription-authenticated
-  host environment, so it is discharged by operator review for the dev-to-main PR.
+  host environment, so it is discharged by operator review for the stable promotion PR.
 
 ## Criteria
 

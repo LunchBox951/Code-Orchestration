@@ -1,6 +1,7 @@
 # Build and dependency artifacts
 node_modules/
 dist/
+release/
 *.tsbuildinfo
 coverage/
 

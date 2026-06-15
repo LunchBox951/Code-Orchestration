@@ -32,6 +32,10 @@ describe('desktop package metadata', () => {
     expect(builderYaml).toContain('!node_modules/.bin/**');
   });
 
+  it('uses a filesystem-safe packaged executable name', () => {
+    expect(builderYaml).toContain('executableName: co');
+  });
+
   it('packages workspace runtime dependencies as built artifacts, not source trees', () => {
     expect(packageJson.files).toEqual(
       expect.arrayContaining(['dist', 'electron-builder.yml', 'package.json']),

@@ -12,5 +12,5 @@ lifecycle. Issues (spec/phase/task) move across it exactly as agents move throug
 - **Blocked** — escalated; needs a decision (filter-up).
 - **Done** — merged.
 
-Release channel (`nightly`/`stable`) is a **label**, not a column. The board is configured in
-GitHub (Phase 6); this doc is the source of truth for its shape.
+Release channel (`nightly`/`stable`) is not a board column. Channel state is driven by
+[`release-policy.md`](release-policy.md) and GitHub Releases.

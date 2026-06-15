@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 jobs:
-  require-dev-source:
-    name: require-dev-source
+  require-release-source:
+    name: require-release-source
     runs-on: ubuntu-latest
     steps:
-      - name: Enforce dev to main only
+      - name: Enforce release branch to main only
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
@@ -22,9 +22,75 @@ jobs:
         run: |
           echo "base=${BASE_REF} head=${HEAD_REPO}:${HEAD_REF}"
 
-          if [ "$BASE_REF" = "main" ] && [ "$HEAD_REF" = "dev" ] && [ "$HEAD_REPO" = "$REPOSITORY" ]; then
+          if [ "$BASE_REF" != "main" ]; then
+            echo "This policy only evaluates PRs targeting main."
+            exit 1
+          fi
+
+          if [ "$HEAD_REPO" != "$REPOSITORY" ]; then
+            echo "PRs into main must come from a release branch in this repository."
+            exit 1
+          fi
+
+          case "$HEAD_REF" in
+            release/*) exit 0 ;;
+            *)
+              echo "PRs into main must come from release/*, not ${HEAD_REF}."
+              exit 1
+              ;;
+          esac
+
+  require-current-main:
+    name: require-current-main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Require release branch to include main
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch origin main --prune
+
+          if git merge-base --is-ancestor origin/main "$HEAD_SHA"; then
+            echo "origin/main is an ancestor of ${HEAD_SHA}."
             exit 0
           fi
 
-          echo "PRs into main must come from this repository's dev branch."
+          echo "Release branches must include current origin/main before promotion."
+          echo "Update the release branch from main, rerun CI, and wait for the soak gate again."
+          exit 1
+
+  require-soak:
+    name: require-soak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Require 24 hour soak
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REQUIRED_SECONDS: '86400'
+        run: |
+          commit_epoch="$(git show -s --format=%ct "$HEAD_SHA")"
+          now_epoch="$(date -u +%s)"
+          age_seconds="$((now_epoch - commit_epoch))"
+
+          echo "head=${HEAD_SHA}"
+          echo "commit_time=$(date -u -d "@${commit_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "now=$(date -u -d "@${now_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "age_seconds=${age_seconds}"
+          echo "required_seconds=${REQUIRED_SECONDS}"
+
+          if [ "$age_seconds" -ge "$REQUIRED_SECONDS" ]; then
+            exit 0
+          fi
+
+          remaining_seconds="$((REQUIRED_SECONDS - age_seconds))"
+          echo "Release branch head has not soaked long enough for stable promotion."
+          echo "Wait another ${remaining_seconds} seconds, then rerun this check."
           exit 1

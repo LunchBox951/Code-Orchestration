@@ -26,12 +26,13 @@ The [Project board](docs/governance/project-board.md) tracks items across the li
 
 ## Branch & PR flow
 
-- Branch from `dev`; open PRs **against `dev`** (the integration line). `main` is the
-  stable release branch, updated only by a gated promotion PR from `dev`.
+- Branch from `dev`; open PRs **against `dev`** (the integration line). `main` is the stable release
+  branch, updated only by a gated promotion PR from same-repository `release/*` branches.
 - Keep PRs focused on one task/phase. Link the issue the PR closes; fill the acceptance-criteria
   checklist in the PR template.
 - A PR merges only after the review gate returns **PASS** and required checks are green. The blocker
-  bar tightens toward production: nits ride as suggestions into `dev`, become blockers at `main`.
+  bar tightens toward production: nits ride as suggestions into `dev`, become blockers in
+  `release/*` → `main` promotion.
 
 ## Commits
 

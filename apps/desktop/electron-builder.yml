@@ -1,5 +1,6 @@
 appId: dev.co.desktop
 productName: co
+executableName: co
 
 directories:
   output: release

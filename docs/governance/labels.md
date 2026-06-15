@@ -50,5 +50,5 @@ track the [board](project-board.md) columns (the board's `Backlog` is the no-sta
   `area:` labels.
 - Status is advanced as the item moves through the review gate; it is not a substitute for the board
   column, but the two are kept consistent.
-- Release channel (`nightly`/`stable`) is intentionally **not** a label family here — that is a
-  board concern, parked with the [release policy](release-policy.md).
+- Release channel (`nightly`/`stable`) is intentionally **not** a label family here; channel state
+  is driven by the [release policy](release-policy.md) and GitHub Releases.
