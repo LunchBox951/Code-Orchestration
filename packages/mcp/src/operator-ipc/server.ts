@@ -479,8 +479,9 @@ export class OperatorIpcServer {
 
   private queueTranscriptPush(agentId: string, chunk: string, offset: number): void {
     const pending = this.pendingTranscriptPushes.get(agentId);
-    const nextOffset = pending?.offset ?? offset;
-    const next = (pending?.chunk ?? '') + chunk;
+    const canCoalesce = pending != null && offset === pending.offset + pending.chunk.length;
+    const nextOffset = canCoalesce ? pending.offset : offset;
+    const next = canCoalesce ? pending.chunk + chunk : chunk;
     if (next.length > TRANSCRIPT_PENDING_MAX_CHARS) {
       const dropped = next.length - TRANSCRIPT_PENDING_MAX_CHARS;
       this.pendingTranscriptPushes.set(agentId, {

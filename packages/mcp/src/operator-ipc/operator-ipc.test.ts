@@ -717,6 +717,51 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     });
   });
 
+  it('does not coalesce a pending transcript push across a same-agent offset reset', async () => {
+    const { projectId } = makeProject();
+    let releaseFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const sent: Array<{ method?: string; params?: unknown }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message);
+        return sent.length === 1 ? firstSend : Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    server.pushTranscript('impl-x', 'old-in-flight', 0);
+    server.pushTranscript('impl-x', 'old-pending', 'old-in-flight'.length);
+    server.pushTranscript('impl-x', 'new-generation', 0);
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await flush();
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(2);
+    expect(sent[1]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', offset: 0, chunk: 'new-generation' },
+    });
+  });
+
   it('push: a hosted pane chunk (ANSI/ESC bytes intact) reaches the SEPARATE client EXACTLY', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
