@@ -15,8 +15,10 @@ import {
   type DeliveryFactory,
   type ProjectId,
   type ResumeHandle,
+  type ReviewerSpawnGate,
   type Role,
   type SessionStore,
+  type ToolSpec,
 } from '@co/core';
 import { createCoMcpServer } from './server.js';
 import { openContextStores } from './context.js';
@@ -68,6 +70,18 @@ export interface HostSessionOptions {
    * panes. Absent ⇒ the in-process default writer (persist-only; the C1 identity surface is unchanged).
    */
   readonly deliveryFactory?: DeliveryFactory;
+  /**
+   * The P2 reviewer-spawn gate (AC-S10-2 / RG-4): when present, this pane's `co_merge` calls can
+   * trigger live reviewer spawns by forwarding the gate through the assembled ToolContext. Absent ⇒
+   * `co_merge` gates on an already-recorded verdict (headless path; unchanged).
+   */
+  readonly reviewerSpawnGate?: ReviewerSpawnGate;
+  /**
+   * Optional explicit tool surface. Normal Conductor sessions omit this and receive
+   * `toolsForRole(identity.role)`; host-proof can pass a minimal proof surface to isolate provider
+   * MCP startup from the full role vocabulary.
+   */
+  readonly tools?: readonly ToolSpec[];
 }
 
 /**
@@ -178,7 +192,10 @@ export class LiveSessionHostImpl implements LiveSessionHost {
           projectId: identity.projectId,
           cwd: identity.cwd,
         },
-        opts?.deliveryFactory != null ? { deliveryFactory: opts.deliveryFactory } : undefined,
+        {
+          ...(opts?.deliveryFactory != null ? { deliveryFactory: opts.deliveryFactory } : {}),
+          ...(opts?.reviewerSpawnGate != null ? { reviewerSpawnGate: opts.reviewerSpawnGate } : {}),
+        },
       );
       opened.ctx.roster!.recordAgent({
         agentId: agent,
@@ -186,7 +203,7 @@ export class LiveSessionHostImpl implements LiveSessionHost {
         ...(identity.subRole != null ? { subRole: identity.subRole } : {}),
         parent,
       });
-      const scopedTools = toolsForRole(identity.role);
+      const scopedTools = opts?.tools ?? toolsForRole(identity.role);
       server = createCoMcpServer({
         tools: scopedTools,
         contextFactory: () => opened!.ctx,

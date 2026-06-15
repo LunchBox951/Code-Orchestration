@@ -208,8 +208,9 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
       assertToolCallerRole('co_pr_merge', ctx.roster, ctx.agent, ['coordinator', 'lead']);
     }
 
-    const into = input.into ?? detectIntegrationTarget(ctx.cwd);
-
+    // Resolve the worktree record BEFORE computing `into` so that a slung sandbox slung off a
+    // non-default base (e.g. `co/stage-10`) uses the RECORDED `baseRef` rather than the stale
+    // remote default that `detectIntegrationTarget` would return (MNR #3/#6).
     const worktree = ctx.worktrees.getWorktree(input.branch);
     if (worktree == null || worktree.removed) {
       throw new Error(
@@ -217,6 +218,7 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
           'exists for that branch.',
       );
     }
+    const into = input.into ?? worktree.baseRef ?? detectIntegrationTarget(ctx.cwd);
     if (!operatorOverride && worktree.parent !== ctx.agent) {
       throw new Error(
         `co_pr_merge: branch '${input.branch}' worktree parent is '${worktree.parent}', not ` +

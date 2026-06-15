@@ -253,9 +253,9 @@ export const pushTool: ToolSpec<PushInput, PushOutput> = {
     }
 
     const mode = resolveRepoMode(ctx.projectId, ctx.cwd);
-    const into =
-      input.into ??
-      (mode === 'owner' ? detectCurrentBranchTarget(ctx.cwd) : detectIntegrationTarget(ctx.cwd));
+    // Resolve the worktree record BEFORE computing `into` so that a slung sandbox slung off a
+    // non-default base (e.g. `co/stage-10`) uses the RECORDED `baseRef` rather than the stale
+    // remote default that `detectIntegrationTarget` would return (MNR #3/#6).
     const worktree = ctx.worktrees.getWorktree(input.branch);
     if (worktree == null) {
       throw new Error(
@@ -263,6 +263,11 @@ export const pushTool: ToolSpec<PushInput, PushOutput> = {
           'that branch.',
       );
     }
+    const into =
+      input.into ??
+      (mode === 'owner'
+        ? detectCurrentBranchTarget(ctx.cwd)
+        : (worktree.baseRef ?? detectIntegrationTarget(ctx.cwd)));
     if (worktree.removed && mode !== 'owner') {
       throw new Error(
         `co_push: cannot publish branch '${input.branch}' in ${mode} mode — no live worktree ` +

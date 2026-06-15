@@ -12,6 +12,7 @@ import {
   workSizeSchema,
   queryObservability,
   runDoctor,
+  defaultProviderProbe,
   openMailStore,
   OPERATOR,
   MAIL_TYPES,
@@ -30,6 +31,7 @@ import type {
   ObservabilitySnapshot,
   DoctorReport,
   ProviderProbeSeam,
+  ProviderProbeCommand,
   MailEnvelope,
   DeliveredMail,
   MailType,
@@ -51,6 +53,12 @@ export interface RunOptions {
   readonly usageSourceFactory?: UsageSourceFactory;
   readonly providerProbe?: ProviderProbeSeam;
   readonly stdin?: string;
+  /**
+   * Injectable command seam for the `--live` provider probe path. When set, wires this fake
+   * command into `defaultProviderProbe` instead of the real binary (sandbox-safe testing of
+   * `co doctor --live` without spawning a real `claude`/`codex` process).
+   */
+  readonly providerProbeCommand?: ProviderProbeCommand;
 }
 
 const HELP_TEXT = `co — the orchestration CLI
@@ -69,6 +77,7 @@ Commands:
 Observability (operator-only):
   co status                 Show roster, phase, review, and cost snapshot
   co doctor                 Run structural health checks
+    --live                  Wire the real provider probe (claude/codex version + auth/doctor)
 
 Mail (operator-only):
   co mail read              Show @operator inbox
@@ -632,11 +641,23 @@ export async function run(
 
     case 'doctor': {
       try {
-        validateNoArgs('doctor', rest);
+        const useLive = rest.includes('--live');
+        const unknownArgs = rest.filter((a) => a !== '--live');
+        if (unknownArgs.length > 0) {
+          validateNoArgs('doctor', unknownArgs);
+        }
+        // When --live is present, wire defaultProviderProbe (metadata-only: claude --version,
+        // claude auth status --json, codex --version, codex doctor --json). The command seam
+        // is injected via options.providerProbeCommand for sandbox-safe testing (no real binary).
+        const providerProbe: ProviderProbeSeam | undefined = useLive
+          ? defaultProviderProbe(
+              options.providerProbeCommand != null ? { command: options.providerProbeCommand } : {},
+            )
+          : options.providerProbe;
         const report = runDoctor({
           projectId,
           repoRoot: cwd,
-          ...(options.providerProbe != null ? { providerProbe: options.providerProbe } : {}),
+          ...(providerProbe != null ? { providerProbe } : {}),
         });
         return { output: renderDoctorReport(report), exitCode: report.healthy ? 0 : 1 };
       } catch (err) {

@@ -120,11 +120,12 @@ function commandDiagnostic(label: string, result: ProviderProbeCommandResult): s
   return `${label} failed: ${detail}`;
 }
 
-function parseJsonObject(raw: string): unknown {
+function parseJsonObject(raw: string): { readonly value: unknown } | { readonly error: string } {
   try {
-    return JSON.parse(raw);
-  } catch {
-    return {};
+    return { value: JSON.parse(raw) };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { error: `invalid JSON: ${msg}` };
   }
 }
 
@@ -154,7 +155,16 @@ function probeClaude(
       diagnostic: commandDiagnostic('claude auth status --json', auth),
     };
   }
-  const account = parseClaudeAuthStatus(parseJsonObject(auth.stdout));
+  const parsed = parseJsonObject(auth.stdout);
+  if ('error' in parsed) {
+    return {
+      version,
+      versionSkewed: versionSkewed('claude', version, expectedVersions),
+      capabilities: [],
+      diagnostic: `claude auth status --json returned ${parsed.error}.`,
+    };
+  }
+  const account = parseClaudeAuthStatus(parsed.value);
   if (!account.loggedIn) {
     return {
       version,
@@ -177,7 +187,7 @@ function probeCodex(
   const versionResult = command('codex', ['--version']);
   const version = versionResult.status === 0 ? trimmed(versionResult.stdout) : undefined;
   const doctor = command('codex', CODEX_DOCTOR_ARGS);
-  if (doctor.error !== undefined || trimmed(doctor.stdout) === undefined) {
+  if (doctor.error !== undefined || doctor.status !== 0 || trimmed(doctor.stdout) === undefined) {
     return {
       version,
       versionSkewed: versionSkewed('codex', version, expectedVersions),
@@ -185,7 +195,16 @@ function probeCodex(
       diagnostic: commandDiagnostic('codex doctor --json', doctor),
     };
   }
-  const account = parseCodexDoctor(parseJsonObject(doctor.stdout));
+  const parsed = parseJsonObject(doctor.stdout);
+  if ('error' in parsed) {
+    return {
+      version,
+      versionSkewed: versionSkewed('codex', version, expectedVersions),
+      capabilities: [],
+      diagnostic: `codex doctor --json returned ${parsed.error}.`,
+    };
+  }
+  const account = parseCodexDoctor(parsed.value);
   if (!account.healthy) {
     return {
       version,

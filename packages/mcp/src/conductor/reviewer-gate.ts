@@ -25,21 +25,20 @@ export class EngineReviewerSpawnGate implements ReviewerSpawnGate {
     if (record.kind !== 'placed' || record.provider == null) {
       throw new Error(
         `EngineReviewerSpawnGate.spawn: placement for '${record.agent}' is '${record.kind}' — ` +
-          'only a placed placement can launch a reviewer pane.',
+          'only a placed placement can launch a pane.',
       );
     }
-    const branch = record.reviewBranch;
-    if (branch == null) {
+    if (this.engine.isHosted(projectId, record.agent)) return;
+    // Reviewers supply a reviewBranch (the branch being reviewed as the pane cwd); slung children
+    // are resolved from their recorded worktree keyed by agent.
+    const worktree =
+      record.reviewBranch != null
+        ? this.worktrees.getWorktree(record.reviewBranch)
+        : this.worktrees.listWorktrees().find((w) => !w.removed && w.agent === record.agent);
+    if (worktree == null || worktree.removed) {
       throw new Error(
-        `EngineReviewerSpawnGate.spawn: placement for '${record.agent}' has no reviewBranch — ` +
-          'cannot resolve the worktree for the reviewer.',
-      );
-    }
-    const worktree = this.worktrees.getWorktree(branch);
-    if (worktree == null) {
-      throw new Error(
-        `EngineReviewerSpawnGate.spawn: no worktree recorded for branch '${branch}' — ` +
-          `cannot launch reviewer '${record.agent}'.`,
+        `EngineReviewerSpawnGate.spawn: no live worktree found for '${record.agent}' ` +
+          `(reviewBranch='${String(record.reviewBranch ?? '–')}') — cannot launch pane.`,
       );
     }
     const isolatedHomeDir = this.isolatedHomeDirFor(record.agent);

@@ -111,6 +111,13 @@ const mergeOutput = z.object({
     .string()
     .optional()
     .describe('The audited operator override reason, present when overridden is true.'),
+  review_pending: z
+    .boolean()
+    .optional()
+    .describe(
+      'True when a live reviewer was just triggered (P2 / AC-S10-2) and the merge is pending its ' +
+        'review. Re-call co_merge once the reviewer records a PASS verdict.',
+    ),
 });
 type MergeOutput = z.infer<typeof mergeOutput>;
 
@@ -203,7 +210,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
     'co_pr_merge path. @operator may use an audited override with a non-empty reason.',
   inputSchema: mergeInput,
   outputSchema: mergeOutput,
-  handler: (ctx, input): MergeOutput => {
+  handler: async (ctx, input): Promise<MergeOutput> => {
     if (!ctx.reviews) {
       throw new Error('co_merge: the mount did not inject a review store (ctx.reviews absent).');
     }
@@ -257,6 +264,50 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
       );
     }
 
+    // P2 / AC-S10-2 — live daemon trigger path: when the engine-backed spawn gate is wired and
+    // no PASS verdict is recorded yet, trigger the review (fire the spawn) and return pending.
+    // The identity pre-check below is skipped on this path (we are not merging; the reviewer will
+    // verify the branch before any merge lands). The headless path (no reviewerSpawnGate) and the
+    // re-call after a recorded PASS both fall through to the merge path below — byte-identical.
+    // Guard: the spawn gate must not fire on the operator-override path — the operator bypasses
+    // the gate entirely; firing spawn here would start an unwanted review for an already-decided merge.
+    if (ctx.reviewerSpawnGate != null && !operatorOverride) {
+      const verdict = ctx.reviews.getVerdict(into, input.branch);
+      if (verdict?.verdict !== 'PASS') {
+        const triggerGate = new CoReviewGate({
+          reviews: ctx.reviews,
+          worktrees,
+          mail: ctx.mail,
+          agentId: ctx.agent,
+          parentResolver: roleParentResolver(ctx.roster),
+          ...(ctx.dispatch != null ? { dispatch: ctx.dispatch, nowMs: Date.now() } : {}),
+          reviewerSpawnGate: ctx.reviewerSpawnGate,
+        });
+        const existingReq = ctx.reviews.getReviewRequest(into, input.branch);
+        const reviewId =
+          existingReq != null && verdict == null
+            ? existingReq.reviewId
+            : `rev-${Date.now().toString(36)}`;
+        triggerGate.triggerReview({
+          reviewId,
+          target: into,
+          branch: input.branch,
+          requestedBy: ctx.agent,
+          scope: 'worker_merge',
+          projectId: ctx.projectId,
+        });
+        await triggerGate.drainSpawns();
+        return {
+          merged: false,
+          // The merge hasn't happened yet — the review is pending — so there is no commit to report.
+          commit_sha: '',
+          commit_message: '',
+          mode: resolveRepoMode(ctx.projectId, repoCwd),
+          review_pending: true,
+        };
+      }
+    }
+
     // Identity pre-check (AC-L6a-7): local merges publish the reviewed branch into `into`, so they
     // must enforce the same DCO/persona floor as co_push/co_pr_merge before any git side effect.
     const allowlist = resolvePersonaAllowlist(ctx.projectId);
@@ -282,13 +333,6 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
 
     // Build the production parent-resolver from the caller's roster parent
     // (AC-L5-4 / Phase D): baseline-failure escalations go one level above the caller.
-    // L7 SEAM NOTE (placement recording): CoReviewGate.triggerReview resolves + records a reviewer
-    // placement (placement.decided) via the L4 dispatch store. `dispatch`/`config`/`nowMs` are
-    // intentionally NOT injected here — triggerReview has zero production callers at this surface
-    // (`co_merge` gates on an already-recorded verdict; `co_finish` stops short of triggering a new
-    // review). The live invocation of triggerReview — conducting the reviewer dispatch — is the L7
-    // seam (AC-L5-11 defers: "no L7 work"). Wiring dispatch here would be dead code. L7 injects it
-    // when it wires the live reviewer dispatch.
     const gate = new CoReviewGate({
       reviews: ctx.reviews,
       worktrees,

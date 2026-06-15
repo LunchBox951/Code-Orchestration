@@ -72,8 +72,10 @@ interface ProviderSignatures {
    * provider footer variants, never rotating placeholders.
    */
   readonly readyAnchorGroups: readonly (readonly string[])[];
-  /** Lowercased anchors; ALL present ⇒ login_required (terminal). */
-  readonly loginAnchors: readonly string[];
+  /** Lowercased anchor groups; ALL anchors in ANY group present ⇒ login_required (terminal). */
+  readonly loginAnchorGroups: readonly (readonly string[])[];
+  /** Lowercased anchor groups that mean startup is still busy even if a footer looks ready. */
+  readonly startingAnchorGroups?: readonly (readonly string[])[];
   /** Known login methods; those whose `match` is present are captured (surfaced, not answered). */
   readonly methods: readonly MethodSig[];
   /** Interstitials, in startup-flow order (earliest first). */
@@ -88,7 +90,11 @@ const SIGNATURES: Readonly<Record<Provider, ProviderSignatures>> = {
     // rather than exact spacing because the TUI lays the strip out with cursor-positioning.
     readyAnchorGroups: [['? for shortcuts'], ['shift+tab', 'agents', 'tokens']],
     // [documented] `Select login method:` header.
-    loginAnchors: ['select login method'],
+    loginAnchorGroups: [
+      ['select login method'],
+      ['opening browser to sign in'],
+      ['paste code here if prompted'],
+    ],
     methods: [
       // [documented] 1. Claude account with subscription / 2. Anthropic Console account / 3. 3rd-party platform
       {
@@ -117,7 +123,8 @@ const SIGNATURES: Readonly<Record<Provider, ProviderSignatures>> = {
       ['›', 'gpt-'],
     ],
     // [documented] sign-in menu: anchor on the first + last options (the header is not documented).
-    loginAnchors: ['sign in with chatgpt', 'provide your own api key'],
+    loginAnchorGroups: [['sign in with chatgpt', 'provide your own api key']],
+    startingAnchorGroups: [['starting mcp servers']],
     methods: [
       // [documented] 1. Sign in with ChatGPT / 2. Sign in with Device Code / 3. Provide your own API key
       { canonical: '1. Sign in with ChatGPT', match: 'sign in with chatgpt' },
@@ -184,10 +191,13 @@ export function classifyStartup(
   const has = (needle: string): boolean => hay.includes(needle);
   const allPresent = (anchors: readonly string[]): boolean => anchors.every(has);
 
-  if (allPresent(sig.loginAnchors)) {
+  if (sig.loginAnchorGroups.some((anchors) => allPresent(anchors))) {
     const present = sig.methods.filter((m) => has(m.match)).map((m) => m.canonical);
     const methods = present.length > 0 ? present : sig.methods.map((m) => m.canonical);
     return { kind: 'login_required', methods };
+  }
+  if (sig.startingAnchorGroups?.some((anchors) => allPresent(anchors)) === true) {
+    return { kind: 'starting' };
   }
   if (sig.readyAnchorGroups.some((anchors) => allPresent(anchors))) {
     return { kind: 'ready' };

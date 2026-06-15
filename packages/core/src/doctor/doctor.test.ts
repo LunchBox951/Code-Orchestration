@@ -356,7 +356,61 @@ describe('defaultProviderProbe', () => {
     expect(result.version).toBe('codex-cli 0.139.0');
     expect(result.versionSkewed).toBe(false);
     expect(result.capabilities).toEqual([]);
-    expect(result.diagnostic).toMatch(/unhealthy|unauthenticated/i);
+    expect(result.diagnostic).toMatch(/codex doctor --json failed/i);
+  });
+
+  it('fails closed when claude auth status returns malformed JSON', () => {
+    const command: ProviderProbeCommand = (cmd, args) => {
+      if (cmd === 'claude' && args.join(' ') === '--version') {
+        return { stdout: '2.1.158 (Claude Code)\n', stderr: '', status: 0 };
+      }
+      if (cmd === 'claude' && args.join(' ') === 'auth status --json') {
+        return { stdout: '{not json', stderr: '', status: 0 };
+      }
+      return { stdout: '', stderr: 'unexpected command', status: 127 };
+    };
+    const probe = defaultProviderProbe({ command });
+
+    const result = probe('claude');
+    expect(result.version).toBe('2.1.158 (Claude Code)');
+    expect(result.capabilities).toEqual([]);
+    expect(result.diagnostic).toMatch(/invalid json/i);
+  });
+
+  it('fails closed when codex doctor returns malformed JSON', () => {
+    const command: ProviderProbeCommand = (cmd, args) => {
+      if (cmd === 'codex' && args.join(' ') === '--version') {
+        return { stdout: 'codex-cli 0.139.0\n', stderr: '', status: 0 };
+      }
+      if (cmd === 'codex' && args.join(' ') === 'doctor --json') {
+        return { stdout: '{not json', stderr: '', status: 0 };
+      }
+      return { stdout: '', stderr: 'unexpected command', status: 127 };
+    };
+    const probe = defaultProviderProbe({ command });
+
+    const result = probe('codex');
+    expect(result.version).toBe('codex-cli 0.139.0');
+    expect(result.capabilities).toEqual([]);
+    expect(result.diagnostic).toMatch(/invalid json/i);
+  });
+
+  it('fails closed when codex doctor exits nonzero even with healthy-looking stdout', () => {
+    const command: ProviderProbeCommand = (cmd, args) => {
+      if (cmd === 'codex' && args.join(' ') === '--version') {
+        return { stdout: 'codex-cli 0.139.0\n', stderr: '', status: 0 };
+      }
+      if (cmd === 'codex' && args.join(' ') === 'doctor --json') {
+        return { stdout: '{"authenticated":true,"status":"ok"}\n', stderr: '', status: 1 };
+      }
+      return { stdout: '', stderr: 'unexpected command', status: 127 };
+    };
+    const probe = defaultProviderProbe({ command });
+
+    const result = probe('codex');
+    expect(result.version).toBe('codex-cli 0.139.0');
+    expect(result.capabilities).toEqual([]);
+    expect(result.diagnostic).toMatch(/codex doctor --json failed/i);
   });
 });
 

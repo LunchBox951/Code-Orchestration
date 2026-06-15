@@ -15,6 +15,9 @@ import { openWorktreeStore, type WorktreeStore } from '../../worktrees/worktree-
 import { REPO_MODE_CONFIG_KEY } from '../../worktrees/repo-mode.js';
 import { worktreePathFor } from '../../worktrees/sling.js';
 import { openProjectStore } from '../../store/sqlite-store.js';
+import { openDispatchStore } from '../../dispatch/dispatch-store.js';
+import { accountForProvider } from '../../dispatch/provider-source.js';
+import type { ReviewerSpawnGate } from '../../review/merge.js';
 import { buildCoreRegistry } from '../core-registry.js';
 import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
@@ -1188,5 +1191,322 @@ describe('co_merge (AC-L5-1, AC-L5-3)', () => {
         intent: { summary: 'land the feature' },
       }),
     ).rejects.toThrow(/regression/);
+  });
+});
+
+// ── P2 / AC-S10-2 — live reviewer trigger path ───────────────────────────────────────────────────────
+describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
+  it('AC-S10-2.1: returns review_pending:true and fires spawn gate when reviewerSpawnGate is wired and no PASS exists', async () => {
+    // Freeze time at epoch 0 so the 1970-epoch snapshot timestamps are fresh (not stale) when the
+    // handler calls Date.now() to build the trigger gate's nowMs. A healthy snapshot → dispatch policy
+    // returns 'placed' → fireSpawn calls reviewerSpawnGate.spawn(), then co_merge drains the spawn.
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const spawned: Array<{ projectId: string; agent: string }> = [];
+      const spawnGate: ReviewerSpawnGate = {
+        spawn(projectId, placement) {
+          spawned.push({ projectId, agent: placement.agent });
+          return Promise.resolve();
+        },
+      };
+      const toolCtx = { ...ctx, dispatch, reviewerSpawnGate: spawnGate };
+      try {
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'trigger a review' },
+        })) as { merged: boolean; review_pending?: boolean };
+        expect(out.merged).toBe(false);
+        expect(out.review_pending).toBe(true);
+        // The spawn body runs before co_merge returns review_pending.
+        expect(spawned).toHaveLength(1);
+        expect(spawned[0]!.projectId).toBe('p-merge-tool');
+        // Assert the agent id (reviewer seat) so a wrong-key regression is caught (spy-key-value-blind-spot).
+        expect(spawned[0]!.agent).toMatch(/^reviewer@rev-/);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC-S10-2.1b: an existing ISSUES verdict triggers a fresh reviewer spawn instead of reusing the stale review id', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          tests: [{ name: 'test-a', passed: true }],
+        },
+      );
+      reviewStore!.recordReviewRequested({
+        reviewId: 'rev-stale',
+        target: 'main',
+        branch: 'co/feature',
+        requestedBy: 'lead-2',
+        scope: 'worker_merge',
+      });
+      reviewStore!.recordVerdict({
+        reviewId: 'rev-stale',
+        target: 'main',
+        branch: 'co/feature',
+        reviewer: 'rev-7',
+        verdict: 'ISSUES',
+        blockers: [{ summary: 'needs work' }],
+        suggestions: [],
+        verification: {
+          commands_run: ['pnpm test'],
+          suite_result: 'pass',
+          baseline_compared: true,
+        },
+      });
+      const dispatch = openDispatchStore('p-merge-tool');
+      try {
+        dispatch.recordSnapshot({
+          provider: 'claude',
+          account: accountForProvider('claude'),
+          available: true,
+          source: 'test',
+          sampled_at: '1970-01-01T00:00:00.000Z',
+          windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+        });
+        const spawnCalls: string[] = [];
+        const spawnGate: ReviewerSpawnGate = {
+          spawn: async (_projectId, placement) => {
+            spawnCalls.push(placement.agent);
+          },
+        };
+        const toolCtx = {
+          ...ctx,
+          dispatch,
+          reviewerSpawnGate: spawnGate,
+        } as ToolContext;
+
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'land the feature' },
+        })) as { merged: boolean; review_pending?: boolean };
+        const placements = dispatch.readPlacements();
+
+        expect(out.review_pending).toBe(true);
+        expect(spawnCalls).toHaveLength(1);
+        expect(spawnCalls[0]).not.toContain('rev-stale');
+        expect(placements).toHaveLength(1);
+        expect(placements[0]!.reviewId).not.toBe('rev-stale');
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC-S10-2.1b: rejects when the live reviewer spawn gate fails', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const toolCtx = {
+        ...ctx,
+        dispatch,
+        reviewerSpawnGate: {
+          spawn: () => Promise.reject(new Error('reviewer spawn failed')),
+        } satisfies ReviewerSpawnGate,
+      };
+      try {
+        await expect(
+          invokeTool(reg, toolCtx, 'co_merge', {
+            branch: 'co/feature',
+            into: 'main',
+            intent: { summary: 'trigger a review' },
+          }),
+        ).rejects.toThrow(/reviewer spawn failed/);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC-S10-2.1c: retries an already-recorded reviewer placement after a live spawn failure', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      let attempts = 0;
+      const toolCtx = {
+        ...ctx,
+        dispatch,
+        reviewerSpawnGate: {
+          spawn: async () => {
+            attempts += 1;
+            if (attempts === 1) throw new Error('transient spawn failed');
+          },
+        } satisfies ReviewerSpawnGate,
+      };
+      try {
+        await expect(
+          invokeTool(reg, toolCtx, 'co_merge', {
+            branch: 'co/feature',
+            into: 'main',
+            intent: { summary: 'trigger a review' },
+          }),
+        ).rejects.toThrow(/transient spawn failed/);
+
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'retry the same review placement' },
+        })) as { merged: boolean; review_pending?: boolean };
+
+        expect(out.merged).toBe(false);
+        expect(out.review_pending).toBe(true);
+        expect(attempts).toBe(2);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC-S10-2.2: headless path (no reviewerSpawnGate) merges normally on recorded PASS — unchanged', async () => {
+    // Confirms the P2 seam is purely ADDITIVE: absent gate → falls through to the existing merge gate.
+    const repo = makeRepo();
+    const reg = buildCoreRegistry();
+    const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+    recordPass(
+      reviewStore!,
+      worktreeStore!,
+      'lead-2',
+      'main',
+      git(repo, 'rev-parse', 'co/feature'),
+    );
+    const out = (await invokeTool(reg, ctx, 'co_merge', {
+      branch: 'co/feature',
+      into: 'main',
+      intent: { summary: 'land the feature' },
+    })) as { merged: boolean; review_pending?: boolean };
+    expect(out.merged).toBe(true);
+    expect(out.review_pending).toBeUndefined();
+  });
+
+  it('AC-S10-2.3: operator-override does not trigger the spawn gate even when reviewerSpawnGate is wired', async () => {
+    // Defensive invariant (nit-a): the spawn gate must NOT fire on the operator-override path.
+    // The operator bypasses the review gate entirely; spawning a reviewer would start an unwanted
+    // review for a merge that the operator has already decided to force through.
+    const repo = makeRepo();
+    const reg = buildCoreRegistry();
+    const { ctx, worktreeStore } = setup(OPERATOR, { cwd: repo, registerCaller: false });
+    worktreeStore!.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        path: '/tmp/fake',
+        parent: OPERATOR,
+      },
+      { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+    );
+
+    const spawned: Array<{ projectId: string; agent: string }> = [];
+    const spawnGate: ReviewerSpawnGate = {
+      spawn(projectId, placement) {
+        spawned.push({ projectId, agent: placement.agent });
+        return Promise.resolve();
+      },
+    };
+
+    const toolCtx = { ...ctx, reviewerSpawnGate: spawnGate };
+    const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+      branch: 'co/feature',
+      into: 'main',
+      intent: { summary: 'operator hotfix' },
+      operator_override: true,
+      reason: 'hotfix: prod down',
+    })) as { merged: boolean; review_pending?: boolean; overridden?: boolean };
+
+    expect(out.merged).toBe(true);
+    expect(out.overridden).toBe(true);
+    expect(out.review_pending).toBeUndefined();
+    // The spawn gate must NOT fire on the operator-override path.
+    expect(spawned).toHaveLength(0);
   });
 });

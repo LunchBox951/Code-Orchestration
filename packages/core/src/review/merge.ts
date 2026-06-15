@@ -118,16 +118,16 @@ export interface ReviewGateDeps {
   readonly teardown?: MergeTeardown;
   /**
    * The reviewer-SPAWN gate (P2, AC-S9-2). When present and an agent review trigger records a PLACED
-   * placement, `triggerReview` fires this gate (fire-and-forget — `triggerReview` stays sync) so the
-   * Conductor can launch the reviewer pane. Absent for all headless core tests (the default
-   * {@link ReviewerSpawnGateStub} is the loud-fail stand-in; `dispatch` must also be wired to reach this).
+   * placement, `triggerReview` fires this gate while staying sync; async tool callers can then
+   * {@link CoReviewGate.drainSpawns} to surface launch failure before returning pending. Absent for all
+   * headless core tests (the default {@link ReviewerSpawnGateStub} is the loud-fail stand-in; `dispatch`
+   * must also be wired to reach this).
    */
   readonly reviewerSpawnGate?: ReviewerSpawnGate;
   /**
-   * Called when a fire-and-forget {@link ReviewerSpawnGate.spawn} rejects. When absent a **loud
-   * default** surfaces the rejection to stderr (Principle 9 — no silent discard). **Hosts SHOULD
-   * inject a structured handler in production** to route spawn failures into telemetry/alerting
-   * rather than relying on the stderr fallback.
+   * Called when {@link ReviewerSpawnGate.spawn} rejects. When absent a **loud default** surfaces the
+   * rejection to stderr (Principle 9 — no silent discard). Async tool callers can additionally await
+   * {@link CoReviewGate.drainSpawns} to reject the user-facing command.
    */
   readonly onSpawnError?: (agentId: string, err: unknown) => void;
 }
@@ -441,9 +441,15 @@ function assertFinishNotNewerThanVerdict(
  */
 export class CoReviewGate implements FinishReviewGate {
   private readonly deps: ReviewGateDeps;
+  private readonly pendingSpawns: Promise<void>[] = [];
 
   constructor(deps: ReviewGateDeps) {
     this.deps = deps;
+  }
+
+  /** Await live reviewer spawns fired by the trigger path. Sync callers may ignore this. */
+  async drainSpawns(): Promise<void> {
+    await Promise.all(this.pendingSpawns);
   }
 
   /**
@@ -841,8 +847,9 @@ export class CoReviewGate implements FinishReviewGate {
   /**
    * Resolve + record the reviewer placement for an AGENT review (AC-L5-11). Reads the scope→role map
    * (`reviewer_profiles`), runs the L4 dispatch policy (which calls the pure `placeAgentFromStore`),
-   * and records a `placement.decided` keyed on the reviewer seat. It NEVER launches — the live spawn
-   * is the L7 stub. A no-op when no dispatch store is wired (existing headless gate tests are unchanged).
+   * and records a `placement.decided` keyed on the reviewer seat. When a live spawn gate is wired, a
+   * placed reviewer record is also launched (or re-launched from an existing compatible placement after
+   * a prior transient launch failure). A no-op when no dispatch store is wired.
    */
   private recordReviewerPlacement(
     req: ReviewTriggerRequest,
@@ -860,7 +867,13 @@ export class CoReviewGate implements FinishReviewGate {
     const compatibleReviewerPlacements = existingReviewerPlacements.filter((placement) =>
       placementMatchesReview(placement, req, scope),
     );
-    if (compatibleReviewerPlacements.some((placement) => placement.kind === 'placed')) {
+    const compatiblePlaced = compatibleReviewerPlacements
+      .filter((placement) => placement.kind === 'placed')
+      .at(-1);
+    if (compatiblePlaced != null) {
+      if (this.deps.reviewerSpawnGate != null) {
+        this.fireSpawn(compatiblePlaced.agent, projectId, compatiblePlaced);
+      }
       return undefined;
     }
     const existingWaitingPlacement = compatibleReviewerPlacements
@@ -873,7 +886,13 @@ export class CoReviewGate implements FinishReviewGate {
     const seatPlacements = this.deps.dispatch
       .readPlacements(seat)
       .filter((placement) => placementMatchesReview(placement, req, scope));
-    if (seatPlacements.some((placement) => placement.kind === 'placed')) return undefined;
+    const seatPlaced = seatPlacements.filter((placement) => placement.kind === 'placed').at(-1);
+    if (seatPlaced != null) {
+      if (this.deps.reviewerSpawnGate != null) {
+        this.fireSpawn(seatPlaced.agent, projectId, seatPlaced);
+      }
+      return undefined;
+    }
     const accounts = this.deps.reviewerAccounts ?? defaultProviderAccounts();
     const nowMs = this.deps.nowMs ?? 0;
     // The reviewer seat this decision is for (L7 owns the live launch under this deterministic id).
@@ -915,7 +934,7 @@ export class CoReviewGate implements FinishReviewGate {
   }
 
   private fireSpawn(agentId: string, projectId: string, record: PlacementRecord): void {
-    void this.deps.reviewerSpawnGate!.spawn(projectId, record).catch((err: unknown) => {
+    const spawn = this.deps.reviewerSpawnGate!.spawn(projectId, record).catch((err: unknown) => {
       if (this.deps.onSpawnError != null) {
         this.deps.onSpawnError(agentId, err);
       } else {
@@ -926,7 +945,10 @@ export class CoReviewGate implements FinishReviewGate {
           err,
         );
       }
+      throw err;
     });
+    this.pendingSpawns.push(spawn);
+    void spawn.catch(() => {});
   }
 
   merge(req: ReviewMergeRequest): ReviewMergeResult {

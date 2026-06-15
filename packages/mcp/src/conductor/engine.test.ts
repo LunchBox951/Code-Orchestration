@@ -43,6 +43,12 @@ import type { HostedIdentity } from '../live-session-host.js';
 // ESC authored as a `\u` escape so the SOURCE holds no raw control byte (the C2 pristine-repo rule).
 const ESC = '\u001B';
 const CLAUDE_READY = ESC + '[2J' + ESC + '[H' + '╭─ Welcome ─╮\r\n❯ \r\n  ? for shortcuts\r\n';
+const CLEAR_SCREEN = ESC + '[2J' + ESC + '[H';
+const CLAUDE_PERMISSION =
+  CLEAR_SCREEN +
+  'Claude wants to use co_mail_send.\nDo you want to proceed?\n' +
+  ESC +
+  '[1m❯ 1. Yes\n  2. No\n';
 
 // ── Cleanup state ────────────────────────────────────────────────────────────
 const ORIGINAL_ENV = process.env;
@@ -289,6 +295,28 @@ describe('selectEligible — a WAITING agent with an outstanding injectable acti
 
 // ── the keystone single-turn cycle ────────────────────────────────────────────
 describe('ConductorEngine — ensure-hosted → bind → inject → ONE turn → detect → yield', () => {
+  it('starts the MCP transport before waiting for provider startup', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-prebind', projectId, cwd });
+    const transportAgents: string[] = [];
+    const { engine, pty } = makeEngine({
+      makeTransport: (id: HostedIdentity) => {
+        transportAgents.push(id.agent);
+        return InMemoryTransport.createLinkedPair();
+      },
+    });
+
+    const ensureP = engine.ensureHosted(identity);
+    expect(pty.panes).toHaveLength(1);
+    await flush();
+
+    expect(transportAgents).toEqual(['impl-prebind']);
+
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await expect(ensureP).resolves.toBeDefined();
+  });
+
   it('drives the full cycle deterministically and yields on an idle (not "done") turn', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
@@ -360,6 +388,34 @@ describe('ConductorEngine — ensure-hosted → bind → inject → ONE turn →
     const { engine, pty } = makeEngine();
     expect(await engine.runCycle([identity])).toBeNull();
     expect(pty.panes).toHaveLength(0); // nothing eligible ⇒ nothing spawned
+  });
+
+  it('keeps the permission dialog watcher attached for the full post-submit turn', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty, clock, qw } = makeEngine();
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    const item = outstandingItem(projectId, 'impl-x');
+    const turnP = engine.runOneTurn(hosted, item);
+    await tick(); // injectMail has written the payload and is awaiting the echo
+    pane.emit(defaultMailRenderer(item));
+    await tick(); // injectMail submitted; observeTurnEnd is now watching the provider turn
+
+    const writeCountBeforeDialog = pane.written.length;
+    clock.set(1000);
+    pane.emit(CLAUDE_PERMISSION);
+    await tick();
+
+    expect(pane.written.slice(writeCountBeforeDialog)).toEqual(['\r']);
+
+    clock.set(1000 + QUIET_WINDOW_MS + 1);
+    qw.settle();
+    const outcome = await turnP;
+    expect(outcome.errored).toBe(false);
+    expect(outcome.turnEnd?.idle).toBe(true);
   });
 });
 
@@ -445,6 +501,50 @@ describe('ConductorEngine — MNR-5 launch authority (no duplicate dispatch)', (
     await expect(reHostP).resolves.toBeDefined();
     expect(pty.panes).toHaveLength(2);
   });
+
+  it('release still closes the session when pane.kill and the kill-error reporter both throw', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+
+    const ensureP = engine.ensureHosted(identity);
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await ensureP;
+    (pane as unknown as { kill: () => void }).kill = () => {
+      throw new Error('kill failed in test');
+    };
+
+    await expect(
+      engine.release(projectId, 'impl-x', {
+        onPaneKillError: () => {
+          throw new Error('reporter failed in test');
+        },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(false);
+  });
+
+  it('closeAll kills warm panes and clears the hosted ledger', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+
+    const ensureP = engine.ensureHosted(identity);
+    const pane = pty.panes[0]!;
+    let exited = false;
+    pane.onExit(() => void (exited = true));
+    pane.emit(CLAUDE_READY);
+    await ensureP;
+
+    await engine.closeAll();
+
+    expect(exited).toBe(true);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(false);
+  });
 });
 
 // ── fail-loud: a startup failure must not leak the spawned pane ────────────────
@@ -464,6 +564,31 @@ describe('ConductorEngine — ensureHosted fails loud without leaking the pane',
     const reHostP = engine.ensureHosted(identity);
     pty.panes[1]!.emit(CLAUDE_READY);
     await expect(reHostP).resolves.toBeDefined();
+  });
+
+  it('closes the client transport when startup fails after the MCP session is bound', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    let clientCloseCount = 0;
+    const { engine, pty } = makeEngine({
+      makeTransport: () => {
+        const pair = InMemoryTransport.createLinkedPair();
+        const originalClose = pair[0].close?.bind(pair[0]);
+        pair[0].close = async () => {
+          clientCloseCount += 1;
+          await originalClose?.();
+        };
+        return pair;
+      },
+    });
+
+    const ensureP = engine.ensureHosted(identity);
+    await flush(); // let hostSession bind before startup fails
+    pty.panes[0]!.exit(1, null);
+
+    await expect(ensureP).rejects.toThrow(/exited|ready/i);
+    expect(clientCloseCount).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -492,6 +617,40 @@ describe('ConductorEngine — MNR-2 seam: an errored turn yields WITHOUT consumi
     expect(outstandingCount(projectId, 'impl-x')).toBe(1);
     // The pane stays warm (yield), so the re-injection can reuse it.
     expect(engine.isHosted(projectId, 'impl-x')).toBe(true);
+  });
+});
+
+// ── MNR-2 seam (end-to-end re-select): the NEXT runCycle re-selects the errored agent ──────────────
+// AC-S10-5 (#b): after an errored turn the mail stays outstanding; the NEXT runCycle call
+// re-selects the SAME agent (selectEligible re-injects it) — the work is never dropped.
+describe('ConductorEngine — MNR-2 end-to-end: runCycle re-selects the same agent after an errored turn', () => {
+  it('the NEXT runCycle selects the same agent whose turn errored because its mail is still outstanding', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    // Use an inject-fail config so the turn errors immediately (echo-verify never happens).
+    const { engine, pty } = makeEngine({
+      injectOptions: { retryDelay: async () => {}, maxEchoAttempts: 2 },
+    });
+
+    // Cycle 1: cold launch → pane ready → turn errors (inject echo-verify fails).
+    const cycle1 = engine.runCycle([identity]);
+    pty.panes[0]!.emit(CLAUDE_READY); // drive ensureHosted
+    const outcome1 = await cycle1;
+    expect(outcome1).not.toBeNull();
+    expect(outcome1!.turn.errored).toBe(true); // the turn threw — no mail consumed
+    // The mail is STILL outstanding (MNR-2: errored turn does not eat its mail).
+    expect(outstandingCount(projectId, 'impl-x')).toBe(1);
+
+    // Cycle 2: impl-x's mail is STILL outstanding → selectEligible RE-SELECTS it.
+    // The pane stayed warm (MNR-2: pane not reaped on error) — no CLAUDE_READY needed.
+    const cycle2 = engine.runCycle([identity]);
+    const outcome2 = await cycle2;
+    // Non-null outcome proves the agent was RE-SELECTED (selectEligible found outstanding mail).
+    expect(outcome2).not.toBeNull();
+    expect(outcome2!.hosted.pane).toBe(pty.panes[0]); // the SAME warm pane was reused
+    expect(outcome2!.turn.errored).toBe(true); // error persists (echo-verify still fails; expected)
   });
 });
 

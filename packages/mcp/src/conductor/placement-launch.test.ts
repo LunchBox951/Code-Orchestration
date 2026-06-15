@@ -14,7 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
@@ -36,6 +36,7 @@ import { ConductorEngine, type ConductorEngineDeps, type HostedPane } from './en
 import type { HostedIdentity } from '../live-session-host.js';
 import { buildPlacementLaunchSpec, type CoMcpPaths } from './placement-launch.js';
 import { EngineReviewerSpawnGate } from './reviewer-gate.js';
+import { defaultCoMcpPaths } from './host-launch-paths.js';
 
 // ESC authored as a \u escape so the source holds no raw control byte (pristine-repo rule).
 const ESC = '\u001B';
@@ -283,7 +284,7 @@ describe('buildPlacementLaunchSpec — pure, deterministic launch-spec builder',
 // 2. MNR-6 isolation
 
 describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => {
-  it('claude spec: env has ONLY CLAUDE_CONFIG_DIR set to the isolated dir', () => {
+  it('claude spec: env has ONLY CLAUDE_CONFIG_DIR set to the isolated dir and MCP env is scoped', () => {
     const { projectId, cwd, dataDir } = makeProject();
     const placement = recordPlacement(projectId, 'impl-c', 'implementer', 'claude');
     const worktree = recordWorktree(projectId, 'impl-c', 'co/feat-c', cwd);
@@ -302,8 +303,19 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(spec.env).not.toHaveProperty('CODEX_HOME');
     // --strict-mcp-config suppresses user MCP servers
     expect(spec.args).toContain('--strict-mcp-config');
-    // no CODEX-style prelaunch files for claude
-    expect(spec.prelaunchFiles ?? []).toHaveLength(0);
+    const mcpConfig = spec.prelaunchFiles?.find((f) => f.path.endsWith('co-mcp.json'));
+    expect(mcpConfig).toBeDefined();
+    expect(mcpConfig!.path).toBe(`${isolatedHomeDir}/mcp/co-mcp.json`);
+    const parsed = JSON.parse(mcpConfig!.contents) as {
+      mcpServers?: { co?: { command?: string; env?: Record<string, string> } };
+    };
+    expect(parsed.mcpServers?.co?.command).toBe(TEST_MCP_PATHS.coMcpCommand);
+    expect(parsed.mcpServers?.co?.env).toEqual({
+      CO_AGENT: 'impl-c',
+      CO_ROLE: 'implementer',
+      CO_PARENT: 'lead-1',
+      CO_PROJECT_ID: projectId,
+    });
   });
 
   it('codex spec: env has ONLY CODEX_HOME set to the isolated dir; prelaunch has approval_policy=never', () => {
@@ -328,6 +340,88 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
     expect(configToml).toBeDefined();
     expect(configToml!.contents).toContain('approval_policy = "never"');
+    expect(configToml!.contents).toContain('[mcp_servers.co.env]');
+    expect(configToml!.contents).toContain('CO_AGENT = "impl-d"');
+    expect(configToml!.contents).toContain('CO_ROLE = "implementer"');
+    expect(configToml!.contents).toContain('CO_PARENT = "lead-1"');
+    expect(configToml!.contents).toContain(`CO_PROJECT_ID = "${projectId}"`);
+  });
+
+  it('uses a per-pane bridge socket in Claude and Codex MCP launch config when supplied', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const bridgePaths: CoMcpPaths = {
+      ...TEST_MCP_PATHS,
+      coMcpArgs: ['dist/bin.js'],
+      coMcpBridgeSocketPath: (isolatedHomeDir) => `${isolatedHomeDir}/mcp/co-mcp.sock`,
+    };
+
+    for (const provider of ['claude', 'codex'] as const) {
+      const agent = `impl-bridge-${provider}`;
+      const placement = recordPlacement(projectId, agent, 'implementer', provider);
+      const worktree = recordWorktree(projectId, agent, `co/${agent}`, cwd);
+      const isolatedHomeDir = join(dataDir, 'isolated', agent);
+      const { spec } = buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        bridgePaths,
+      );
+
+      if (provider === 'claude') {
+        const configPath = spec.args[spec.args.indexOf('--mcp-config') + 1];
+        const config = spec.prelaunchFiles?.find((file) => file.path === configPath);
+        const parsed = JSON.parse(config!.contents) as {
+          mcpServers?: { co?: { args?: string[]; env?: Record<string, string> } };
+        };
+        expect(parsed.mcpServers?.co?.args).toEqual([
+          'dist/bin.js',
+          'bridge',
+          `${isolatedHomeDir}/mcp/co-mcp.sock`,
+        ]);
+        expect(parsed.mcpServers?.co?.env?.['CO_MCP_BRIDGE_LOG']).toBe(
+          `${isolatedHomeDir}/mcp/bridge.log`,
+        );
+      } else {
+        expect(spec.args).toEqual(['--add-dir', `${isolatedHomeDir}/mcp`]);
+        const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
+        expect(configToml!.contents).toContain('args = ["dist/bin.js", "bridge", "');
+        expect(configToml!.contents).toContain(`${isolatedHomeDir}/mcp/co-mcp.sock`);
+        expect(configToml!.contents).toContain(
+          `CO_MCP_BRIDGE_LOG = "${isolatedHomeDir}/mcp/bridge.log"`,
+        );
+      }
+    }
+  });
+
+  it('default Codex bridge args grant only the private bridge socket directory', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const agent = 'impl-default-bridge';
+    const placement = recordPlacement(projectId, agent, 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, agent, 'co/default-bridge', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', agent);
+    const defaultPaths = defaultCoMcpPaths({
+      argv: ['node', '/repo/packages/mcp/dist/bin.js'],
+      env: { CO_CLI_COMMAND: '/repo/packages/cli/dist/index.js' },
+      nodeCommand: '/usr/bin/node',
+    });
+    const socketPath = defaultPaths.coMcpBridgeSocketPath?.(isolatedHomeDir, agent);
+    expect(socketPath).toBeDefined();
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      defaultPaths,
+    );
+
+    const bridgeDir = dirname(socketPath!);
+    expect(bridgeDir).not.toBe(tmpdir());
+    expect(socketPath).toBe(join(bridgeDir, 'bridge.sock'));
+    expect(spec.args).toEqual(['--add-dir', bridgeDir]);
+    const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
+    expect(configToml!.contents).toContain(`"bridge", "${socketPath}"`);
   });
 });
 
@@ -519,7 +613,55 @@ describe('EngineReviewerSpawnGate — launches a reviewer pane from a placed rev
     );
   });
 
-  it('throws if reviewBranch is absent from the placement', async () => {
+  it('spawn() resolves a slung child worktree by AGENT (no reviewBranch) and calls ensureHosted', async () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    seedParentChain(projectId);
+
+    // Slung implementer: worktree keyed to the child agent on a normal branch — NO reviewBranch.
+    // Proves the gate's generic fallback: listWorktrees().find(w => w.agent === record.agent).
+    const childAgent = 'impl-slung-g';
+    recordWorktree(projectId, childAgent, 'co/impl-slung-g', cwd);
+    const childPlacement = recordPlacement(projectId, childAgent, 'implementer', 'claude');
+
+    const { engine, pty } = makeEngine();
+    const wtStore = worktreeStores[worktreeStores.length - 1]!;
+    const gate = new EngineReviewerSpawnGate(
+      engine,
+      wtStore,
+      (agent) => join(dataDir, 'isolated', agent),
+      TEST_MCP_PATHS,
+    );
+
+    // Drive the pane in parallel with spawn (agent-lookup path, not reviewBranch path)
+    const spawnPromise = gate.spawn(projectId, childPlacement);
+    await flush();
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await spawnPromise;
+
+    expect(engine.isHosted(projectId, childAgent)).toBe(true);
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    expect(roster.getAgent(childAgent)?.role).toBe('implementer');
+
+    const sessions = openSessionStore(projectId);
+    sessionStores.push(sessions);
+    expect(sessions.getSession(childAgent)?.agentId).toBe(childAgent);
+
+    // MNR-5 through the gate: a second spawn for the same child agent is an idempotent no-op.
+    await expect(gate.spawn(projectId, childPlacement)).resolves.toBeUndefined();
+    expect(pty.panes).toHaveLength(1);
+  });
+});
+
+// 7. EngineReviewerSpawnGate — no-worktree fallback (nit-b)
+
+describe('EngineReviewerSpawnGate — no-worktree fallback throws cleanly', () => {
+  it('throws when no worktree is found for the placement agent via the generic agent-lookup path', async () => {
+    // Negative test: a placed placement with NO recorded worktree for its agent must throw with a
+    // descriptive error rather than silently doing nothing or crashing with a null-deref.
+    // This exercises the fallback branch:
+    //   listWorktrees().find(w => !w.removed && w.agent === record.agent) → undefined → throw.
     const { projectId } = makeProject();
     const { engine } = makeEngine();
     const wtStore = openWorktreeStore(projectId);
@@ -531,8 +673,126 @@ describe('EngineReviewerSpawnGate — launches a reviewer pane from a placed rev
       TEST_MCP_PATHS,
     );
 
-    const placement = recordPlacement(projectId, 'reviewer@rev-y', 'reviewer', 'claude');
-    // no reviewBranch in this placement
-    await expect(gate.spawn(projectId, placement)).rejects.toThrow(/no reviewBranch/);
+    // A placed placement whose agent has NO worktree recorded → generic lookup returns undefined.
+    const placement = recordPlacement(projectId, 'impl-no-wt', 'implementer', 'claude');
+
+    await expect(gate.spawn(projectId, placement)).rejects.toThrow(
+      /no live worktree found.*impl-no-wt/,
+    );
+  });
+
+  it('throws when reviewBranch is set but no worktree is recorded for that branch', async () => {
+    // Exercises the reviewer branch-keyed lookup path:
+    //   worktrees.getWorktree(record.reviewBranch) → null → throw.
+    const { projectId } = makeProject();
+    const { engine } = makeEngine();
+    const wtStore = openWorktreeStore(projectId);
+    worktreeStores.push(wtStore);
+    const gate = new EngineReviewerSpawnGate(
+      engine,
+      wtStore,
+      (agent) => `/isolated/${agent}`,
+      TEST_MCP_PATHS,
+    );
+
+    // Reviewer placement referencing a branch that has no worktree on record.
+    const placement = recordPlacement(projectId, 'reviewer@rev-no-wt', 'reviewer', 'claude', {
+      reviewId: 'rev-no-wt',
+      reviewBranch: 'co/branch-that-does-not-exist',
+      reviewTarget: 'main',
+      reviewScope: 'worker_merge',
+    });
+
+    await expect(gate.spawn(projectId, placement)).rejects.toThrow(
+      /no live worktree found.*reviewer@rev-no-wt/,
+    );
+  });
+
+  it('throws when reviewBranch points at a removed worktree record', async () => {
+    const { projectId, cwd } = makeProject();
+    const branch = 'co/removed-review-branch';
+    const projectDataDir = registries[registries.length - 1]!.dataDirFor(projectId);
+    recordWorktree(
+      projectId,
+      'impl-removed',
+      branch,
+      join(projectDataDir, 'worktrees', 'co', 'removed'),
+    );
+    const wtStore = worktreeStores[worktreeStores.length - 1]!;
+    wtStore.removeWorktree(branch, {
+      repoCwd: cwd,
+      gitExec: () => {},
+      fs: {
+        exists: () => false,
+        isSymlink: () => false,
+        realpath: (path) => path,
+        removeDir: () => {},
+      },
+    });
+    const { engine } = makeEngine();
+    const gate = new EngineReviewerSpawnGate(
+      engine,
+      wtStore,
+      (agent) => `/isolated/${agent}`,
+      TEST_MCP_PATHS,
+    );
+    const placement = recordPlacement(projectId, 'reviewer@rev-removed', 'reviewer', 'claude', {
+      reviewId: 'rev-removed',
+      reviewBranch: branch,
+      reviewTarget: 'main',
+      reviewScope: 'worker_merge',
+    });
+
+    await expect(gate.spawn(projectId, placement)).rejects.toThrow(
+      /no live worktree found.*reviewer@rev-removed/i,
+    );
+  });
+});
+
+// 8. Researcher seat + engine-wide single-launch authority (AC-S10-2.3 + AC-S10-2.4 / MNR-5)
+
+describe('researcher seat — engine-wide single-launch authority (AC-S10-2.3 + MNR-5 / AC-S10-2.4)', () => {
+  it('a placed researcher is hosted through the same role-agnostic launch path; MNR-5 refuses a second host', async () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    seedParentChain(projectId);
+
+    // PLACED RESEARCHER seat — no reviewer-specific fields (proves the launch path is role-agnostic,
+    // not reviewer-special-cased). A normal branch, NOT a reviewBranch.
+    const placement = recordPlacement(projectId, 'res-mnr5', 'researcher', 'claude');
+    const worktree = recordWorktree(projectId, 'res-mnr5', 'co/research-mnr5', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-mnr5');
+
+    const { identity, spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    expect(identity.role).toBe('researcher');
+
+    const { engine, pty } = makeEngine();
+    await hostPaneFromSpec(engine, pty, identity, spec);
+
+    // AC-S10-2.3: researcher pane is hosted; roster + session records carry role 'researcher'.
+    expect(engine.isHosted(projectId, 'res-mnr5')).toBe(true);
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    expect(roster.getAgent('res-mnr5')?.role).toBe('researcher');
+    const sessions = openSessionStore(projectId);
+    sessionStores.push(sessions);
+    expect(sessions.getSession('res-mnr5')?.agentId).toBe('res-mnr5');
+
+    // AC-S10-2.4 / MNR-5: a second ensureHosted for the SAME agent is REFUSED — the guard is keyed
+    // to the agent id, not the role. Proves the launch authority is engine-wide, not role-scoped.
+    const { identity: id2, spec: spec2 } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+    await expect(engine.ensureHosted(id2, spec2)).rejects.toThrow(/already hosted.*MNR-5/);
   });
 });
