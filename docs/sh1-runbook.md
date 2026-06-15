@@ -177,7 +177,7 @@ Collect the following artifacts and record them as the evidence bundle for `SH-1
 With all five items captured, mark `SH-1` as met in `docs/v1-acceptance-criteria.md`:
 
 ```
-- `SH-1` ☑ `co` runs a real multi-phase change on the **`co` repo itself` start to finish
+- `SH-1` ☑ `co` runs a real multi-phase change on the **`co` repo itself** start to finish
   (spec-lock → phases → worktrees → review gate → gated merge) with zero prototype involvement.
   Evidence: <link or PR reference>
 ```
