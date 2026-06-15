@@ -171,12 +171,17 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   const mailVm = new MailVM({
     registry: buildRegistry(deps.registry),
     onMarkRead: (recipient, seq) => {
-      void client.markRead(recipient, seq).catch((e: unknown) => {
-        // Conductor down or gone mid-call — show a clear message, never crash.
-        if (!(e instanceof ConductorUnavailableError)) {
-          deps.onMailError?.(safeError(e));
-        }
-      });
+      void client
+        .markRead(recipient, seq)
+        .then(() => {
+          doRefreshMail();
+        })
+        .catch((e: unknown) => {
+          // Conductor down or gone mid-call — show a clear message, never crash.
+          if (!(e instanceof ConductorUnavailableError)) {
+            deps.onMailError?.(safeError(e));
+          }
+        });
     },
     onReply: (target: OperatorMailRef, draft: ReplyDraft) => {
       void client
@@ -218,8 +223,9 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     const inbox = readInbox(bus);
     const outbox = readOutbox(bus);
     mailVm.update(inbox, outbox);
-    deps.onMailState?.(mailVm.state);
   }
+
+  mailVm.subscribe((state) => deps.onMailState?.(state));
 
   const nav = new NavVM();
   if (deps.onNavState) nav.subscribe(deps.onNavState);

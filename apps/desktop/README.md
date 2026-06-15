@@ -24,7 +24,8 @@ see [`docs/research/language-and-stack.md`](../../docs/research/language-and-sta
 # From the repo root
 pnpm install
 pnpm build                        # compile all packages including @co/desktop
-pnpm --filter @co/desktop start   # launch with electron (requires electron binary on host)
+pnpm --filter @co/mcp exec co-mcp serve <project-id>  # live conductor, separate terminal
+CO_PROJECT_ID=<project-id> pnpm --filter @co/desktop start
 ```
 
 ## Packaging (Linux)

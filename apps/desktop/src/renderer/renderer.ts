@@ -156,7 +156,7 @@ function renderMailSidebar(state: MailState): void {
     busSelector.innerHTML = buses
       .map(
         (bus) =>
-          `<div class="bus-option${bus === state.activeBus ? ' active' : ''}" data-bus="${esc(bus)}">${esc(bus)}</div>`,
+          `<button class="bus-option${bus === state.activeBus ? ' active' : ''}" data-bus="${esc(bus)}" type="button">${esc(bus)}</button>`,
       )
       .join('');
   }
@@ -214,8 +214,8 @@ function renderMailDetail(state: MailState): void {
       `<button class="btn btn-approve" data-action="approve" data-seq="${selected.seq}">Approve</button>`,
       `<button class="btn btn-decline" data-action="decline" data-seq="${selected.seq}">Decline</button>`,
       `<button class="btn btn-reply btn-secondary" data-action="open-composer"`,
-      ` data-seq="${selected.seq}" data-recipient="${esc(selected.sender)}"`,
-      ` data-type="clarify_response" data-subject="${esc(`Re: ${selected.subject}`)}">Reply with note</button>`,
+      ` data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}"`,
+      ` data-type="approval_response" data-subject="${esc(`Re: ${selected.subject}`)}">Add note</button>`,
       `</div>`,
     ].join('');
   } else if (isActionable) {
@@ -228,19 +228,30 @@ function renderMailDetail(state: MailState): void {
     ].join('');
   }
 
+  const composerFooter = isApproval
+    ? [
+        `<button class="btn btn-secondary" data-action="close-composer">Cancel</button>`,
+        `<button class="btn btn-decline" data-action="decline-with-composer" data-seq="${selected.seq}">Decline with note</button>`,
+        `<button class="btn btn-approve" data-action="approve-with-composer" data-seq="${selected.seq}">Approve with note</button>`,
+      ].join('')
+    : [
+        `<button class="btn btn-secondary" data-action="close-composer">Cancel</button>`,
+        `<button class="btn btn-reply" data-action="submit-reply">Send</button>`,
+      ].join('');
+
   const composerHtml = composer.active
     ? [
         `<div class="mail-composer">`,
-        `<div class="mail-composer-header">Reply`,
+        `<div class="mail-composer-header">${isApproval ? 'Decision note' : 'Reply'}`,
         `<button class="mail-composer-close" data-action="close-composer">×</button>`,
         `</div>`,
         `<div class="mail-composer-body">`,
         `<textarea class="composer-textarea" id="composer-body" placeholder="Type your reply…">${esc(composer.body)}</textarea>`,
         `</div>`,
         `<div class="mail-composer-footer">`,
-        `<button class="btn btn-secondary" data-action="close-composer">Cancel</button>`,
-        `<button class="btn btn-reply" data-action="submit-reply">Send</button>`,
-        `</div></div>`,
+        composerFooter,
+        `</div>`,
+        `</div>`,
       ].join('')
     : '';
 
@@ -470,6 +481,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   void bridge.refreshLimitsCost();
 
+  function selectMailRow(row: HTMLElement): void {
+    const seq = row.dataset['seq'];
+    if (seq != null) void bridge.mailSelect(Number(seq));
+  }
+
   // Header limits button toggle (renderer-local; no main round-trip needed)
   const limitsBtn = document.getElementById('limits-btn');
   const limitsPopover = document.getElementById('limits-popover');
@@ -502,7 +518,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Mail list row
     const row = target.closest<HTMLElement>('.mail-row');
     if (row?.dataset['seq'] != null) {
-      void bridge.mailSelect(Number(row.dataset['seq']));
+      selectMailRow(row);
       return;
     }
 
@@ -551,6 +567,20 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'submit-reply':
         void bridge.mailSubmitReply();
         break;
+      case 'approve-with-composer':
+        if (seq != null) void bridge.mailApproveWithComposer(seq);
+        break;
+      case 'decline-with-composer':
+        if (seq != null) void bridge.mailDeclineWithComposer(seq);
+        break;
     }
+  });
+
+  document.getElementById('view-mail')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const row = (e.target as HTMLElement).closest<HTMLElement>('.mail-row');
+    if (row?.dataset['seq'] == null) return;
+    e.preventDefault();
+    selectMailRow(row);
   });
 });

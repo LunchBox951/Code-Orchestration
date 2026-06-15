@@ -1,4 +1,4 @@
-import { mailKind } from '@co/core';
+import { OPERATOR, mailKind } from '@co/core';
 import type {
   ApprovalDecision,
   ApprovalReply,
@@ -10,8 +10,6 @@ import type {
   ReplyDraft,
   ReviewVerdictValue,
 } from '@co/core';
-
-const OPERATOR = '@operator';
 
 export interface MailRow {
   readonly seq: number;

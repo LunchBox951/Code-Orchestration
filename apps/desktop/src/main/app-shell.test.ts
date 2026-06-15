@@ -35,6 +35,9 @@ function makeClient(obs: OperatorObservation = staticObs): OperatorIpcClient {
     connect: vi.fn().mockResolvedValue(obs.kind === 'live'),
     observe: vi.fn().mockResolvedValue(obs),
     onTick: vi.fn().mockReturnValue(() => {}),
+    reply: vi.fn().mockResolvedValue(undefined),
+    approve: vi.fn().mockResolvedValue(undefined),
+    markRead: vi.fn().mockResolvedValue(undefined),
     close: vi.fn().mockResolvedValue(undefined),
   } as unknown as OperatorIpcClient;
 }
@@ -280,5 +283,105 @@ describe('createAppShell — limitsCost VM wiring', () => {
     expect(shell.limitsCost.state.agentCosts).toHaveLength(1);
     expect(shell.limitsCost.state.agentCosts[0]?.id).toBe('impl-1');
     expect(shell.limitsCost.state.agentCosts[0]?.totalCostUsd).toBe(0.05);
+  });
+});
+
+describe('createAppShell — mail VM bridge wiring', () => {
+  const INFO_MAIL: DeliveredMail = {
+    seq: 10,
+    recipient: '@operator',
+    sender: 'lead-1',
+    type: 'chat',
+    subject: 'FYI',
+    body: 'hello',
+    ts: 1000,
+    read: false,
+  } as DeliveredMail;
+
+  const ACTION_MAIL: DeliveredMail = {
+    seq: 11,
+    recipient: '@operator',
+    sender: 'lead-1',
+    type: 'clarify_request',
+    subject: 'Need input',
+    body: 'what next?',
+    ts: 1000,
+  } as DeliveredMail;
+
+  it('notifies onMailState when MailVM mutates selection and composer state', () => {
+    const onMailState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+      inboxReader: () => [ACTION_MAIL],
+      outboxReader: () => [],
+      onMailState,
+    });
+
+    shell.refreshMail();
+    onMailState.mockClear();
+
+    shell.mail.selectMail(ACTION_MAIL.seq);
+    expect(onMailState).toHaveBeenCalledWith(
+      expect.objectContaining({ selected: expect.objectContaining({ seq: ACTION_MAIL.seq }) }),
+    );
+
+    onMailState.mockClear();
+    shell.mail.openComposer(
+      ACTION_MAIL.seq,
+      ACTION_MAIL.recipient,
+      'clarify_response',
+      'Re: Need input',
+    );
+    expect(onMailState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        composer: expect.objectContaining({ active: true, targetSeq: ACTION_MAIL.seq }),
+      }),
+    );
+
+    onMailState.mockClear();
+    shell.mail.closeComposer();
+    expect(onMailState).toHaveBeenCalledWith(
+      expect.objectContaining({ composer: expect.objectContaining({ active: false }) }),
+    );
+  });
+
+  it('refreshes mail after informational markRead succeeds', async () => {
+    let mail = INFO_MAIL;
+    const onMailState = vi.fn();
+    const client = {
+      ...makeClient(),
+      markRead: vi.fn().mockImplementation(async (_recipient: string, seq: number) => {
+        mail = { ...mail, seq, read: true } as DeliveredMail;
+        return mail;
+      }),
+    } as unknown as OperatorIpcClient;
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => [mail],
+      outboxReader: () => [],
+      onMailState,
+    });
+
+    shell.refreshMail();
+    onMailState.mockClear();
+    shell.mail.selectMail(INFO_MAIL.seq);
+
+    await vi.waitFor(() => {
+      expect(client.markRead).toHaveBeenCalledWith('@operator', INFO_MAIL.seq);
+      expect(shell.mail.state.inbox[0]?.read).toBe(true);
+      expect(onMailState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inbox: expect.arrayContaining([
+            expect.objectContaining({ seq: INFO_MAIL.seq, read: true }),
+          ]),
+        }),
+      );
+    });
   });
 });

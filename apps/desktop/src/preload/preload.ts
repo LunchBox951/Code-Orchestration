@@ -30,6 +30,8 @@ export interface CoShellBridge {
   mailSubmitReply(): Promise<MailState | null>;
   mailQuickApprove(approvalSeq: number): Promise<MailState | null>;
   mailQuickDecline(approvalSeq: number): Promise<MailState | null>;
+  mailApproveWithComposer(approvalSeq: number): Promise<MailState | null>;
+  mailDeclineWithComposer(approvalSeq: number): Promise<MailState | null>;
   mailRefresh(): Promise<MailState | null>;
   // ── Limits / Cost ─────────────────────────────────────────────────────────
   onLimitsCostState(listener: (state: LimitsCostState) => void): () => void;
@@ -114,6 +116,12 @@ const bridge: CoShellBridge = {
   },
   async mailQuickDecline(approvalSeq: number): Promise<MailState | null> {
     return ipcRenderer.invoke('mail:quickDecline', approvalSeq) as Promise<MailState | null>;
+  },
+  async mailApproveWithComposer(approvalSeq: number): Promise<MailState | null> {
+    return ipcRenderer.invoke('mail:approveWithComposer', approvalSeq) as Promise<MailState | null>;
+  },
+  async mailDeclineWithComposer(approvalSeq: number): Promise<MailState | null> {
+    return ipcRenderer.invoke('mail:declineWithComposer', approvalSeq) as Promise<MailState | null>;
   },
   async mailRefresh(): Promise<MailState | null> {
     return ipcRenderer.invoke('mail:refresh') as Promise<MailState | null>;

@@ -14,6 +14,7 @@
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  */
 import {
+  assertNever,
   OPERATOR_IPC_METHODS,
   OPERATOR_IPC_TICK,
   queryObservability,
@@ -183,9 +184,12 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
         }
         return;
       }
-      default:
-        // The client never receives requests; `unknown` is ignored.
+      case 'request':
+      case 'unknown':
+        // The client never receives requests; unclassified messages are ignored.
         return;
+      default:
+        return assertNever(incoming);
     }
   }
 

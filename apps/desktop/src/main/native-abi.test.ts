@@ -113,7 +113,8 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
     // This test documents the known gap so CI failure is explicit, not silent.
     const version = getElectronVersion();
     expect(version).toBeTruthy(); // package types are present
-    // Operator TODO: run `xvfb-run electron dist/main/native-abi-smoke.js`
+    // Operator TODO: run
+    // `pnpm --filter @co/desktop exec electron -e "require('node:sqlite'); require('node-pty'); console.log('native-abi: ok')"`
     // and confirm exit 0 with the sentinel "native-abi: ok".
     expect(true).toBe(true);
   });

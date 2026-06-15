@@ -3,6 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'"
+    />
     <title>co · Code Orchestration</title>
     <style>
       /* Design palette: dark oklch theme */
@@ -22,7 +26,7 @@
         --paused: oklch(0.6 0.01 262);
         --header-h: 52px;
         --rail-w: 224px;
-        --radius: 9px;
+        --radius: 8px;
         font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
         font-size: 14px;
         color: var(--text);
@@ -62,7 +66,7 @@
         font-weight: 700;
         font-size: 16px;
         color: var(--accent);
-        letter-spacing: -0.5px;
+        letter-spacing: 0;
         -webkit-app-region: no-drag;
       }
 
@@ -146,7 +150,7 @@
       .rail-title {
         font-size: 10px;
         font-weight: 600;
-        letter-spacing: 0.08em;
+        letter-spacing: 0;
         text-transform: uppercase;
         color: var(--muted);
         padding: 4px 16px 8px;
@@ -157,6 +161,9 @@
         display: flex;
         align-items: center;
         gap: 10px;
+        width: 100%;
+        background: none;
+        border: 0;
         padding: 8px 16px;
         cursor: pointer;
         border-radius: 0;
@@ -164,6 +171,8 @@
         user-select: none;
         transition: color 0.15s;
         font-size: 13px;
+        font-family: inherit;
+        text-align: left;
       }
 
       .nav-item:hover {
@@ -249,7 +258,7 @@
         font-size: 20px;
         font-weight: 700;
         color: var(--heading);
-        letter-spacing: -0.3px;
+        letter-spacing: 0;
       }
 
       .mc-subline {
@@ -287,7 +296,7 @@
       .stat-label {
         font-size: 10px;
         font-weight: 600;
-        letter-spacing: 0.08em;
+        letter-spacing: 0;
         text-transform: uppercase;
         color: var(--muted);
       }
@@ -323,7 +332,7 @@
       .section-heading {
         font-size: 11px;
         font-weight: 600;
-        letter-spacing: 0.06em;
+        letter-spacing: 0;
         text-transform: uppercase;
         color: var(--muted);
         padding: 10px 14px;
@@ -509,19 +518,24 @@
       .mail-bus-label {
         font-size: 10px;
         font-weight: 600;
-        letter-spacing: 0.08em;
+        letter-spacing: 0;
         text-transform: uppercase;
         color: var(--muted);
         margin-bottom: 6px;
       }
 
       .bus-option {
+        display: block;
+        width: 100%;
         padding: 4px 8px;
+        border: 0;
         border-radius: 5px;
+        background: none;
         cursor: pointer;
         font-family: 'IBM Plex Mono', ui-monospace, monospace;
         font-size: 11px;
         color: var(--muted);
+        text-align: left;
         transition:
           background 0.1s,
           color 0.1s;
@@ -552,7 +566,7 @@
         font-size: 11px;
         font-weight: 600;
         color: var(--muted);
-        letter-spacing: 0.06em;
+        letter-spacing: 0;
         text-transform: uppercase;
         transition: color 0.15s;
       }
@@ -676,7 +690,7 @@
         font-size: 10px;
         font-weight: 600;
         text-transform: uppercase;
-        letter-spacing: 0.08em;
+        letter-spacing: 0;
         color: var(--muted);
       }
 
@@ -779,7 +793,7 @@
         font-weight: 600;
         color: var(--muted);
         text-transform: uppercase;
-        letter-spacing: 0.06em;
+        letter-spacing: 0;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -934,7 +948,7 @@
         color: var(--heading);
         font-family: 'IBM Plex Mono', ui-monospace, monospace;
         text-transform: uppercase;
-        letter-spacing: 0.06em;
+        letter-spacing: 0;
       }
 
       .headroom-dot {
@@ -980,7 +994,7 @@
       .limits-bar-label {
         color: var(--muted);
         text-transform: uppercase;
-        letter-spacing: 0.06em;
+        letter-spacing: 0;
       }
 
       .limits-bar-pct {
@@ -1041,7 +1055,7 @@
       .cost-section-heading {
         font-size: 11px;
         font-weight: 600;
-        letter-spacing: 0.06em;
+        letter-spacing: 0;
         text-transform: uppercase;
         color: var(--muted);
         padding: 10px 14px;
@@ -1119,31 +1133,31 @@
       <!-- Left rail nav -->
       <nav id="nav-rail">
         <div class="rail-title">Cockpit</div>
-        <div class="nav-item active" data-view="dashboard">
+        <button class="nav-item active" data-view="dashboard" type="button">
           <span class="nav-glyph">◈</span>
           Dashboard
-        </div>
-        <div class="nav-item" data-view="agents">
+        </button>
+        <button class="nav-item" data-view="agents" type="button">
           <span class="nav-glyph">⊕</span>
           Agents
-        </div>
-        <div class="nav-item" data-view="mail">
+        </button>
+        <button class="nav-item" data-view="mail" type="button">
           <span class="nav-glyph">✉</span>
           Mail
           <span class="nav-badge" id="mail-badge" style="display: none">0</span>
-        </div>
-        <div class="nav-item" data-view="review">
+        </button>
+        <button class="nav-item" data-view="review" type="button">
           <span class="nav-glyph">◎</span>
           Review
-        </div>
-        <div class="nav-item" data-view="source">
+        </button>
+        <button class="nav-item" data-view="source" type="button">
           <span class="nav-glyph">⊞</span>
           Source
-        </div>
-        <div class="nav-item" data-view="cost">
+        </button>
+        <button class="nav-item" data-view="cost" type="button">
           <span class="nav-glyph">§</span>
           Cost
-        </div>
+        </button>
       </nav>
 
       <!-- Main content area -->
@@ -1165,7 +1179,9 @@
               <div class="mail-bus-area">
                 <div class="mail-bus-label">Viewing</div>
                 <div id="mail-bus-selector">
-                  <div class="bus-option active" data-bus="@operator">@operator</div>
+                  <button class="bus-option active" data-bus="@operator" type="button">
+                    @operator
+                  </button>
                 </div>
               </div>
               <div class="mail-tabs">

@@ -137,6 +137,8 @@ interface CoShellBridge {
   mailSubmitReply(): Promise<MailState | null>;
   mailQuickApprove(approvalSeq: number): Promise<MailState | null>;
   mailQuickDecline(approvalSeq: number): Promise<MailState | null>;
+  mailApproveWithComposer(approvalSeq: number): Promise<MailState | null>;
+  mailDeclineWithComposer(approvalSeq: number): Promise<MailState | null>;
   mailRefresh(): Promise<MailState | null>;
   // ── Limits / Cost ─────────────────────────────────────────────────────────
   onLimitsCostState(listener: (state: LimitsCostState) => void): () => void;

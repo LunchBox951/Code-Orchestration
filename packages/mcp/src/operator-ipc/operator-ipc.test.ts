@@ -56,7 +56,7 @@ import { SocketClientTransport } from '../conductor/real-transport.js';
 import type { HostedIdentity } from '../live-session-host.js';
 import { OperatorIpcServer } from './server.js';
 import { ConductorUnavailableError, OperatorIpcClient, OperatorIpcConnection } from './client.js';
-import { classifyIncoming, makeRequest } from './wire.js';
+import { classifyIncoming, makeRequest, WIRE_ERROR } from './wire.js';
 
 // ── Scripted startup fixture. ESC/CR via fromCharCode so the SOURCE holds no raw control byte. ──
 const ESC = String.fromCharCode(0x1b);
@@ -994,6 +994,35 @@ describe('operator-IPC wire — JSON-RPC envelope compatibility + unknown-method
       if (reply.kind !== 'error') throw new Error('unreachable');
       expect(reply.id).toBe(7);
       expect(reply.error.message).toMatch(/unknown method/i);
+    } finally {
+      await transport.close();
+    }
+  });
+
+  it('answers a known method with malformed params as JSON-RPC invalidParams', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+
+    const transport = new SocketClientTransport(socketPath);
+    const got = new Promise<ReturnType<typeof classifyIncoming>>((resolve) => {
+      transport.onmessage = (message) => resolve(classifyIncoming(message));
+    });
+    await transport.start();
+    try {
+      await transport.send(makeRequest(8, 'pause', {}));
+      const reply = await got;
+      expect(reply.kind).toBe('error');
+      if (reply.kind !== 'error') throw new Error('unreachable');
+      expect(reply.id).toBe(8);
+      expect(reply.error.code).toBe(WIRE_ERROR.invalidParams);
+      expect(reply.error.message).toMatch(/agentId/i);
     } finally {
       await transport.close();
     }

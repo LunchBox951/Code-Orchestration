@@ -81,10 +81,19 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+class InvalidParamsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidParamsError';
+  }
+}
+
 function requireString(obj: WirePayload, key: string): string {
   const value = obj[key];
   if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`operator IPC: missing/invalid '${key}' (expected a non-empty string).`);
+    throw new InvalidParamsError(
+      `operator IPC: missing/invalid '${key}' (expected a non-empty string).`,
+    );
   }
   return value;
 }
@@ -92,15 +101,15 @@ function requireString(obj: WirePayload, key: string): string {
 function requireNumber(obj: WirePayload, key: string): number {
   const value = obj[key];
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new Error(`operator IPC: missing/invalid '${key}' (expected a number).`);
+    throw new InvalidParamsError(`operator IPC: missing/invalid '${key}' (expected a number).`);
   }
   return value;
 }
 
 function requireObject(obj: WirePayload, key: string): WirePayload {
   const value = obj[key];
-  if (value == null || typeof value !== 'object') {
-    throw new Error(`operator IPC: missing/invalid '${key}' (expected an object).`);
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new InvalidParamsError(`operator IPC: missing/invalid '${key}' (expected an object).`);
   }
   return value as WirePayload;
 }
@@ -114,13 +123,15 @@ function requireSteer(params: WirePayload): Steer {
   if (kind === 'interrupt') {
     return { kind };
   }
-  throw new Error(`operator IPC steer: invalid kind '${String(kind)}'.`);
+  throw new InvalidParamsError(`operator IPC steer: invalid kind '${String(kind)}'.`);
 }
 
 function requireDecision(obj: WirePayload, key: string): ApprovalDecision {
   const decision = requireString(obj, key);
   if (decision !== 'approve' && decision !== 'decline') {
-    throw new Error(`operator IPC: '${key}' must be 'approve' or 'decline', got '${decision}'.`);
+    throw new InvalidParamsError(
+      `operator IPC: '${key}' must be 'approve' or 'decline', got '${decision}'.`,
+    );
   }
   return decision;
 }
@@ -193,7 +204,13 @@ export class OperatorIpcServer {
       const result = await this.invoke(method, params);
       this.safeSend(makeResult(id, result));
     } catch (error) {
-      this.safeSend(makeError(id, WIRE_ERROR.internalError, errorMessage(error)));
+      this.safeSend(
+        makeError(
+          id,
+          error instanceof InvalidParamsError ? WIRE_ERROR.invalidParams : WIRE_ERROR.internalError,
+          errorMessage(error),
+        ),
+      );
     }
   }
 
