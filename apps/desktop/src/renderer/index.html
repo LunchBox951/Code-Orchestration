@@ -16,6 +16,10 @@
         --muted: oklch(0.65 0.009 262);
         --accent: oklch(0.71 0.14 255);
         --live: oklch(0.8 0.17 150);
+        --warm: oklch(0.8 0.17 150);
+        --waiting: oklch(0.8 0.15 85);
+        --stuck: oklch(0.65 0.22 25);
+        --paused: oklch(0.6 0.01 262);
         --header-h: 52px;
         --rail-w: 224px;
         --radius: 9px;
@@ -235,6 +239,240 @@
         color: var(--muted);
         font-size: 13px;
       }
+
+      /* ── Mission Control / Dashboard ─────────────────────────── */
+      .mc-header {
+        margin-bottom: 4px;
+      }
+
+      .mc-title {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--heading);
+        letter-spacing: -0.3px;
+      }
+
+      .mc-subline {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+
+      .degraded-banner {
+        background: oklch(0.28 0.04 85);
+        border: 1px solid oklch(0.45 0.08 85);
+        border-radius: var(--radius);
+        padding: 8px 14px;
+        font-size: 12px;
+        color: oklch(0.88 0.12 85);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .stat-tiles {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 10px;
+      }
+
+      .stat-tile {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .stat-label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .stat-value {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 28px;
+        font-weight: 700;
+        color: var(--heading);
+        line-height: 1;
+      }
+
+      .tile-warm .stat-label {
+        color: var(--warm);
+      }
+      .tile-waiting .stat-label {
+        color: var(--waiting);
+      }
+      .tile-stuck .stat-label {
+        color: var(--stuck);
+      }
+      .tile-paused .stat-label {
+        color: var(--paused);
+      }
+
+      .section-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .section-heading {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .action-count {
+        background: var(--accent);
+        color: #fff;
+        font-size: 10px;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 99px;
+        min-width: 18px;
+        text-align: center;
+      }
+
+      .tree-view {
+        padding: 8px 0;
+        max-height: 280px;
+        overflow-y: auto;
+      }
+
+      .tree-node {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 14px;
+        font-size: 13px;
+      }
+
+      .tree-role {
+        color: var(--muted);
+        font-size: 11px;
+        flex-shrink: 0;
+      }
+
+      .tree-id {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 12px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* ── Status dots ─────────────────────────────────────────── */
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .dot-warm {
+        background: var(--warm);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      .dot-waiting {
+        background: var(--waiting);
+      }
+
+      .dot-stuck {
+        background: var(--stuck);
+      }
+
+      .dot-paused {
+        background: var(--paused);
+      }
+
+      .dot-unknown {
+        background: var(--border);
+      }
+
+      /* ── Action-required panel ───────────────────────────────── */
+      .action-panel {
+        border-color: oklch(0.45 0.08 85 / 0.5);
+      }
+
+      .action-panel .section-heading {
+        color: oklch(0.88 0.12 85);
+        border-bottom-color: oklch(0.45 0.08 85 / 0.5);
+      }
+
+      .actionable-list {
+        max-height: 240px;
+        overflow-y: auto;
+      }
+
+      .actionable-row {
+        display: grid;
+        grid-template-columns: 140px 1fr 120px 48px;
+        gap: 10px;
+        align-items: center;
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+      }
+
+      .actionable-row:last-child {
+        border-bottom: none;
+      }
+
+      .action-type {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        font-weight: 600;
+        color: oklch(0.88 0.12 85);
+        background: oklch(0.28 0.04 85);
+        padding: 2px 6px;
+        border-radius: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .action-subject {
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .action-sender {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .action-age {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        text-align: right;
+      }
+
+      .empty-state {
+        padding: 24px 14px;
+        font-size: 12px;
+        color: var(--muted);
+        text-align: center;
+      }
     </style>
   </head>
   <body>
@@ -284,8 +522,10 @@
       <!-- Main content area -->
       <main>
         <div class="view active" id="view-dashboard">
-          <div class="view-heading">Dashboard</div>
-          <div class="stub-card">Loading conductor state…</div>
+          <div class="mc-header">
+            <div class="mc-title">Mission Control</div>
+            <div class="mc-subline">Connecting to conductor…</div>
+          </div>
         </div>
         <div class="view" id="view-agents">
           <div class="view-heading">Agents</div>
@@ -309,6 +549,6 @@
         </div>
       </main>
     </div>
-    <script src="../renderer/renderer.js"></script>
+    <script src="./renderer.js"></script>
   </body>
 </html>

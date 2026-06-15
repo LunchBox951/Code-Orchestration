@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createAppShell, defaultOperatorSocketPath } from './app-shell.js';
-import type { OperatorObservation } from '@co/core';
+import type { OperatorObservation, DeliveredMail, OperatorIpcTick } from '@co/core';
 import type { ProjectId } from '@co/core';
 import { projectDataDir } from '@co/core';
 import { operatorIpcSocketPath } from '@co/mcp';
@@ -127,5 +127,98 @@ describe('createAppShell — view-model bridge wiring', () => {
       shell.nav.navigate(view);
       expect(shell.nav.state.activeView).toBe(view);
     }
+  });
+});
+
+describe('createAppShell — dashboard VM wiring', () => {
+  const FAKE_MAIL: DeliveredMail = {
+    seq: 1,
+    recipient: '@operator',
+    sender: 'lead-1',
+    type: 'clarify_request',
+    subject: 'Q',
+    body: 'body',
+    ts: 1000,
+  } as DeliveredMail;
+
+  it('exposes dashboard VM starting degraded', () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+    });
+    expect(shell.dashboard.state.connection).toBe('degraded');
+  });
+
+  it('notifies onDashboardState after start() with connection status', async () => {
+    const onDashboardState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(staticObs),
+      actionablesReader: () => [],
+      onDashboardState,
+    });
+    await shell.start();
+    expect(onDashboardState).toHaveBeenCalledOnce();
+    expect(onDashboardState).toHaveBeenCalledWith(
+      expect.objectContaining({ connection: 'degraded' }),
+    );
+  });
+
+  it('dashboard connection becomes live when conductor is up', async () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(liveObs),
+      actionablesReader: () => [],
+    });
+    await shell.start();
+    expect(shell.dashboard.state.connection).toBe('live');
+  });
+
+  it('actionables from injected reader appear in dashboard state', async () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(staticObs),
+      actionablesReader: () => [FAKE_MAIL],
+    });
+    await shell.start();
+    expect(shell.dashboard.state.actionables).toHaveLength(1);
+    expect(shell.dashboard.state.actionables[0]?.seq).toBe(1);
+  });
+
+  it('a pushed tick updates the dashboard within one cycle', async () => {
+    const tickListeners: Array<(tick: OperatorIpcTick) => void> = [];
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockImplementation((cb: (tick: OperatorIpcTick) => void) => {
+        tickListeners.push(cb);
+        return () => {};
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onDashboardState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      onDashboardState,
+    });
+    await shell.start();
+    onDashboardState.mockClear();
+
+    const tick: OperatorIpcTick = { snapshot: { snapshot: emptyStatic, agents: [] } };
+    tickListeners[0]?.(tick);
+
+    expect(onDashboardState).toHaveBeenCalledOnce();
+    expect(onDashboardState).toHaveBeenCalledWith(expect.objectContaining({ connection: 'live' }));
+    expect(shell.dashboard.state.connection).toBe('live');
   });
 });
