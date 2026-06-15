@@ -1115,7 +1115,120 @@
         color: var(--heading);
         flex-shrink: 0;
       }
+
+      /* ── Agents Console ─────────────────────────────────────────────────── */
+      .agents-layout {
+        display: flex;
+        height: 100%;
+        overflow: hidden;
+      }
+
+      .agents-sidebar {
+        width: 220px;
+        flex-shrink: 0;
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--surface);
+      }
+
+      .agents-sidebar-label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+
+      .agents-roster {
+        flex: 1;
+        overflow-y: auto;
+      }
+
+      .agents-roster-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+
+      .agents-roster-row:hover {
+        background: var(--card);
+      }
+
+      .agents-roster-row.selected {
+        background: var(--card);
+        border-left: 3px solid var(--accent);
+        padding-left: 9px;
+      }
+
+      .agents-row-role {
+        font-size: 12px;
+        color: var(--text);
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .agents-row-id {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 80px;
+      }
+
+      .agents-main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .agents-transcript {
+        flex: 1;
+        overflow: hidden;
+        position: relative;
+        background: oklch(0.12 0.005 262);
+      }
+
+      .steer-composer {
+        flex-shrink: 0;
+        border-top: 1px solid var(--border);
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .steer-label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .steer-buttons {
+        display: flex;
+        gap: 6px;
+      }
+
+      .steer-btn {
+        flex: 1;
+      }
     </style>
+    <link rel="stylesheet" href="./vendor/xterm.css" />
   </head>
   <body>
     <!-- Header -->
@@ -1192,8 +1305,61 @@
           </div>
         </div>
         <div class="view" id="view-agents">
-          <div class="view-heading">Agents</div>
-          <div class="stub-card">Coming in a later stage.</div>
+          <div class="agents-layout">
+            <!-- Left: agent roster -->
+            <div class="agents-sidebar">
+              <div class="agents-sidebar-label">Agents</div>
+              <div id="agents-roster" class="agents-roster">
+                <div class="empty-state">No agents</div>
+              </div>
+            </div>
+            <!-- Right: transcript pane + steer composer -->
+            <div class="agents-main">
+              <div
+                id="agents-transcript"
+                class="agents-transcript"
+                aria-label="Agent transcript"
+              ></div>
+              <div class="steer-composer">
+                <label for="steer-input" class="steer-label">Steer</label>
+                <textarea
+                  id="steer-input"
+                  class="composer-textarea"
+                  placeholder="Type your steer…"
+                  disabled
+                ></textarea>
+                <div class="steer-buttons">
+                  <button
+                    class="btn btn-reply steer-btn"
+                    data-action="answer"
+                    type="button"
+                    aria-label="Answer agent"
+                    disabled
+                  >
+                    Answer
+                  </button>
+                  <button
+                    class="btn btn-reply steer-btn"
+                    data-action="redirect"
+                    type="button"
+                    aria-label="Redirect agent"
+                    disabled
+                  >
+                    Redirect
+                  </button>
+                  <button
+                    class="btn btn-secondary steer-btn"
+                    data-action="interrupt"
+                    type="button"
+                    aria-label="Interrupt agent"
+                    disabled
+                  >
+                    ⊗
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="view" id="view-mail">
           <div class="mail-layout">
@@ -1260,6 +1426,7 @@
         </div>
       </main>
     </div>
+    <script src="./vendor/xterm.js"></script>
     <script type="module" src="./renderer.js"></script>
   </body>
 </html>

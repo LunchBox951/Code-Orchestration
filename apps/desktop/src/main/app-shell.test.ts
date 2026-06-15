@@ -38,6 +38,7 @@ function makeClient(obs: OperatorObservation = staticObs): OperatorIpcClient {
     connect: vi.fn().mockResolvedValue(obs.kind === 'live'),
     observe: vi.fn().mockResolvedValue(obs),
     onTick: vi.fn().mockReturnValue(() => {}),
+    onTranscript: vi.fn().mockReturnValue(() => {}),
     reply: vi.fn().mockResolvedValue(undefined),
     approve: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
@@ -235,6 +236,7 @@ describe('createAppShell — dashboard VM wiring', () => {
         tickListeners.push(cb);
         return () => {};
       }),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as OperatorIpcClient;
 

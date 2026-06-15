@@ -477,6 +477,84 @@ function renderCostView(state: LimitsCostState): void {
   `;
 }
 
+// ── Agents Console rendering ──────────────────────────────────────────────────
+
+let agentsTerm: XtermTerminal | null = null;
+let lastAgentId: string | null = null;
+let lastTranscript = '';
+let latestAgentsState: AgentsConsoleState | null = null;
+
+function getOrCreateTerm(): XtermTerminal {
+  if (agentsTerm != null) return agentsTerm;
+  const term = new window.Terminal({ convertEol: true, disableStdin: true });
+  const el = document.getElementById('agents-transcript');
+  if (el) term.open(el);
+  agentsTerm = term;
+  return term;
+}
+
+function showTranscriptError(message: string | undefined): void {
+  const agentsMain = document.querySelector<HTMLElement>('#view-agents .agents-main');
+  if (!agentsMain || !message) return;
+  const toast = document.createElement('div');
+  toast.className = 'mail-error-toast';
+  toast.textContent = message;
+  agentsMain.prepend(toast);
+  setTimeout(() => toast.remove(), 5000);
+}
+
+function setComposerEnabled(enabled: boolean): void {
+  const steerInput = document.getElementById('steer-input') as HTMLTextAreaElement | null;
+  if (steerInput) steerInput.disabled = !enabled;
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('#view-agents .steer-btn')) {
+    btn.disabled = !enabled;
+  }
+}
+
+function renderAgents(state: AgentsConsoleState): void {
+  latestAgentsState = state;
+
+  const roster = document.getElementById('agents-roster');
+  if (roster) {
+    if (state.roster.length === 0) {
+      roster.innerHTML = `<div class="empty-state">No agents</div>`;
+    } else {
+      roster.innerHTML = state.roster
+        .map((agent) => {
+          const isSelected = agent.agentId === state.selectedAgentId;
+          return [
+            `<div class="agents-roster-row${isSelected ? ' selected' : ''}"`,
+            ` data-agent-id="${esc(agent.agentId)}"`,
+            ` role="button" tabindex="0"`,
+            ` aria-selected="${isSelected ? 'true' : 'false'}">`,
+            statusDotHtml(agent.status),
+            `<span class="agents-row-role">${esc(agent.role)}</span>`,
+            `<span class="agents-row-id">${esc(agent.agentId)}</span>`,
+            `</div>`,
+          ].join('');
+        })
+        .join('');
+    }
+  }
+
+  const composerEnabled = state.selectedAgentId != null && state.connection === 'live';
+  setComposerEnabled(composerEnabled);
+
+  const term = getOrCreateTerm();
+  if (state.selectedAgentId !== lastAgentId) {
+    term.reset();
+    if (state.transcript) term.write(state.transcript);
+  } else if (state.transcript.startsWith(lastTranscript)) {
+    const delta = state.transcript.slice(lastTranscript.length);
+    if (delta) term.write(delta);
+  } else {
+    term.reset();
+    if (state.transcript) term.write(state.transcript);
+  }
+  lastAgentId = state.selectedAgentId;
+  lastTranscript = state.transcript;
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -569,6 +647,65 @@ document.addEventListener('DOMContentLoaded', () => {
       limitsBtn?.classList.remove('open');
       limitsBtn?.setAttribute('aria-expanded', 'false');
     }
+  });
+
+  // ── Agents Console ─────────────────────────────────────────────────────────
+
+  bridge.onAgentsConsoleState((state) => {
+    renderAgents(state);
+  });
+
+  function selectAgentRow(agentId: string): void {
+    void bridge.agentsSelect(agentId);
+  }
+
+  document.getElementById('view-agents')?.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+
+    const row = target.closest<HTMLElement>('.agents-roster-row');
+    if (row?.dataset['agentId'] != null) {
+      selectAgentRow(row.dataset['agentId']);
+      return;
+    }
+
+    const btn = target.closest<HTMLElement>('.steer-btn');
+    if (!btn) return;
+    const action = btn.dataset['action'];
+    const selectedAgentId = latestAgentsState?.selectedAgentId;
+    if (!selectedAgentId) return;
+
+    const steerInput = document.getElementById('steer-input') as HTMLTextAreaElement | null;
+    const text = steerInput?.value.trim() ?? '';
+
+    switch (action) {
+      case 'answer':
+        if (!text) return;
+        void bridge.agentsSteer(selectedAgentId, { kind: 'answer', text }).then((r) => {
+          if (!r.ok) showTranscriptError(r.error);
+          else if (steerInput) steerInput.value = '';
+        });
+        break;
+      case 'redirect':
+        if (!text) return;
+        void bridge.agentsSteer(selectedAgentId, { kind: 'redirect', text }).then((r) => {
+          if (!r.ok) showTranscriptError(r.error);
+          else if (steerInput) steerInput.value = '';
+        });
+        break;
+      case 'interrupt':
+        void bridge.agentsSteer(selectedAgentId, { kind: 'interrupt' }).then((r) => {
+          if (!r.ok) showTranscriptError(r.error);
+        });
+        break;
+    }
+  });
+
+  document.getElementById('view-agents')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const row = (e.target as HTMLElement).closest<HTMLElement>('.agents-roster-row');
+    if (row?.dataset['agentId'] == null) return;
+    e.preventDefault();
+    selectAgentRow(row.dataset['agentId']);
   });
 
   // ── Mail event delegation ──────────────────────────────────────────────────

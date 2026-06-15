@@ -10,6 +10,7 @@ import {
   requireMailType,
   requireNavView,
   requireNonEmptyString,
+  requireSteer,
 } from './ipc-guards.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -68,6 +69,7 @@ async function createWindow(): Promise<void> {
     onMailState: (state) => sendToRenderer('mail:state', state),
     onMailError: (message) => sendToRenderer('mail:error', message),
     onLimitsCostState: (state) => sendToRenderer('limitsCost:state', state),
+    onAgentsConsoleState: (state) => sendToRenderer('agentsConsole:state', state),
   });
 
   mainWindow = new BrowserWindow({
@@ -308,6 +310,25 @@ ipcMain.handle('mail:refresh', () => {
 ipcMain.handle('limitsCost:refresh', () => {
   shell?.refreshLimitsCost();
   return shell?.limitsCost.state ?? null;
+});
+
+// ── Agents Console IPC channels ─────────────────────────────────────────────
+
+ipcMain.handle('agents:select', (_event, agentId: unknown) => {
+  const id = agentId == null ? null : requireNonEmptyString(agentId, 'agentId');
+  shell?.selectAgent(id);
+  return shell?.agentsConsole.state ?? null;
+});
+
+ipcMain.handle('agents:steer', async (_event, agentId: unknown, steer: unknown) => {
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  try {
+    await shell.client.steer(requireNonEmptyString(agentId, 'agentId'), requireSteer(steer));
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg };
+  }
 });
 
 app.whenReady().then(openWindow).catch(handleStartupFailure);
