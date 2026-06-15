@@ -580,7 +580,8 @@ describe('createAppShell — agentsConsole VM wiring', () => {
       transcript: vi
         .fn()
         .mockResolvedValueOnce(transcriptTail('impl-x', ''))
-        .mockResolvedValueOnce(transcriptTail('impl-x', 'missed while offline\n')),
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'missed while offline\n'))
+        .mockResolvedValue(transcriptTail('impl-x', 'unexpected extra fetch\n')),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as OperatorIpcClient;
 
@@ -622,6 +623,64 @@ describe('createAppShell — agentsConsole VM wiring', () => {
         transcript: 'missed while offline\n',
       });
     });
+  });
+
+  it('does not refetch the selected transcript on every live tick after reconnect backfill', async () => {
+    const tickListeners: Array<(tick: OperatorIpcTick) => void> = [];
+    const liveTick: OperatorIpcTick = {
+      snapshot: {
+        snapshot: emptyStatic,
+        agents: [
+          {
+            agentId: 'impl-x',
+            role: 'implementer',
+            parent: 'lead-1',
+            hosted: true,
+            outstandingMail: 0,
+            paused: false,
+            stuck: false,
+            costUsd: 0,
+          },
+        ],
+      },
+    };
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockImplementation((cb: (tick: OperatorIpcTick) => void) => {
+        tickListeners.push(cb);
+        return () => {};
+      }),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript: vi
+        .fn()
+        .mockResolvedValueOnce(transcriptTail('impl-x', ''))
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'missed while offline\n'))
+        .mockResolvedValue(transcriptTail('impl-x', 'unexpected extra fetch\n')),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    await flushPromises();
+
+    tickListeners[0]?.(liveTick);
+    await vi.waitFor(() => {
+      expect(client.transcript).toHaveBeenCalledTimes(2);
+      expect(shell.agentsConsole.state.transcript).toBe('missed while offline\n');
+    });
+
+    tickListeners[0]?.(liveTick);
+    await flushPromises();
+
+    expect(client.transcript).toHaveBeenCalledTimes(2);
   });
 
   it('live append: onTranscript chunk appends for selected agent; different agentId is ignored', async () => {

@@ -169,6 +169,12 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       .catch(() => {});
   }
 
+  function updateAgentsConsole(observation: OperatorObservation | null): void {
+    const wasLive = agentsConsoleVm.state.connection === 'live';
+    agentsConsoleVm.update(observation);
+    if (observation?.kind === 'live' && !wasLive) refreshSelectedTranscript();
+  }
+
   function doRefreshLimitsCost(): void {
     limitsCostVm.update({
       buckets: readBuckets(),
@@ -265,8 +271,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       deps.onConnectionState?.(state);
       dash.update(state.observation, readActionables());
       deps.onDashboardState?.(dash.state);
-      agentsConsoleVm.update(state.observation);
-      if (state.observation?.kind === 'live') refreshSelectedTranscript();
+      updateAgentsConsole(state.observation);
       doRefreshMail();
       doRefreshLimitsCost();
     },
@@ -274,8 +279,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       const liveObs: OperatorObservation = { kind: 'live', snapshot: tick.snapshot };
       dash.update(liveObs, readActionables());
       deps.onDashboardState?.(dash.state);
-      agentsConsoleVm.update(liveObs);
-      refreshSelectedTranscript();
+      updateAgentsConsole(liveObs);
       doRefreshMail();
       doRefreshLimitsCost();
     },
