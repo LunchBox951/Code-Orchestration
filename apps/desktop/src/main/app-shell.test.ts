@@ -625,6 +625,59 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     });
   });
 
+  it('replaces stale selected transcript when reconnect starts a new offset generation', async () => {
+    const tickListeners: Array<(tick: OperatorIpcTick) => void> = [];
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockImplementation((cb: (tick: OperatorIpcTick) => void) => {
+        tickListeners.push(cb);
+        return () => {};
+      }),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript: vi
+        .fn()
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'old pane output\n'))
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'new pane output\n', 0)),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    await vi.waitFor(() => {
+      expect(shell.agentsConsole.state.transcript).toBe('old pane output\n');
+    });
+
+    tickListeners[0]?.({
+      snapshot: {
+        snapshot: emptyStatic,
+        agents: [
+          {
+            agentId: 'impl-x',
+            role: 'implementer',
+            parent: 'lead-1',
+            hosted: true,
+            outstandingMail: 0,
+            paused: false,
+            stuck: false,
+            costUsd: 0,
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(shell.agentsConsole.state.transcript).toBe('new pane output\n');
+    });
+  });
+
   it('does not refetch the selected transcript on every live tick after reconnect backfill', async () => {
     const tickListeners: Array<(tick: OperatorIpcTick) => void> = [];
     const liveTick: OperatorIpcTick = {
@@ -681,6 +734,59 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     await flushPromises();
 
     expect(client.transcript).toHaveBeenCalledTimes(2);
+  });
+
+  it('backfills the selected transcript on a live refresh even when the console was already live', async () => {
+    const liveWithImpl: OperatorObservation = {
+      kind: 'live',
+      snapshot: {
+        snapshot: emptyStatic,
+        agents: [
+          {
+            agentId: 'impl-x',
+            role: 'implementer',
+            parent: 'lead-1',
+            hosted: true,
+            outstandingMail: 0,
+            paused: false,
+            stuck: false,
+            costUsd: 0,
+          },
+        ],
+      },
+    };
+    const client = {
+      connected: true,
+      connect: vi.fn().mockResolvedValue(true),
+      observe: vi.fn().mockResolvedValue(liveWithImpl),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript: vi
+        .fn()
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'before disconnect\n'))
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'missed during disconnect\n', 0)),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    await vi.waitFor(() => {
+      expect(shell.agentsConsole.state.connection).toBe('live');
+      expect(shell.agentsConsole.state.transcript).toBe('before disconnect\n');
+    });
+
+    await shell.connection.refresh();
+
+    await vi.waitFor(() => {
+      expect(client.transcript).toHaveBeenCalledTimes(2);
+      expect(shell.agentsConsole.state.transcript).toBe('missed during disconnect\n');
+    });
   });
 
   it('live append: onTranscript chunk appends for selected agent; different agentId is ignored', async () => {

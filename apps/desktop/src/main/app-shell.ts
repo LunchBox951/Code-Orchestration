@@ -152,9 +152,10 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   let transcriptRequestSeq = 0;
   agentsConsoleVm.subscribe((state) => deps.onAgentsConsoleState?.(state));
 
-  function refreshSelectedTranscript(): void {
+  function refreshSelectedTranscript(opts: { resetGeneration?: boolean } = {}): void {
     const agentId = agentsConsoleVm.state.selectedAgentId;
     if (agentId == null) return;
+    if (opts.resetGeneration === true) agentsConsoleVm.clearSelectedTranscript();
     const requestSeq = ++transcriptRequestSeq;
     void client
       .transcript(agentId)
@@ -169,10 +170,18 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       .catch(() => {});
   }
 
-  function updateAgentsConsole(observation: OperatorObservation | null): void {
+  function updateAgentsConsole(
+    observation: OperatorObservation | null,
+    backfill: 'none' | 'live' | 'live-transition',
+  ): void {
     const wasLive = agentsConsoleVm.state.connection === 'live';
     agentsConsoleVm.update(observation);
-    if (observation?.kind === 'live' && !wasLive) refreshSelectedTranscript();
+    if (
+      observation?.kind === 'live' &&
+      (backfill === 'live' || (backfill === 'live-transition' && !wasLive))
+    ) {
+      refreshSelectedTranscript({ resetGeneration: true });
+    }
   }
 
   function doRefreshLimitsCost(): void {
@@ -271,7 +280,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       deps.onConnectionState?.(state);
       dash.update(state.observation, readActionables());
       deps.onDashboardState?.(dash.state);
-      updateAgentsConsole(state.observation);
+      updateAgentsConsole(state.observation, 'live');
       doRefreshMail();
       doRefreshLimitsCost();
     },
@@ -279,7 +288,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       const liveObs: OperatorObservation = { kind: 'live', snapshot: tick.snapshot };
       dash.update(liveObs, readActionables());
       deps.onDashboardState?.(dash.state);
-      updateAgentsConsole(liveObs);
+      updateAgentsConsole(liveObs, 'live-transition');
       doRefreshMail();
       doRefreshLimitsCost();
     },

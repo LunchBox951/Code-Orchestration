@@ -128,6 +128,16 @@ export class AgentsConsoleVM {
     this.emit();
   }
 
+  clearSelectedTranscript(): void {
+    if (this._state.selectedAgentId == null) return;
+    this.transcriptSegments = [];
+    this._state = {
+      ...this._state,
+      transcript: '',
+    };
+    this.emit();
+  }
+
   setTranscriptTail(tail: TranscriptTail): void {
     if (tail.agentId !== this._state.selectedAgentId) return;
     this.applyTranscriptSegment(tail.offset, tail.tail);
