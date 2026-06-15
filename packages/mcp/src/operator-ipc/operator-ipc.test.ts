@@ -563,6 +563,54 @@ describe('AC-S11-1 — cross-process observe + control over a 0o600 operator-onl
     expect(pane.written.filter((w) => w === CR)).toHaveLength(1); // exactly one submit
     expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // steering never tears the pane down
   });
+
+  it('steer (redirect) reaches the warm pane cross-process: the operator text + exactly one submit', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const steerP = client.steer('impl-x', { kind: 'redirect', text: 'try a different approach' });
+    for (let i = 0; i < 50 && !pane.written.join('').includes('try a different approach'); i++)
+      await tick();
+    pane.emit('try a different approach');
+    await steerP;
+
+    expect(pane.written.join('')).toContain('try a different approach');
+    expect(pane.written.filter((w) => w === CR)).toHaveLength(1); // exactly one submit
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // steering never tears the pane down
+  });
+
+  it('steer (interrupt) reaches the warm pane cross-process: exactly the provider ESC, no teardown', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const before = pane.written.length;
+    await client.steer('impl-x', { kind: 'interrupt' });
+
+    expect(pane.written.slice(before)).toEqual([ESC]); // claude ⇒ ESC; no text, no submit
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // steering never tears the pane down
+  });
 });
 
 // ── MNR #2 — every write routes through the daemon (single writer) ────────────────
@@ -681,6 +729,65 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
     server2.pushTick(control.observe());
     await flush();
     expect(ticks).toHaveLength(2); // the reconnect resumed the per-tick push (not a one-shot)
+    expect(states.filter((s) => s === 'connected')).toHaveLength(2);
+  });
+
+  it('client reconnects to the SAME running server after a client-side socket drop (app restart, daemon stays up)', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = await startServer(control, projectId, socketPath);
+
+    // Use the injectable `connect` seam for two roles:
+    //   1. Capture the live OperatorIpcConnection so the test can close the client side without
+    //      touching the server (simulates the app process exiting while `co serve` keeps running).
+    //   2. Gate reconnection attempts via `allowReconnect` so that observe() degrades to static
+    //      during the "dropped but server still up" window — proving the degraded-read path before
+    //      re-enabling the seam for the explicit reconnect.
+    let capturedConn: OperatorIpcConnection | null = null;
+    let allowReconnect = true;
+    const states: string[] = [];
+    const ticks: OperatorIpcTick[] = [];
+    const client = new OperatorIpcClient({
+      projectId,
+      socketPath,
+      connect: async (path) => {
+        if (!allowReconnect) throw new Error('reconnect gated for test');
+        capturedConn = await OperatorIpcConnection.connect(path);
+        return capturedConn;
+      },
+      onState: (s) => states.push(s),
+    });
+    clients.push(client);
+    client.onTick((t) => ticks.push(t));
+
+    // Connect and verify the push stream is live.
+    expect(await client.connect()).toBe(true);
+    server.pushTick(control.observe());
+    await flush();
+    expect(ticks).toHaveLength(1);
+
+    // Force a client-side drop: close the client's connection while the server keeps listening.
+    // Gate reconnection so that observe() degrades (the drop window before the app re-opens).
+    allowReconnect = false;
+    await capturedConn!.close();
+    await flush();
+    expect(states).toContain('disconnected');
+    expect(client.connected).toBe(false);
+    expect((await client.observe()).kind).toBe('static'); // degraded — connection gated
+
+    // Re-open the gate and reconnect to the SAME still-running server.
+    allowReconnect = true;
+    expect(await client.connect()).toBe(true);
+    server.pushTick(control.observe()); // same server instance, still accepting pushes
+    await flush();
+    expect(ticks).toHaveLength(2); // the push stream RESUMED on the same server (not a restart)
     expect(states.filter((s) => s === 'connected')).toHaveLength(2);
   });
 
