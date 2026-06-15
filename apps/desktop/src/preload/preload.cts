@@ -26,6 +26,7 @@ interface CoShellBridge {
   refreshConnection(): Promise<ConnectionState | null>;
   onNavState(listener: (state: NavState) => void): () => void;
   onConnectionState(listener: (state: ConnectionState) => void): () => void;
+  onConnectionError(listener: (message: string) => void): () => void;
   onDashboardState(listener: (state: DashboardState) => void): () => void;
   refreshDashboard(): Promise<DashboardState | null>;
   // ── Mail ──────────────────────────────────────────────────────────────────
@@ -69,6 +70,11 @@ const bridge: CoShellBridge = {
     const handler = (_event: unknown, state: ConnectionState): void => listener(state);
     ipcRenderer.on('connection:state', handler);
     return () => ipcRenderer.removeListener('connection:state', handler);
+  },
+  onConnectionError(listener: (message: string) => void) {
+    const handler = (_event: unknown, message: string): void => listener(message);
+    ipcRenderer.on('connection:error', handler);
+    return () => ipcRenderer.removeListener('connection:error', handler);
   },
   onDashboardState(listener: (state: DashboardState) => void) {
     const handler = (_event: unknown, state: DashboardState): void => listener(state);

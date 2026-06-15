@@ -131,6 +131,7 @@ export class MailVM {
 
   /** Switch the active bus; fires onSelectBus so the main process re-fetches mail. */
   selectBus(busId: string): void {
+    if (this._state.composer.pending) return;
     this._rawInbox = [];
     this._rawOutbox = [];
     this._state = {
@@ -149,6 +150,7 @@ export class MailVM {
 
   /** Switch inbox/outbox tab; clears the selection. */
   selectTab(tab: 'inbox' | 'outbox'): void {
+    if (this._state.composer.pending) return;
     this._state = { ...this._state, tab, selected: null, composer: { ...BLANK_COMPOSER } };
     this._selectedSeq = null;
     this.emit();
@@ -160,6 +162,7 @@ export class MailVM {
    * sticky; agent-bus views are read-only).
    */
   selectMail(seq: number): void {
+    if (this._state.composer.pending) return;
     const currentList = this._state.tab === 'inbox' ? this._rawInbox : this._rawOutbox;
     const raw = currentList.find((m) => m.seq === seq);
     if (raw == null) return;
@@ -188,6 +191,7 @@ export class MailVM {
     replyType: MailType,
     subject: string,
   ): void {
+    if (this._state.composer.pending) return;
     this._state = {
       ...this._state,
       composer: {
@@ -205,6 +209,7 @@ export class MailVM {
   }
 
   updateComposerField(field: 'type' | 'subject' | 'body', value: string): void {
+    if (this._state.composer.pending) return;
     const current = this._state.composer;
     const nextType = field === 'type' ? (value as MailType) : current.type;
     this._state = {
@@ -222,6 +227,11 @@ export class MailVM {
   }
 
   closeComposer(): void {
+    if (this._state.composer.pending) return;
+    this.resetComposer();
+  }
+
+  private resetComposer(): void {
     this._state = { ...this._state, composer: { ...BLANK_COMPOSER } };
     this.emit();
   }
@@ -251,7 +261,7 @@ export class MailVM {
         },
       );
       if (this._state.composer.idempotencyKey === idempotencyKey) {
-        this.closeComposer();
+        this.resetComposer();
       }
     } catch (error) {
       if (this._state.composer.idempotencyKey === idempotencyKey) {
@@ -320,7 +330,7 @@ export class MailVM {
         body: c.body || defaultBody,
       });
       if (c.active && this._state.composer.idempotencyKey === idempotencyKey) {
-        this.closeComposer();
+        this.resetComposer();
       }
     } catch (error) {
       if (c.active && this._state.composer.idempotencyKey === idempotencyKey) {

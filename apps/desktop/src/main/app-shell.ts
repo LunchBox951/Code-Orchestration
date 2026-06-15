@@ -64,6 +64,7 @@ export interface AppShellDeps {
   readonly rollupsReader?: () => readonly CostRollup[];
   readonly onNavState?: (state: NavState) => void;
   readonly onConnectionState?: (state: ConnectionState) => void;
+  readonly onConnectionError?: (message: string) => void;
   readonly onDashboardState?: (state: DashboardState) => void;
   readonly onMailState?: (state: MailState) => void;
   readonly onMailError?: (message: string) => void;
@@ -165,6 +166,9 @@ export function createAppShell(deps: AppShellDeps): AppShell {
         if (s === 'disconnected') {
           void connVmRef.current?.refresh();
         }
+      },
+      onError: (e) => {
+        deps.onConnectionError?.(`operator IPC connection error: ${safeError(e)}`);
       },
     });
 

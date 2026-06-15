@@ -62,6 +62,14 @@ function setLiveStatus(status: string): void {
   if (label) label.textContent = status === 'live' ? 'live' : 'offline';
 }
 
+function showAppError(message: string): void {
+  const toast = document.createElement('div');
+  toast.className = 'app-error-toast';
+  toast.textContent = message;
+  document.body.append(toast);
+  setTimeout(() => toast.remove(), 7000);
+}
+
 // ── Dashboard rendering ────────────────────────────────────────────────────────
 
 function statusDotHtml(status: AgentStatus): string {
@@ -491,6 +499,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   bridge.onConnectionState((state) => {
     setLiveStatus(state.status);
+  });
+
+  bridge.onConnectionError((message) => {
+    showAppError(message);
   });
 
   bridge.onDashboardState((state) => {

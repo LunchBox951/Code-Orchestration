@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createAppShell, defaultOperatorSocketPath } from './app-shell.js';
 import type { OperatorObservation, DeliveredMail, OperatorIpcTick, CostRollup } from '@co/core';
 import type { ProjectId } from '@co/core';
@@ -103,6 +106,35 @@ describe('createAppShell — view-model bridge wiring', () => {
     await shell.start();
     expect(onConnectionState).toHaveBeenCalledOnce();
     expect(onConnectionState).toHaveBeenCalledWith(expect.objectContaining({ status: 'degraded' }));
+  });
+
+  it('surfaces unexpected operator IPC connect failures from the production client wiring', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'co-desktop-opipc-'));
+    const blockedParent = join(dir, 'not-a-directory');
+    writeFileSync(blockedParent, '');
+    const onConnectionError = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: join(blockedParent, 'operator.sock'),
+      actionablesReader: () => [],
+      inboxReader: () => [],
+      outboxReader: () => [],
+      bucketsReader: () => [],
+      accountStatusesReader: () => [],
+      rollupsReader: () => [],
+      onConnectionError,
+    });
+
+    try {
+      await shell.start();
+    } finally {
+      await shell.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    expect(shell.connection.state.status).toBe('degraded');
+    expect(onConnectionError).toHaveBeenCalledOnce();
+    expect(onConnectionError.mock.calls[0]?.[0]).toMatch(/operator IPC connection/i);
   });
 
   it('close() closes the client', async () => {

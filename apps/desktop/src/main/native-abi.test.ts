@@ -46,6 +46,12 @@ const ELECTRON_MIN_MAJOR = 36;
 /** Node 22.5.0 introduced node:sqlite (DatabaseSync). */
 const NODE_SQLITE_MIN = { major: 22, minor: 5 };
 
+const HOST_HANDOFF_COMMAND =
+  "pnpm --filter @co/desktop exec electron -e \"const path = require('node:path'); " +
+  "require('node:sqlite'); " +
+  "require(require.resolve('node-pty', { paths: [process.cwd(), path.resolve(process.cwd(), '../..')] })); " +
+  "console.log('native-abi: ok')\"";
+
 describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
   it('Electron version is ≥36 (bundles Node 22.x which has node:sqlite)', () => {
     const version = getElectronVersion();
@@ -107,7 +113,12 @@ describe('AC-S11-2 §3c — native-addon ABI version compatibility', () => {
   });
 
   // Operator TODO: run
-  // `pnpm --filter @co/desktop exec electron -e "require('node:sqlite'); require('node-pty'); console.log('native-abi: ok')"`
+  // HOST_HANDOFF_COMMAND
   // and confirm exit 0 with the sentinel "native-abi: ok".
   it.todo('[host handoff] electron binary execution is not tested in this sandbox');
+
+  it('documents a host handoff command that resolves node-pty from the workspace root', () => {
+    expect(HOST_HANDOFF_COMMAND).toContain("require.resolve('node-pty'");
+    expect(HOST_HANDOFF_COMMAND).toContain("path.resolve(process.cwd(), '../..')");
+  });
 });

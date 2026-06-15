@@ -63,6 +63,7 @@ async function createWindow(): Promise<void> {
     projectId,
     onNavState: (state) => sendToRenderer('nav:state', state),
     onConnectionState: (state) => sendToRenderer('connection:state', state),
+    onConnectionError: (message) => sendToRenderer('connection:error', message),
     onDashboardState: (state) => sendToRenderer('dashboard:state', state),
     onMailState: (state) => sendToRenderer('mail:state', state),
     onMailError: (message) => sendToRenderer('mail:error', message),

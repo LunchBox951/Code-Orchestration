@@ -44,6 +44,20 @@ function makeApprovalMail(overrides: Partial<DeliveredMail> = {}): DeliveredMail
   });
 }
 
+function deferred<T = void>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+  readonly reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // ── MailVM — initial state ─────────────────────────────────────────────────────
 
 describe('MailVM — initial state', () => {
@@ -388,6 +402,41 @@ describe('MailVM — reply composer', () => {
       'desktop-reply:lead-1:5:clarify_response',
     ]);
     expect(vm.state.composer.active).toBe(false);
+  });
+
+  it('keeps a pending composer across navigation and replacement attempts', async () => {
+    const sendGate = deferred();
+    const onReply = vi.fn(() => sendGate.promise);
+    const vm = new MailVM({ registry: createRendererRegistry(), onReply });
+    vm.update([makeMail({ seq: 1 }), makeMail({ seq: 2 })], []);
+    vm.selectMail(1);
+    vm.openComposer(1, 'lead-1', 'clarify_response', 're: first');
+    vm.updateComposerField('body', 'draft while sending');
+
+    const send = vm.submitReply();
+
+    expect(vm.state.composer.pending).toBe(true);
+    vm.selectMail(2);
+    vm.openComposer(2, 'lead-1', 'clarify_response', 're: second');
+    vm.selectTab('outbox');
+    vm.selectBus('agent-1');
+    vm.closeComposer();
+    sendGate.reject(new Error('daemon down'));
+
+    await expect(send).rejects.toThrow('daemon down');
+
+    expect(vm.state.selected?.seq).toBe(1);
+    expect(vm.state.activeBus).toBe('@operator');
+    expect(vm.state.tab).toBe('inbox');
+    expect(vm.state.composer).toEqual(
+      expect.objectContaining({
+        active: true,
+        pending: false,
+        targetSeq: 1,
+        subject: 're: first',
+        body: 'draft while sending',
+      }),
+    );
   });
 });
 
