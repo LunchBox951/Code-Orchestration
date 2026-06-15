@@ -277,6 +277,7 @@ export class MailVM {
 
   /** Quick-approve an approval mail with default prose (fires onApprove). */
   async approve(approvalSeq: number): Promise<void> {
+    if (this._state.composer.pending) return;
     await this.cbApprove?.(approvalSeq, {
       decision: 'approve',
       subject: 'Approved',
@@ -286,6 +287,7 @@ export class MailVM {
 
   /** Quick-decline an approval mail with default prose (fires onApprove). */
   async decline(approvalSeq: number): Promise<void> {
+    if (this._state.composer.pending) return;
     await this.cbApprove?.(approvalSeq, {
       decision: 'decline',
       subject: 'Declined',

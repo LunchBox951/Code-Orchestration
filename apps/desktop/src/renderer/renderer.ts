@@ -254,11 +254,11 @@ function renderMailDetail(state: MailState): void {
   if (isApproval) {
     actionButtons = [
       `<div class="mail-card-actions">`,
-      `<button class="btn btn-approve" data-action="approve" data-seq="${selected.seq}">Approve</button>`,
-      `<button class="btn btn-decline" data-action="decline" data-seq="${selected.seq}">Decline</button>`,
+      `<button class="btn btn-approve" data-action="approve" data-seq="${selected.seq}"${pendingAttr}>Approve</button>`,
+      `<button class="btn btn-decline" data-action="decline" data-seq="${selected.seq}"${pendingAttr}>Decline</button>`,
       `<button class="btn btn-reply btn-secondary" data-action="open-composer"`,
       ` data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}"`,
-      ` data-type="approval_response" data-subject="${esc(`Re: ${selected.subject}`)}">Add note</button>`,
+      ` data-type="approval_response" data-subject="${esc(`Re: ${selected.subject}`)}"${pendingAttr}>Add note</button>`,
       `</div>`,
     ].join('');
   } else if (isActionable) {
@@ -268,7 +268,7 @@ function renderMailDetail(state: MailState): void {
       `<div class="mail-card-actions">`,
       `<button class="btn btn-reply" data-action="open-composer"`,
       ` data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}"`,
-      ` data-type="${replyType}" data-subject="${esc(`Re: ${selected.subject}`)}">${replyLabel}</button>`,
+      ` data-type="${replyType}" data-subject="${esc(`Re: ${selected.subject}`)}"${pendingAttr}>${replyLabel}</button>`,
       `</div>`,
     ].join('');
   }

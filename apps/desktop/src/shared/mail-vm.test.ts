@@ -461,6 +461,23 @@ describe('MailVM — approve/decline quick-actions', () => {
     expect(reply.decision).toBe('decline');
   });
 
+  it('ignores quick approval actions while a composer submit is pending', async () => {
+    const sendGate = deferred();
+    const onReply = vi.fn(() => sendGate.promise);
+    const onApprove = vi.fn();
+    const vm = new MailVM({ registry: createRendererRegistry(), onReply, onApprove });
+    vm.openComposer(5, 'lead-1', 'clarify_response', 're: help');
+
+    const send = vm.submitReply();
+
+    expect(vm.state.composer.pending).toBe(true);
+    await vm.approve(20);
+    await vm.decline(20);
+    expect(onApprove).not.toHaveBeenCalled();
+    sendGate.resolve();
+    await send;
+  });
+
   it('approveWithComposer uses composer body + closes composer', async () => {
     const onApprove = vi.fn();
     const vm = new MailVM({ registry: createRendererRegistry(), onApprove });
