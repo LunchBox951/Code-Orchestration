@@ -145,7 +145,46 @@ export class AgentsConsoleVM {
 
   appendChunk(chunk: OperatorIpcTranscript): void {
     if (chunk.agentId !== this._state.selectedAgentId) return;
+    const resetPrefix = this.resetPrefixForLiveChunk(chunk.offset, chunk.chunk);
+    if (resetPrefix != null) {
+      this.transcriptSegments = resetPrefix.length > 0 ? [{ offset: 0, text: resetPrefix }] : [];
+    }
     this.applyTranscriptSegment(chunk.offset, chunk.chunk);
+  }
+
+  private resetPrefixForLiveChunk(offset: number, text: string): string | null {
+    if (text.length === 0 || this.transcriptSegments.length === 0) return null;
+    const chunkEnd = offset + text.length;
+    let overlapped = false;
+    for (const segment of this.transcriptSegments) {
+      const segmentEnd = segment.offset + segment.text.length;
+      const start = Math.max(offset, segment.offset);
+      const end = Math.min(chunkEnd, segmentEnd);
+      if (start >= end) continue;
+      overlapped = true;
+      const existing = segment.text.slice(start - segment.offset, end - segment.offset);
+      const incoming = text.slice(start - offset, end - offset);
+      if (existing !== incoming) return this.contiguousPrefixBefore(offset);
+    }
+    if (!overlapped && offset === 0) return '';
+    return null;
+  }
+
+  private contiguousPrefixBefore(offset: number): string {
+    if (offset <= 0) return '';
+    let cursor = 0;
+    let prefix = '';
+    for (const segment of this.transcriptSegments) {
+      if (segment.offset > cursor) break;
+      const startInSegment = Math.max(0, cursor - segment.offset);
+      const endInSegment = Math.min(segment.text.length, offset - segment.offset);
+      if (endInSegment > startInSegment) {
+        prefix += segment.text.slice(startInSegment, endInSegment);
+        cursor = segment.offset + endInSegment;
+      }
+      if (cursor >= offset) return prefix.slice(0, offset);
+    }
+    return '';
   }
 
   private applyTranscriptSegment(offset: number, text: string): void {

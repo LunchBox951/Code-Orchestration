@@ -370,6 +370,28 @@ describe('AgentsConsoleVM — appendChunk', () => {
     expect(vm.state.transcript).toBe('line1\nline2\n');
   });
 
+  it('treats a selected-agent offset reset push as a new transcript generation', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'old pane output\n'));
+
+    vm.appendChunk(push('a1', 'new pane output\n', 0));
+
+    expect(vm.state.transcript).toBe('new pane output\n');
+  });
+
+  it('does not truncate a fetched tail when a duplicate offset-zero push arrives late', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'hello world\n'));
+
+    vm.appendChunk(push('a1', 'hello', 0));
+
+    expect(vm.state.transcript).toBe('hello world\n');
+  });
+
   it('ignored for a different agentId (per-agent isolation)', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
