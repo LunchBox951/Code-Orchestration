@@ -71,6 +71,24 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - name: Require current main tip
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git fetch origin main --prune
+          main_sha="$(git rev-parse origin/main)"
+
+          echo "release_sha=${RELEASE_SHA}"
+          echo "origin_main=${main_sha}"
+
+          if [ "$RELEASE_SHA" = "$main_sha" ]; then
+            exit 0
+          fi
+
+          echo "Refusing to publish stable from a stale main workflow run."
+          echo "Only the current origin/main tip may update the stable channel."
+          exit 1
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
