@@ -325,6 +325,22 @@ describe('MailVM — reply composer', () => {
     expect(draft.body).toBe('here is my answer');
   });
 
+  it('submitReply adds reviewVerdict when sending a review_response', () => {
+    const onReply = vi.fn();
+    const vm = new MailVM({ registry: createRendererRegistry(), onReply });
+    vm.openComposer(5, '@operator', 'review_response', 're: review');
+    vm.updateComposerField('body', 'pass\nlooks good');
+
+    vm.submitReply();
+
+    const [, draft] = onReply.mock.calls[0] as [
+      { seq: number; recipient: string },
+      { type: string; subject: string; body: string; reviewVerdict?: string },
+    ];
+    expect(draft.type).toBe('review_response');
+    expect(draft.reviewVerdict).toBe('PASS');
+  });
+
   it('submitReply closes the composer after firing', () => {
     const vm = new MailVM({ registry: createRendererRegistry(), onReply: vi.fn() });
     vm.openComposer(5, 'lead-1', 'clarify_response', 're: X');

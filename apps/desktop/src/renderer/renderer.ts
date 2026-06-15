@@ -16,6 +16,36 @@ function esc(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
+const OPERATOR_BUS = '@operator';
+const MAIL_REVIEW_REQUEST = 'review_request';
+const MAIL_REVIEW_RESPONSE = 'review_response';
+const knownMailBuses = new Set<string>([OPERATOR_BUS]);
+let latestMailState: MailState | null = null;
+
+function collectAgentIds(nodes: readonly TreeNode[], out: string[] = []): string[] {
+  for (const node of nodes) {
+    out.push(node.agentId);
+    collectAgentIds(node.children, out);
+  }
+  return out;
+}
+
+function rememberMailBuses(state: DashboardState): void {
+  knownMailBuses.clear();
+  knownMailBuses.add(OPERATOR_BUS);
+  for (const agentId of collectAgentIds(state.tree)) {
+    knownMailBuses.add(agentId);
+  }
+}
+
+function replyTypeFor(mailType: string): string {
+  return mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE : 'clarify_response';
+}
+
+function replyLabelFor(mailType: string): string {
+  return mailType === MAIL_REVIEW_REQUEST ? 'Submit verdict' : 'Reply';
+}
+
 function activateView(view: NavView): void {
   for (const el of document.querySelectorAll('.nav-item')) {
     el.classList.toggle('active', el.getAttribute('data-view') === view);
@@ -148,9 +178,8 @@ function mailAgeStr(ts: number): string {
 function renderMailSidebar(state: MailState): void {
   const busSelector = document.getElementById('mail-bus-selector');
   if (busSelector) {
-    // Always show @operator; include the active bus if it's an agent
-    const buses = ['@operator'];
-    if (state.activeBus !== '@operator' && !buses.includes(state.activeBus)) {
+    const buses = [OPERATOR_BUS, ...[...knownMailBuses].filter((bus) => bus !== OPERATOR_BUS)];
+    if (!buses.includes(state.activeBus)) {
       buses.push(state.activeBus);
     }
     busSelector.innerHTML = buses
@@ -210,6 +239,7 @@ function renderMailDetail(state: MailState): void {
 
   const isActionable = selected.kind === 'actionable';
   const isApproval = selected.type === 'approval';
+  const isReviewComposer = composer.type === MAIL_REVIEW_RESPONSE;
 
   let actionButtons = '';
   if (isApproval) {
@@ -223,11 +253,13 @@ function renderMailDetail(state: MailState): void {
       `</div>`,
     ].join('');
   } else if (isActionable) {
+    const replyType = replyTypeFor(selected.type);
+    const replyLabel = replyLabelFor(selected.type);
     actionButtons = [
       `<div class="mail-card-actions">`,
       `<button class="btn btn-reply" data-action="open-composer"`,
       ` data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}"`,
-      ` data-type="clarify_response" data-subject="${esc(`Re: ${selected.subject}`)}">Reply</button>`,
+      ` data-type="${replyType}" data-subject="${esc(`Re: ${selected.subject}`)}">${replyLabel}</button>`,
       `</div>`,
     ].join('');
   }
@@ -240,17 +272,23 @@ function renderMailDetail(state: MailState): void {
       ].join('')
     : [
         `<button class="btn btn-secondary" data-action="close-composer">Cancel</button>`,
-        `<button class="btn btn-reply" data-action="submit-reply">Send</button>`,
+        `<button class="btn btn-reply" data-action="submit-reply">${isReviewComposer ? 'Submit verdict' : 'Send'}</button>`,
       ].join('');
 
+  const composerTitle = isApproval
+    ? 'Decision note'
+    : isReviewComposer
+      ? 'Review verdict'
+      : 'Reply';
+  const composerPlaceholder = isReviewComposer ? 'PASS or ISSUES' : 'Type your reply…';
   const composerHtml = composer.active
     ? [
         `<div class="mail-composer">`,
-        `<div class="mail-composer-header">${isApproval ? 'Decision note' : 'Reply'}`,
+        `<div class="mail-composer-header">${composerTitle}`,
         `<button class="mail-composer-close" data-action="close-composer" aria-label="Close composer">×</button>`,
         `</div>`,
         `<div class="mail-composer-body">`,
-        `<textarea class="composer-textarea" id="composer-body" placeholder="Type your reply…">${esc(composer.body)}</textarea>`,
+        `<textarea class="composer-textarea" id="composer-body" placeholder="${composerPlaceholder}">${esc(composer.body)}</textarea>`,
         `</div>`,
         `<div class="mail-composer-footer">`,
         composerFooter,
@@ -283,6 +321,7 @@ function renderMailDetail(state: MailState): void {
 }
 
 function renderMail(state: MailState): void {
+  latestMailState = state;
   renderMailSidebar(state);
   renderMailDetail(state);
 
@@ -454,7 +493,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   bridge.onDashboardState((state) => {
+    rememberMailBuses(state);
     renderDashboard(state);
+    if (latestMailState != null) renderMail(latestMailState);
   });
 
   // ── Mail ────────────────────────────────────────────────────────────────────

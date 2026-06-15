@@ -1,12 +1,27 @@
-import { contextBridge, ipcRenderer } from 'electron';
-import type { NavView } from '../shared/nav-vm.js';
-import type { NavState } from '../shared/nav-vm.js';
-import type { ConnectionState } from '../shared/connection-vm.js';
-import type { DashboardState } from '../shared/dashboard-vm.js';
-import type { LimitsCostState } from '../shared/limits-cost-vm.js';
-import type { MailState } from '../shared/mail-vm.js';
+type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'cost';
+type NavState = { readonly activeView: NavView };
+type ConnectionState = unknown;
+type DashboardState = unknown;
+type LimitsCostState = unknown;
+type MailState = unknown;
 
-export interface CoShellBridge {
+interface ContextBridgeLike {
+  exposeInMainWorld(key: string, api: unknown): void;
+}
+
+interface IpcRendererLike {
+  invoke<T = unknown>(channel: string, ...args: unknown[]): Promise<T>;
+  on<T>(channel: string, listener: (event: unknown, payload: T) => void): void;
+  removeListener<T>(channel: string, listener: (event: unknown, payload: T) => void): void;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- Electron sandboxed preloads run as CJS, not ESM.
+const { contextBridge, ipcRenderer } = require('electron') as {
+  readonly contextBridge: ContextBridgeLike;
+  readonly ipcRenderer: IpcRendererLike;
+};
+
+interface CoShellBridge {
   navigate(view: NavView): void;
   refreshConnection(): Promise<ConnectionState | null>;
   onNavState(listener: (state: NavState) => void): () => void;
@@ -43,47 +58,45 @@ const bridge: CoShellBridge = {
     void ipcRenderer.invoke('nav:navigate', view);
   },
   async refreshConnection(): Promise<ConnectionState | null> {
-    return ipcRenderer.invoke('connection:refresh') as Promise<ConnectionState | null>;
+    return ipcRenderer.invoke<ConnectionState | null>('connection:refresh');
   },
   onNavState(listener: (state: NavState) => void) {
-    const handler = (_event: Electron.IpcRendererEvent, state: NavState): void => listener(state);
+    const handler = (_event: unknown, state: NavState): void => listener(state);
     ipcRenderer.on('nav:state', handler);
     return () => ipcRenderer.removeListener('nav:state', handler);
   },
   onConnectionState(listener: (state: ConnectionState) => void) {
-    const handler = (_event: Electron.IpcRendererEvent, state: ConnectionState): void =>
-      listener(state);
+    const handler = (_event: unknown, state: ConnectionState): void => listener(state);
     ipcRenderer.on('connection:state', handler);
     return () => ipcRenderer.removeListener('connection:state', handler);
   },
   onDashboardState(listener: (state: DashboardState) => void) {
-    const handler = (_event: Electron.IpcRendererEvent, state: DashboardState): void =>
-      listener(state);
+    const handler = (_event: unknown, state: DashboardState): void => listener(state);
     ipcRenderer.on('dashboard:state', handler);
     return () => ipcRenderer.removeListener('dashboard:state', handler);
   },
   async refreshDashboard(): Promise<DashboardState | null> {
-    return ipcRenderer.invoke('dashboard:refresh') as Promise<DashboardState | null>;
+    return ipcRenderer.invoke<DashboardState | null>('dashboard:refresh');
   },
   // ── Mail ──────────────────────────────────────────────────────────────────
   onMailState(listener: (state: MailState) => void) {
-    const handler = (_event: Electron.IpcRendererEvent, state: MailState): void => listener(state);
+    const handler = (_event: unknown, state: MailState): void => listener(state);
     ipcRenderer.on('mail:state', handler);
     return () => ipcRenderer.removeListener('mail:state', handler);
   },
   onMailError(listener: (message: string) => void) {
-    const handler = (_event: Electron.IpcRendererEvent, message: string): void => listener(message);
+    const handler = (_event: unknown, message: string): void => listener(message);
     ipcRenderer.on('mail:error', handler);
     return () => ipcRenderer.removeListener('mail:error', handler);
   },
   async mailSelectBus(busId: string): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:selectBus', busId) as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:selectBus', busId);
   },
   async mailSelectTab(tab: 'inbox' | 'outbox'): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:selectTab', tab) as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:selectTab', tab);
   },
   async mailSelect(seq: number): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:select', seq) as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:select', seq);
   },
   async mailOpenComposer(
     targetSeq: number,
@@ -91,50 +104,49 @@ const bridge: CoShellBridge = {
     replyType: string,
     subject: string,
   ): Promise<MailState | null> {
-    return ipcRenderer.invoke(
+    return ipcRenderer.invoke<MailState | null>(
       'mail:openComposer',
       targetSeq,
       targetRecipient,
       replyType,
       subject,
-    ) as Promise<MailState | null>;
+    );
   },
   async mailUpdateComposer(
     field: 'type' | 'subject' | 'body',
     value: string,
   ): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:updateComposer', field, value) as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:updateComposer', field, value);
   },
   async mailCloseComposer(): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:closeComposer') as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:closeComposer');
   },
   async mailSubmitReply(): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:submitReply') as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:submitReply');
   },
   async mailQuickApprove(approvalSeq: number): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:quickApprove', approvalSeq) as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:quickApprove', approvalSeq);
   },
   async mailQuickDecline(approvalSeq: number): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:quickDecline', approvalSeq) as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:quickDecline', approvalSeq);
   },
   async mailApproveWithComposer(approvalSeq: number): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:approveWithComposer', approvalSeq) as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:approveWithComposer', approvalSeq);
   },
   async mailDeclineWithComposer(approvalSeq: number): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:declineWithComposer', approvalSeq) as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:declineWithComposer', approvalSeq);
   },
   async mailRefresh(): Promise<MailState | null> {
-    return ipcRenderer.invoke('mail:refresh') as Promise<MailState | null>;
+    return ipcRenderer.invoke<MailState | null>('mail:refresh');
   },
   // ── Limits / Cost ─────────────────────────────────────────────────────────
   onLimitsCostState(listener: (state: LimitsCostState) => void) {
-    const handler = (_event: Electron.IpcRendererEvent, state: LimitsCostState): void =>
-      listener(state);
+    const handler = (_event: unknown, state: LimitsCostState): void => listener(state);
     ipcRenderer.on('limitsCost:state', handler);
     return () => ipcRenderer.removeListener('limitsCost:state', handler);
   },
   async refreshLimitsCost(): Promise<LimitsCostState | null> {
-    return ipcRenderer.invoke('limitsCost:refresh') as Promise<LimitsCostState | null>;
+    return ipcRenderer.invoke<LimitsCostState | null>('limitsCost:refresh');
   },
 };
 

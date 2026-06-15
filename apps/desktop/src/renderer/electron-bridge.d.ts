@@ -1,4 +1,4 @@
-// Renderer-side type declarations for the contextBridge surface exposed by preload.ts.
+// Renderer-side type declarations for the contextBridge surface exposed by preload.cts.
 // Declared inline (no Node/shared imports) because the renderer is isolated from Node context.
 
 type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'cost';

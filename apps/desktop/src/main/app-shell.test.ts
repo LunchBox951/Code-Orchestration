@@ -348,6 +348,45 @@ describe('createAppShell — mail VM bridge wiring', () => {
     );
   });
 
+  it('submits review_request replies with a structured review verdict', async () => {
+    const reviewRequest = {
+      ...ACTION_MAIL,
+      type: 'review_request',
+      subject: 'Review merge',
+    } as DeliveredMail;
+    const client = makeClient();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => [reviewRequest],
+      outboxReader: () => [],
+    });
+
+    shell.refreshMail();
+    shell.mail.selectMail(reviewRequest.seq);
+    shell.mail.openComposer(
+      reviewRequest.seq,
+      reviewRequest.recipient,
+      'review_response',
+      'Re: Review merge',
+    );
+    shell.mail.updateComposerField('body', 'ISSUES\nneeds tests');
+    shell.mail.submitReply();
+
+    await vi.waitFor(() => {
+      expect(client.reply).toHaveBeenCalledWith(
+        { seq: reviewRequest.seq, recipient: '@operator' },
+        expect.objectContaining({
+          type: 'review_response',
+          reviewVerdict: 'ISSUES',
+          body: 'ISSUES\nneeds tests',
+        }),
+      );
+    });
+  });
+
   it('refreshes mail after informational markRead succeeds', async () => {
     let mail = INFO_MAIL;
     const onMailState = vi.fn();

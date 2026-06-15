@@ -35,4 +35,16 @@ describe('renderer accessibility states', () => {
     expect(nonApprovalBranch).toContain('data-recipient="${esc(selected.recipient)}"');
     expect(nonApprovalBranch).not.toContain('data-recipient="${esc(selected.sender)}"');
   });
+
+  it('opens review requests as structured review responses', () => {
+    expect(rendererSource).toContain('mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE');
+    expect(rendererSource).toContain('data-type="${replyType}"');
+    expect(rendererSource).toContain("'Submit verdict'");
+  });
+
+  it('populates the agent-bus selector from dashboard agents', () => {
+    expect(rendererSource).toContain('function rememberMailBuses(state: DashboardState)');
+    expect(rendererSource).toContain('knownMailBuses.add(agentId)');
+    expect(rendererSource).toContain('if (latestMailState != null) renderMail(latestMailState)');
+  });
 });

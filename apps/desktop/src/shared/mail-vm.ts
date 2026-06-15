@@ -1,4 +1,4 @@
-import { OPERATOR, mailKind } from '@co/core';
+import { MAIL_REVIEW_RESPONSE, OPERATOR, mailKind } from '@co/core';
 import type {
   ApprovalDecision,
   ApprovalReply,
@@ -61,6 +61,13 @@ const INITIAL_STATE: MailState = {
   selected: null,
   composer: BLANK_COMPOSER,
 };
+
+function reviewVerdictFromBody(body: string): ReviewVerdictValue | undefined {
+  const [firstToken] = body.trim().split(/\s+/, 1);
+  const verdict = firstToken?.toUpperCase();
+  if (verdict === 'PASS' || verdict === 'ISSUES') return verdict;
+  return undefined;
+}
 
 export interface MailVMDeps {
   readonly registry: RendererRegistry;
@@ -202,9 +209,16 @@ export class MailVM {
   submitReply(): void {
     const c = this._state.composer;
     if (!c.active || c.targetSeq == null || c.targetRecipient == null) return;
+    const reviewVerdict =
+      c.type === MAIL_REVIEW_RESPONSE ? reviewVerdictFromBody(c.body) : undefined;
     this.cbReply?.(
       { seq: c.targetSeq, recipient: c.targetRecipient },
-      { type: c.type, subject: c.subject, body: c.body },
+      {
+        type: c.type,
+        subject: c.subject,
+        body: c.body,
+        ...(reviewVerdict != null ? { reviewVerdict } : {}),
+      },
     );
     this.closeComposer();
   }

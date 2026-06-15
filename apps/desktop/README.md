@@ -15,7 +15,7 @@ see [`docs/research/language-and-stack.md`](../../docs/research/language-and-sta
 - **Main process** (`src/main/`) — Node/Electron context. Imports `@co/core` (static
   reads) and the P1 `OperatorIpcClient` from `@co/mcp` (live conductor IPC). Creates
   the `BrowserWindow` and exposes the typed view-model bridge over `ipcMain`.
-- **Preload** (`src/preload/preload.ts`) — `contextBridge` exposes `window.coShell`
+- **Preload** (`src/preload/preload.cts`) — `contextBridge` exposes `window.coShell`
   (`CoShellBridge`) to the renderer; `contextIsolation: true`, `nodeIntegration: false`,
   `sandbox: true`.
 - **Renderer** (`src/renderer/`) — DOM-only; uses `window.coShell` for all data.
