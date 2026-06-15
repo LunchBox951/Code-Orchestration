@@ -504,6 +504,7 @@ export {
   reviewReviewerKey,
   resolveReviewerKind,
   resolveReviewerKindFromConfig,
+  buildHumanReviewVerdict,
   reviewRequestOutcome,
   reviewRequestEnvelope,
   recordHumanVerdict,

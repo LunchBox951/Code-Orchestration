@@ -100,6 +100,9 @@ function requireReplyDraft(value: unknown): ReplyDraft {
     ...(draft['decision'] === 'approve' || draft['decision'] === 'decline'
       ? { decision: draft['decision'] }
       : {}),
+    ...(draft['reviewVerdict'] === 'PASS' || draft['reviewVerdict'] === 'ISSUES'
+      ? { reviewVerdict: draft['reviewVerdict'] }
+      : {}),
   };
 }
 

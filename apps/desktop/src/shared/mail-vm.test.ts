@@ -217,6 +217,17 @@ describe('MailVM — selectBus (agent-bus toggle)', () => {
     expect(vm.state.outbox).toHaveLength(0);
   });
 
+  it('switching bus closes an active composer and clears its target', () => {
+    const vm = new MailVM({ registry: createRendererRegistry() });
+    vm.openComposer(42, 'lead-1', 'clarify_response', 're: help');
+
+    vm.selectBus('agent-xyz');
+
+    expect(vm.state.composer).toEqual(
+      expect.objectContaining({ active: false, targetSeq: null, targetRecipient: null }),
+    );
+  });
+
   it('fires onSelectBus callback so the main process can re-fetch', () => {
     const onSelectBus = vi.fn();
     const vm = new MailVM({ registry: createRendererRegistry(), onSelectBus });
@@ -232,6 +243,24 @@ describe('MailVM — selectBus (agent-bus toggle)', () => {
     vm.update([agentMail], []);
     expect(vm.state.inbox).toHaveLength(1);
     expect(vm.state.inbox[0]!.seq).toBe(99);
+  });
+});
+
+// ── MailVM — selectTab ────────────────────────────────────────────────────────
+
+describe('MailVM — selectTab', () => {
+  it('switching tabs clears selection and closes any active composer', () => {
+    const vm = new MailVM({ registry: createRendererRegistry() });
+    vm.update([makeMail({ seq: 1 })], []);
+    vm.selectMail(1);
+    vm.openComposer(1, 'lead-1', 'clarify_response', 're: help');
+
+    vm.selectTab('outbox');
+
+    expect(vm.state.selected).toBeNull();
+    expect(vm.state.composer).toEqual(
+      expect.objectContaining({ active: false, targetSeq: null, targetRecipient: null }),
+    );
   });
 });
 

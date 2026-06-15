@@ -226,7 +226,7 @@ function renderMailDetail(state: MailState): void {
     actionButtons = [
       `<div class="mail-card-actions">`,
       `<button class="btn btn-reply" data-action="open-composer"`,
-      ` data-seq="${selected.seq}" data-recipient="${esc(selected.sender)}"`,
+      ` data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}"`,
       ` data-type="clarify_response" data-subject="${esc(`Re: ${selected.subject}`)}">Reply</button>`,
       `</div>`,
     ].join('');

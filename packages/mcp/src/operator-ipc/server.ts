@@ -25,10 +25,14 @@ import {
   assertNever,
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
   OPERATOR,
   OPERATOR_IPC_METHODS,
   OPERATOR_IPC_TICK,
+  buildHumanReviewVerdict,
   openMailStore,
+  openReviewStore,
   type ApprovalDecision,
   type DeliveredMail,
   type LiveObservabilitySnapshot,
@@ -36,6 +40,8 @@ import {
   type MailType,
   type OperatorIpcMethod,
   type ProjectId,
+  type ReviewStore,
+  type ReviewVerdictValue,
   type ReplyDraft,
   type Steer,
 } from '@co/core';
@@ -67,6 +73,8 @@ export interface OperatorIpcServerDeps {
   readonly socketPath: string;
   /** Opens the project mail bus for a write verb (open/close per call). Default: {@link openMailStore}. */
   readonly openMail?: (projectId: ProjectId) => MailStore;
+  /** Opens the project review store for human `review_response` replies. Default: {@link openReviewStore}. */
+  readonly openReview?: (projectId: ProjectId) => ReviewStore;
   /** Diagnostic seam for server-side errors (a push to a gone client, a transport error). Default: none. */
   readonly onError?: (error: unknown) => void;
 }
@@ -136,6 +144,16 @@ function requireDecision(obj: WirePayload, key: string): ApprovalDecision {
   return decision;
 }
 
+function requireReviewVerdict(obj: WirePayload, key: string): ReviewVerdictValue {
+  const verdict = requireString(obj, key);
+  if (verdict !== 'PASS' && verdict !== 'ISSUES') {
+    throw new InvalidParamsError(
+      `operator IPC: '${key}' must be 'PASS' or 'ISSUES', got '${verdict}'.`,
+    );
+  }
+  return verdict;
+}
+
 /**
  * The operator-IPC server. Owns one {@link SocketServerTransport}, routes inbound JSON-RPC requests to
  * the control surface / mail store, and forwards per-tick snapshots via {@link pushTick}. Lifecycle:
@@ -146,6 +164,7 @@ export class OperatorIpcServer {
   private readonly projectId: ProjectId;
   private readonly socketPath: string;
   private readonly openMail: (projectId: ProjectId) => MailStore;
+  private readonly openReview: (projectId: ProjectId) => ReviewStore;
   private readonly onError: ((error: unknown) => void) | undefined;
   private readonly transport: SocketServerTransport;
   private started = false;
@@ -155,6 +174,7 @@ export class OperatorIpcServer {
     this.projectId = deps.projectId;
     this.socketPath = deps.socketPath;
     this.openMail = deps.openMail ?? openMailStore;
+    this.openReview = deps.openReview ?? openReviewStore;
     this.onError = deps.onError;
     this.transport = new SocketServerTransport(this.socketPath);
     this.transport.onmessage = (message): void => this.onMessage(message);
@@ -265,6 +285,9 @@ export class OperatorIpcServer {
       ...(typeof draftIn.decision === 'string'
         ? { decision: requireDecision(draftIn, 'decision') }
         : {}),
+      ...(typeof draftIn.reviewVerdict === 'string'
+        ? { reviewVerdict: requireReviewVerdict(draftIn, 'reviewVerdict') }
+        : {}),
     };
     const mail = this.openMail(this.projectId);
     try {
@@ -277,12 +300,92 @@ export class OperatorIpcServer {
           `operator IPC reply: mail seq=${seq} is '${found.kind ?? '<unknown>'}', not actionable.`,
         );
       }
+      if (draft.type === MAIL_REVIEW_RESPONSE) {
+        return this.handleReviewResponse(mail, found, draft);
+      }
       if (found.resolved) {
+        const existing = this.existingIdempotentReply(mail, found, draft);
+        if (existing != null) return existing;
         throw new Error(`operator IPC reply: mail seq=${seq} is already resolved.`);
       }
       return mail.reply(found, draft);
     } finally {
       mail.close();
+    }
+  }
+
+  private existingIdempotentReply(
+    mail: MailStore,
+    answered: DeliveredMail,
+    draft: ReplyDraft,
+  ): DeliveredMail | undefined {
+    if (draft.idempotencyKey == null) return undefined;
+    const sender = draft.from ?? answered.recipient;
+    const existing = mail
+      .inbox(answered.sender)
+      .find(
+        (m) =>
+          m.idempotencyKey === draft.idempotencyKey &&
+          m.sender === sender &&
+          m.type === draft.type &&
+          m.causationId === String(answered.seq),
+      );
+    if (existing == null) return undefined;
+    if (existing.subject !== draft.subject || existing.body !== draft.body) {
+      throw new Error(
+        `operator IPC reply: idempotent retry for mail seq=${answered.seq} changes subject/body.`,
+      );
+    }
+    return existing;
+  }
+
+  private handleReviewResponse(
+    mail: MailStore,
+    requestMail: DeliveredMail,
+    draft: ReplyDraft,
+  ): DeliveredMail {
+    if (requestMail.type !== MAIL_REVIEW_REQUEST) {
+      throw new Error(
+        `operator IPC review reply: mail seq=${requestMail.seq} is '${requestMail.type}', ` +
+          `not ${MAIL_REVIEW_REQUEST}.`,
+      );
+    }
+    if (draft.reviewVerdict == null) {
+      throw new InvalidParamsError(
+        `operator IPC review reply: ${MAIL_REVIEW_RESPONSE} requires reviewVerdict.`,
+      );
+    }
+    const reviewId = requestMail.idempotencyKey?.startsWith('review-request:')
+      ? requestMail.idempotencyKey.slice('review-request:'.length)
+      : undefined;
+    if (reviewId == null || reviewId.length === 0) {
+      throw new Error(
+        `operator IPC review reply: malformed review_request mail seq=${requestMail.seq}.`,
+      );
+    }
+    const reviews = this.openReview(this.projectId);
+    try {
+      const request = reviews.getReviewRequestById(reviewId);
+      if (request == null) {
+        throw new Error(
+          `operator IPC review reply: review_request mail seq=${requestMail.seq} has no ` +
+            'matching review.requested row.',
+        );
+      }
+      return mail.replyWithReviewVerdict(
+        requestMail,
+        draft,
+        buildHumanReviewVerdict(reviews, {
+          reviewId,
+          target: request.target,
+          branch: request.branch,
+          scope: request.scope,
+          verdict: draft.reviewVerdict,
+          body: draft.body,
+        }),
+      );
+    } finally {
+      reviews.close();
     }
   }
 

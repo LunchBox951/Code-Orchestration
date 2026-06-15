@@ -27,8 +27,10 @@ import {
   checkToolCompleteness,
   FakePty,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_REVIEW_RESPONSE,
   openMailStore,
   openRegistry,
+  openReviewStore,
   openRosterStore,
   openSessionStore,
   outwardApprovalEnvelope,
@@ -39,6 +41,7 @@ import {
   type OperatorIpcTick,
   type ProjectId,
   type ProjectRegistry,
+  type ReviewStore,
   type RosterStore,
   type SessionStore,
 } from '@co/core';
@@ -69,6 +72,7 @@ let dataDirs: string[] = [];
 let engines: ConductorEngine[] = [];
 let registries: ProjectRegistry[] = [];
 let mailStores: MailStore[] = [];
+let reviewStores: ReviewStore[] = [];
 let rosterStores: RosterStore[] = [];
 let sessionStores: SessionStore[] = [];
 let servers: OperatorIpcServer[] = [];
@@ -81,6 +85,7 @@ beforeEach(() => {
   engines = [];
   registries = [];
   mailStores = [];
+  reviewStores = [];
   rosterStores = [];
   sessionStores = [];
   servers = [];
@@ -117,7 +122,13 @@ afterEach(async () => {
       /* best-effort */
     }
   }
-  for (const closeable of [...mailStores, ...rosterStores, ...sessionStores, ...registries]) {
+  for (const closeable of [
+    ...mailStores,
+    ...reviewStores,
+    ...rosterStores,
+    ...sessionStores,
+    ...registries,
+  ]) {
     try {
       closeable.close();
     } catch {
@@ -770,6 +781,37 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     expect(lead.outstanding('lead-1')).toHaveLength(0);
   });
 
+  it('reply treats an exact same-key retry after resolution as idempotent', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const ask = seedActionableMail(projectId, 'lead-1', 'impl-x');
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+    const draft = {
+      type: 'clarify_response' as const,
+      subject: 're: first',
+      body: 'use claude',
+      idempotencyKey: 'operator-ipc-reply:exact',
+    };
+
+    const first = await client.reply({ seq: ask.seq, recipient: 'lead-1' }, draft);
+    const second = await client.reply({ seq: ask.seq, recipient: 'lead-1' }, draft);
+
+    expect(second).toEqual(first);
+    const responses = inboxOf(projectId, 'impl-x').filter(
+      (m) => m.type === 'clarify_response' && m.causationId === String(ask.seq),
+    );
+    expect(responses).toHaveLength(1);
+  });
+
   it('reply rejects a non-actionable target without appending a response', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
@@ -842,6 +884,66 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     );
     expect(responses).toHaveLength(1);
     expect(responses[0]?.body).toBe('use claude');
+  });
+
+  it('reply records review_response verdicts through the human-review path', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const seedStore = openMailStore(projectId);
+    let request: DeliveredMail;
+    try {
+      request = seedStore.requestHumanReview(
+        {
+          type: 'review_request',
+          to: '@operator',
+          from: 'lead-review',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-opipc-review',
+        },
+        {
+          reviewId: 'rev-opipc-review',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead-review',
+          reviewerKind: 'human',
+        },
+      ).mail;
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const delivered = await client.reply(
+      { seq: request.seq, recipient: '@operator' },
+      {
+        type: MAIL_REVIEW_RESPONSE,
+        subject: 're: review requested',
+        body: 'passes',
+        reviewVerdict: 'PASS',
+        idempotencyKey: 'operator-ipc-review-response:exact',
+      },
+    );
+
+    expect(delivered.type).toBe(MAIL_REVIEW_RESPONSE);
+    expect(delivered.reviewVerdict).toBe('PASS');
+    expect(reviews.getVerdict('main', 'co/feature', 'pr_merge')?.verdict).toBe('PASS');
+    const response = inboxOf(projectId, 'lead-review').find(
+      (m) => m.type === MAIL_REVIEW_RESPONSE && m.causationId === String(request.seq),
+    );
+    expect(response?.reviewVerdict).toBe('PASS');
   });
 });
 

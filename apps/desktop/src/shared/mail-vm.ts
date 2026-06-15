@@ -123,6 +123,7 @@ export class MailVM {
       tab: 'inbox',
       inbox: [],
       outbox: [],
+      composer: { ...BLANK_COMPOSER },
     };
     this._selectedSeq = null;
     this.emit();
@@ -131,7 +132,7 @@ export class MailVM {
 
   /** Switch inbox/outbox tab; clears the selection. */
   selectTab(tab: 'inbox' | 'outbox'): void {
-    this._state = { ...this._state, tab, selected: null };
+    this._state = { ...this._state, tab, selected: null, composer: { ...BLANK_COMPOSER } };
     this._selectedSeq = null;
     this.emit();
   }

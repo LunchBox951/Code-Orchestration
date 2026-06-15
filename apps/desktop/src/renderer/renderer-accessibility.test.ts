@@ -23,4 +23,12 @@ describe('renderer accessibility states', () => {
     expect(rendererSource).toContain("setAttribute('aria-expanded', 'true')");
     expect(rendererSource).toContain("setAttribute('aria-expanded', 'false')");
   });
+
+  it('opens non-approval replies against the selected mail recipient inbox', () => {
+    const nonApprovalBranch = rendererSource.slice(
+      rendererSource.indexOf('} else if (isActionable)'),
+    );
+    expect(nonApprovalBranch).toContain('data-recipient="${esc(selected.recipient)}"');
+    expect(nonApprovalBranch).not.toContain('data-recipient="${esc(selected.sender)}"');
+  });
 });
