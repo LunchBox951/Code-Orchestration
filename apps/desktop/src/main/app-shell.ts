@@ -128,14 +128,17 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     deps.outboxReader ?? (ownedStore != null ? (s) => ownedStore.sentBy(s) : () => []);
 
   // Open the dispatch store for usage/cost static reads (D5: daemon-down-safe pure reads).
-  // Closed when no readers are injected (production mode). Tests inject bucketsReader etc.
+  // Opened when no readers are injected (production mode); tests inject reader fns directly.
   const ownedDispatchStore = deps.bucketsReader == null ? openDispatchStore(deps.projectId) : null;
   const readBuckets: () => readonly UsageBucket[] =
-    deps.bucketsReader ?? (() => ownedDispatchStore!.readBuckets());
+    deps.bucketsReader ??
+    (ownedDispatchStore != null ? () => ownedDispatchStore.readBuckets() : () => []);
   const readAccountStatuses: () => readonly UsageAccountStatus[] =
-    deps.accountStatusesReader ?? (() => ownedDispatchStore!.readAccountStatuses());
+    deps.accountStatusesReader ??
+    (ownedDispatchStore != null ? () => ownedDispatchStore.readAccountStatuses() : () => []);
   const readRollups: () => readonly CostRollup[] =
-    deps.rollupsReader ?? (() => ownedDispatchStore!.readRollups());
+    deps.rollupsReader ??
+    (ownedDispatchStore != null ? () => ownedDispatchStore.readRollups() : () => []);
 
   const dash = new DashboardVM();
   const limitsCostVm = new LimitsCostVM();
