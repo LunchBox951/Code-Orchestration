@@ -310,6 +310,11 @@ abstract class SocketTransportBase implements Transport {
     ),
   ) {}
 
+  /** Whether a peer socket is currently attached (operator-IPC uses this to skip a no-consumer push). */
+  get connected(): boolean {
+    return this.socket != null;
+  }
+
   protected attachSocket(socket: Socket): void {
     this.readBuffer.clear();
     this.socket = socket;
@@ -390,7 +395,7 @@ abstract class SocketTransportBase implements Transport {
   abstract start(): Promise<void>;
 }
 
-class SocketServerTransport extends SocketTransportBase {
+export class SocketServerTransport extends SocketTransportBase {
   private server: Server | undefined;
   private started = false;
 
@@ -493,7 +498,7 @@ function ensurePrivateSocketDirectory(socketPath: string): void {
   }
 }
 
-class SocketClientTransport extends SocketTransportBase {
+export class SocketClientTransport extends SocketTransportBase {
   private started = false;
 
   constructor(private readonly socketPath: string) {

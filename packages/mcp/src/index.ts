@@ -57,6 +57,7 @@ export {
   type ConductorHostRunnerDeps,
   type ConductorControlSurface,
   type ServeConductorOptions,
+  type OperatorIpcServeConfig,
   type IntervalScheduler,
   type IntervalHandle,
 } from './conductor/host.js';
@@ -73,3 +74,19 @@ export {
   EngineLiveStateProvider,
   type EngineLiveStateProviderDeps,
 } from './conductor/live-observe.js';
+// Stage 11 P1 (OP-IPC) — the cross-process operator-IPC binding the desktop app drives. The SERVER
+// (started by `co serve`) wraps the `ConductorControlSurface` + a `MailStore` over a Unix-socket
+// JSON-RPC channel and pushes a per-tick snapshot; the CLIENT is the app-facing degradation FACADE
+// (live overlay when up, static `queryObservability` fall-back when down; control + writes need the
+// socket). Operator-uid-only by socket permission; registers ZERO agent MCP tools (Principle 4 + D4).
+export {
+  OperatorIpcServer,
+  operatorIpcSocketPath,
+  type OperatorIpcServerDeps,
+} from './operator-ipc/server.js';
+export {
+  OperatorIpcClient,
+  OperatorIpcConnection,
+  ConductorUnavailableError,
+  type OperatorIpcClientDeps,
+} from './operator-ipc/client.js';
