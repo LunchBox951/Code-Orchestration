@@ -25,6 +25,7 @@ async function createWindow(): Promise<void> {
     projectId,
     onNavState: (state) => sendToRenderer('nav:state', state),
     onConnectionState: (state) => sendToRenderer('connection:state', state),
+    onDashboardState: (state) => sendToRenderer('dashboard:state', state),
   });
 
   mainWindow = new BrowserWindow({
@@ -56,6 +57,11 @@ ipcMain.handle('nav:navigate', (_event, view: NavView) => {
 ipcMain.handle('connection:refresh', async () => {
   await shell?.connection.refresh();
   return shell?.connection.state ?? null;
+});
+
+ipcMain.handle('dashboard:refresh', async () => {
+  await shell?.connection.refresh();
+  return shell?.dashboard.state ?? null;
 });
 
 app.whenReady().then(() => {
