@@ -289,7 +289,7 @@ export class ConductorUnavailableError extends Error {
 export interface OperatorIpcClientDeps {
   /** The project whose static rollup backs a degraded read. */
   readonly projectId: ProjectId;
-  /** The operator-IPC socket path (where `co serve` listens). */
+  /** The operator-IPC socket path (where `co-mcp serve <projectId>` listens). */
   readonly socketPath: string;
   /** Connect seam (default: {@link OperatorIpcConnection.connect}). Injectable for tests. */
   readonly connect?: (socketPath: string) => Promise<OperatorIpcConnection>;
@@ -472,7 +472,7 @@ export class OperatorIpcClient {
     const connection = await this.ensureConnection();
     if (connection == null) {
       throw new ConductorUnavailableError(
-        'operator IPC: the Conductor is not running — control and mail writes need `co serve`.',
+        'operator IPC: the Conductor is not running — control and mail writes need `co-mcp serve <projectId>`.',
       );
     }
     try {

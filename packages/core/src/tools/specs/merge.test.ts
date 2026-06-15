@@ -1204,7 +1204,7 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
     try {
       const repo = makeRepo();
       const reg = buildCoreRegistry();
-      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
       worktreeStore!.recordWorktreeAndBaseline(
         {
           branch: 'co/feature',
@@ -1236,10 +1236,15 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
         const out = (await invokeTool(reg, toolCtx, 'co_merge', {
           branch: 'co/feature',
           into: 'main',
+          spec_ref: 'spec:task-merge-live#locked',
           intent: { summary: 'trigger a review' },
         })) as { merged: boolean; review_pending?: boolean };
         expect(out.merged).toBe(false);
         expect(out.review_pending).toBe(true);
+        expect(reviewStore!.getReviewRequest('main', 'co/feature')?.specRef).toEqual({
+          kind: 'criteria',
+          ref: 'spec:task-merge-live#locked',
+        });
         // The spawn body runs before co_merge returns review_pending.
         expect(spawned).toHaveLength(1);
         expect(spawned[0]!.projectId).toBe('p-merge-tool');

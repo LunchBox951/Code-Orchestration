@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 const here = dirname(fileURLToPath(import.meta.url));
 const rendererSource = readFileSync(join(here, 'renderer.ts'), 'utf8');
 const htmlSource = readFileSync(join(here, 'index.html'), 'utf8');
+const appShellSource = readFileSync(join(here, '../main/app-shell.ts'), 'utf8');
 
 describe('review view', () => {
   it('review view markup has required structural elements', () => {
@@ -45,6 +46,13 @@ describe('review view', () => {
     // reviewDetailNeedsRebuild helper, keyed on whether that textarea is focused.
     expect(rendererSource).toContain('reviewDetailNeedsRebuild(');
     expect(rendererSource).toContain("document.activeElement?.id === 'review-composer-body'");
+  });
+
+  it('points operator-facing conductor guidance at the shipped co-mcp binary', () => {
+    expect(rendererSource).toContain('start \\`co-mcp serve <projectId>\\`');
+    expect(appShellSource).toContain('start `co-mcp serve <projectId>`');
+    expect(rendererSource).not.toContain('start \\`co serve\\`');
+    expect(appShellSource).not.toContain('start `co serve`');
   });
 });
 

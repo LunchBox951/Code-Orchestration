@@ -56,9 +56,12 @@ describe('reviewDetailSignature', () => {
     status: 'loaded',
     value: {
       kind: 'resolved',
+      reviewId: 'rev-1',
       branch: 'co/x',
       target: 'main',
+      scope: 'merge',
       diff: { kind: 'patch', patch: '@@' },
+      criteria: { kind: 'no-locked-spec' },
     },
   };
 
@@ -76,14 +79,28 @@ describe('reviewDetailSignature', () => {
 
   it('projects the non-body fields and excludes composer.body', () => {
     const sig = reviewDetailSignature(stateView({ body: 'typed so far' }));
-    expect(sig).toEqual({
-      selectedReviewId: 'rev-1',
-      contextKey: JSON.stringify(loadedContext),
-      composerActive: true,
-      composerVerdict: 'PASS',
-      composerPending: false,
-    });
+    expect(sig.selectedReviewId).toBe('rev-1');
+    expect(sig.contextKey).toContain('loaded:resolved');
+    expect(sig.contextKey).toContain('patch:2:@@');
+    expect(sig.composerActive).toBe(true);
+    expect(sig.composerVerdict).toBe('PASS');
+    expect(sig.composerPending).toBe(false);
     expect(JSON.stringify(sig)).not.toContain('typed so far');
+  });
+
+  it('keeps contextKey bounded for large diff patches', () => {
+    const bigPatch = `diff --git a/file b/file\n${'x'.repeat(5000)}\nend`;
+    const sig = reviewDetailSignature(
+      stateView({
+        context: {
+          ...loadedContext,
+          value: { ...loadedContext.value, diff: { kind: 'patch', patch: bigPatch } },
+        },
+      }),
+    );
+    expect(sig.contextKey).toContain(`patch:${bigPatch.length}:`);
+    expect(sig.contextKey.length).toBeLessThan(500);
+    expect(sig.contextKey).not.toContain('x'.repeat(1000));
   });
 
   it('yields an identical signature when only composer.body changed (same context reference)', () => {

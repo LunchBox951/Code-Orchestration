@@ -612,7 +612,7 @@ function renderReviewDetail(context: SelectedContext, composer: VerdictComposer)
     return `<div class="empty-state">Review not found: ${esc(value.reviewId)}</div>`;
   }
   if (value.kind === 'conductor-down') {
-    return `<div class="empty-state">Conductor not running — start \`co serve\` to load review context.</div>`;
+    return `<div class="empty-state">Conductor not running — start \`co-mcp serve <projectId>\` to load review context.</div>`;
   }
 
   // kind === 'resolved'

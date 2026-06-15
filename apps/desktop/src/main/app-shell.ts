@@ -247,7 +247,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       } catch (e: unknown) {
         deps.onMailError?.(
           e instanceof ConductorUnavailableError
-            ? 'Conductor not running — start `co serve` to send mail.'
+            ? 'Conductor not running — start `co-mcp serve <projectId>` to send mail.'
             : safeError(e),
         );
         throw e;
@@ -262,7 +262,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       } catch (e: unknown) {
         deps.onMailError?.(
           e instanceof ConductorUnavailableError
-            ? 'Conductor not running — start `co serve` to approve/decline.'
+            ? 'Conductor not running — start `co-mcp serve <projectId>` to approve/decline.'
             : safeError(e),
         );
         throw e;
@@ -301,7 +301,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       } catch (e) {
         deps.onReviewError?.(
           e instanceof ConductorUnavailableError
-            ? 'Conductor not running — start `co serve` to submit a verdict.'
+            ? 'Conductor not running — start `co-mcp serve <projectId>` to submit a verdict.'
             : safeError(e),
         );
         throw e;

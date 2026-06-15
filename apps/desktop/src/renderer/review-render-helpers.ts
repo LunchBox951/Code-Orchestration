@@ -36,9 +36,8 @@ export interface ReviewStateView {
 
 /**
  * Project a ReviewState into its detail signature. `composer.body` is deliberately EXCLUDED — it is the
- * one field a keystroke changes, and the live textarea already holds it. `contextKey` is a faithful
- * serialization of the context: the VM keeps the SAME context reference across composer-body edits, so the
- * key is stable while typing and changes only on a real context load/change.
+ * one field a keystroke changes, and the live textarea already holds it. `contextKey` is a bounded
+ * structural fingerprint of the rendered context, so composer keystrokes do not stringify large diffs.
  */
 export function reviewDetailSignature(state: ReviewStateView): ReviewDetailSignature {
   return {
@@ -51,13 +50,80 @@ export function reviewDetailSignature(state: ReviewStateView): ReviewDetailSigna
 }
 
 function contextKey(context: unknown): string {
-  try {
-    return JSON.stringify(context) ?? 'null';
-  } catch {
-    // A non-serializable context (cycles, etc.) is not expected from the VM; fall back to a constant so
-    // the decision degrades to "always rebuild" rather than throwing in the render path.
-    return '<unserializable>';
+  if (context == null) return 'null';
+  if (!isRecord(context)) return scalarKey(context);
+
+  const status = stringProp(context, 'status');
+  if (status === 'loading') return 'loading';
+  if (status !== 'loaded') return objectShapeKey(context);
+
+  return `loaded:${reviewContextKey(context.value)}`;
+}
+
+function reviewContextKey(value: unknown): string {
+  if (!isRecord(value)) return scalarKey(value);
+  const kind = stringProp(value, 'kind');
+  if (kind === 'not-found' || kind === 'conductor-down') {
+    return `${kind}:${sampleString(stringProp(value, 'reviewId'))}`;
   }
+  if (kind !== 'resolved') return objectShapeKey(value);
+
+  return [
+    'resolved',
+    sampleString(stringProp(value, 'reviewId')),
+    sampleString(stringProp(value, 'branch')),
+    sampleString(stringProp(value, 'target')),
+    sampleString(stringProp(value, 'scope')),
+    diffKey(value.diff),
+    criteriaKey(value.criteria),
+  ].join('|');
+}
+
+function diffKey(diff: unknown): string {
+  if (!isRecord(diff)) return scalarKey(diff);
+  const kind = stringProp(diff, 'kind');
+  if (kind === 'patch') return `patch:${sampleString(stringProp(diff, 'patch'))}`;
+  if (kind === 'unavailable') return `unavailable:${sampleString(stringProp(diff, 'reason'))}`;
+  return objectShapeKey(diff);
+}
+
+function criteriaKey(criteria: unknown): string {
+  if (!isRecord(criteria)) return scalarKey(criteria);
+  const kind = stringProp(criteria, 'kind');
+  if (kind === 'no-locked-spec') return 'no-locked-spec';
+  if (kind !== 'criteria') return objectShapeKey(criteria);
+
+  const items = Array.isArray(criteria.criteria) ? criteria.criteria : [];
+  const itemKeys = items
+    .map((item) => {
+      if (!isRecord(item)) return scalarKey(item);
+      return `${sampleString(stringProp(item, 'text'))}:${sampleString(stringProp(item, 'verify'))}`;
+    })
+    .join(',');
+  return `criteria:${sampleString(stringProp(criteria, 'specRef'))}:${items.length}:${itemKeys}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function stringProp(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === 'string' ? value : '';
+}
+
+function scalarKey(value: unknown): string {
+  return `${typeof value}:${String(value)}`;
+}
+
+function objectShapeKey(value: Record<string, unknown>): string {
+  return `object:${Object.keys(value).sort().join(',')}`;
+}
+
+function sampleString(value: string): string {
+  const max = 96;
+  if (value.length <= max * 2) return `${value.length}:${value}`;
+  return `${value.length}:${value.slice(0, max)}:${value.slice(-max)}`;
 }
 
 /**
