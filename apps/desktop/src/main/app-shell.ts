@@ -25,6 +25,11 @@ export interface AppShell {
 
 export function createAppShell(deps: AppShellDeps): AppShell {
   const socketPath = deps.socketPath ?? operatorIpcSocketPath(deps.projectId);
+
+  // Declare the ref before the client so the onState closure is TDZ-safe and
+  // refactor-safe: the handler always resolves through the ref, not the variable.
+  const connVmRef: { current?: ConnectionVM } = {};
+
   const client =
     deps.client ??
     new OperatorIpcClient({
@@ -32,7 +37,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       socketPath,
       onState: (s) => {
         if (s === 'disconnected') {
-          void connVm.refresh();
+          void connVmRef.current?.refresh();
         }
       },
     });
@@ -44,6 +49,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     client,
     onState: deps.onConnectionState,
   });
+  connVmRef.current = connVm;
 
   return {
     nav,

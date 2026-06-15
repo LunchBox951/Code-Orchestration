@@ -6,7 +6,9 @@
   "main": "./dist/main/index.js",
   "scripts": {
     "build": "tsc -b",
-    "start": "electron dist/main/index.js"
+    "start": "electron dist/main/index.js",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
   },
   "dependencies": {
     "@co/core": "workspace:*",
