@@ -1,3 +1,4 @@
+import { assertNever } from '@co/core';
 import type { OperatorObservation, DeliveredMail, AgentLiveView, AgentRecord } from '@co/core';
 
 export type AgentStatus = 'warm' | 'waiting' | 'stuck' | 'paused' | 'unknown';
@@ -105,30 +106,34 @@ function deriveFromObservation(observation: OperatorObservation | null): {
     return { tree: [], stats: empty, connection: 'degraded' };
   }
 
-  if (observation.kind === 'live') {
-    const agents = observation.snapshot.agents;
-    const statusMap = new Map<string, AgentStatus>(
-      agents.map((a) => [a.agentId, deriveStatusLive(a)]),
-    );
-    const tree = buildTree(agents as ReadonlyArray<AgentLiveView & AgentEntry>, statusMap);
-    const stats: FleetStats = {
-      total: agents.length,
-      warm: agents.filter((a) => statusMap.get(a.agentId) === 'warm').length,
-      waiting: agents.filter((a) => statusMap.get(a.agentId) === 'waiting').length,
-      stuck: agents.filter((a) => statusMap.get(a.agentId) === 'stuck').length,
-      paused: agents.filter((a) => statusMap.get(a.agentId) === 'paused').length,
-    };
-    return { tree, stats, connection: 'live' };
+  switch (observation.kind) {
+    case 'live': {
+      const agents = observation.snapshot.agents;
+      const statusMap = new Map<string, AgentStatus>(
+        agents.map((a) => [a.agentId, deriveStatusLive(a)]),
+      );
+      const tree = buildTree(agents as ReadonlyArray<AgentLiveView & AgentEntry>, statusMap);
+      const stats: FleetStats = {
+        total: agents.length,
+        warm: agents.filter((a) => statusMap.get(a.agentId) === 'warm').length,
+        waiting: agents.filter((a) => statusMap.get(a.agentId) === 'waiting').length,
+        stuck: agents.filter((a) => statusMap.get(a.agentId) === 'stuck').length,
+        paused: agents.filter((a) => statusMap.get(a.agentId) === 'paused').length,
+      };
+      return { tree, stats, connection: 'live' };
+    }
+    case 'static': {
+      const agents = observation.snapshot.agents;
+      const statusMap = new Map<string, AgentStatus>(
+        agents.map((a: AgentRecord) => [a.agentId, 'unknown' as const]),
+      );
+      const tree = buildTree(agents as ReadonlyArray<AgentRecord & AgentEntry>, statusMap);
+      const stats: FleetStats = { total: agents.length, warm: 0, waiting: 0, stuck: 0, paused: 0 };
+      return { tree, stats, connection: 'degraded' };
+    }
+    default:
+      return assertNever(observation);
   }
-
-  // Static observation (conductor not running)
-  const agents = observation.snapshot.agents;
-  const statusMap = new Map<string, AgentStatus>(
-    agents.map((a: AgentRecord) => [a.agentId, 'unknown' as const]),
-  );
-  const tree = buildTree(agents as ReadonlyArray<AgentRecord & AgentEntry>, statusMap);
-  const stats: FleetStats = { total: agents.length, warm: 0, waiting: 0, stuck: 0, paused: 0 };
-  return { tree, stats, connection: 'degraded' };
 }
 
 export class DashboardVM {

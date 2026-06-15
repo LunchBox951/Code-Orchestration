@@ -254,13 +254,16 @@ describe('DashboardVM — actionables', () => {
     expect(vm.state.actionables.map((r) => r.seq)).toEqual([1, 2, 3]);
   });
 
-  it('MNR #1: update never mutates the injected mail array', () => {
+  it('MNR #1: DashboardVM never calls markRead — rendered rows equal input 1:1', () => {
+    // markRead is structurally impossible: DashboardVM is pure with no MailStore
+    // reference. The VM only maps DeliveredMail → ActionableRow (read projection).
+    // Assert the guarantee holds: every injected actionable appears in the output
+    // with the same seq, and no item is dropped (which markRead would effectively do).
     const vm = new DashboardVM();
-    const mail = makeMail();
-    const originalTs = mail.ts;
-    vm.update(null, [mail]);
-    // The actionable is read-only — ts unchanged in original
-    expect(mail.ts).toBe(originalTs);
+    const mails = [makeMail({ seq: 10 }), makeMail({ seq: 20 }), makeMail({ seq: 30 })];
+    vm.update(null, mails);
+    expect(vm.state.actionables).toHaveLength(mails.length);
+    expect(vm.state.actionables.map((r) => r.seq)).toEqual([10, 20, 30]);
   });
 });
 

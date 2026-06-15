@@ -5,9 +5,14 @@ type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'cost';
 type ConnectionStatus = 'connecting' | 'live' | 'degraded';
 type AgentStatus = 'warm' | 'waiting' | 'stuck' | 'paused' | 'unknown';
 
+interface ConnectionObservation {
+  kind: 'live' | 'static';
+  snapshot: unknown;
+}
+
 interface ConnectionState {
   status: ConnectionStatus;
-  observation: unknown;
+  observation: ConnectionObservation | null;
 }
 
 interface TreeNode {
