@@ -302,6 +302,12 @@ export class OperatorIpcServer {
         return this.control.transcriptTail(
           requireString(params, 'agentId'),
         ) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.reviewContext:
+        // Stage 13 R-A — the on-demand Review-view context (diff + criteria + refs). A daemon-side READ
+        // off the control surface; degrades to a named state, never throws to the view (Principle 9).
+        return (await this.control.reviewContext(
+          requireString(params, 'reviewId'),
+        )) as unknown as WirePayload;
       default:
         return assertNever(method);
     }
