@@ -437,6 +437,15 @@ export class ConductorEngine {
     // directly (it already carries the isolated config from buildPlacementLaunchSpec); otherwise fall
     // back to the injected spawnSpecFor seam (the default minimal spec or a host-live override).
     const pane = this.deps.pty.spawn(spec ?? this.spawnSpecFor(identity));
+    // Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe before startup driving so the operator tail and live
+    // stream include early provider interstitials/login prompts as well as post-ready turn bytes.
+    this.transcriptTails.set(agentKey, '');
+    this.transcriptUnsub.set(
+      agentKey,
+      pane.onData((chunk) =>
+        this.appendTranscript(agentKey, identity.projectId, identity.agent, chunk),
+      ),
+    );
     const startupP = driveToReady(pane, identity.provider);
     // The promise is awaited below, but attach a catch immediately so an early startup failure cannot
     // surface as an unhandled rejection while the MCP bind is still being established.
@@ -470,20 +479,6 @@ export class ConductorEngine {
         pane.onExit(() => this.paneExited.set(agentKey, true)),
       );
 
-      // Stage 12 C-P1 (TRANSCRIPT-SEAM) — a NEW, PERSISTENT pane.onData subscription, distinct from the
-      // PER-TURN observer in observeTurnEnd (which is torn down on settle). Every chunk is appended to
-      // this agent's bounded tail and fanned out to the transcript listeners (the operator-IPC live
-      // push). It lives until release, mirroring the onExit tracking above. Startup interstitial bytes
-      // (consumed by driveToReady before this point) are intentionally not captured — the transcript
-      // begins at the ready pane.
-      this.transcriptTails.set(agentKey, '');
-      this.transcriptUnsub.set(
-        agentKey,
-        pane.onData((chunk) =>
-          this.appendTranscript(agentKey, identity.projectId, identity.agent, chunk),
-        ),
-      );
-
       const hostedPane: HostedPane = { identity, pane, session, startup, clientTransport };
       this.hosted.set(agentKey, hostedPane);
       this.hostedPanes.set(paneKey, identity.agent);
@@ -498,6 +493,7 @@ export class ConductorEngine {
       }
       await Promise.allSettled([session?.close(), clientTransport?.close?.()]);
       await Promise.allSettled([startupP]);
+      this.dropExitTracking(agentKey);
       throw error;
     }
   }

@@ -1025,6 +1025,26 @@ describe('ConductorEngine — SF-2 steer: route a mid-turn steer to the warm pan
 
 // ── Stage 12 C-P1 (TRANSCRIPT-SEAM) — the persistent transcript ring buffer ──────
 describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring buffer per agent', () => {
+  it('captures startup interstitial bytes in both the tail and live stream', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const seen: string[] = [];
+    const unsub = engine.onTranscript((pid, agent, chunk) => {
+      if (pid === projectId && agent === 'impl-x') seen.push(chunk);
+    });
+
+    const ensureP = engine.ensureHosted(identity);
+    const pane = pty.panes[pty.panes.length - 1]!;
+    pane.emit(CLAUDE_READY);
+    await ensureP;
+    unsub();
+
+    expect(engine.transcriptTail(projectId, 'impl-x')).toBe(CLAUDE_READY);
+    expect(seen).toEqual([CLAUDE_READY]);
+  });
+
   it('accumulates a hosted pane’s output (ANSI/ESC bytes intact) into the tail', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
@@ -1036,7 +1056,7 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     for (const c of chunks) pane.emit(c);
 
     // The persistent onData observer concatenates every chunk, control bytes preserved verbatim.
-    expect(engine.transcriptTail(projectId, 'impl-x')).toBe(chunks.join(''));
+    expect(engine.transcriptTail(projectId, 'impl-x')).toBe(CLAUDE_READY + chunks.join(''));
   });
 
   it('bounds the tail to TRANSCRIPT_TAIL_MAX_CHARS, dropping the OLDEST bytes (keeps most-recent)', async () => {
@@ -1121,7 +1141,7 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     const { pane } = await hostPane(engine, pty, identity);
 
     pane.emit('before release');
-    expect(engine.transcriptTail(projectId, 'impl-x')).toBe('before release');
+    expect(engine.transcriptTail(projectId, 'impl-x')).toBe(CLAUDE_READY + 'before release');
 
     const seen: string[] = [];
     engine.onTranscript((_pid, _agent, chunk) => seen.push(chunk));

@@ -52,7 +52,7 @@ function requireNonBlankString(value: unknown, label: string): string {
 }
 
 export function requireAgentId(value: unknown): string {
-  return requireNonBlankString(value, 'agentId');
+  return requireNonBlankString(value, 'agentId').trim();
 }
 
 export function requireSteer(value: unknown): Steer {

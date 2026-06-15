@@ -78,6 +78,8 @@ export interface OperatorIpcServerDeps {
   readonly openReview?: (projectId: ProjectId) => ReviewStore;
   /** Diagnostic seam for server-side errors (a push to a gone client, a transport error). Default: none. */
   readonly onError?: (error: unknown) => void;
+  /** Locks the socket file after listen. Default: {@link chmodSync}. Injected for lifecycle tests. */
+  readonly chmodSocket?: (socketPath: string, mode: number) => void;
 }
 
 const OPERATOR_IPC_METHOD_SET = new Set<string>(Object.values(OPERATOR_IPC_METHODS));
@@ -169,6 +171,7 @@ export class OperatorIpcServer {
   private readonly openMail: (projectId: ProjectId) => MailStore;
   private readonly openReview: (projectId: ProjectId) => ReviewStore;
   private readonly onError: ((error: unknown) => void) | undefined;
+  private readonly chmodSocket: (socketPath: string, mode: number) => void;
   private readonly transport: SocketServerTransport;
   private readonly pendingTranscriptPushes = new Map<string, string>();
   private transcriptPushInFlight = false;
@@ -181,6 +184,7 @@ export class OperatorIpcServer {
     this.openMail = deps.openMail ?? openMailStore;
     this.openReview = deps.openReview ?? openReviewStore;
     this.onError = deps.onError;
+    this.chmodSocket = deps.chmodSocket ?? chmodSync;
     this.transport = new SocketServerTransport(this.socketPath);
     this.transport.onmessage = (message): void => this.onMessage(message);
     this.transport.onerror = (error): void => this.report(error);
@@ -190,10 +194,20 @@ export class OperatorIpcServer {
   async start(): Promise<void> {
     if (this.started) throw new Error('OperatorIpcServer.start: already started.');
     this.started = true;
-    await this.transport.start();
-    // The socket DIR is `0o700` (ensurePrivateSocketDirectory, inside transport.start); now lock the
-    // socket FILE itself so only the operator uid can connect — never an app/agent responsibility.
-    chmodSync(this.socketPath, 0o600);
+    try {
+      await this.transport.start();
+      // The socket DIR is `0o700` (ensurePrivateSocketDirectory, inside transport.start); now lock the
+      // socket FILE itself so only the operator uid can connect — never an app/agent responsibility.
+      this.chmodSocket(this.socketPath, 0o600);
+    } catch (error) {
+      this.started = false;
+      try {
+        await this.transport.close();
+      } catch (cleanupError) {
+        this.report(cleanupError);
+      }
+      throw error;
+    }
   }
 
   /**

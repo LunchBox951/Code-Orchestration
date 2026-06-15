@@ -47,6 +47,7 @@ describe('main IPC runtime guards', () => {
 
   it('accepts nonblank agent ids and rejects whitespace-only values', () => {
     expect(requireAgentId('impl-x')).toBe('impl-x');
+    expect(requireAgentId(' impl-x ')).toBe('impl-x');
     expect(() => requireAgentId('')).toThrow(/agentId/i);
     expect(() => requireAgentId('   ')).toThrow(/agentId/i);
     expect(() => requireAgentId(42)).toThrow(/agentId/i);

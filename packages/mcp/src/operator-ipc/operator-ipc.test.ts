@@ -524,6 +524,29 @@ describe('AC-S11-1 — cross-process observe + control over a 0o600 operator-onl
     expect(statSync(dirname(socketPath)).mode & 0o077).toBe(0); // private dir (no group/other access)
   });
 
+  it('closes the listening socket if chmod fails after transport start', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      chmodSocket: () => {
+        throw new Error('chmod failed in test');
+      },
+    });
+    servers.push(server);
+
+    await expect(server.start()).rejects.toThrow(/chmod failed in test/);
+    await expect(OperatorIpcConnection.connect(socketPath)).rejects.toThrow();
+  });
+
   it('daemon-down degrades reads to the static rollup and refuses control with a clear error', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
@@ -777,7 +800,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     const tail = await client.transcript('impl-x');
     expect(client.connected).toBe(true);
     expect(tail.agentId).toBe('impl-x');
-    expect(tail.tail).toBe(chunks.join(''));
+    expect(tail.tail).toBe(CLAUDE_READY + chunks.join(''));
   });
 
   it('per-agent isolation: the push carries agentId — a B-filtered subscriber gets nothing when A emits', async () => {

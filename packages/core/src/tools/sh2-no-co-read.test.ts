@@ -42,11 +42,16 @@ export function detectCoPaths(source: string): string[] {
     .replace(/\/\*[\s\S]*?\*\//g, '') // block comments (/** … */ and /* … */)
     .replace(/\/\/[^\n]*/g, ''); // line comments
   const literalRe = /\.co[\\/]+(specs|plans|issues)\b/g;
-  const joinRe = /\b(?:path\.)?join\s*\(\s*['"`]\.co['"`]\s*,\s*['"`](specs|plans|issues)['"`]/g;
+  const segmentCallRe = /\b(?:path\.)?(?:join|resolve)\s*\(([^)]*)\)/g;
+  const coSegmentRe = /['"`]\.co['"`]\s*,\s*['"`](specs|plans|issues)['"`]/;
   const hits: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = literalRe.exec(stripped)) !== null) hits.push(m[0]);
-  while ((m = joinRe.exec(stripped)) !== null) hits.push(`join('.co', '${m[1]}')`);
+  while ((m = segmentCallRe.exec(stripped)) !== null) {
+    const coSegment = coSegmentRe.exec(m[1] ?? '');
+    const section = coSegment?.[1];
+    if (section != null) hits.push(`${m[0].split('(')[0] ?? 'path'}(..., '.co', '${section}')`);
+  }
   return hits;
 }
 
@@ -114,6 +119,18 @@ describe('SH-2 — detectCoPaths goes RED on runtime path literals', () => {
 
   it("flags segmented path construction with join('.co', 'specs')", () => {
     expect(detectCoPaths("const dir = join('.co', 'specs');")).not.toEqual([]);
+  });
+
+  it("flags prefixed segmented path construction with join(repoRoot, '.co', 'specs')", () => {
+    expect(detectCoPaths("const dir = join(repoRoot, '.co', 'specs');")).not.toEqual([]);
+  });
+
+  it("flags prefixed segmented path construction with path.join(repoRoot, '.co', 'plans')", () => {
+    expect(detectCoPaths("const dir = path.join(repoRoot, '.co', 'plans');")).not.toEqual([]);
+  });
+
+  it("flags prefixed segmented path construction with resolve(cwd, '.co', 'issues')", () => {
+    expect(detectCoPaths("const dir = resolve(cwd, '.co', 'issues');")).not.toEqual([]);
   });
 
   it('does NOT flag a line comment mentioning .co/issues', () => {

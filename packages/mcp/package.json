@@ -6,6 +6,10 @@
   "bin": { "co-mcp": "./dist/bin.js" },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "package.json"
+  ],
   "dependencies": {
     "@co/core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0"
