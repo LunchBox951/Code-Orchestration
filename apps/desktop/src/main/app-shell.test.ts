@@ -566,6 +566,64 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     });
   });
 
+  it('backfills the selected transcript again after a live tick reconnects', async () => {
+    const tickListeners: Array<(tick: OperatorIpcTick) => void> = [];
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockImplementation((cb: (tick: OperatorIpcTick) => void) => {
+        tickListeners.push(cb);
+        return () => {};
+      }),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript: vi
+        .fn()
+        .mockResolvedValueOnce(transcriptTail('impl-x', ''))
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'missed while offline\n')),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    await flushPromises();
+    expect(shell.agentsConsole.state.transcript).toBe('');
+
+    tickListeners[0]?.({
+      snapshot: {
+        snapshot: emptyStatic,
+        agents: [
+          {
+            agentId: 'impl-x',
+            role: 'implementer',
+            parent: 'lead-1',
+            hosted: true,
+            outstandingMail: 0,
+            paused: false,
+            stuck: false,
+            costUsd: 0,
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(client.transcript).toHaveBeenCalledTimes(2);
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        selectedAgentId: 'impl-x',
+        transcript: 'missed while offline\n',
+      });
+    });
+  });
+
   it('live append: onTranscript chunk appends for selected agent; different agentId is ignored', async () => {
     const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
     const client = {

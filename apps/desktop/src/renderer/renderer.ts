@@ -544,7 +544,8 @@ function renderAgents(state: AgentsConsoleState): void {
     }
   }
 
-  const composerEnabled = state.selectedAgentId != null && state.connection === 'live';
+  const composerEnabled =
+    state.selectedAgentId != null && state.connection === 'live' && state.selectedStatus === 'warm';
   setComposerEnabled(composerEnabled);
 
   renderAgentsTranscript(state);

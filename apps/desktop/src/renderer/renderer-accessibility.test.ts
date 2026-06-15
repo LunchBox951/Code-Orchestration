@@ -33,6 +33,10 @@ describe('agents console', () => {
     expect(rendererSource).toContain('if (!isAgentsViewActive()) return;');
     expect(rendererSource).toContain("if (view === 'agents' && latestAgentsState != null)");
   });
+
+  it('only enables steer controls for a selected warm live agent', () => {
+    expect(rendererSource).toContain("state.selectedStatus === 'warm'");
+  });
 });
 
 describe('renderer accessibility states', () => {

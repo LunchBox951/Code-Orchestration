@@ -152,6 +152,23 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   let transcriptRequestSeq = 0;
   agentsConsoleVm.subscribe((state) => deps.onAgentsConsoleState?.(state));
 
+  function refreshSelectedTranscript(): void {
+    const agentId = agentsConsoleVm.state.selectedAgentId;
+    if (agentId == null) return;
+    const requestSeq = ++transcriptRequestSeq;
+    void client
+      .transcript(agentId)
+      .then((tail) => {
+        if (
+          requestSeq === transcriptRequestSeq &&
+          agentsConsoleVm.state.selectedAgentId === agentId
+        ) {
+          agentsConsoleVm.setTranscriptTail(tail);
+        }
+      })
+      .catch(() => {});
+  }
+
   function doRefreshLimitsCost(): void {
     limitsCostVm.update({
       buckets: readBuckets(),
@@ -249,6 +266,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       dash.update(state.observation, readActionables());
       deps.onDashboardState?.(dash.state);
       agentsConsoleVm.update(state.observation);
+      if (state.observation?.kind === 'live') refreshSelectedTranscript();
       doRefreshMail();
       doRefreshLimitsCost();
     },
@@ -257,6 +275,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       dash.update(liveObs, readActionables());
       deps.onDashboardState?.(dash.state);
       agentsConsoleVm.update(liveObs);
+      refreshSelectedTranscript();
       doRefreshMail();
       doRefreshLimitsCost();
     },
@@ -274,21 +293,8 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     refreshMail: doRefreshMail,
     refreshLimitsCost: doRefreshLimitsCost,
     selectAgent(agentId: string | null): void {
-      const requestSeq = ++transcriptRequestSeq;
       agentsConsoleVm.selectAgent(agentId);
-      if (agentId != null) {
-        void client
-          .transcript(agentId)
-          .then((tail) => {
-            if (
-              requestSeq === transcriptRequestSeq &&
-              agentsConsoleVm.state.selectedAgentId === agentId
-            ) {
-              agentsConsoleVm.setTranscriptTail(tail);
-            }
-          })
-          .catch(() => {});
-      }
+      refreshSelectedTranscript();
     },
     async start() {
       await connVm.start();
