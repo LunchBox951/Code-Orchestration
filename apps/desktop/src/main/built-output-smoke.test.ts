@@ -16,7 +16,10 @@ describe('desktop built-output script modes', () => {
     const renderer = distFile('renderer', 'renderer.js');
 
     expect(html).toContain('<script type="module" src="./renderer.js"></script>');
-    expect(renderer).toContain('export {};');
+    // renderer.ts is an ES module — it statically imports the review-render helpers — so tsc emits an
+    // ESM `import` the browser loads (no bundler), and the sibling helper module is emitted alongside it.
+    expect(renderer).toMatch(/^import .* from '\.\/review-render-helpers\.js';/m);
+    expect(distFile('renderer', 'review-render-helpers.js')).toContain('reviewDetailNeedsRebuild');
   });
 
   it('vendors xterm assets referenced by the renderer HTML', () => {

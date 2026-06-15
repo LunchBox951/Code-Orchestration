@@ -38,6 +38,14 @@ describe('review view', () => {
     expect(rendererSource).toContain('aria-label="Submit PASS verdict"');
     expect(rendererSource).toContain('aria-label="Submit ISSUES verdict"');
   });
+
+  it('gates the verdict-composer detail rebuild to preserve the caret while typing (review #316)', () => {
+    // The detail pane must NOT be unconditionally rebuilt: typing in #review-composer-body would
+    // recreate the focused textarea and drop the caret. renderReview gates the rebuild on the pure
+    // reviewDetailNeedsRebuild helper, keyed on whether that textarea is focused.
+    expect(rendererSource).toContain('reviewDetailNeedsRebuild(');
+    expect(rendererSource).toContain("document.activeElement?.id === 'review-composer-body'");
+  });
 });
 
 describe('agents console', () => {
