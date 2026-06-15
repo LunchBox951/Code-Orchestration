@@ -1227,6 +1227,255 @@
       .steer-btn {
         flex: 1;
       }
+
+      /* ── Review view ─────────────────────────────────────────── */
+      main:has(#view-review.active) {
+        padding: 0;
+        overflow: hidden;
+      }
+
+      #view-review.active {
+        height: 100%;
+        gap: 0;
+      }
+
+      .review-layout {
+        display: flex;
+        height: 100%;
+        overflow: hidden;
+      }
+
+      .review-sidebar {
+        width: 240px;
+        flex-shrink: 0;
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--surface);
+      }
+
+      .review-sidebar-label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+
+      .review-list {
+        flex: 1;
+        overflow-y: auto;
+      }
+
+      .review-row {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+
+      .review-row:hover {
+        background: var(--card);
+      }
+
+      .review-row.selected {
+        background: var(--card);
+        border-left: 3px solid var(--accent);
+        padding-left: 11px;
+      }
+
+      .review-row-subject {
+        font-size: 13px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 500;
+      }
+
+      .review-row-meta {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 3px;
+      }
+
+      .review-row-sender {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .review-row-age {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+
+      .review-detail-pane {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .review-diff-block {
+        background: oklch(0.12 0.005 262);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .review-diff-header {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .review-diff-pre {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 12px;
+        padding: 12px 14px;
+        overflow-x: auto;
+        white-space: pre;
+        line-height: 1.5;
+        margin: 0;
+        color: var(--text);
+      }
+
+      .diff-add {
+        color: var(--live);
+      }
+
+      .diff-remove {
+        color: var(--stuck);
+      }
+
+      .diff-hunk {
+        color: var(--accent);
+      }
+
+      .review-criteria-block {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .review-criteria-header {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .review-criteria-list {
+        padding: 10px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .review-criterion {
+        font-size: 13px;
+        color: var(--text);
+        line-height: 1.5;
+      }
+
+      .review-criterion-verify {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+
+      .review-verdict-block {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .review-verdict-header {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .review-verdict-actions {
+        display: flex;
+        gap: 10px;
+        padding: 12px 14px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .review-verdict-body {
+        padding: 10px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .review-body-textarea {
+        width: 100%;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 12px;
+        padding: 8px 12px;
+        resize: none;
+        outline: none;
+        min-height: 80px;
+        line-height: 1.5;
+      }
+
+      .review-body-textarea:focus {
+        border-color: var(--accent);
+      }
+
+      .review-verdict-footer {
+        padding: 10px 14px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .btn-pass {
+        background: var(--live);
+        color: oklch(0.1 0 0);
+      }
+
+      .btn-issues {
+        background: var(--stuck);
+        color: #fff;
+      }
     </style>
     <link rel="stylesheet" href="./vendor/xterm.css" />
   </head>
@@ -1285,6 +1534,7 @@
         <button class="nav-item" data-view="review" type="button">
           <span class="nav-glyph">◎</span>
           Review
+          <span class="nav-badge" id="review-badge" style="display: none">0</span>
         </button>
         <button class="nav-item" data-view="source" type="button">
           <span class="nav-glyph">⊞</span>
@@ -1411,8 +1661,19 @@
           </div>
         </div>
         <div class="view" id="view-review">
-          <div class="view-heading">Review</div>
-          <div class="stub-card">Coming in a later stage.</div>
+          <div class="review-layout">
+            <!-- Left: pending review list -->
+            <div class="review-sidebar">
+              <div class="review-sidebar-label">Pending Reviews</div>
+              <div id="review-list" class="review-list" role="listbox" aria-label="Pending reviews">
+                <div class="empty-state">No pending reviews</div>
+              </div>
+            </div>
+            <!-- Right: diff + criteria + verdict -->
+            <div class="review-detail-pane" id="review-detail-pane" aria-label="Review diff">
+              <div class="empty-state">Select a review to inspect it</div>
+            </div>
+          </div>
         </div>
         <div class="view" id="view-source">
           <div class="view-heading">Source</div>

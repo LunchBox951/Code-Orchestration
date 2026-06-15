@@ -55,6 +55,10 @@ export function requireAgentId(value: unknown): string {
   return requireNonBlankString(value, 'agentId').trim();
 }
 
+export function requireReviewVerdict(value: unknown): 'PASS' | 'ISSUES' {
+  return requireOneOf(value, ['PASS', 'ISSUES'] as const, 'review verdict');
+}
+
 export function requireSteer(value: unknown): Steer {
   const obj = asRecord(value, 'steer');
   const kind = obj['kind'];

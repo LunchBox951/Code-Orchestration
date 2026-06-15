@@ -23,6 +23,8 @@ const { contextBridge, ipcRenderer } = require('electron') as {
   readonly ipcRenderer: IpcRendererLike;
 };
 
+type ReviewState = unknown;
+
 interface CoShellBridge {
   navigate(view: NavView): void;
   refreshConnection(): Promise<ConnectionState | null>;
@@ -58,6 +60,15 @@ interface CoShellBridge {
   onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
+  // ── Review ────────────────────────────────────────────────────────────────
+  onReviewState(listener: (state: ReviewState) => void): () => void;
+  onReviewError(listener: (message: string) => void): () => void;
+  reviewSelect(reviewId: string): Promise<ReviewState | null>;
+  reviewBeginVerdict(verdict: 'PASS' | 'ISSUES'): Promise<ReviewState | null>;
+  reviewUpdateComposerBody(text: string): Promise<ReviewState | null>;
+  reviewCancelVerdict(): Promise<ReviewState | null>;
+  reviewSubmitVerdict(): Promise<ReviewState | null>;
+  reviewRefresh(): Promise<ReviewState | null>;
 }
 
 const bridge: CoShellBridge = {
@@ -171,6 +182,35 @@ const bridge: CoShellBridge = {
   },
   async agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agents:steer', agentId, steer);
+  },
+  // ── Review ────────────────────────────────────────────────────────────────
+  onReviewState(listener: (state: ReviewState) => void) {
+    const handler = (_event: unknown, state: ReviewState): void => listener(state);
+    ipcRenderer.on('review:state', handler);
+    return () => ipcRenderer.removeListener('review:state', handler);
+  },
+  onReviewError(listener: (message: string) => void) {
+    const handler = (_event: unknown, message: string): void => listener(message);
+    ipcRenderer.on('review:error', handler);
+    return () => ipcRenderer.removeListener('review:error', handler);
+  },
+  async reviewSelect(reviewId: string): Promise<ReviewState | null> {
+    return ipcRenderer.invoke<ReviewState | null>('review:select', reviewId);
+  },
+  async reviewBeginVerdict(verdict: 'PASS' | 'ISSUES'): Promise<ReviewState | null> {
+    return ipcRenderer.invoke<ReviewState | null>('review:beginVerdict', verdict);
+  },
+  async reviewUpdateComposerBody(text: string): Promise<ReviewState | null> {
+    return ipcRenderer.invoke<ReviewState | null>('review:updateComposerBody', text);
+  },
+  async reviewCancelVerdict(): Promise<ReviewState | null> {
+    return ipcRenderer.invoke<ReviewState | null>('review:cancelVerdict');
+  },
+  async reviewSubmitVerdict(): Promise<ReviewState | null> {
+    return ipcRenderer.invoke<ReviewState | null>('review:submitVerdict');
+  },
+  async reviewRefresh(): Promise<ReviewState | null> {
+    return ipcRenderer.invoke<ReviewState | null>('review:refresh');
   },
 };
 
