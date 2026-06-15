@@ -284,6 +284,136 @@ function renderMail(state: MailState): void {
   }
 }
 
+// ── Limits / Cost rendering ────────────────────────────────────────────────────
+
+function headroomDotCls(usedPct: number): string {
+  if (usedPct >= 80) return 'headroom-dot-high';
+  if (usedPct >= 50) return 'headroom-dot-mid';
+  return 'headroom-dot-low';
+}
+
+function resetEta(resetAt: string): string {
+  const ms = Date.parse(resetAt) - Date.now();
+  if (Number.isNaN(ms) || ms <= 0) return 'resetting';
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  if (h > 0) return `resets in ${h}h ${m}m`;
+  return `resets in ${m}m`;
+}
+
+function renderLimitsPopover(state: LimitsCostState): void {
+  const body = document.getElementById('limits-popover-body');
+  if (!body) return;
+
+  if (state.headroomRows.length === 0) {
+    body.innerHTML = `<div class="empty-state">No usage data</div>`;
+    return;
+  }
+
+  // Group rows by (provider, account)
+  const groups = new Map<string, LimitsCostHeadroomRow[]>();
+  for (const row of state.headroomRows) {
+    const key = `${row.provider}:${row.account}`;
+    let arr = groups.get(key);
+    if (arr == null) {
+      arr = [];
+      groups.set(key, arr);
+    }
+    arr.push(row);
+  }
+
+  const cards = [...groups.entries()]
+    .map(([key, rows]) => {
+      const [provider, account] = key.split(':') as [string, string];
+
+      // Compute worst headroom dot for this account header
+      const knownRows = rows.filter((r) => r.headroom.kind === 'known') as Array<
+        LimitsCostHeadroomRow & { headroom: { kind: 'known'; used_pct: number; reset_at: string } }
+      >;
+      const worstPct =
+        knownRows.length > 0 ? Math.max(...knownRows.map((r) => r.headroom.used_pct)) : undefined;
+      const dotCls = worstPct !== undefined ? headroomDotCls(worstPct) : 'headroom-dot-unknown';
+
+      const barRowsHtml = rows
+        .map((row) => {
+          if (row.headroom.kind === 'unknown') {
+            return `<div class="limits-unknown-row">${esc(row.windowKind)}: no data — ${esc(row.headroom.reason)}</div>`;
+          }
+          const pct = Math.min(100, Math.round(row.headroom.used_pct));
+          const fillCls =
+            pct >= 80
+              ? 'limits-bar-fill limits-bar-fill-high'
+              : pct >= 50
+                ? 'limits-bar-fill limits-bar-fill-mid'
+                : 'limits-bar-fill';
+          return `
+            <div class="limits-bar-row">
+              <div class="limits-bar-meta">
+                <span class="limits-bar-label">${esc(row.windowKind)}</span>
+                <span class="limits-bar-pct">${pct}% used</span>
+              </div>
+              <div class="limits-bar-track">
+                <div class="${esc(fillCls)}" style="width:${pct}%"></div>
+              </div>
+              <div class="limits-bar-reset">${esc(resetEta(row.headroom.reset_at))}</div>
+            </div>
+          `;
+        })
+        .join('');
+
+      return `
+        <div class="limits-provider-card">
+          <div class="limits-provider-header">
+            <span class="headroom-dot ${esc(dotCls)}"></span>
+            ${esc(provider)}
+            <span style="color:var(--muted);font-weight:400">${esc(account)}</span>
+          </div>
+          <div class="limits-bar-rows">${barRowsHtml}</div>
+        </div>
+      `;
+    })
+    .join('');
+
+  body.innerHTML = cards;
+}
+
+function renderCostView(state: LimitsCostState): void {
+  const container = document.getElementById('cost-content');
+  if (!container) return;
+
+  if (state.agentCosts.length === 0 && state.taskCosts.length === 0) {
+    container.innerHTML = `<div class="empty-state">No cost data yet</div>`;
+    return;
+  }
+
+  function costRowsHtml(rows: readonly LimitsCostCostRow[]): string {
+    if (rows.length === 0) return `<div class="empty-state">No entries</div>`;
+    return rows
+      .map(
+        (r) => `
+          <div class="cost-row">
+            <span class="cost-row-id" title="${esc(r.id)}">${esc(r.id)}</span>
+            <span class="cost-row-usd">$${r.totalCostUsd.toFixed(4)}</span>
+          </div>
+        `,
+      )
+      .join('');
+  }
+
+  container.innerHTML = `
+    <div class="cost-sections">
+      <div class="cost-section">
+        <div class="cost-section-heading">Per agent</div>
+        <div class="cost-list">${costRowsHtml(state.agentCosts)}</div>
+      </div>
+      <div class="cost-section">
+        <div class="cost-section-heading">Per task</div>
+        <div class="cost-list">${costRowsHtml(state.taskCosts)}</div>
+      </div>
+    </div>
+  `;
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -330,6 +460,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Request initial mail state on load
   void bridge.mailRefresh();
+
+  // ── Limits / Cost ──────────────────────────────────────────────────────────
+
+  bridge.onLimitsCostState((state) => {
+    renderLimitsPopover(state);
+    renderCostView(state);
+  });
+
+  void bridge.refreshLimitsCost();
+
+  // Header limits button toggle (renderer-local; no main round-trip needed)
+  const limitsBtn = document.getElementById('limits-btn');
+  const limitsPopover = document.getElementById('limits-popover');
+  limitsBtn?.addEventListener('click', () => {
+    const isOpen = limitsPopover != null && !limitsPopover.hasAttribute('hidden');
+    if (isOpen) {
+      limitsPopover?.setAttribute('hidden', '');
+      limitsBtn.classList.remove('open');
+    } else {
+      limitsPopover?.removeAttribute('hidden');
+      limitsBtn.classList.add('open');
+    }
+  });
+
+  // Close popover when clicking outside
+  document.addEventListener('click', (e) => {
+    const wrapper = document.getElementById('limits-wrapper');
+    if (wrapper == null || limitsPopover == null) return;
+    if (!wrapper.contains(e.target as Node)) {
+      limitsPopover.setAttribute('hidden', '');
+      limitsBtn?.classList.remove('open');
+    }
+  });
 
   // ── Mail event delegation ──────────────────────────────────────────────────
 

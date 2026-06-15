@@ -3,6 +3,7 @@ import type { NavView } from '../shared/nav-vm.js';
 import type { NavState } from '../shared/nav-vm.js';
 import type { ConnectionState } from '../shared/connection-vm.js';
 import type { DashboardState } from '../shared/dashboard-vm.js';
+import type { LimitsCostState } from '../shared/limits-cost-vm.js';
 import type { MailState } from '../shared/mail-vm.js';
 
 export interface CoShellBridge {
@@ -30,6 +31,9 @@ export interface CoShellBridge {
   mailQuickApprove(approvalSeq: number): Promise<MailState | null>;
   mailQuickDecline(approvalSeq: number): Promise<MailState | null>;
   mailRefresh(): Promise<MailState | null>;
+  // ── Limits / Cost ─────────────────────────────────────────────────────────
+  onLimitsCostState(listener: (state: LimitsCostState) => void): () => void;
+  refreshLimitsCost(): Promise<LimitsCostState | null>;
 }
 
 const bridge: CoShellBridge = {
@@ -113,6 +117,16 @@ const bridge: CoShellBridge = {
   },
   async mailRefresh(): Promise<MailState | null> {
     return ipcRenderer.invoke('mail:refresh') as Promise<MailState | null>;
+  },
+  // ── Limits / Cost ─────────────────────────────────────────────────────────
+  onLimitsCostState(listener: (state: LimitsCostState) => void) {
+    const handler = (_event: Electron.IpcRendererEvent, state: LimitsCostState): void =>
+      listener(state);
+    ipcRenderer.on('limitsCost:state', handler);
+    return () => ipcRenderer.removeListener('limitsCost:state', handler);
+  },
+  async refreshLimitsCost(): Promise<LimitsCostState | null> {
+    return ipcRenderer.invoke('limitsCost:refresh') as Promise<LimitsCostState | null>;
   },
 };
 

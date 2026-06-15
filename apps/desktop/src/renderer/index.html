@@ -841,6 +841,250 @@
         color: oklch(0.88 0.18 25);
         font-family: 'IBM Plex Mono', ui-monospace, monospace;
       }
+
+      /* ── Limits popover button ────────────────────────── */
+      .limits-wrapper {
+        position: relative;
+        -webkit-app-region: no-drag;
+      }
+
+      .limits-btn {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 99px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        cursor: pointer;
+        transition:
+          border-color 0.15s,
+          color 0.15s;
+      }
+
+      .limits-btn:hover {
+        border-color: var(--accent);
+        color: var(--text);
+      }
+
+      .limits-btn.open {
+        border-color: var(--accent);
+        color: var(--heading);
+      }
+
+      /* ── Limits popover panel ─────────────────────────── */
+      .limits-popover {
+        position: absolute;
+        top: calc(100% + 8px);
+        right: 0;
+        width: 340px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: 0 8px 24px oklch(0 0 0 / 0.4);
+        z-index: 100;
+        overflow: hidden;
+      }
+
+      .limits-popover-hdr {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--heading);
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+
+      .limits-popover-cap {
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--muted);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .limits-popover-body {
+        padding: 10px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        max-height: 360px;
+        overflow-y: auto;
+      }
+
+      .limits-provider-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+
+      .limits-provider-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--heading);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+
+      .headroom-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .headroom-dot-low {
+        background: var(--warm);
+      }
+      .headroom-dot-mid {
+        background: var(--waiting);
+      }
+      .headroom-dot-high {
+        background: var(--stuck);
+      }
+      .headroom-dot-unknown {
+        background: var(--border);
+      }
+
+      .limits-bar-rows {
+        padding: 8px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .limits-bar-row {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .limits-bar-meta {
+        display: flex;
+        justify-content: space-between;
+        font-size: 10px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .limits-bar-label {
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+
+      .limits-bar-pct {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .limits-bar-track {
+        height: 5px;
+        background: var(--border);
+        border-radius: 99px;
+        overflow: hidden;
+      }
+
+      .limits-bar-fill {
+        height: 100%;
+        border-radius: 99px;
+        background: var(--accent);
+        transition: width 0.3s;
+      }
+
+      .limits-bar-fill-high {
+        background: var(--stuck);
+      }
+      .limits-bar-fill-mid {
+        background: var(--waiting);
+      }
+
+      .limits-bar-reset {
+        font-size: 10px;
+        color: var(--muted);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .limits-unknown-row {
+        padding: 6px 12px;
+        font-size: 11px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      /* ── Cost view ────────────────────────────────────── */
+      .cost-sections {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        align-items: start;
+      }
+
+      .cost-section {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .cost-section-heading {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .cost-list {
+        padding: 4px 0;
+        max-height: 400px;
+        overflow-y: auto;
+      }
+
+      .cost-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 7px 14px;
+        border-bottom: 1px solid var(--border);
+        gap: 12px;
+      }
+
+      .cost-row:last-child {
+        border-bottom: none;
+      }
+
+      .cost-row-id {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .cost-row-usd {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--heading);
+        flex-shrink: 0;
+      }
     </style>
   </head>
   <body>
@@ -851,6 +1095,21 @@
       <div class="live-pill">
         <span class="live-dot" id="live-dot"></span>
         <span id="live-label">offline</span>
+      </div>
+      <div class="limits-wrapper">
+        <button class="limits-btn" id="limits-btn" type="button">
+          <span>&#x25C8;</span>
+          <span id="limits-summary">Limits</span>
+        </button>
+        <div class="limits-popover" id="limits-popover" hidden>
+          <div class="limits-popover-hdr">
+            Subscription limits
+            <span class="limits-popover-cap">balancer paces on headroom</span>
+          </div>
+          <div class="limits-popover-body" id="limits-popover-body">
+            <div class="empty-state">No usage data</div>
+          </div>
+        </div>
       </div>
       <div class="avatar">OP</div>
     </header>
@@ -933,7 +1192,9 @@
         </div>
         <div class="view" id="view-cost">
           <div class="view-heading">Cost</div>
-          <div class="stub-card">Loading cost data…</div>
+          <div id="cost-content">
+            <div class="empty-state">Loading cost data…</div>
+          </div>
         </div>
       </main>
     </div>

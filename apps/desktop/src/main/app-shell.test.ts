@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createAppShell, defaultOperatorSocketPath } from './app-shell.js';
-import type { OperatorObservation, DeliveredMail, OperatorIpcTick } from '@co/core';
+import type { OperatorObservation, DeliveredMail, OperatorIpcTick, CostRollup } from '@co/core';
 import type { ProjectId } from '@co/core';
 import { projectDataDir } from '@co/core';
 import { operatorIpcSocketPath } from '@co/mcp';
@@ -220,5 +220,65 @@ describe('createAppShell — dashboard VM wiring', () => {
     expect(onDashboardState).toHaveBeenCalledOnce();
     expect(onDashboardState).toHaveBeenCalledWith(expect.objectContaining({ connection: 'live' }));
     expect(shell.dashboard.state.connection).toBe('live');
+  });
+});
+
+describe('createAppShell — limitsCost VM wiring', () => {
+  const FAKE_ROLLUP: CostRollup = {
+    kind: 'agent',
+    id: 'impl-1',
+    totalCostUsd: 0.05,
+    costUsdObservations: 1,
+    inputTokens: 100,
+    outputTokens: 50,
+    totalTokens: 150,
+    tokenObservations: 1,
+    usedPct: 0,
+    usedPctObservations: 0,
+    observations: 1,
+  };
+
+  it('exposes limitsCost VM starting with empty state', () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      bucketsReader: () => [],
+      accountStatusesReader: () => [],
+      rollupsReader: () => [],
+    });
+    expect(shell.limitsCost.state.headroomRows).toHaveLength(0);
+    expect(shell.limitsCost.state.agentCosts).toHaveLength(0);
+    expect(shell.limitsCost.state.taskCosts).toHaveLength(0);
+  });
+
+  it('notifies onLimitsCostState after start()', async () => {
+    const onLimitsCostState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      bucketsReader: () => [],
+      accountStatusesReader: () => [],
+      rollupsReader: () => [],
+      onLimitsCostState,
+    });
+    await shell.start();
+    expect(onLimitsCostState).toHaveBeenCalledOnce();
+  });
+
+  it('injected rollups appear in limitsCost state after start()', async () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      bucketsReader: () => [],
+      accountStatusesReader: () => [],
+      rollupsReader: () => [FAKE_ROLLUP],
+    });
+    await shell.start();
+    expect(shell.limitsCost.state.agentCosts).toHaveLength(1);
+    expect(shell.limitsCost.state.agentCosts[0]?.id).toBe('impl-1');
+    expect(shell.limitsCost.state.agentCosts[0]?.totalCostUsd).toBe(0.05);
   });
 });
