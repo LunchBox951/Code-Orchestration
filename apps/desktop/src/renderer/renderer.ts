@@ -2,6 +2,12 @@
 // to the coShell bridge exposed by the preload via contextBridge.
 
 import { reviewDetailNeedsRebuild, reviewDetailSignature } from './review-render-helpers.js';
+import {
+  captureInteractionState,
+  mailDetailSignature,
+  needsRebuild,
+  restoreInteractionState,
+} from './live-render-helpers.js';
 
 const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'cost'] as const;
 type NavView = (typeof NAV_VIEWS)[number];
@@ -174,6 +180,12 @@ function renderDashboard(state: DashboardState): void {
           })
           .join('');
 
+  // Preserve scroll across the rebuild (AC-S15-9 [SF-4]): the Dashboard rebuilds its content on every
+  // tick; <main> is the scroll container, so snapshot + restore its scrollTop instead of jumping the
+  // operator back to the top. focused=false → restore never steals focus from another view's input.
+  const scrollEl = container.closest<HTMLElement>('main');
+  const scroll = scrollEl != null ? captureInteractionState(scrollEl) : null;
+
   container.innerHTML = `
     <div class="mc-header">
       <div class="mc-title">Mission Control</div>
@@ -190,6 +202,8 @@ function renderDashboard(state: DashboardState): void {
       <div class="actionable-list">${actionableRows}</div>
     </div>
   `;
+
+  if (scrollEl != null && scroll != null) restoreInteractionState(scrollEl, scroll);
 }
 
 // ── Mail rendering ─────────────────────────────────────────────────────────────
@@ -252,9 +266,31 @@ function renderMailSidebar(state: MailState): void {
     .join('');
 }
 
-function renderMailDetail(state: MailState): void {
+function renderMailDetail(state: MailState, prevState: MailState | null): void {
   const detailPane = document.getElementById('mail-detail-pane');
   if (!detailPane) return;
+
+  // Caret preservation (GitHub #39): the detail pane is rebuilt on every MailState emit, which recreates
+  // the focused composer textarea and drops the caret to offset 0 on every keystroke (typed text reverses).
+  // When the ONLY change is composer.body (excluded from the signature) AND #composer-body is focused, skip
+  // the rebuild — the live textarea already holds the typed value. Mirrors the shipped Review #316 guard.
+  const composerFocused = document.activeElement?.id === 'composer-body';
+  const rebuild = needsRebuild(
+    prevState != null ? mailDetailSignature(prevState) : null,
+    mailDetailSignature(state),
+    composerFocused,
+  );
+  if (!rebuild) return;
+
+  // A rebuild is unavoidable (a non-body field changed, or first render). If the user was mid-edit in the
+  // composer, capture caret + scroll from the outgoing textarea so we can re-apply them to the new one
+  // instead of blindly focus()-ing and dropping the caret to 0.
+  const outgoing = composerFocused
+    ? (document.getElementById('composer-body') as HTMLTextAreaElement | null)
+    : null;
+  const captured = outgoing != null ? captureInteractionState(outgoing, true) : null;
+  const composerJustOpened =
+    state.composer.active && (prevState == null || !prevState.composer.active);
 
   const { selected, composer } = state;
 
@@ -340,20 +376,28 @@ function renderMailDetail(state: MailState): void {
     composerHtml,
   ].join('');
 
-  // Wire composer textarea live-sync
+  // Wire composer textarea live-sync, preserving caret/focus across the rebuild.
   const textarea = document.getElementById('composer-body') as HTMLTextAreaElement | null;
   if (textarea) {
     textarea.addEventListener('input', () => {
       void window.coShell.mailUpdateComposer('body', textarea.value);
     });
-    textarea.focus();
+    if (captured != null) {
+      // Mid-edit rebuild: re-apply the caret/scroll and re-focus the freshly-created textarea.
+      restoreInteractionState(textarea, captured);
+    } else if (composerJustOpened) {
+      // First open (inactive→active): focus the empty textarea (caret at end is fine). Do NOT focus on
+      // unrelated rebuilds while the composer is unfocused — that would steal focus from elsewhere.
+      textarea.focus();
+    }
   }
 }
 
 function renderMail(state: MailState): void {
+  const prevState = latestMailState;
   latestMailState = state;
   renderMailSidebar(state);
-  renderMailDetail(state);
+  renderMailDetail(state, prevState);
 
   // Update nav badge with actionable count
   const totalActionables = state.inbox.filter((r) => r.kind === 'actionable').length;
