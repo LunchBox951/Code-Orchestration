@@ -33,7 +33,9 @@ import {
   OPERATOR_IPC_TRANSCRIPT,
   buildHumanReviewVerdict,
   openMailStore,
+  openRegistry,
   openReviewStore,
+  startCoordinatorSession,
   type ApprovalDecision,
   type DeliveredMail,
   type LiveObservabilitySnapshot,
@@ -41,10 +43,12 @@ import {
   type MailType,
   type OperatorIpcMethod,
   type ProjectId,
+  type ProjectRegistry,
   type ReviewContext,
   type ReviewStore,
   type ReviewVerdictValue,
   type ReplyDraft,
+  type StartSessionResult,
   type Steer,
 } from '@co/core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
@@ -81,6 +85,10 @@ export interface OperatorIpcServerDeps {
   readonly onError?: (error: unknown) => void;
   /** Locks the socket file after listen. Default: {@link chmodSync}. Injected for lifecycle tests. */
   readonly chmodSocket?: (socketPath: string, mode: number) => void;
+  /** Opens the global registry to resolve the repo path for `startSession`. Default: {@link openRegistry}. */
+  readonly openRegistryFn?: () => ProjectRegistry;
+  /** The start primitive for `startSession`. Default: {@link startCoordinatorSession}. */
+  readonly startFn?: typeof startCoordinatorSession;
 }
 
 const OPERATOR_IPC_METHOD_SET = new Set<string>(Object.values(OPERATOR_IPC_METHODS));
@@ -189,6 +197,8 @@ export class OperatorIpcServer {
   private readonly openReview: (projectId: ProjectId) => ReviewStore;
   private readonly onError: ((error: unknown) => void) | undefined;
   private readonly chmodSocket: (socketPath: string, mode: number) => void;
+  private readonly openRegistryFn: () => ProjectRegistry;
+  private readonly startFn: typeof startCoordinatorSession;
   private readonly transport: SocketServerTransport;
   private readonly pendingTranscriptPushes = new Map<string, { offset: number; chunk: string }>();
   private transcriptPushInFlight = false;
@@ -202,6 +212,8 @@ export class OperatorIpcServer {
     this.openReview = deps.openReview ?? openReviewStore;
     this.onError = deps.onError;
     this.chmodSocket = deps.chmodSocket ?? chmodSync;
+    this.openRegistryFn = deps.openRegistryFn ?? openRegistry;
+    this.startFn = deps.startFn ?? startCoordinatorSession;
     this.transport = new SocketServerTransport(this.socketPath);
     this.transport.onmessage = (message): void => this.onMessage(message);
     this.transport.onerror = (error): void => this.report(error);
@@ -325,9 +337,48 @@ export class OperatorIpcServer {
         return (await this.control.reviewContext(
           requireString(params, 'reviewId'),
         )) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.startSession:
+        // Stage 14 P4 — the operator-only START verb over the operator-IPC wire (the IPC socket is
+        // operator-uid-only by OS permission; this is NEVER an agent-callable tool — Principle 4 + D4).
+        // Resolve the project's repo path via the registry exactly as `runStartSessionCommand` does,
+        // then delegate to the same core primitive (single source of truth; never duplicated here).
+        return (await this.handleStartSession(params)) as unknown as WirePayload;
       default:
         return assertNever(method);
     }
+  }
+
+  /**
+   * Start a ROOT coordinator session via the operator-IPC wire. Resolves the project's repo path
+   * from the registry, then delegates to the core `startCoordinatorSession` primitive. Fails loud
+   * (Principle 9) unless exactly one of `prompt` / `specBody` is supplied.
+   */
+  private async handleStartSession(params: WirePayload): Promise<StartSessionResult> {
+    const prompt = typeof params['prompt'] === 'string' ? params['prompt'].trim() : '';
+    const specBody = typeof params['specBody'] === 'string' ? params['specBody'].trim() : '';
+    const fromPrompt = prompt.length > 0;
+    const fromSpec = specBody.length > 0;
+    if (fromPrompt === fromSpec) {
+      throw new InvalidParamsError(
+        'operator IPC startSession: exactly one of `prompt` / `specBody` is required ' +
+          '(Principle 9 — fail loud).',
+      );
+    }
+    const registry = this.openRegistryFn();
+    let repoCwd: string | undefined;
+    try {
+      repoCwd = registry.pathFor(this.projectId) ?? undefined;
+    } finally {
+      registry.close();
+    }
+    if (repoCwd == null) {
+      throw new Error(`operator IPC startSession: unknown project id '${this.projectId}'.`);
+    }
+    return this.startFn({
+      projectId: this.projectId,
+      repoCwd,
+      ...(fromPrompt ? { prompt } : { specBody }),
+    });
   }
 
   /** Reply to an actionable mail named by `target`, through the daemon's own store (single writer). */

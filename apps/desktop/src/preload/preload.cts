@@ -60,6 +60,8 @@ interface CoShellBridge {
   onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
+  agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
+  agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
   // ── Review ────────────────────────────────────────────────────────────────
   onReviewState(listener: (state: ReviewState) => void): () => void;
   onReviewError(listener: (message: string) => void): () => void;
@@ -69,6 +71,12 @@ interface CoShellBridge {
   reviewCancelVerdict(): Promise<ReviewState | null>;
   reviewSubmitVerdict(): Promise<ReviewState | null>;
   reviewRefresh(): Promise<ReviewState | null>;
+  // ── Session ───────────────────────────────────────────────────────────────
+  sessionStart(
+    prompt: string | null,
+    specBody: string | null,
+  ): Promise<{ ok: boolean; error?: string }>;
+  onSessionError(listener: (message: string) => void): () => void;
 }
 
 const bridge: CoShellBridge = {
@@ -183,6 +191,12 @@ const bridge: CoShellBridge = {
   async agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agents:steer', agentId, steer);
   },
+  async agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agent:stop', agentId);
+  },
+  async agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agent:unstick', agentId);
+  },
   // ── Review ────────────────────────────────────────────────────────────────
   onReviewState(listener: (state: ReviewState) => void) {
     const handler = (_event: unknown, state: ReviewState): void => listener(state);
@@ -211,6 +225,18 @@ const bridge: CoShellBridge = {
   },
   async reviewRefresh(): Promise<ReviewState | null> {
     return ipcRenderer.invoke<ReviewState | null>('review:refresh');
+  },
+  // ── Session ───────────────────────────────────────────────────────────────
+  async sessionStart(
+    prompt: string | null,
+    specBody: string | null,
+  ): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:start', prompt, specBody);
+  },
+  onSessionError(listener: (message: string) => void) {
+    const handler = (_event: unknown, message: string): void => listener(message);
+    ipcRenderer.on('session:error', handler);
+    return () => ipcRenderer.removeListener('session:error', handler);
   },
 };
 

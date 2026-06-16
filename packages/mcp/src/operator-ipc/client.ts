@@ -33,6 +33,8 @@ import {
   type ProjectId,
   type ReplyDraft,
   type ReviewContext,
+  type StartSessionParams,
+  type StartSessionResult,
   type Steer,
   type TranscriptTail,
 } from '@co/core';
@@ -155,6 +157,14 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     return (await this.call(OPERATOR_IPC_METHODS.reviewContext, {
       reviewId,
     })) as unknown as ReviewContext;
+  }
+
+  /** Stage 14 P4 — start a ROOT coordinator session (operator-only; mirrors {@link reviewContext}). */
+  async startSession(params: StartSessionParams): Promise<StartSessionResult> {
+    return (await this.call(OPERATOR_IPC_METHODS.startSession, {
+      ...(params.prompt != null ? { prompt: params.prompt } : {}),
+      ...(params.specBody != null ? { specBody: params.specBody } : {}),
+    } as unknown as WirePayload)) as unknown as StartSessionResult;
   }
 
   /** Subscribe to the per-tick `tick` push; returns an unsubscribe fn. */
@@ -440,6 +450,15 @@ export class OperatorIpcClient {
       }
     }
     return { kind: 'conductor-down', reviewId };
+  }
+
+  /**
+   * Stage 14 P4 — start a ROOT coordinator session (operator-only; wraps the core primitive). Unlike
+   * observe/transcript, this is a WRITE verb that requires the socket; if the Conductor is down it
+   * throws a clear {@link ConductorUnavailableError} (Principle 9 — control needs the daemon).
+   */
+  async startSession(params: StartSessionParams): Promise<StartSessionResult> {
+    return this.withConnection((c) => c.startSession(params));
   }
 
   /** Subscribe to the per-tick push; survives reconnects. Returns an unsubscribe fn. */
