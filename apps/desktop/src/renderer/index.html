@@ -1476,6 +1476,55 @@
         background: var(--stuck);
         color: #fff;
       }
+
+      /* ── Session start form ───────────────────────────────── */
+      .session-start-card {
+        padding: 0;
+        overflow: hidden;
+      }
+
+      .session-form-heading {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .session-form-body {
+        padding: 12px 14px;
+      }
+
+      .session-prompt-textarea {
+        min-height: 72px;
+      }
+
+      .session-form-footer {
+        padding: 10px 14px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      /* ── Agents roster row actions ────────────────────────── */
+      .agents-roster-row {
+        flex-wrap: wrap;
+      }
+
+      .agents-row-actions {
+        display: flex;
+        gap: 4px;
+        margin-left: auto;
+        flex-shrink: 0;
+      }
+
+      .agents-agent-btn {
+        padding: 2px 8px;
+        font-size: 10px;
+      }
     </style>
     <link rel="stylesheet" href="./vendor/xterm.css" />
   </head>
@@ -1549,9 +1598,18 @@
       <!-- Main content area -->
       <main>
         <div class="view active" id="view-dashboard">
-          <div class="mc-header">
-            <div class="mc-title">Mission Control</div>
-            <div class="mc-subline">Connecting to conductor…</div>
+          <div id="dashboard-content">
+            <div class="mc-header">
+              <div class="mc-title">Mission Control</div>
+              <div class="mc-subline">Connecting to conductor…</div>
+            </div>
+          </div>
+          <div
+            id="session-start-form"
+            class="section-card session-start-card"
+            aria-label="Start a coordinator session"
+          >
+            <!-- Rendered by renderSessionStartForm() -->
           </div>
         </div>
         <div class="view" id="view-agents">

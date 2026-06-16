@@ -40,6 +40,7 @@ import {
   openSpecStore,
   openWorktreeStore,
   outwardApprovalEnvelope,
+  startCoordinatorSession,
   queryLiveObservability,
   queryObservability,
   type DeliveredMail,
@@ -2381,5 +2382,169 @@ describe('Stage 13 R-A — reviewContext over the default socket (client↔serve
       kind: 'conductor-down',
       reviewId: 'rev-absent',
     });
+  });
+});
+
+// ── Stage 14 P4 — startSession over the operator-IPC wire ───────────────────────
+describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, never an agent tool)', () => {
+  // A canned registry that resolves to the test project's cwd (avoids needing a live registry file).
+  function makeOpenRegistryFn(projectId: string, cwd: string): () => ProjectRegistry {
+    return () => {
+      const reg = openRegistry();
+      registries.push(reg);
+      // Override pathFor to return the test cwd for our projectId.
+      return {
+        ...reg,
+        pathFor: (pid: string) => (pid === projectId ? cwd : reg.pathFor(pid)),
+      };
+    };
+  }
+
+  it('startSession round-trips: the result flows back across the socket and startFn receives the right params', async () => {
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const fakeResult = {
+      coordinator: `coord-root-test`,
+      worktreePath: '/tmp/fake/worktree',
+      branch: 'co/coord-root-test',
+      baseRef: 'main',
+      baseSha: 'abc1234',
+    };
+    const startCalls: Array<{
+      projectId: string;
+      repoCwd: string;
+      prompt?: string;
+      specBody?: string;
+    }> = [];
+    const startFn: typeof startCoordinatorSession = (params) => {
+      startCalls.push({
+        projectId: params.projectId,
+        repoCwd: params.repoCwd,
+        prompt: params.prompt,
+        specBody: params.specBody,
+      });
+      return fakeResult;
+    };
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      startFn,
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    const result = await client.startSession({ prompt: 'orchestrate the new feature' });
+
+    expect(result).toEqual(fakeResult);
+    expect(startCalls).toHaveLength(1);
+    expect(startCalls[0]).toMatchObject({
+      projectId,
+      repoCwd: cwd,
+      prompt: 'orchestrate the new feature',
+    });
+    expect(startCalls[0]?.specBody).toBeUndefined();
+  });
+
+  it('startSession with specBody: the specBody flows to the startFn (not prompt)', async () => {
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const fakeResult = {
+      coordinator: 'coord-root-spec',
+      worktreePath: '/tmp/wt',
+      branch: 'co/b',
+      baseRef: 'main',
+      baseSha: 'def',
+    };
+    const startCalls: Array<{ prompt?: string; specBody?: string }> = [];
+    const startFn: typeof startCoordinatorSession = (params) => {
+      startCalls.push({ prompt: params.prompt, specBody: params.specBody });
+      return fakeResult;
+    };
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      startFn,
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    const result = await client.startSession({ specBody: '# spec\n\n- Do the thing' });
+
+    expect(result).toEqual(fakeResult);
+    expect(startCalls[0]).toMatchObject({ specBody: '# spec\n\n- Do the thing' });
+    expect(startCalls[0]?.prompt).toBeUndefined();
+  });
+
+  it('exactly-one-of: both prompt and specBody → InvalidParams error across the socket', async () => {
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      startFn: () => {
+        throw new Error('should not reach startFn');
+      },
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.startSession({ prompt: 'a prompt', specBody: 'a spec' })).rejects.toThrow(
+      /exactly one/i,
+    );
+  });
+
+  it('exactly-one-of: neither prompt nor specBody → InvalidParams error across the socket', async () => {
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      startFn: () => {
+        throw new Error('should not reach startFn');
+      },
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    // Neither prompt nor specBody supplied (both undefined/empty).
+    await expect(client.startSession({})).rejects.toThrow(/exactly one/i);
   });
 });

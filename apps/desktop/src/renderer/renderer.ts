@@ -119,7 +119,7 @@ function renderTreeNodes(nodes: readonly TreeNode[], depth: number): string {
 }
 
 function renderDashboard(state: DashboardState): void {
-  const container = document.getElementById('view-dashboard');
+  const container = document.getElementById('dashboard-content');
   if (!container) return;
 
   const isLive = state.connection === 'live';
@@ -555,6 +555,14 @@ function renderAgents(state: AgentsConsoleState): void {
             statusDotHtml(agent.status),
             `<span class="agents-row-role">${esc(agent.role)}</span>`,
             `<span class="agents-row-id">${esc(agent.agentId)}</span>`,
+            `<div class="agents-row-actions">`,
+            `<button class="btn btn-secondary agents-agent-btn" data-agent-action="stop"`,
+            ` data-agent-id="${esc(agent.agentId)}" type="button"`,
+            ` aria-label="Stop agent ${esc(agent.agentId)}">Stop</button>`,
+            `<button class="btn btn-secondary agents-agent-btn" data-agent-action="unstick"`,
+            ` data-agent-id="${esc(agent.agentId)}" type="button"`,
+            ` aria-label="Unstick agent ${esc(agent.agentId)}">Unstick</button>`,
+            `</div>`,
             `</div>`,
           ].join('');
         })
@@ -769,6 +777,25 @@ function renderReview(state: ReviewState): void {
   }
 }
 
+// ── Session start form rendering ───────────────────────────────────────────────
+
+function renderSessionStartForm(): void {
+  const form = document.getElementById('session-start-form');
+  if (!form) return;
+  form.innerHTML = [
+    `<div class="session-form-heading">Start a coordinator session</div>`,
+    `<div class="session-form-body">`,
+    `<textarea id="session-prompt-input" class="composer-textarea session-prompt-textarea"`,
+    ` placeholder="Describe the task for the root coordinator…"`,
+    ` aria-label="Coordinator session prompt"></textarea>`,
+    `</div>`,
+    `<div class="session-form-footer">`,
+    `<button class="btn btn-reply" id="session-start-btn" type="button"`,
+    ` aria-label="Start coordinator session">Start session</button>`,
+    `</div>`,
+  ].join('');
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -875,6 +902,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
   void bridge.reviewRefresh();
 
+  // ── Session start ──────────────────────────────────────────────────────────
+
+  renderSessionStartForm();
+
+  bridge.onSessionError((message) => {
+    showAppError(message);
+  });
+
+  document.getElementById('session-start-form')?.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('#session-start-btn');
+    if (!btn) return;
+    const textarea = document.getElementById('session-prompt-input') as HTMLTextAreaElement | null;
+    const prompt = textarea?.value.trim() ?? '';
+    void bridge.sessionStart(prompt.length > 0 ? prompt : null, null).then((r) => {
+      if (r.ok && textarea) textarea.value = '';
+      // Errors are pushed via session:error → onSessionError → showAppError.
+    });
+  });
+
   document.getElementById('view-review')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
 
@@ -945,6 +991,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('view-agents')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
+
+    // Stop / Unstick per-agent buttons — check before row selection so clicks on the buttons
+    // do not also trigger agent selection.
+    const agentBtn = target.closest<HTMLElement>('.agents-agent-btn');
+    if (agentBtn?.dataset['agentId'] != null) {
+      e.stopPropagation();
+      const agentAction = agentBtn.dataset['agentAction'];
+      const agentId = agentBtn.dataset['agentId'];
+      if (agentAction === 'stop') {
+        void bridge.agentsStop(agentId).then((r) => {
+          if (!r.ok) showTranscriptError(r.error);
+        });
+      } else if (agentAction === 'unstick') {
+        void bridge.agentsUnstick(agentId).then((r) => {
+          if (!r.ok) showTranscriptError(r.error);
+        });
+      }
+      return;
+    }
 
     const row = target.closest<HTMLElement>('.agents-roster-row');
     if (row?.dataset['agentId'] != null) {

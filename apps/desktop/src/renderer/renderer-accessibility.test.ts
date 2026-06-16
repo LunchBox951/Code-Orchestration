@@ -139,3 +139,76 @@ describe('renderer accessibility states', () => {
     expect(rendererSource).toContain('if (latestMailState != null) renderMail(latestMailState)');
   });
 });
+
+describe('session start (P4)', () => {
+  it('session-start-form container is in the HTML (static, outside dashboard-content)', () => {
+    expect(htmlSource).toContain('id="session-start-form"');
+    // Must be a sibling of dashboard-content, not inside it (survives renderDashboard rewrites).
+    const dashContent = htmlSource.indexOf('id="dashboard-content"');
+    const sessionForm = htmlSource.indexOf('id="session-start-form"');
+    expect(dashContent).toBeGreaterThan(-1);
+    expect(sessionForm).toBeGreaterThan(-1);
+    // session-start-form must appear AFTER dashboard-content in document order
+    // (sibling, not nested inside dashboard-content which renderDashboard overwrites).
+    expect(sessionForm).toBeGreaterThan(dashContent);
+  });
+
+  it('renderSessionStartForm injects a textarea with the correct aria-label and a start button', () => {
+    expect(rendererSource).toContain('function renderSessionStartForm()');
+    expect(rendererSource).toContain('aria-label="Coordinator session prompt"');
+    expect(rendererSource).toContain('id="session-start-btn"');
+    expect(rendererSource).toContain('aria-label="Start coordinator session"');
+  });
+
+  it('renderer wires session:start to the bridge on button click', () => {
+    expect(rendererSource).toContain('bridge.sessionStart(');
+    expect(rendererSource).toContain("'#session-start-btn'");
+    // On success the textarea is cleared.
+    expect(rendererSource).toContain("textarea.value = ''");
+  });
+
+  it('renderDashboard targets dashboard-content (not view-dashboard), preserving the session form', () => {
+    expect(rendererSource).toContain("document.getElementById('dashboard-content')");
+    // Must NOT target view-dashboard as the container (would wipe the form on every tick).
+    const renderDashFn = rendererSource.slice(rendererSource.indexOf('function renderDashboard('));
+    const fnBody = renderDashFn.slice(0, renderDashFn.indexOf('\nfunction '));
+    expect(fnBody).not.toContain("getElementById('view-dashboard')");
+  });
+
+  it('session error handler is wired to show an app error toast', () => {
+    expect(rendererSource).toContain('bridge.onSessionError(');
+    expect(rendererSource).toContain('showAppError(');
+  });
+});
+
+describe('agents stop / unstick (P4)', () => {
+  it('per-agent Stop and Unstick buttons render in agents roster with correct aria-labels', () => {
+    expect(rendererSource).toContain('data-agent-action="stop"');
+    expect(rendererSource).toContain('data-agent-action="unstick"');
+    expect(rendererSource).toContain('aria-label="Stop agent ${esc(agent.agentId)}"');
+    expect(rendererSource).toContain('aria-label="Unstick agent ${esc(agent.agentId)}"');
+  });
+
+  it('renderer wires stop/unstick agent buttons to the bridge', () => {
+    expect(rendererSource).toContain('bridge.agentsStop(');
+    expect(rendererSource).toContain('bridge.agentsUnstick(');
+    expect(rendererSource).toContain("agentAction === 'stop'");
+    expect(rendererSource).toContain("agentAction === 'unstick'");
+  });
+
+  it('stop/unstick click handler stops propagation so row selection is not also triggered', () => {
+    // The agent-btn handler calls e.stopPropagation() before the roster-row handler fires.
+    const clickBlock = rendererSource.slice(
+      rendererSource.indexOf("const agentBtn = target.closest<HTMLElement>('.agents-agent-btn')"),
+    );
+    expect(clickBlock.slice(0, 200)).toContain('e.stopPropagation()');
+  });
+
+  it('bridge exposes agentsStop and agentsUnstick methods', () => {
+    const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+    expect(preloadSource).toContain('agentsStop(');
+    expect(preloadSource).toContain('agentsUnstick(');
+    expect(preloadSource).toContain("'agent:stop'");
+    expect(preloadSource).toContain("'agent:unstick'");
+  });
+});

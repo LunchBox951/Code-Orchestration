@@ -1297,6 +1297,8 @@ export type {
   OperatorUnavailableReason,
   OperatorObservation,
   OperatorIpcConnectionState,
+  StartSessionParams,
+  StartSessionResult,
 } from './operator-ipc/contract.js';
 export {
   OPERATOR_IPC_METHODS,
