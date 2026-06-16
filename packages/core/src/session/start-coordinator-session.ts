@@ -9,13 +9,13 @@
  * What it does, given `{ projectId, repoCwd, prompt? | specBody? }`:
  *   1. PROVISION the root's worktree via {@link slingWorktree} (a real worktree record + checkout under
  *      program-data) so the daemon's cold-start launch has a recorded cwd + placement to host into.
- *   2. REGISTER the root in the roster as a `coordinator` whose parent is {@link OPERATOR} (idempotent —
- *      re-asserting the same agent is safe).
- *   3. SEED an ACTIONABLE `clarify_request` kickoff addressed to the root, FROM `@operator`, carrying the
+ *   2. SEED an ACTIONABLE `clarify_request` kickoff addressed to the root, FROM `@operator`, carrying the
  *      prompt (or the draft-spec brief) as `{ subject, body }`. This is what makes the root selectable by
  *      the daemon's run-cycle: selection reads `store.outstanding`, which is ACTIONABLE-only. An
  *      `operator_message` is classified INFORMATIONAL and would NOT drive a turn — so the kickoff must be
  *      a `clarify_request` (the same actionable kickoff the harnesses use).
+ *   3. REGISTER the root in the roster as a `coordinator` whose parent is {@link OPERATOR} (idempotent —
+ *      re-asserting the same agent is safe).
  *
  * ⚠ It deliberately DOES NOT mint a `session.created` record. Minting the session is the daemon's job
  * when it cold-starts the registered-but-unhosted root (`ensureHosted → hostSession`, which mints the
@@ -33,7 +33,7 @@
  * via {@link rootCoordinatorId}, so a given project always yields the same root id / branch / pane.
  */
 import { createHash } from 'node:crypto';
-import { MAIL_CLARIFY_REQUEST, OPERATOR } from '../mail/events.js';
+import { MAIL_CLARIFY_REQUEST, OPERATOR, type DeliveredMail } from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { openRosterStore, type RosterStore } from '../roles/roster-store.js';
 import {
@@ -92,8 +92,8 @@ export function rootCoordinatorId(projectId: string): string {
 
 /**
  * Start a ROOT coordinator session (the operator entry point). See the file docstring for the full
- * contract; in short: provision the worktree → register the roster coordinator (parent `@operator`) →
- * seed the actionable `clarify_request` kickoff — but mint NO session (the daemon does that on cold
+ * contract; in short: provision the worktree → seed the actionable `clarify_request` kickoff →
+ * register the roster coordinator (parent `@operator`) — but mint NO session (the daemon does that on cold
  * start). Fails loud (Principle 9) unless exactly one of `prompt` / `specBody` is supplied.
  */
 export function startCoordinatorSession(
@@ -144,20 +144,13 @@ export function startCoordinatorSession(
     worktreeStore.close();
   }
 
+  let kickoff: DeliveredMail | undefined;
   try {
-    // 2) REGISTER the root in the roster (idempotent): a coordinator parented to @operator.
-    const roster = openRoster(projectId);
-    try {
-      roster.recordAgent({ agentId: coordinator, role: 'coordinator', parent: OPERATOR });
-    } finally {
-      roster.close();
-    }
-
-    // 3) SEED the ACTIONABLE kickoff `clarify_request` (NOT `operator_message` — that is informational and
+    // 2) SEED the ACTIONABLE kickoff `clarify_request` (NOT `operator_message` — that is informational and
     //    would not drive a turn). To the root, from @operator, carrying the prompt / draft-spec brief.
     const mail = openMail(projectId);
     try {
-      mail.send({
+      kickoff = mail.send({
         type: MAIL_CLARIFY_REQUEST,
         to: coordinator,
         from: OPERATOR,
@@ -167,8 +160,17 @@ export function startCoordinatorSession(
     } finally {
       mail.close();
     }
+
+    // 3) REGISTER the root in the roster (idempotent): a coordinator parented to @operator.
+    const roster = openRoster(projectId);
+    try {
+      roster.recordAgent({ agentId: coordinator, role: 'coordinator', parent: OPERATOR });
+    } finally {
+      roster.close();
+    }
   } catch (cause) {
     cleanupFailedStartWorktree(openWorktrees, projectId, branch, repoCwd);
+    retractStartKickoff(openMail, projectId, kickoff);
     throw cause;
   }
 
@@ -179,6 +181,22 @@ export function startCoordinatorSession(
     baseRef: slung.baseRef,
     baseSha: slung.baseSha,
   };
+}
+
+function retractStartKickoff(
+  openMail: (projectId: string) => MailStore,
+  projectId: string,
+  kickoff: DeliveredMail | undefined,
+): void {
+  if (kickoff == null) return;
+  const mail = openMail(projectId);
+  try {
+    mail.retract(OPERATOR, kickoff.seq);
+  } catch {
+    // Preserve the original start failure. Orphan detection can surface cleanup residue later.
+  } finally {
+    mail.close();
+  }
 }
 
 function cleanupFailedStartWorktree(

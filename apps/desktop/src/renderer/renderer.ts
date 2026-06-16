@@ -906,10 +906,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   renderSessionStartForm();
 
-  bridge.onSessionError((message) => {
-    showAppError(message);
-  });
-
   document.getElementById('session-start-form')?.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('#session-start-btn');
     if (!btn) return;

@@ -76,7 +76,6 @@ interface CoShellBridge {
     prompt: string | null,
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
-  onSessionError(listener: (message: string) => void): () => void;
 }
 
 const bridge: CoShellBridge = {
@@ -232,11 +231,6 @@ const bridge: CoShellBridge = {
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:start', prompt, specBody);
-  },
-  onSessionError(listener: (message: string) => void) {
-    const handler = (_event: unknown, message: string): void => listener(message);
-    ipcRenderer.on('session:error', handler);
-    return () => ipcRenderer.removeListener('session:error', handler);
   },
 };
 

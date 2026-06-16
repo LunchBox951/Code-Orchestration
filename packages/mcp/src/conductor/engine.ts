@@ -65,6 +65,7 @@ import {
   steerPane,
   watchDialogs,
   waitingItems,
+  WEDGE_MS,
   type ReviewerSpawnGate,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -366,6 +367,12 @@ export class ConductorEngine {
    * on release.
    */
   private readonly turnInFlight = new Map<string, boolean>();
+  /**
+   * P6 (watchdog-seam) — the injected-time start of the current or most-recent unfinished turn. Used
+   * to scope host liveness to current-turn bytes instead of stale startup/prior-turn output, and to
+   * prove a hosted pane has actually had a turn injected before silent-stop classification is enabled.
+   */
+  private readonly turnStartedAt = new Map<string, number>();
 
   constructor(deps: ConductorEngineDeps) {
     this.deps = deps;
@@ -418,9 +425,10 @@ export class ConductorEngine {
   /**
    * P6 (watchdog-seam) — build the in-process liveness observation for `agent` without the OS
    * `pidAlive` probe. Returns `{ trace, exited, turnActive }` from durable in-process state:
-   *   - `trace`: a single `bytes` event at the last pane byte time (from {@link lastByteAt}) — enough
-   *     for the classifier to check byte-quiescence (idle). Empty when no bytes have been seen yet,
-   *     which is still a valid observation (no byte activity at all is not an idle signal on its own).
+   *   - `trace`: a single `bytes` event at the last current-turn pane byte time (from
+   *     {@link lastByteAt}) — enough for the classifier to check byte-quiescence (idle). Empty when no
+   *     current-turn bytes have been seen yet, which is still a valid observation (absence alone is not
+   *     an idle signal).
    *   - `exited`: whether the pane has fired `onExit` (the `dead` liveness signal).
    *   - `turnActive`: whether {@link runOneTurn} is currently in flight (mail injected, turn not
    *     yet yielded) — the semantic `turnActive` signal that separates a wedge from a silent-stop.
@@ -438,16 +446,25 @@ export class ConductorEngine {
         readonly trace: readonly DetectorEvent[];
         readonly exited: boolean;
         readonly turnActive: boolean;
+        readonly turnStartedAt?: number;
       }
     | undefined {
     const agentKey = ConductorEngine.agentKey(projectId, agentId);
     if (!this.hosted.has(agentKey)) return undefined; // not hosted — unobservable (skip)
     const exited = this.paneExited.get(agentKey) ?? false;
     const turnActive = this.turnInFlight.get(agentKey) ?? false;
+    const turnStartedAt = this.turnStartedAt.get(agentKey);
     const lastByte = this.lastByteAt.get(agentKey);
     const trace: DetectorEvent[] =
-      lastByte !== undefined ? [{ kind: 'bytes', at: lastByte, bytes: 1 }] : [];
-    return { trace, exited, turnActive };
+      lastByte !== undefined && (turnStartedAt == null || lastByte >= turnStartedAt)
+        ? [{ kind: 'bytes', at: lastByte, bytes: 1 }]
+        : [];
+    return {
+      trace,
+      exited,
+      turnActive,
+      ...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
+    };
   }
 
   /**
@@ -583,6 +600,7 @@ export class ConductorEngine {
     opts: RunOneTurnOptions = {},
   ): Promise<TurnOutcome> {
     const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
+    this.turnStartedAt.set(agentKey, this.deps.now());
     this.turnInFlight.set(agentKey, true); // P6: mark turn in flight so the reconcile watchdog sees turnActive
     try {
       const text = this.renderMail(mail);
@@ -592,6 +610,7 @@ export class ConductorEngine {
       });
       opts.onInjected?.();
       const { turnEnd, trace, observedAt } = await this.observeTurnEnd(hosted);
+      if (turnEnd.sawCompletionVerb) this.turnStartedAt.delete(agentKey);
       // P1b: classify liveness over the SAME turn trace and surface it. The turn has yielded
       // (turnActive=false), so the classifier reads `dead` (pane exited) or a `silent_stop` break
       // (idle without a completion verb); otherwise the session is healthy and the pane stays WARM.
@@ -639,7 +658,20 @@ export class ConductorEngine {
         abortCurrent = () => controller.abort();
         await this.deps.quietWindow(controller.signal);
         abortCurrent = null;
-        if (!controller.signal.aborted) break; // window elapsed with no new output ⇒ idle
+        if (!controller.signal.aborted) {
+          const turnStartedAt = this.turnStartedAt.get(
+            ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent),
+          );
+          const hasCurrentTurnBytes = trace.some((ev) => ev.kind === 'bytes');
+          if (
+            turnStartedAt !== undefined &&
+            !hasCurrentTurnBytes &&
+            this.deps.now() - turnStartedAt < WEDGE_MS
+          ) {
+            continue;
+          }
+          break; // window elapsed with no new output ⇒ idle
+        }
         // else: new output arrived during the window ⇒ re-arm and keep watching.
       }
       const observedAt = this.deps.now();
@@ -943,6 +975,7 @@ export class ConductorEngine {
     this.transcriptNextOffsets.delete(agentKey);
     this.lastByteAt.delete(agentKey); // P6
     this.turnInFlight.delete(agentKey); // P6
+    this.turnStartedAt.delete(agentKey); // P6
   }
 }
 

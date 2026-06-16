@@ -463,7 +463,13 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     // Record a PLACED decision only after the sandbox exists, kickoff is durable, and the live launch
     // has either succeeded or is intentionally headless. A git, mail, or spawn failure must not leave
     // a false successful placement.
-    ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
+    try {
+      ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
+    } catch (cause) {
+      cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd);
+      retractKickoff(ctx.mail, ctx.agent, kickoff);
+      throw cause;
+    }
 
     return {
       status: 'placed',

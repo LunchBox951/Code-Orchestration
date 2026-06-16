@@ -3,7 +3,7 @@
  * `FakePty` + a CONTROLLABLE scheduler (NOT real timers, NEVER a real provider binary), this proves:
  *   - `ConductorHostRunner.start()` recovers + arms the cadence and returns the live set;
  *   - each scheduler beat drives exactly one `daemon.tick()` and reports its outcome;
- *   - the re-entrancy guard SKIPS a beat while a prior tick is still in flight (no overlap);
+ *   - the re-entrancy guard skips overlapping daemon ticks while allowing watchdog-only beats;
  *   - `stop()` disarms;
  *   - `serveConductor` wires the whole stack over injected seams and runs;
  *   - the default `makeTransport` is the `[host-live]` operator-handoff seam (fails loud), and
@@ -384,7 +384,7 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     expect(() => runner.start()).toThrow(/already been stopped/i);
   });
 
-  it('skips a beat while a prior tick is still in flight (re-entrancy guard — no overlap)', async () => {
+  it('skips overlapping daemon ticks while allowing watchdog-only beats', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
     const clock = makeClock();
@@ -411,10 +411,10 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
 
     scheduler.fire(); // beat #1 — daemon.tick() starts and parks at the (unsettled) turn
     await tick(); // let beat #1 reach its in-flight await
-    scheduler.fire(); // beat #2 — MUST be skipped (a tick is in flight)
+    scheduler.fire(); // beat #2 — daemon.tick() is skipped; watchdog-only reconcile may run
     await tick();
 
-    // Settle the single in-flight turn; only beat #1 completes (beat #2 never ticked).
+    // Settle the single in-flight turn; only beat #1 completes a daemon tick.
     await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
     await flush();
     expect(ticks).toHaveLength(1);

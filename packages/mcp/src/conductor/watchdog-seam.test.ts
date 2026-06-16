@@ -24,6 +24,7 @@ import {
   FakePty,
   ReconcileLoop,
   WEDGE_MS,
+  classifyLiveness,
   defaultMailRenderer,
   openMailStore,
   openRegistry,
@@ -207,10 +208,26 @@ async function hostPane(
   return pane;
 }
 
+async function driveTurnToIdle(
+  pane: FakePty['panes'][number],
+  item: ReturnType<typeof outstandingItem>,
+  clock: ReturnType<typeof makeClock>,
+  qw: ReturnType<typeof makeQuietWindow>,
+): Promise<void> {
+  await tick(); // injectMail has written the payload and is awaiting the echo
+  pane.emit(defaultMailRenderer(item)); // composer echoes the injected text
+  await tick(); // injectMail submits; observeTurnEnd arms the first quiet window
+  clock.set(1000);
+  pane.emit('turn output before yielding\r\n');
+  await tick(); // new bytes re-arm the quiet window
+  clock.set(1000 + QUIET_WINDOW_MS + 1);
+  qw.settle();
+}
+
 // ── AC-S14-6 — the main proof ────────────────────────────────────────────────────────────────────────
 
 describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-backed livenessInputFor', () => {
-  it('a stalled agent (pty-quiet, no completion verb, pidAlive=true) is detected and escalated to STUCK', async () => {
+  it('a driven turn that yields quiet without a completion verb is detected and escalated to STUCK', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
 
@@ -244,20 +261,19 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     // Access the engine through the daemon (mirrors host.test.ts pattern).
     const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
 
-    // Host the stalled agent pane with outstanding actionable mail: this is a yielded turn that still
-    // needs a completion verb, not a merely warm idle pane.
+    // Host the stalled agent pane with outstanding actionable mail, then actually drive one turn. A
+    // merely warm pane with queued work is covered by the negative regression below.
     seedActionableMail(projectId, 'impl-stalled');
     const pane = await hostPane(engine, pty, makeIdentity('impl-stalled', projectId, cwd));
+    const hosted = engine.getHosted(projectId, 'impl-stalled')!;
+    const item = outstandingItem(projectId, 'impl-stalled');
     const reconcile = (runner as unknown as { daemon: { reconcile: ReconcileLoop } }).daemon
       .reconcile;
 
-    // Emit some bytes so the engine's lastByteAt is set (the agent was active at clock=0).
-    pane.emit('⠋ working…\r\n');
     clock.set(0);
-
-    // Advance time past the QUIET_WINDOW_MS + idle boundary so detectTurnEnd sees the agent as idle.
-    const AFTER_QUIET = 1000 + QUIET_WINDOW_MS + 1;
-    clock.set(AFTER_QUIET);
+    const turnP = engine.runOneTurn(hosted, item);
+    await driveTurnToIdle(pane, item, clock, qw);
+    await turnP;
 
     // Reconcile 1 — the watchdog observes the agent: idle, no completion verb, pidAlive=true,
     // turnActive=false ⇒ SILENT STOP break-signal + finish-before-yield nudge. NOT stuck yet.
@@ -271,10 +287,55 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     expect(stuck).toEqual([]); // nudge injected first; STUCK requires a persisting break
 
     // Reconcile 2 — still idle, no completion ⇒ persisting break ⇒ STUCK-and-surfaced.
-    clock.set(AFTER_QUIET + 4000);
+    clock.set(1000 + QUIET_WINDOW_MS + 1 + 4000);
     await reconcile.tick();
 
     expect(stuck).toEqual(['impl-stalled']);
+
+    await runner.stop();
+  });
+
+  it('a warm hosted pane with queued mail but no driven turn is NOT detected as silent-stop', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const scheduler = new FakeScheduler();
+
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const stuck: string[] = [];
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      autoStart: false,
+      pidAliveFor: () => true,
+      injectNudge: async () => {},
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: (agent) => stuck.push(agent),
+    });
+
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const reconcile = (runner as unknown as { daemon: { reconcile: ReconcileLoop } }).daemon
+      .reconcile;
+    seedActionableMail(projectId, 'impl-queued');
+    const pane = await hostPane(engine, pty, makeIdentity('impl-queued', projectId, cwd));
+
+    clock.set(0);
+    pane.emit('warm pane output before selection\r\n');
+    clock.set(1000 + QUIET_WINDOW_MS + 1);
+
+    await reconcile.tick();
+
+    expect(breaks).toEqual([]);
+    expect(stuck).toEqual([]);
 
     await runner.stop();
   });
@@ -688,13 +749,12 @@ describe('ConductorEngine.livenessObservationFor — the in-process observation 
       makeTransport: () => InMemoryTransport.createLinkedPair(),
       now: clock.now,
       quietWindow: qw.quietWindow,
-      // Fast retryDelay + allowUnverifiedSubmit: injectMail resolves immediately even without a
-      // real pane echo, so runOneTurn can proceed to observeTurnEnd and the test can settle it.
-      injectOptions: { retryDelay: () => Promise.resolve(), allowUnverifiedSubmit: true },
+      // Never-resolving retry seam: only the composer echo below advances injection.
+      injectOptions: { retryDelay: () => new Promise<void>(() => {}) },
     } satisfies ConductorEngineDeps);
 
     seedActionableMail(projectId, 'impl-turn');
-    await hostPane(engine, pty, makeIdentity('impl-turn', projectId, cwd));
+    const pane = await hostPane(engine, pty, makeIdentity('impl-turn', projectId, cwd));
 
     // Before any turn — turnActive must be false.
     expect(engine.livenessObservationFor(projectId, 'impl-turn')!.turnActive).toBe(false);
@@ -714,7 +774,18 @@ describe('ConductorEngine.livenessObservationFor — the in-process observation 
     await tick(); // let runOneTurn start and reach the injectMail await
 
     // While the turn is in flight — turnActive must be true.
-    expect(engine.livenessObservationFor(projectId, 'impl-turn')!.turnActive).toBe(true);
+    const activeObs = engine.livenessObservationFor(projectId, 'impl-turn')!;
+    expect(activeObs.turnActive).toBe(true);
+    expect(activeObs.turnStartedAt).toBe(0);
+
+    pane.emit(defaultMailRenderer(mail)); // echo-verify the injected mail
+    await tick(); // injectMail submits; observeTurnEnd arms the first quiet window
+
+    // Emit a current-turn byte so this test exercises ordinary quiet-yield completion rather than
+    // the zero-current-byte wedge guard.
+    clock.set(1000);
+    pane.emit('turn bytes\r\n');
+    await tick();
 
     // Settle the turn: advance the clock past the quiet window, then resolve it.
     clock.set(1000 + QUIET_WINDOW_MS + 1);
@@ -724,6 +795,110 @@ describe('ConductorEngine.livenessObservationFor — the in-process observation 
     // After the turn completes — turnActive must be false again.
     expect(engine.livenessObservationFor(projectId, 'impl-turn')!.turnActive).toBe(false);
 
+    await engine.closeAll();
+  });
+
+  it('scopes active-turn liveness to bytes at or after turnStartedAt', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: () => Promise.resolve(), allowUnverifiedSubmit: true },
+    } satisfies ConductorEngineDeps);
+
+    seedActionableMail(projectId, 'impl-stale');
+    const pane = await hostPane(engine, pty, makeIdentity('impl-stale', projectId, cwd));
+
+    clock.set(1000);
+    pane.emit('startup/prior-turn bytes\r\n');
+
+    const hosted = engine.getHosted(projectId, 'impl-stale')!;
+    const mail = outstandingItem(projectId, 'impl-stale');
+    clock.set(10_000);
+    const turnP = engine.runOneTurn(hosted, mail);
+    await tick();
+
+    const obs = engine.livenessObservationFor(projectId, 'impl-stale')!;
+    expect(obs.turnActive).toBe(true);
+    expect(obs.turnStartedAt).toBe(10_000);
+    expect(obs.trace).toEqual([]);
+
+    const beforeWedge = classifyLiveness(
+      { ...obs, pidAlive: true, hasOutstandingActionable: true },
+      10_000 + WEDGE_MS - 1,
+    );
+    expect(beforeWedge.liveness).toBe('alive');
+    expect(beforeWedge.break).toBeUndefined();
+
+    clock.set(10_000 + WEDGE_MS);
+    qw.settle();
+    await turnP;
+    await engine.closeAll();
+  });
+
+  it('keeps a zero-current-byte active turn in flight through settled quiet windows before wedge', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: () => Promise.resolve(), allowUnverifiedSubmit: true },
+    } satisfies ConductorEngineDeps);
+
+    seedActionableMail(projectId, 'impl-zero');
+    await hostPane(engine, pty, makeIdentity('impl-zero', projectId, cwd));
+    const hosted = engine.getHosted(projectId, 'impl-zero')!;
+    const mail = outstandingItem(projectId, 'impl-zero');
+
+    let completed = false;
+    clock.set(1000);
+    const turnP = engine.runOneTurn(hosted, mail).then(() => {
+      completed = true;
+    });
+    await tick();
+
+    clock.set(1000 + QUIET_WINDOW_MS + 1);
+    qw.settle();
+    await flush();
+
+    expect(completed).toBe(false);
+    const obs = engine.livenessObservationFor(projectId, 'impl-zero')!;
+    expect(obs.turnActive).toBe(true);
+    expect(obs.turnStartedAt).toBe(1000);
+    expect(obs.trace).toEqual([]);
+
+    const beforeWedge = classifyLiveness(
+      { ...obs, pidAlive: true, hasOutstandingActionable: true },
+      1000 + WEDGE_MS - 1,
+    );
+    expect(beforeWedge.liveness).toBe('alive');
+    expect(beforeWedge.break).toBeUndefined();
+
+    const atWedge = classifyLiveness(
+      { ...obs, pidAlive: true, hasOutstandingActionable: true },
+      1000 + WEDGE_MS,
+    );
+    expect(atWedge.liveness).toBe('wedged');
+    expect(atWedge.break?.kind).toBe('wedged');
+
+    clock.set(1000 + WEDGE_MS);
+    qw.settle();
+    await turnP;
     await engine.closeAll();
   });
 

@@ -555,7 +555,8 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       return {
         ...obs,
         pidAlive: pidAliveFor(agent),
-        hasOutstandingActionable: hasOutstandingActionable(projectId, agent.agentId),
+        hasOutstandingActionable:
+          obs.turnStartedAt !== undefined && hasOutstandingActionable(projectId, agent.agentId),
       };
     },
     now,

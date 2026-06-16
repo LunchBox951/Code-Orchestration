@@ -247,7 +247,6 @@ interface CoShellBridge {
     prompt: string | null,
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
-  onSessionError(listener: (message: string) => void): () => void;
 }
 
 interface Window {

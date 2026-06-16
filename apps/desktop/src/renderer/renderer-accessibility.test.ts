@@ -176,15 +176,11 @@ describe('session start (P4)', () => {
     expect(fnBody).not.toContain("getElementById('view-dashboard')");
   });
 
-  it('session error handler is wired to show an app error toast', () => {
-    expect(rendererSource).toContain('bridge.onSessionError(');
-    expect(rendererSource).toContain('showAppError(');
-  });
-
   it('session:start request errors surface exactly once through the returned result', () => {
     const returnedErrorDisplays = rendererSource.match(
       /showAppError\(r\.error \?\? 'Failed to start coordinator session'\)/g,
     );
+    expect(rendererSource).not.toContain('bridge.onSessionError(');
     expect(rendererSource).toContain('else if (!r.ok)');
     expect(rendererSource).toContain(
       "showAppError(r.error ?? 'Failed to start coordinator session')",

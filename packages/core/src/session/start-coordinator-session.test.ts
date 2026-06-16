@@ -181,7 +181,7 @@ describe('startCoordinatorSession — provisions worktree, registers the root, s
     ).not.toThrow();
   });
 
-  it('cleans up the provisioned root worktree when roster registration fails', () => {
+  it('cleans up worktree + kickoff when roster registration fails, then allows retry', () => {
     const { projectId, repo } = makeProject();
     const coordinator = rootCoordinatorId(projectId);
     const branch = `co/${coordinator}`;
@@ -208,12 +208,31 @@ describe('startCoordinatorSession — provisions worktree, registers the root, s
     } finally {
       wt.close();
     }
+    const mail = openMailStore(projectId);
+    try {
+      expect(mail.outstanding(coordinator)).toHaveLength(0);
+    } finally {
+      mail.close();
+    }
     expect(() =>
       execFileSync('git', ['rev-parse', '--verify', branch], { cwd: repo, stdio: 'ignore' }),
     ).toThrow();
+
+    const retried = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'retry after roster cleanup', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+
+    expect(retried.branch).toBe(branch);
+    const retriedWt = openWorktreeStore(projectId);
+    try {
+      expect(retriedWt.getWorktree(branch)?.removed).toBe(false);
+    } finally {
+      retriedWt.close();
+    }
   });
 
-  it('cleans up the provisioned root worktree when kickoff mail fails', () => {
+  it('cleans up the provisioned root worktree when kickoff mail fails, then allows retry', () => {
     const { projectId, repo } = makeProject();
     const coordinator = rootCoordinatorId(projectId);
     const branch = `co/${coordinator}`;
@@ -249,6 +268,26 @@ describe('startCoordinatorSession — provisions worktree, registers the root, s
     expect(() =>
       execFileSync('git', ['rev-parse', '--verify', branch], { cwd: repo, stdio: 'ignore' }),
     ).toThrow();
+
+    const roster = openRosterStore(projectId);
+    try {
+      expect(roster.getAgent(coordinator)).toBeUndefined();
+    } finally {
+      roster.close();
+    }
+
+    const retried = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'retry after mail cleanup', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+
+    expect(retried.branch).toBe(branch);
+    const retriedMail = openMailStore(projectId);
+    try {
+      expect(retriedMail.outstanding(coordinator)).toHaveLength(1);
+    } finally {
+      retriedMail.close();
+    }
   });
 
   it('fails loud when BOTH --prompt and --spec are supplied', () => {

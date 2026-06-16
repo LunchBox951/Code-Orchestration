@@ -8,7 +8,7 @@ import { runStartSessionCommand } from './conductor/start-session-command.js';
 import { runProjectIdCommand } from './conductor/project-id-command.js';
 
 /**
- * The `co-mcp` executable. Three modes:
+ * The `co-mcp` executable. Modes:
  *   - default (no subcommand): the stdio MCP server — the real headless AGENT surface.
  *   - `serve <projectId>`: the OPERATOR-only Conductor launch (`co-mcp serve`, D6) — drives the
  *     deterministic daemon on a real cadence with real panes. The Conductor is never agent-callable

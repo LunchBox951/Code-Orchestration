@@ -7,7 +7,7 @@
  * the core primitive. Heavy logic is covered by the core primitive's own unit test; here we only assert
  * the adapter's parse + wiring (injected seams — no real registry/git needed).
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ProjectRegistry } from '@co/core';
 import {
   parseStartSessionArgs,
@@ -112,6 +112,35 @@ describe('runStartSessionCommand — registry resolution + core wiring (injected
     expect(calls).toEqual([
       { projectId: 'proj-1', repoCwd: '/repos/proj-1', specBody: 'SPEC@/tmp/spec.md' },
     ]);
+  });
+
+  it('prints the default launch note to stderr, not stdout', async () => {
+    const stderr: string[] = [];
+    const stdout: string[] = [];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((line) => {
+      stderr.push(String(line));
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((line) => {
+      stdout.push(String(line));
+    });
+    try {
+      await runStartSessionCommand(['proj-1', '--prompt', 'orchestrate'], {
+        openRegistry: fakeRegistry(() => '/repos/proj-1'),
+        start: () => ({
+          coordinator: 'coord-root-deadbeef',
+          worktreePath: '/data/worktrees/co/coord-root-deadbeef',
+          branch: 'co/coord-root-deadbeef',
+          baseRef: 'main',
+          baseSha: 'abc',
+        }),
+      });
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+
+    expect(stderr.join('\n')).toContain('coord-root-deadbeef');
+    expect(stdout).toEqual([]);
   });
 
   it('fails loud on an unknown project id (never calls the core primitive)', async () => {

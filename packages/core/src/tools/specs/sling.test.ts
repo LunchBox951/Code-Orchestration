@@ -874,6 +874,46 @@ describe('co_sling — spawn gate integration (P2 / AC-S10-2)', () => {
     expect(ctx.worktrees?.getWorktree('co/sling-fail')?.removed).toBe(true);
     expect(ctx.mail.outstanding('impl-sling-fail')).toHaveLength(0);
     expect(() => git(repo, 'rev-parse', '--verify', 'co/sling-fail')).toThrow();
+
+    const retryCtx = {
+      ...ctx,
+      reviewerSpawnGate: undefined,
+    };
+    const retried = (await invokeTool(buildCoreRegistry(), retryCtx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-sling-fail',
+      branch: 'co/sling-fail',
+    })) as { status: string };
+
+    expect(retried.status).toBe('placed');
+    expect(ctx.worktrees?.getWorktree('co/sling-fail')?.removed).toBe(false);
+    expect(ctx.mail.outstanding('impl-sling-fail')).toHaveLength(1);
+  });
+
+  it('placed: cleans up worktree + kickoff when placement recording fails', async () => {
+    const repo = makeMainRepo();
+    const base = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const ctx: ToolContext = {
+      ...base,
+      dispatch: {
+        ...base.dispatch,
+        recordPlacement: () => {
+          throw new Error('placement failed');
+        },
+      } as DispatchStore,
+    };
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-placement-fail',
+        branch: 'co/placement-fail',
+      }),
+    ).rejects.toThrow(/placement failed/i);
+
+    expect(base.worktrees?.getWorktree('co/placement-fail')?.removed).toBe(true);
+    expect(base.mail.outstanding('impl-placement-fail')).toHaveLength(0);
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/placement-fail')).toThrow();
   });
 
   it('headless path (no reviewerSpawnGate): co_sling placed is byte-identical to before — gate never fires', async () => {
@@ -979,6 +1019,16 @@ describe('co_sling — P2 (AC-S14-2) kickoff: seeds actionable clarify_request o
     expect(base.worktrees?.getWorktree('co/p2-kickoff-fail')?.removed).toBe(true);
     expect(base.mail.outstanding('impl-kickoff-fail')).toHaveLength(0);
     expect(() => git(repo, 'rev-parse', '--verify', 'co/p2-kickoff-fail')).toThrow();
+
+    const retried = (await invokeTool(buildCoreRegistry(), base, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-kickoff-fail',
+      branch: 'co/p2-kickoff-fail',
+    })) as { status: string };
+
+    expect(retried.status).toBe('placed');
+    expect(base.worktrees?.getWorktree('co/p2-kickoff-fail')?.removed).toBe(false);
+    expect(base.mail.outstanding('impl-kickoff-fail')).toHaveLength(1);
   });
 
   it('waiting: does NOT seed a kickoff (no sandbox created, no mail delivered to child)', async () => {
