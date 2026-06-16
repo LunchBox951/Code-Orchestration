@@ -315,7 +315,7 @@ describe('AC-S9-8 — co mail send dispatches to openMailStore', () => {
       dir,
     );
     expect(result.exitCode).toBe(1);
-    expect(result.output).toMatch(/reviewVerdict|review_response/i);
+    expect(result.output).toMatch(/not CLI-sendable|review_response|Review view/i);
   });
 });
 

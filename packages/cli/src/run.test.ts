@@ -801,6 +801,8 @@ describe('co help / unknown command', () => {
     expect(result.exitCode).toBe(0);
     expect(result.output).toMatch(/usage|cost|sling/i);
     expect(result.output).toMatch(/refreshes usage cache/i);
+    expect(result.output).not.toContain('review_request');
+    expect(result.output).not.toContain('review_response');
   });
 
   it('shows help text for no arguments', async () => {

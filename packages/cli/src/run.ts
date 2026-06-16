@@ -15,6 +15,8 @@ import {
   defaultProviderProbe,
   openMailStore,
   OPERATOR,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   openSpecStore,
   openPlanStore,
@@ -43,6 +45,10 @@ import type {
   WorktreeRecord,
 } from '@co/core';
 import { readFileSync } from 'node:fs';
+
+const CLI_SENDABLE_MAIL_TYPES = MAIL_TYPES.filter(
+  (type) => type !== MAIL_REVIEW_REQUEST && type !== MAIL_REVIEW_RESPONSE,
+);
 
 export interface RunResult {
   output: string;
@@ -84,7 +90,7 @@ Mail (operator-only):
     --recipient <r>         Read a specific recipient's inbox
   co mail send              Send a typed mail from @operator
     --to <recipient>        Recipient (required)
-    --type <type>           Mail type (required): ${MAIL_TYPES.join('|')}
+    --type <type>           Mail type (required): ${CLI_SENDABLE_MAIL_TYPES.join('|')}
     --subject <subject>     Subject line (required)
     --body <body>           Body text (default: empty)
 
@@ -566,8 +572,17 @@ function runMailCommand(projectId: string, argv: string[]): RunResult {
       if (!to) throw new Error('missing --to <recipient>.');
       const rawType = parsed.values.get('--type');
       if (!rawType) throw new Error('missing --type <type>.');
-      if (!(MAIL_TYPES as readonly string[]).includes(rawType)) {
-        throw new Error(`unknown mail type '${rawType}'. Valid types: ${MAIL_TYPES.join(', ')}.`);
+      if (!(CLI_SENDABLE_MAIL_TYPES as readonly string[]).includes(rawType)) {
+        const knownMailType = (MAIL_TYPES as readonly string[]).includes(rawType);
+        if (knownMailType) {
+          throw new Error(
+            `mail type '${rawType}' is not CLI-sendable; submit human review verdicts through ` +
+              'the desktop Review view / operator IPC.',
+          );
+        }
+        throw new Error(
+          `unknown mail type '${rawType}'. Valid types: ${CLI_SENDABLE_MAIL_TYPES.join(', ')}.`,
+        );
       }
       const subject = parsed.values.get('--subject');
       if (!subject) throw new Error('missing --subject <subject>.');
