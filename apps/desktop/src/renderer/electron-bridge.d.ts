@@ -110,6 +110,19 @@ interface XtermTerminal {
   reset(): void;
   clear(): void;
   dispose(): void;
+  // Load an xterm addon (e.g. the fit addon) — `unknown` keeps the renderer free of an xterm type import.
+  loadAddon(addon: unknown): void;
+}
+
+// The vendored `@xterm/addon-fit` UMD build assigns `globalThis.FitAddon = { FitAddon: <constructor> }`.
+interface XtermFitAddon {
+  fit(): void;
+  activate(terminal: unknown): void;
+  dispose(): void;
+}
+
+interface XtermFitAddonModule {
+  FitAddon: new () => XtermFitAddon;
 }
 
 // ── Review (inline — renderer is isolated from Node context) ─────────────────
@@ -252,4 +265,5 @@ interface CoShellBridge {
 interface Window {
   coShell: CoShellBridge;
   Terminal: new (opts?: unknown) => XtermTerminal;
+  FitAddon: XtermFitAddonModule;
 }
