@@ -230,8 +230,11 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     // Access the engine through the daemon (mirrors host.test.ts pattern).
     const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
 
-    // Host the stalled agent pane (the session is recorded by LiveSessionHostImpl.hostSession).
+    // Host the stalled agent pane with outstanding actionable mail: this is a yielded turn that still
+    // needs a completion verb, not a merely warm idle pane.
+    seedActionableMail(projectId, 'impl-stalled');
     const pane = await hostPane(engine, pty, makeIdentity('impl-stalled', projectId, cwd));
+    runner.control?.router.pause('impl-stalled');
 
     // Emit some bytes so the engine's lastByteAt is set (the agent was active at clock=0).
     pane.emit('⠋ working…\r\n');
@@ -259,6 +262,49 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     await flush();
 
     expect(stuck).toEqual(['impl-stalled']);
+
+    await runner.stop();
+  });
+
+  it('an idle warm pane with no outstanding actionable mail is NOT detected as silent-stop', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const scheduler = new FakeScheduler();
+
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const stuck: string[] = [];
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      pidAliveFor: () => true,
+      injectNudge: async () => {},
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: (agent) => stuck.push(agent),
+    });
+
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const pane = await hostPane(engine, pty, makeIdentity('impl-idle', projectId, cwd));
+
+    pane.emit('warm pane ready\r\n');
+    clock.set(1000 + QUIET_WINDOW_MS + 1);
+
+    scheduler.fire();
+    await flush();
+    scheduler.fire();
+    await flush();
+
+    expect(breaks).toEqual([]);
+    expect(stuck).toEqual([]);
 
     await runner.stop();
   });

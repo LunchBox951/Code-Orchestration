@@ -91,8 +91,9 @@ Exactly one of `--prompt` / `--spec` is required; both or neither fails loud.
 
 **Option B — Desktop app:**
 
-Open the app, navigate to the **"Start a coordinator session"** form, fill in the project id and
-prompt or spec path, and click **"Start session"**.
+Launch the app with `CO_PROJECT_ID=<projectId>` in its environment, navigate to the **"Start a
+coordinator session"** form, enter a prompt, and click **"Start session"**. Use the CLI option above
+when starting from a pre-written draft spec file.
 
 The command registers the root coordinator in the roster and provisions its worktree. The daemon
 (Step 4) cold-starts it on the next tick and drives its first turn.
@@ -133,7 +134,7 @@ Operator host-live acceptance (run before merging):
 [ ] Auth: `co doctor --live` → [ok] provider-compatibility for the provider(s) you'll use.
 [ ] Find project id: `co-mcp project-id` prints the registered projectId for this repo.
 [ ] Start the daemon: `co-mcp serve <projectId>` ticks without error.
-[ ] Start a coordinator session: `co-mcp start-session <projectId> --prompt "…"` OR the app "Start session" button, with a small prompt (or draft spec).
+[ ] Start a coordinator session: `co-mcp start-session <projectId> --prompt "…"` OR the app "Start session" button, with a small prompt. Use CLI `--spec` for a draft spec.
 [ ] Plan-with-operator: the coordinator mails you a clarify/brainstorm; you answer; it drafts a spec.
 [ ] Lock: you `co_spec_lock` the agreed spec.
 [ ] Autonomous drive: WITHOUT manual tool calls, co spawns lead/implementer, runs turns, and a review_request lands in your inbox / the Reviews view.

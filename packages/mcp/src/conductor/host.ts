@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import {
   NodePtyHost,
   defaultGitRawReader,
+  openMailStore,
   openRegistry,
   openReviewStore,
   openSessionStore,
@@ -46,7 +47,7 @@ import { DaemonBackedAgentRouter } from './agent-router.js';
 import { EngineLiveStateProvider } from './live-observe.js';
 import type { HostedIdentity } from '../live-session-host.js';
 import { EngineReviewerSpawnGate } from './reviewer-gate.js';
-import { type CoMcpPaths } from './placement-launch.js';
+import { buildHostedLaunchSpec, type CoMcpPaths } from './placement-launch.js';
 import { createSocketBridgeTransportPair } from './real-transport.js';
 import { defaultCoMcpPaths, type HostLaunchPathOptions } from './host-launch-paths.js';
 import { resolveReviewContext } from './review-context.js';
@@ -287,6 +288,15 @@ function liveRunningAgents(projectId: ProjectId, engine: ConductorEngine): reado
   }
 }
 
+function hasOutstandingActionable(projectId: ProjectId, agentId: string): boolean {
+  const mail = openMailStore(projectId);
+  try {
+    return mail.outstanding(agentId).length > 0;
+  } finally {
+    mail.close();
+  }
+}
+
 /** Options for {@link serveConductor}. The genuinely host-live seams carry honest defaults. */
 export interface ServeConductorOptions {
   /** The project whose live set the conductor drives. */
@@ -401,12 +411,22 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       }
       return createSocketBridgeTransportPair(socketPath);
     });
+  const spawnSpecFor =
+    opts.coMcpPaths != null && isolatedHomeDirFor != null
+      ? (() => {
+          const coMcpPaths = opts.coMcpPaths;
+          const homeFor = isolatedHomeDirFor;
+          return (identity: HostedIdentity) =>
+            buildHostedLaunchSpec(identity, homeFor(identity.agent), coMcpPaths);
+        })()
+      : undefined;
   const engine = new ConductorEngine({
     pty,
     makeTransport,
     now,
     quietWindow: opts.quietWindow ?? realQuietWindow,
     reviewerSpawnGate: () => spawnGate,
+    ...(spawnSpecFor != null ? { spawnSpecFor } : {}),
   });
   if (opts.coMcpPaths != null) {
     ownedWtStore = openWorktreeStore(projectId);
@@ -506,7 +526,11 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     livenessInputFor: (agent: RunningAgent) => {
       const obs = engine.livenessObservationFor(projectId, agent.agentId);
       if (obs == null) return undefined; // not hosted — skip (orphan with no live pane)
-      return { ...obs, pidAlive: pidAliveFor(agent) };
+      return {
+        ...obs,
+        pidAlive: pidAliveFor(agent),
+        hasOutstandingActionable: hasOutstandingActionable(projectId, agent.agentId),
+      };
     },
     now,
     onBreak: opts.onBreak ?? (() => {}),

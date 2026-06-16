@@ -325,8 +325,8 @@ export class ConductorDaemon {
    * candidate, exactly as before. Re-launching a crashed child into a fresh pane is the `[host-live]`
    * operator handoff, not this in-process cold-start.
    *
-   * Over `FakePty` the default-spec `ensureHosted(identity)` path is sufficient (mirrors `hostPane`);
-   * the placement-launch-spec + injected `coMcpPaths` wiring is the host-live seam (see `host.ts`).
+   * Launch details stay behind the engine's injected `spawnSpecFor`: sandbox callers can keep a
+   * minimal spec, while `co-mcp serve` supplies the isolated MCP bridge/config spec in `host.ts`.
    * No wall clock — discovery is pure store reads and the launch carries the daemon's injected seams.
    */
   private async coldStartRootCoordinators(): Promise<readonly string[]> {

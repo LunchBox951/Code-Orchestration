@@ -26,7 +26,9 @@ describe('co-mcp binary help', () => {
 
   it('keeps the SH-1 runbook honest about current live serve boundaries', () => {
     expect(runbook).toContain('co-mcp serve <projectId>');
-    expect(runbook).toContain('does not yet auto-discover a freshly locked spec');
+    expect(runbook).toContain('Current Stage 14 boundary');
+    expect(runbook).toContain('cold-starts registered root coordinators');
+    expect(runbook).toContain('Treat any manual tool calls that remain necessary');
     expect(runbook).toMatch(/There is no public\s+`co spec lock` CLI command yet/);
     expect(runbook).toContain('For SH-1 evidence, submit from the Review view');
     expect(runbook).not.toContain(

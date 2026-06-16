@@ -103,7 +103,9 @@ export interface LivenessInput {
   readonly hasWaitingItems?: boolean;
   /**
    * True when the agent's inbox contains at least one outstanding (unresolved) actionable mail
-   * (`mail.outstanding(agent)` non-empty). Injected by the host-side `livenessInputFor` seam.
+   * (`mail.outstanding(agent)` non-empty). Injected by the host-side `livenessInputFor` seam. When
+   * explicitly false, an idle warm pane is not treated as a silent-stop break because there is no
+   * outstanding turn to finish.
    */
   readonly hasOutstandingActionable?: boolean;
 }
@@ -191,7 +193,7 @@ export function classifyLiveness(
 
   // silent-stop — the agent YIELDED its turn (no longer active) but went idle with NO completion verb
   // and a quiet pty: it stopped without finishing. Reuse C2's detector for the idle + no-verb gate.
-  if (!input.turnActive) {
+  if (!input.turnActive && input.hasOutstandingActionable !== false) {
     const trace =
       input.turnStartedAt == null
         ? input.trace

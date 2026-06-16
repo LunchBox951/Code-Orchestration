@@ -16,18 +16,21 @@ import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  OPERATOR,
   ReconcileLoop,
   defaultMailRenderer,
   openMailStore,
   openRegistry,
   openRosterStore,
   openSessionStore,
+  openWorktreeStore,
   QUIET_WINDOW_MS,
   type DeliveredMail,
   type MailStore,
   type ProjectId,
   type ProjectRegistry,
   type RosterStore,
+  type WorktreeStore,
 } from '@co/core';
 import { ConductorEngine, type ConductorEngineDeps } from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
@@ -52,6 +55,7 @@ let engines: ConductorEngine[] = [];
 let registries: ProjectRegistry[] = [];
 let mailStores: MailStore[] = [];
 let rosterStores: RosterStore[] = [];
+let worktreeStores: WorktreeStore[] = [];
 
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
@@ -60,6 +64,7 @@ beforeEach(() => {
   registries = [];
   mailStores = [];
   rosterStores = [];
+  worktreeStores = [];
 });
 
 afterEach(async () => {
@@ -70,7 +75,7 @@ afterEach(async () => {
       /* best-effort */
     }
   }
-  for (const closeable of [...mailStores, ...rosterStores, ...registries]) {
+  for (const closeable of [...mailStores, ...rosterStores, ...worktreeStores, ...registries]) {
     try {
       closeable.close();
     } catch {
@@ -135,6 +140,34 @@ function seedActionableMail(projectId: ProjectId, agent: string): void {
   } finally {
     mail.close();
   }
+}
+
+function seedRootCoordinator(projectId: ProjectId, agent: string, cwd: string): void {
+  const roster = openRosterStore(projectId);
+  rosterStores.push(roster);
+  roster.recordAgent({ agentId: agent, role: 'coordinator', parent: OPERATOR });
+
+  const worktrees = openWorktreeStore(projectId);
+  worktreeStores.push(worktrees);
+  worktrees.recordWorktree({
+    branch: `co/${agent}`,
+    baseRef: 'main',
+    baseSha: 'abc123',
+    path: cwd,
+    parent: OPERATOR,
+    agent,
+    role: 'coordinator',
+  });
+
+  const mail = openMailStore(projectId);
+  mailStores.push(mail);
+  mail.send({
+    type: 'clarify_request',
+    to: agent,
+    from: OPERATOR,
+    subject: 'start',
+    body: 'draft a tiny doc change',
+  });
 }
 
 function outstandingItem(projectId: ProjectId, agent: string): DeliveredMail {
@@ -480,6 +513,58 @@ describe('serveConductor — wires the full stack over injected seams (no real b
 
     expect(paths.claudeCredentialsJson).toBe('{"claude":true}\n');
     expect(paths.codexAuthJson).toBe('{"codex":true}\n');
+  });
+
+  it('cold-started root coordinators use the host-live isolated MCP bridge launch spec', async () => {
+    const { projectId, cwd } = makeProject();
+    const root = 'coord-root-hostlive';
+    seedRootCoordinator(projectId, root, cwd);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const scheduler = new FakeScheduler();
+    const pty = new FakePty();
+    const ticks: DaemonTickOutcome[] = [];
+    const bridgeRequests: Array<{ readonly isolatedHomeDir: string; readonly agent: string }> = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      coMcpPaths: {
+        coMcpCommand: '/opt/co-mcp',
+        coCliCommand: '/opt/co',
+        coMcpBridgeSocketPath: (isolatedHomeDir, agent) => {
+          bridgeRequests.push({ isolatedHomeDir, agent });
+          return join(isolatedHomeDir, 'mcp', 'bridge.sock');
+        },
+      },
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      injectNudge: async () => {},
+      onTick: (o) => ticks.push(o),
+    });
+
+    scheduler.fire();
+    await tick(); // let the root cold-start spawn and bind before startup bytes arrive
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await driveTurnToIdle(pane, outstandingItem(projectId, root), clock, qw);
+    await flush();
+
+    expect(ticks[0]?.coldStarted).toEqual([root]);
+    expect(bridgeRequests).toEqual([
+      { isolatedHomeDir: expect.stringContaining(`/isolated/${root}`), agent: root },
+    ]);
+    expect(pane.spec.env['CLAUDE_CONFIG_DIR']).toContain(`/isolated/${root}`);
+    expect(pane.spec.args).toContain('--strict-mcp-config');
+    expect(pane.spec.args).toContain('--mcp-config');
+    expect(pane.spec.prelaunchFiles?.[0]?.path).toContain(`/isolated/${root}/mcp/co-mcp.json`);
+    expect(pane.spec.prelaunchFiles?.[0]?.contents).toContain('"bridge"');
+    expect(pane.spec.prelaunchFiles?.[0]?.contents).toContain('/mcp/bridge.sock');
+
+    await runner.stop();
   });
 
   it('autoStart:false builds without arming the cadence', async () => {
