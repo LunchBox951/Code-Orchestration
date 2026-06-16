@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { defaultGitExec, slingWorktree } from '../../worktrees/sling.js';
 import type { ToolSpec } from '../registry.js';
-import { MAIL_CLARIFY_REQUEST } from '../../mail/events.js';
+import { MAIL_CLARIFY_REQUEST, type DeliveredMail } from '../../mail/events.js';
+import type { MailStore } from '../../mail/mail-store.js';
 import { defaultProviderAccounts } from '../../dispatch/balancer.js';
 import { refreshUsageForAccounts, runDispatchPolicy } from '../../dispatch/cli-render.js';
 import { providerSchema } from '../../dispatch/events.js';
@@ -424,7 +425,27 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       projectId: ctx.projectId,
     });
 
-    // Symmetrical to co_merge's reviewer trigger: once the slung child's worktree + placement are
+    // AC-S14-2 (P2 kickoff): seed an actionable clarify_request to the child so the daemon's
+    // run-cycle can select it on the next tick (selection reads `outstanding`, ACTIONABLE-only).
+    // Seed BEFORE live spawn/placement so a mail failure cannot leave a placed or hosted child with no
+    // first actionable item.
+    let kickoff: DeliveredMail;
+    try {
+      kickoff = ctx.mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: input.agent,
+        from: ctx.agent,
+        subject: 'Kickoff',
+        body:
+          input.kickoff ??
+          'Begin your assigned task; your full assignment is in your session context. Report completion via `co_finish`/`worker_done`.',
+      });
+    } catch (cause) {
+      cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd);
+      throw cause;
+    }
+
+    // Symmetrical to co_merge's reviewer trigger: once the slung child's worktree + kickoff are
     // recorded, the live spawn must succeed or the caller must see the failure. Returning `placed`
     // while no pane exists would make launch failure invisible to recovery/operations.
     if (ctx.reviewerSpawnGate != null) {
@@ -434,27 +455,15 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
           provisionalPlacementRecord(input.agent, placedPayload),
         );
       } catch (cause) {
-        cleanupFailedSpawnWorktree(ctx.worktrees, input.branch, ctx.cwd);
+        cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd);
+        retractKickoff(ctx.mail, ctx.agent, kickoff);
         throw cause;
       }
     }
-    // Record a PLACED decision only after the sandbox exists and the live launch has either succeeded
-    // or is intentionally headless. A git or spawn failure must not leave a false successful placement.
+    // Record a PLACED decision only after the sandbox exists, kickoff is durable, and the live launch
+    // has either succeeded or is intentionally headless. A git, mail, or spawn failure must not leave
+    // a false successful placement.
     ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
-
-    // AC-S14-2 (P2 kickoff): seed an actionable clarify_request to the child so the daemon's
-    // run-cycle can select it on the next tick (selection reads `outstanding`, ACTIONABLE-only).
-    // The `kickoff` input carries the child's first task; the directive fallback is actionable work,
-    // not a content-free heartbeat. WAITING slings seed nothing (no sandbox, no actionable item).
-    ctx.mail.send({
-      type: MAIL_CLARIFY_REQUEST,
-      to: input.agent,
-      from: ctx.agent,
-      subject: 'Kickoff',
-      body:
-        input.kickoff ??
-        'Begin your assigned task; your full assignment is in your session context. Report completion via `co_finish`/`worker_done`.',
-    });
 
     return {
       status: 'placed',
@@ -493,7 +502,7 @@ function provisionalPlacementRecord(agent: string, placement: PlacementDecided):
   };
 }
 
-function cleanupFailedSpawnWorktree(
+function cleanupFailedSlingWorktree(
   worktrees: WorktreeStore,
   branch: string,
   repoCwd: string,
@@ -507,6 +516,14 @@ function cleanupFailedSpawnWorktree(
     defaultGitExec(repoCwd, ['branch', '-D', branch]);
   } catch {
     // Preserve the spawn failure. A missing/locked branch can be surfaced by later cleanup.
+  }
+}
+
+function retractKickoff(mail: MailStore, sender: string, kickoff: DeliveredMail): void {
+  try {
+    mail.retract(sender, kickoff.seq);
+  } catch {
+    // Preserve the spawn failure. Orphan detection can surface any cleanup residue later.
   }
 }
 

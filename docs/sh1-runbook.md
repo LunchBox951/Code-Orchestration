@@ -42,8 +42,8 @@ proof first if you have not already.
 4. **Desktop app built and running with the Reviews view available.** The Review view is required
    for SH-1 evidence because it displays the diff and locked acceptance criteria before verdict
    submission (see Step 3). Build the app (`pnpm build` from `apps/desktop`, or the appropriate
-   desktop build command for your environment) and confirm the **Reviews** nav item is visible before
-   starting.
+   desktop build command for your environment), launch it with `CO_PROJECT_ID="$PROJECT_ID"` in its
+   environment, and confirm the **Reviews** nav item is visible before starting.
 
 5. **Conductor daemon running.** Start it with:
 

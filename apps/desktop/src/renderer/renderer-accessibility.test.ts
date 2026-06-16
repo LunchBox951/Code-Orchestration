@@ -179,6 +179,13 @@ describe('session start (P4)', () => {
     expect(rendererSource).toContain('bridge.onSessionError(');
     expect(rendererSource).toContain('showAppError(');
   });
+
+  it('session:start returned errors are surfaced even when no push error is emitted', () => {
+    expect(rendererSource).toContain('else if (!r.ok)');
+    expect(rendererSource).toContain(
+      "showAppError(r.error ?? 'Failed to start coordinator session')",
+    );
+  });
 });
 
 describe('agents stop / unstick (P4)', () => {

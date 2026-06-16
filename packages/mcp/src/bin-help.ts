@@ -14,6 +14,6 @@ export function renderCoMcpHelp(): string {
     '  serve requires the explicit registered project id. It does not infer from cwd.',
     '  start-session requires exactly one of --prompt / --spec (both/neither fails loud).',
     '  project-id is idempotent: re-running on an already-registered repo returns the same id.',
-    '  stdout is reserved for MCP protocol output except for this help text.',
+    '  stdout is reserved for MCP protocol output except for this help text and project-id.',
   ].join('\n');
 }

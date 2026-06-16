@@ -365,7 +365,8 @@ export class ConductorDaemon {
               agent.role === 'coordinator' &&
               agent.parent === OPERATOR &&
               !live.has(agent.agentId) &&
-              !this.engine.isHosted(this.projectId, agent.agentId),
+              !this.engine.isHosted(this.projectId, agent.agentId) &&
+              !this.isSkipped(this.projectId, agent.agentId),
           );
         if (roots.length === 0) return [];
         const worktrees = this.openWorktrees(this.projectId);

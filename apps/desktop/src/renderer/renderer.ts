@@ -917,7 +917,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const prompt = textarea?.value.trim() ?? '';
     void bridge.sessionStart(prompt.length > 0 ? prompt : null, null).then((r) => {
       if (r.ok && textarea) textarea.value = '';
-      // Errors are pushed via session:error → onSessionError → showAppError.
+      else if (!r.ok) showAppError(r.error ?? 'Failed to start coordinator session');
     });
   });
 

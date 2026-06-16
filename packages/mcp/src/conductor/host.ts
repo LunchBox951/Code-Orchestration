@@ -370,10 +370,10 @@ export interface OperatorIpcServeConfig {
 /**
  * Build the full Conductor host stack and (by default) start it: a real {@link ConductorEngine} (real
  * panes + cadence), the watchdog {@link ReconcileLoop} (running set = the agents this process hosts;
- * the live OS liveness probe is the `[host-live]` handoff, so it skips), the deterministic
- * {@link ConductorDaemon}, and the {@link ConductorHostRunner}. Every genuinely host-live seam is
- * injectable; the defaults let `co-mcp serve` recover + idle-tick and fail loud ONLY when it must bind a
- * real provider transport. Returns the (started) runner.
+ * liveness input is derived from the hosted engine state plus the injected/default `pidAliveFor`
+ * probe), the deterministic {@link ConductorDaemon}, and the {@link ConductorHostRunner}. Every
+ * genuinely host-live seam is injectable; the defaults let `co-mcp serve` recover + idle-tick and fail
+ * loud ONLY when it must bind a real provider transport. Returns the (started) runner.
  */
 export async function serveConductor(opts: ServeConductorOptions): Promise<ConductorHostRunner> {
   const projectId = opts.projectId;

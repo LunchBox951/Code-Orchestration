@@ -946,6 +946,40 @@ describe('co_sling — P2 (AC-S14-2) kickoff: seeds actionable clarify_request o
     expect(outstanding[0]!.recipient).toBe('impl-1');
   });
 
+  it('placed: fails loud and cleans up when kickoff mail cannot be written', async () => {
+    const repo = makeMainRepo();
+    const base = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const spawned: string[] = [];
+    const ctx: ToolContext = {
+      ...base,
+      mail: {
+        ...base.mail,
+        send: () => {
+          throw new Error('kickoff failed');
+        },
+      },
+      reviewerSpawnGate: {
+        spawn: async (_projectId, record) => {
+          spawned.push(record.agent);
+        },
+      },
+    };
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-kickoff-fail',
+        branch: 'co/p2-kickoff-fail',
+      }),
+    ).rejects.toThrow(/kickoff failed/i);
+
+    expect(spawned).toEqual([]);
+    expect(base.dispatch?.readPlacements('lead-7')).toHaveLength(0);
+    expect(base.worktrees?.getWorktree('co/p2-kickoff-fail')?.removed).toBe(true);
+    expect(base.mail.outstanding('impl-kickoff-fail')).toHaveLength(0);
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/p2-kickoff-fail')).toThrow();
+  });
+
   it('waiting: does NOT seed a kickoff (no sandbox created, no mail delivered to child)', async () => {
     const repo = makeMainRepo();
     const ctx = makeContextWithDispatch('lead-7', repo, maxedSnapshot);

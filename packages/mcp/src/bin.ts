@@ -29,7 +29,7 @@ import { runProjectIdCommand } from './conductor/project-id-command.js';
  *
  * A fatal startup error (missing identity / project id, unregistered worktree, transport failure)
  * fails loud to stderr and exits non-zero — never a silent degrade (Principle 9). stdout is reserved
- * for the MCP protocol stream, except for explicit `--help` output.
+ * for the MCP protocol stream, except for explicit `--help` and `project-id` output.
  */
 const [mode, ...rest] = process.argv.slice(2);
 if (mode === '--help' || mode === '-h' || mode === 'help') {

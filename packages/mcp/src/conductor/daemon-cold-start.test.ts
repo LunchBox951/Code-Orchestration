@@ -393,6 +393,41 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
     expect(pty.panes).toHaveLength(0);
   });
 
+  it('does NOT cold-start a registered root while router skip state suppresses it', async () => {
+    const { projectId, repo } = makeProject();
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const engine = makeEngine(pty, clock, qw);
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+      isSkipped: (pid, agent) => pid === projectId && agent === coordinator,
+    });
+
+    const out = await daemon.tick();
+
+    expect(out.coldStarted).toEqual([]);
+    expect(out.selected).toBeNull();
+    expect(engine.isHosted(projectId, coordinator)).toBe(false);
+    expect(pty.panes).toHaveLength(0);
+
+    const sessions = openSessionStore(projectId);
+    try {
+      expect(sessions.getSession(coordinator)).toBeUndefined();
+    } finally {
+      sessions.close();
+    }
+  });
+
   it('is deterministic: two runs on fresh projects produce identical cold-start outcomes', async () => {
     // The root id is a deterministic function of the project id (a per-project randomUUID), so it
     // differs by project — exactly like sh1-dry-run's fingerprint excludes per-run git SHAs. Normalize
