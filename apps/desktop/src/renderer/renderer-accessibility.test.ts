@@ -124,10 +124,11 @@ describe('renderer accessibility states', () => {
     expect(nonApprovalBranch).not.toContain('data-recipient="${esc(selected.sender)}"');
   });
 
-  it('opens review requests as structured review responses', () => {
-    expect(rendererSource).toContain('mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE');
-    expect(rendererSource).toContain('data-type="${replyType}"');
-    expect(rendererSource).toContain("'Submit verdict'");
+  it('keeps review_request verdicts out of the Mail composer', () => {
+    expect(rendererSource).toContain("if (mailType === MAIL_REVIEW_REQUEST) return 'review'");
+    expect(rendererSource).not.toContain('mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE');
+    expect(rendererSource).not.toContain("'Submit verdict'");
+    expect(rendererSource).toContain('Open in Reviews');
   });
 
   it('populates the agent-bus selector from dashboard agents', () => {

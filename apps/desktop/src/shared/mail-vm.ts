@@ -66,13 +66,6 @@ const INITIAL_STATE: MailState = {
   composer: BLANK_COMPOSER,
 };
 
-function reviewVerdictFromBody(body: string): ReviewVerdictValue | undefined {
-  const [firstToken] = body.trim().split(/\s+/, 1);
-  const verdict = firstToken?.toUpperCase();
-  if (verdict === 'PASS' || verdict === 'ISSUES') return verdict;
-  return undefined;
-}
-
 function replyIdempotencyKey(targetRecipient: string, targetSeq: number, type: MailType): string {
   return `desktop-reply:${targetRecipient}:${targetSeq}:${type}`;
 }
@@ -240,6 +233,7 @@ export class MailVM {
   async submitReply(): Promise<void> {
     const c = this._state.composer;
     if (!c.active || c.pending || c.targetSeq == null || c.targetRecipient == null) return;
+    if (c.type === MAIL_REVIEW_RESPONSE) return;
     const idempotencyKey =
       c.idempotencyKey ?? replyIdempotencyKey(c.targetRecipient, c.targetSeq, c.type);
     this._state = {
@@ -247,8 +241,6 @@ export class MailVM {
       composer: { ...c, pending: true, idempotencyKey },
     };
     this.emit();
-    const reviewVerdict =
-      c.type === MAIL_REVIEW_RESPONSE ? reviewVerdictFromBody(c.body) : undefined;
     try {
       await this.cbReply?.(
         { seq: c.targetSeq, recipient: c.targetRecipient },
@@ -257,7 +249,6 @@ export class MailVM {
           subject: c.subject,
           body: c.body,
           idempotencyKey,
-          ...(reviewVerdict != null ? { reviewVerdict } : {}),
         },
       );
       if (this._state.composer.idempotencyKey === idempotencyKey) {

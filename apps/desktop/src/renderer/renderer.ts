@@ -22,7 +22,6 @@ let latestReviewState: ReviewState | null = null;
 
 const OPERATOR_BUS = '@operator';
 const MAIL_REVIEW_REQUEST = 'review_request';
-const MAIL_REVIEW_RESPONSE = 'review_response';
 const knownMailBuses = new Set<string>([OPERATOR_BUS]);
 let latestMailState: MailState | null = null;
 
@@ -43,11 +42,12 @@ function rememberMailBuses(state: DashboardState): void {
 }
 
 function replyTypeFor(mailType: string): string {
-  return mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE : 'clarify_response';
+  if (mailType === MAIL_REVIEW_REQUEST) return 'review';
+  return 'clarify_response';
 }
 
 function replyLabelFor(mailType: string): string {
-  return mailType === MAIL_REVIEW_REQUEST ? 'Submit verdict' : 'Reply';
+  return mailType === MAIL_REVIEW_REQUEST ? 'Open in Reviews' : 'Reply';
 }
 
 function activateView(view: NavView): void {
@@ -257,7 +257,6 @@ function renderMailDetail(state: MailState): void {
 
   const isActionable = selected.kind === 'actionable';
   const isApproval = selected.type === 'approval';
-  const isReviewComposer = composer.type === MAIL_REVIEW_RESPONSE;
   const pendingAttr = composer.pending ? ' disabled' : '';
 
   let actionButtons = '';
@@ -269,6 +268,12 @@ function renderMailDetail(state: MailState): void {
       `<button class="btn btn-reply btn-secondary" data-action="open-composer"`,
       ` data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}"`,
       ` data-type="approval_response" data-subject="${esc(`Re: ${selected.subject}`)}"${pendingAttr}>Add note</button>`,
+      `</div>`,
+    ].join('');
+  } else if (selected.type === MAIL_REVIEW_REQUEST) {
+    actionButtons = [
+      `<div class="mail-card-actions">`,
+      `<button class="btn btn-reply" data-action="open-review-view"${pendingAttr}>${replyLabelFor(selected.type)}</button>`,
       `</div>`,
     ].join('');
   } else if (isActionable) {
@@ -291,15 +296,11 @@ function renderMailDetail(state: MailState): void {
       ].join('')
     : [
         `<button class="btn btn-secondary" data-action="close-composer"${pendingAttr}>Cancel</button>`,
-        `<button class="btn btn-reply" data-action="submit-reply"${pendingAttr}>${isReviewComposer ? 'Submit verdict' : 'Send'}</button>`,
+        `<button class="btn btn-reply" data-action="submit-reply"${pendingAttr}>Send</button>`,
       ].join('');
 
-  const composerTitle = isApproval
-    ? 'Decision note'
-    : isReviewComposer
-      ? 'Review verdict'
-      : 'Reply';
-  const composerPlaceholder = isReviewComposer ? 'PASS or ISSUES' : 'Type your reply…';
+  const composerTitle = isApproval ? 'Decision note' : 'Reply';
+  const composerPlaceholder = 'Type your reply…';
   const composerHtml = composer.active
     ? [
         `<div class="mail-composer">`,
@@ -1032,6 +1033,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         break;
       }
+      case 'open-review-view':
+        activateView('review');
+        bridge.navigate('review');
+        void bridge.reviewRefresh().then((s) => {
+          if (s != null) renderReview(s);
+        });
+        break;
       case 'close-composer':
         void bridge.mailCloseComposer();
         break;

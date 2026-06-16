@@ -402,7 +402,7 @@ describe('createAppShell — mail VM bridge wiring', () => {
     );
   });
 
-  it('submits review_request replies with a structured review verdict', async () => {
+  it('does not submit review_request replies through the Mail view', async () => {
     const reviewRequest = {
       ...ACTION_MAIL,
       type: 'review_request',
@@ -429,16 +429,7 @@ describe('createAppShell — mail VM bridge wiring', () => {
     shell.mail.updateComposerField('body', 'ISSUES\nneeds tests');
     await shell.mail.submitReply();
 
-    await vi.waitFor(() => {
-      expect(client.reply).toHaveBeenCalledWith(
-        { seq: reviewRequest.seq, recipient: '@operator' },
-        expect.objectContaining({
-          type: 'review_response',
-          reviewVerdict: 'ISSUES',
-          body: 'ISSUES\nneeds tests',
-        }),
-      );
-    });
+    expect(client.reply).not.toHaveBeenCalled();
   });
 
   it('refreshes mail after informational markRead succeeds', async () => {

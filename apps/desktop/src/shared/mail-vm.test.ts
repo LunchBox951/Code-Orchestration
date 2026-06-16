@@ -340,7 +340,7 @@ describe('MailVM — reply composer', () => {
     expect(draft.idempotencyKey).toBe('desktop-reply:lead-1:5:clarify_response');
   });
 
-  it('submitReply adds reviewVerdict when sending a review_response', async () => {
+  it('submitReply refuses review_response composers so review verdicts stay in the Review view', async () => {
     const onReply = vi.fn();
     const vm = new MailVM({ registry: createRendererRegistry(), onReply });
     vm.openComposer(5, '@operator', 'review_response', 're: review');
@@ -348,12 +348,9 @@ describe('MailVM — reply composer', () => {
 
     await vm.submitReply();
 
-    const [, draft] = onReply.mock.calls[0] as [
-      { seq: number; recipient: string },
-      { type: string; subject: string; body: string; reviewVerdict?: string },
-    ];
-    expect(draft.type).toBe('review_response');
-    expect(draft.reviewVerdict).toBe('PASS');
+    expect(onReply).not.toHaveBeenCalled();
+    expect(vm.state.composer.active).toBe(true);
+    expect(vm.state.composer.pending).toBe(false);
   });
 
   it('submitReply closes the composer after firing', async () => {

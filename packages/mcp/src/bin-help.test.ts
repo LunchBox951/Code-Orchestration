@@ -32,6 +32,7 @@ describe('co-mcp binary help', () => {
       'picks up the task on its next tick and drives the full lifecycle autonomously',
     );
     expect(runbook).not.toContain('either the\n> Review view or the Mail view reply');
+    expect(runbook).not.toContain('wait for the Reviewer agent to finish');
     expect(runbook).not.toContain('## Step 5 — Verify zero prototype involvement');
   });
 

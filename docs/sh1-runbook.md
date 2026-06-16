@@ -26,8 +26,10 @@ proof first if you have not already.
    `[ok] provider-compatibility`. See [`host-proof.md`](host-proof.md) for the expected output and
    troubleshooting steps.
 
-2. **Binaries built and on `$PATH`.** `co` and `co-mcp` must be built (`pnpm build` in the repo
-   root) and shell-resolvable. If `co` is not on `$PATH`, set `CO_CLI_COMMAND` before proceeding.
+2. **Binaries built and shell-invocable.** `co` and `co-mcp` must be built (`pnpm build` in the repo
+   root). The operator shell commands below invoke `co` directly; if `co` is not on `$PATH`, use its
+   absolute path wherever the runbook says `co`. `CO_CLI_COMMAND` only helps `co-mcp` locate the CLI
+   for commands it launches from the daemon.
 
 3. **The `co` repo registered.** `co doctor` should show `[ok] program-data-integrity`. This
    confirms the repo is a registered project in program-data. There is no separate registration
@@ -138,9 +140,9 @@ Review the diff and criteria, then make a decision:
   is recorded and the Lead kicks the worktree back to the implementer for another pass.
 
 > **Important:** For SH-1 evidence, submit from the Review view so the captured decision includes
-> the rendered diff and locked acceptance criteria. The desktop Mail view can also record a
-> structured `review_response`, but it does not display that evidence and is not the proof path for
-> this runbook. There is **no CLI path** to submit a verdict.
+> the rendered diff and locked acceptance criteria. The desktop Mail view only surfaces the
+> `review_request` inbox item and routes the operator to Reviews; it cannot record a verdict. There
+> is **no CLI path** to submit a verdict.
 > `co mail send --type review_response …` is rejected before a mail is stored; the CLI has no verdict
 > recording path. Human-review verdicts must be recorded through the operator-IPC server. See [Advanced: observe without the desktop app](#advanced-observe-without-the-desktop-app)
 > for CLI observation commands.
@@ -219,7 +221,7 @@ marked met in `docs/v1-acceptance-criteria.md`:
 |---|---|
 | "Conductor not running" shown in Reviews | Start the daemon: `co-mcp serve <projectId>` |
 | No agents appear in the Agents Console | Daemon did not tick, the spec is not yet locked, or the next transition still needs an explicit operator/coordinator tool call; run `co status` and `co spec <taskId>` to confirm |
-| Reviews view empty / no pending review | The gated merge was not queued yet; wait for the Reviewer agent to finish (watch `co status`) |
+| Reviews view empty / no pending review | The gated merge was not queued yet; confirm or rerun the Lead/coordinator `co_merge` transition for the finished worktree and check the operator inbox for `review_request` |
 | "No locked spec" error from coordinator | Run `co spec <taskId>` and lock via operator-only `co_spec_lock` before planning/merge review |
 | SH-2 guard fails | A `.co/` literal was introduced in production source; grep `packages/*/src` for the offending path and remove it |
 | Clicking PASS has no effect | Desktop app lost connection to the IPC server; restart `co-mcp serve <projectId>` and reload the app |
@@ -243,10 +245,9 @@ co status
 ```
 
 A pending `review_request` in the inbox means the Review view is waiting for your PASS or ISSUES.
-To proceed, open the desktop app — **submitting a verdict requires the desktop app** (Review view
-or Mail view reply, both of which route through the operator-IPC server). There is no CLI
+To proceed, open the desktop app — **submitting a verdict requires the Review view**. There is no CLI
 verdict-submission path; `co mail send --type review_response …` is rejected before a mail is
-stored, and the gated merge will refuse until the operator-IPC path records the verdict.
+stored, and the gated merge will refuse until the operator-IPC Review path records the verdict.
 
 ---
 
