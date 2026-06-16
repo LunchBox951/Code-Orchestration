@@ -39,6 +39,7 @@ const RESOLVED_CTX: ReviewContext = {
   branch: 'feature',
   target: 'main',
   scope: 'pr_merge',
+  evidenceFingerprint: 'sha256:review-context-abc',
   diff: { kind: 'patch', patch: 'diff --git ...' },
   criteria: { kind: 'criteria', specRef: 'spec.md', criteria: [{ text: 'It works' }] },
 };
@@ -270,6 +271,7 @@ describe('ReviewVM — submitVerdict PASS', () => {
     expect(capturedTarget).toEqual({ seq: 7, recipient: OPERATOR });
     expect(capturedDraft?.type).toBe(MAIL_REVIEW_RESPONSE);
     expect(capturedDraft?.reviewVerdict).toBe('PASS');
+    expect(capturedDraft?.reviewContextFingerprint).toBe('sha256:review-context-abc');
     expect(capturedDraft?.idempotencyKey).toBe(
       `desktop-reply:${OPERATOR}:7:${MAIL_REVIEW_RESPONSE}`,
     );

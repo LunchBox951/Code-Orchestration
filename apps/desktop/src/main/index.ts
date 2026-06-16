@@ -140,6 +140,9 @@ function requireReplyDraft(value: unknown): ReplyDraft {
     ...(draft['reviewVerdict'] === 'PASS' || draft['reviewVerdict'] === 'ISSUES'
       ? { reviewVerdict: draft['reviewVerdict'] }
       : {}),
+    ...(typeof draft['reviewContextFingerprint'] === 'string'
+      ? { reviewContextFingerprint: draft['reviewContextFingerprint'] }
+      : {}),
   };
 }
 

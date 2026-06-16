@@ -23,6 +23,8 @@ export type ReviewSpecRef =
 
 /** The explicit marker surfaced when no locked spec resolves — never `<TODO>`. */
 export const NO_LOCKED_SPEC_MARKER = 'no locked spec' as const;
+const SPEC_REF_PREFIX = 'spec:';
+const SPEC_REF_LOCKED_SUFFIX = '#locked';
 
 /**
  * Resolve an optional spec reference into a `ReviewSpecRef` discriminated result:
@@ -42,6 +44,14 @@ export function resolveReviewSpecRef(specRef: string | undefined): ReviewSpecRef
  */
 export function renderReviewSpecRef(specRef: ReviewSpecRef): string {
   return specRef.kind === 'criteria' ? specRef.ref : NO_LOCKED_SPEC_MARKER;
+}
+
+/** Parse the pinned locked-spec ref shape used by the Review view (`spec:<taskId>#locked`). */
+export function taskIdFromLockedSpecRef(specRef: string): string | undefined {
+  const ref = specRef.trim();
+  if (!ref.startsWith(SPEC_REF_PREFIX) || !ref.endsWith(SPEC_REF_LOCKED_SUFFIX)) return undefined;
+  const taskId = ref.slice(SPEC_REF_PREFIX.length, ref.length - SPEC_REF_LOCKED_SUFFIX.length);
+  return taskId.length > 0 && !taskId.includes('#') ? taskId : undefined;
 }
 
 /**
@@ -65,4 +75,18 @@ export function resolveSpecRefFromStore(
     return { kind: 'criteria', ref: `spec:${taskId}#locked` };
   }
   return { kind: 'no-locked-spec' };
+}
+
+/**
+ * Resolve a user-supplied review spec ref against the durable spec store. Only the displayable,
+ * locked `spec:<taskId>#locked` shape backed by a locked spec record yields criteria.
+ */
+export function resolveReviewSpecRefFromStore(
+  specs: Pick<SpecStore, 'getSpec'>,
+  specRef: string | undefined,
+): ReviewSpecRef {
+  if (specRef === undefined || specRef.trim().length === 0) return { kind: 'no-locked-spec' };
+  const taskId = taskIdFromLockedSpecRef(specRef);
+  if (taskId == null) return { kind: 'no-locked-spec' };
+  return resolveSpecRefFromStore(specs, taskId);
 }

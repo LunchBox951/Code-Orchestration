@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import type {
   Criterion,
+  FinishRecord,
   GitReader,
   ReviewRequestRecord,
   SpecRecord,
@@ -60,6 +61,18 @@ function worktreeRecord(over: Partial<WorktreeRecord> = {}): WorktreeRecord {
   };
 }
 
+function finishRecord(over: Partial<FinishRecord> = {}): FinishRecord {
+  return {
+    branch: 'co/feature',
+    baseSha: 'a'.repeat(40),
+    commitSha: 'b'.repeat(40),
+    tests: [{ name: 'pnpm test', passed: true }],
+    recordedTs: 2,
+    recordedSeq: 7,
+    ...over,
+  };
+}
+
 /** A spies bundle: the injected deps + the close counters and the captured read args. */
 interface Spies {
   readonly deps: ReviewContextDeps;
@@ -74,6 +87,7 @@ function makeDeps(opts: {
   request?: ReviewRequestRecord;
   spec?: SpecRecord;
   worktree?: WorktreeRecord;
+  finish?: FinishRecord;
   git?: GitReader;
 }): Spies {
   const closes = { reviews: 0, specs: 0, worktrees: 0 };
@@ -99,6 +113,8 @@ function makeDeps(opts: {
         branchesAsked.push(branch);
         return opts.worktree != null && opts.worktree.branch === branch ? opts.worktree : undefined;
       },
+      getFinish: (branch) =>
+        opts.finish != null && opts.finish.branch === branch ? opts.finish : undefined,
       close: () => void closes.worktrees++,
     }),
     gitReader: (cwd, args) => {
@@ -118,6 +134,7 @@ describe('resolveReviewContext — every state surfaces a NAMED result (Principl
       request: reviewRecord(),
       spec: specRecord(),
       worktree: worktreeRecord(),
+      finish: finishRecord(),
       git: () => PATCH,
     });
 
@@ -126,6 +143,7 @@ describe('resolveReviewContext — every state surfaces a NAMED result (Principl
     expect(result).toEqual({
       kind: 'resolved',
       reviewId: 'rev-1',
+      evidenceFingerprint: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
       branch: 'co/feature',
       target: 'main',
       scope: 'pr_merge',
@@ -146,6 +164,28 @@ describe('resolveReviewContext — every state surfaces a NAMED result (Principl
     ]);
     // Every opened store was closed (no leaked handles).
     expect(spies.closes).toEqual({ reviews: 1, specs: 1, worktrees: 1 });
+  });
+
+  it('resolved fingerprint changes when the latest finish commit changes', async () => {
+    const base = {
+      request: reviewRecord(),
+      spec: specRecord(),
+      worktree: worktreeRecord(),
+      git: () => PATCH,
+    };
+    const first = await resolveReviewContext(
+      makeDeps({ ...base, finish: finishRecord({ commitSha: 'b'.repeat(40) }) }).deps,
+      'rev-1',
+    );
+    const second = await resolveReviewContext(
+      makeDeps({ ...base, finish: finishRecord({ commitSha: 'c'.repeat(40) }) }).deps,
+      'rev-1',
+    );
+
+    if (first.kind !== 'resolved' || second.kind !== 'resolved') {
+      throw new Error('expected resolved review contexts');
+    }
+    expect(first.evidenceFingerprint).not.toBe(second.evidenceFingerprint);
   });
 
   it('resolved + no-locked-spec: the spec store is never opened', async () => {

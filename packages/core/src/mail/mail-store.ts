@@ -63,6 +63,7 @@ export interface ReplyDraft {
   readonly idempotencyKey?: string;
   readonly decision?: ApprovalDecision; // ONLY an `approval_response` reply carries it (W4)
   readonly reviewVerdict?: ReviewVerdictValue; // ONLY a `review_response` reply carries it (L5-E)
+  readonly reviewContextFingerprint?: string; // ONLY a Review-view `review_response` reply carries it
 }
 
 /**

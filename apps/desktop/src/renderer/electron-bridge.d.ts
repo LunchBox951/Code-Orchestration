@@ -155,6 +155,7 @@ type ReviewContext =
   | {
       kind: 'resolved';
       reviewId: string;
+      evidenceFingerprint: string;
       branch: string;
       target: string;
       scope: string;

@@ -74,6 +74,7 @@ function reviewContextKey(value: unknown): string {
     sampleString(stringProp(value, 'branch')),
     sampleString(stringProp(value, 'target')),
     sampleString(stringProp(value, 'scope')),
+    sampleString(stringProp(value, 'evidenceFingerprint')),
     diffKey(value.diff),
     criteriaKey(value.criteria),
   ].join('|');

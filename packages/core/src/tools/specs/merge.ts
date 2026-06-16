@@ -286,6 +286,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         const triggerGate = new CoReviewGate({
           reviews: ctx.reviews,
           worktrees,
+          ...(ctx.specs != null ? { specs: ctx.specs } : {}),
           mail: ctx.mail,
           agentId: ctx.agent,
           parentResolver: roleParentResolver(ctx.roster),

@@ -534,8 +534,10 @@ export type { ReviewSpecRef } from './review/spec-ref.js';
 export {
   NO_LOCKED_SPEC_MARKER,
   resolveReviewSpecRef,
+  resolveReviewSpecRefFromStore,
   renderReviewSpecRef,
   resolveSpecRefFromStore,
+  taskIdFromLockedSpecRef,
 } from './review/spec-ref.js';
 
 // L4-1 dispatch substrate: the event-sourced usage/cost foundation + the FROZEN ProviderUsageSource

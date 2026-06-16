@@ -175,6 +175,8 @@ export type ReviewContext =
 export interface ReviewContextResolved {
   readonly kind: 'resolved';
   readonly reviewId: string;
+  /** Fingerprint of the exact diff/criteria/finish evidence the operator reviewed. */
+  readonly evidenceFingerprint: string;
   /** The source branch under review. */
   readonly branch: string;
   /** The merge target the diff is computed against (`git diff target...branch`). */

@@ -18,6 +18,7 @@ import { openProjectStore } from '../../store/sqlite-store.js';
 import { openDispatchStore } from '../../dispatch/dispatch-store.js';
 import { accountForProvider } from '../../dispatch/provider-source.js';
 import type { ReviewerSpawnGate } from '../../review/merge.js';
+import { openSpecStore, type SpecStore } from '../../specs/specs-store.js';
 import { buildCoreRegistry } from '../core-registry.js';
 import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
@@ -33,6 +34,7 @@ let reviews: ReviewStore[] = [];
 let worktrees: WorktreeStore[] = [];
 let rosters: RosterStore[] = [];
 let regs: ProjectRegistry[] = [];
+let specs: SpecStore[] = [];
 
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
@@ -53,6 +55,7 @@ afterEach(() => {
   for (const w of worktrees) w.close();
   for (const r of rosters) r.close();
   for (const r of regs) r.close();
+  for (const s of specs) s.close();
   process.env = ORIGINAL_ENV;
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
   tmpDirs = [];
@@ -61,6 +64,7 @@ afterEach(() => {
   worktrees = [];
   rosters = [];
   regs = [];
+  specs = [];
 });
 
 function git(cwd: string, ...args: string[]): string {
@@ -1196,6 +1200,68 @@ describe('co_merge (AC-L5-1, AC-L5-3)', () => {
 
 // ── P2 / AC-S10-2 — live reviewer trigger path ───────────────────────────────────────────────────────
 describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
+  it.each([
+    ['malformed', 'task-merge-live', false],
+    ['missing locked spec', 'spec:missing-task#locked', false],
+    ['draft spec', 'spec:task-draft#locked', true],
+  ] as const)(
+    'human reviewer refuses %s spec_ref before creating review mail',
+    async (_label, specRef, seedDraft) => {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const specStore = openSpecStore('p-merge-tool');
+      specs.push(specStore);
+      if (seedDraft) {
+        specStore.recordDraft({
+          taskId: 'task-draft',
+          title: 'Draft task',
+          goal: 'not locked yet',
+          criteria: [{ text: 'locked before review', verify: 'pnpm test' }],
+          body: '',
+          actor: OPERATOR,
+        });
+      }
+      const cfg = openConfigStore();
+      try {
+        cfg.setProjectOverride('p-merge-tool', 'review.worker_merge.reviewer', 'human');
+      } finally {
+        cfg.close();
+      }
+      const toolCtx = {
+        ...ctx,
+        specs: specStore,
+        reviewerSpawnGate: {
+          spawn: () => {
+            throw new Error('human review should not spawn an agent reviewer');
+          },
+        } satisfies ReviewerSpawnGate,
+      };
+
+      await expect(
+        invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          spec_ref: specRef,
+          intent: { summary: 'trigger a human review' },
+        }),
+      ).rejects.toThrow(/locked acceptance criteria|spec_ref|spec:<taskId>#locked/i);
+
+      expect(reviewStore!.getReviewRequest('main', 'co/feature')).toBeUndefined();
+      expect(ctx.mail.inbox(OPERATOR).filter((m) => m.type === 'review_request')).toHaveLength(0);
+    },
+  );
+
   it('AC-S10-2.1: returns review_pending:true and fires spawn gate when reviewerSpawnGate is wired and no PASS exists', async () => {
     // Freeze time at epoch 0 so the 1970-epoch snapshot timestamps are fresh (not stale) when the
     // handler calls Date.now() to build the trigger gate's nowMs. A healthy snapshot → dispatch policy

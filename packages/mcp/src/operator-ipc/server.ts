@@ -350,6 +350,9 @@ export class OperatorIpcServer {
       ...(typeof draftIn.reviewVerdict === 'string'
         ? { reviewVerdict: requireReviewVerdict(draftIn, 'reviewVerdict') }
         : {}),
+      ...(typeof draftIn.reviewContextFingerprint === 'string'
+        ? { reviewContextFingerprint: requireString(draftIn, 'reviewContextFingerprint') }
+        : {}),
     };
     const mail = this.openMail(this.projectId);
     try {
@@ -467,6 +470,15 @@ export class OperatorIpcServer {
         throw new Error(
           `operator IPC review reply: review evidence for '${reviewId}' does not match the ` +
             'durable review request.',
+        );
+      }
+      if (
+        context.kind === 'resolved' &&
+        draft.reviewContextFingerprint !== context.evidenceFingerprint
+      ) {
+        throw new Error(
+          `operator IPC review reply: review evidence fingerprint for '${reviewId}' is stale ` +
+            'or missing; reload the Review view before submitting a verdict.',
         );
       }
       if (request.specRef.kind !== 'criteria') {

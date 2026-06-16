@@ -511,6 +511,7 @@ describe('createAppShell — review VM bridge wiring', () => {
     branch: 'co/review-shell',
     target: 'main',
     scope: 'merge',
+    evidenceFingerprint: 'sha256:review-shell',
     diff: { kind: 'patch', patch: '@@ -1 +1 @@\n-old\n+new' },
     criteria: {
       kind: 'criteria',
@@ -562,6 +563,7 @@ describe('createAppShell — review VM bridge wiring', () => {
       expect.objectContaining({
         type: MAIL_REVIEW_RESPONSE,
         reviewVerdict: 'PASS',
+        reviewContextFingerprint: 'sha256:review-shell',
         body: 'PASS\nlooks good',
       }),
     );

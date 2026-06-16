@@ -16,13 +16,16 @@
  * before the next read (mirrors the server's `openMail` per-write pattern — no leaked handles).
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  */
+import { createHash } from 'node:crypto';
 import {
   type GitReader,
+  taskIdFromLockedSpecRef,
   type ReviewContext,
   type ReviewCriteria,
   type ReviewDiff,
   type ReviewRequestRecord,
   type ReviewSpecRef,
+  type FinishRecord,
   type ReviewStore,
   type SpecStore,
   type WorktreeRecord,
@@ -35,15 +38,11 @@ export interface ReviewContextDeps {
   readonly openReviews: () => Pick<ReviewStore, 'getReviewRequestById' | 'close'>;
   /** Open the spec store for one read, then `close()` it. Needs only `getSpec`. */
   readonly openSpecs: () => Pick<SpecStore, 'getSpec' | 'close'>;
-  /** Open the worktree store for one read, then `close()` it. Needs only `getWorktree`. */
-  readonly openWorktrees: () => Pick<WorktreeStore, 'getWorktree' | 'close'>;
+  /** Open the worktree store for one read, then `close()` it. Needs worktree + finish evidence. */
+  readonly openWorktrees: () => Pick<WorktreeStore, 'getWorktree' | 'getFinish' | 'close'>;
   /** The READ git seam: `(cwd, args) => stdout | null` (null on a non-zero exit). NEVER `GitExec`. */
   readonly gitReader: GitReader; // (cwd, args) => string | null
 }
-
-/** The locked-spec ref shape (`spec:<taskId>#locked`) the criteria half parses the taskId out of. */
-const SPEC_REF_PREFIX = 'spec:';
-const SPEC_REF_LOCKED_SUFFIX = /#locked$/;
 
 /**
  * Resolve `reviewId`'s review context. See the module header for the degrade discipline.
@@ -59,14 +58,25 @@ export async function resolveReviewContext(
 ): Promise<ReviewContext> {
   const req = readReviewRequest(deps, reviewId);
   if (req == null) return { kind: 'not-found', reviewId };
+  const criteria = resolveCriteria(deps, req.specRef);
+  const evidence = resolveWorktreeEvidence(deps, req.branch, req.target);
   return {
     kind: 'resolved',
     reviewId,
+    evidenceFingerprint: reviewEvidenceFingerprint({
+      reviewId,
+      branch: req.branch,
+      target: req.target,
+      scope: req.scope,
+      diff: evidence.diff,
+      criteria,
+      finish: evidence.finish,
+    }),
     branch: req.branch,
     target: req.target,
     scope: req.scope,
-    diff: resolveDiff(deps, req.branch, req.target),
-    criteria: resolveCriteria(deps, req.specRef),
+    diff: evidence.diff,
+    criteria,
   };
 }
 
@@ -91,7 +101,8 @@ function readReviewRequest(
  */
 function resolveCriteria(deps: ReviewContextDeps, specRef: ReviewSpecRef): ReviewCriteria {
   if (specRef.kind === 'no-locked-spec') return { kind: 'no-locked-spec' };
-  const taskId = specRef.ref.slice(SPEC_REF_PREFIX.length).replace(SPEC_REF_LOCKED_SUFFIX, '');
+  const taskId = taskIdFromLockedSpecRef(specRef.ref);
+  if (taskId == null) return { kind: 'no-locked-spec' };
   const specs = deps.openSpecs();
   try {
     const spec = specs.getSpec(taskId);
@@ -108,10 +119,22 @@ function resolveCriteria(deps: ReviewContextDeps, specRef: ReviewSpecRef): Revie
  * (`gitReader` → null) ⇒ `git-failed`; otherwise the patch text — an empty string is VALID ("no
  * changes"), NOT unavailable.
  */
-function resolveDiff(deps: ReviewContextDeps, branch: string, target: string): ReviewDiff {
-  const wt = readWorktree(deps, branch);
+function resolveWorktreeEvidence(
+  deps: ReviewContextDeps,
+  branch: string,
+  target: string,
+): { readonly diff: ReviewDiff; readonly finish: FinishRecord | undefined } {
+  const worktrees = deps.openWorktrees();
+  let wt: WorktreeRecord | undefined;
+  let finish: FinishRecord | undefined;
+  try {
+    wt = worktrees.getWorktree(branch);
+    finish = worktrees.getFinish(branch);
+  } finally {
+    worktrees.close();
+  }
   if (wt == null || wt.removed === true) {
-    return { kind: 'unavailable', reason: 'worktree-missing' };
+    return { diff: { kind: 'unavailable', reason: 'worktree-missing' }, finish };
   }
   const patch = deps.gitReader(wt.path, [
     'diff',
@@ -119,16 +142,37 @@ function resolveDiff(deps: ReviewContextDeps, branch: string, target: string): R
     '--no-color',
     `${target}...${branch}`,
   ]);
-  if (patch == null) return { kind: 'unavailable', reason: 'git-failed' };
-  return { kind: 'patch', patch };
+  return {
+    diff: patch == null ? { kind: 'unavailable', reason: 'git-failed' } : { kind: 'patch', patch },
+    finish,
+  };
 }
 
-/** Read the recorded worktree for `branch` (open→read→close); undefined when none is recorded. */
-function readWorktree(deps: ReviewContextDeps, branch: string): WorktreeRecord | undefined {
-  const wts = deps.openWorktrees();
-  try {
-    return wts.getWorktree(branch);
-  } finally {
-    wts.close();
-  }
+function reviewEvidenceFingerprint(input: {
+  readonly reviewId: string;
+  readonly branch: string;
+  readonly target: string;
+  readonly scope: string;
+  readonly diff: ReviewDiff;
+  readonly criteria: ReviewCriteria;
+  readonly finish: FinishRecord | undefined;
+}): string {
+  const payload = {
+    reviewId: input.reviewId,
+    branch: input.branch,
+    target: input.target,
+    scope: input.scope,
+    diff: input.diff,
+    criteria: input.criteria,
+    finish:
+      input.finish == null
+        ? null
+        : {
+            commitSha: input.finish.commitSha,
+            recordedSeq: input.finish.recordedSeq ?? null,
+            recordedTs: input.finish.recordedTs,
+            tests: input.finish.tests,
+          },
+  };
+  return `sha256:${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
 }

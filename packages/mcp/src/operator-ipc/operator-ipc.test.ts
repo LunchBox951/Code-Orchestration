@@ -306,6 +306,7 @@ function makeControl(
 }
 
 const EVIDENCE_SPEC_REF = 'spec:review-task#locked';
+const EVIDENCE_FINGERPRINT = 'sha256:review-context-evidence';
 
 function evidenceReviewContext(
   reviewId: string,
@@ -317,6 +318,7 @@ function evidenceReviewContext(
     branch: 'co/feature',
     target: 'main',
     scope: 'pr_merge',
+    evidenceFingerprint: EVIDENCE_FINGERPRINT,
     diff: { kind: 'patch', patch: '@@ -1 +1 @@\n-old\n+new' },
     criteria: {
       kind: 'criteria',
@@ -1343,6 +1345,7 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
         subject: 're: review requested',
         body: 'passes',
         reviewVerdict: 'PASS',
+        reviewContextFingerprint: EVIDENCE_FINGERPRINT,
         idempotencyKey: 'operator-ipc-review-response:exact',
       },
     );
@@ -1412,6 +1415,7 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
           subject: 're: review requested',
           body: 'passes',
           reviewVerdict: 'PASS',
+          reviewContextFingerprint: EVIDENCE_FINGERPRINT,
           idempotencyKey: 'operator-ipc-review-response:no-spec',
         },
       ),
@@ -1484,10 +1488,76 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
           subject: 're: review requested',
           body: 'passes',
           reviewVerdict: 'PASS',
+          reviewContextFingerprint: EVIDENCE_FINGERPRINT,
           idempotencyKey: 'operator-ipc-review-response:wrong-spec',
         },
       ),
     ).rejects.toThrow(/acceptance criteria|specRef|review evidence/i);
+
+    expect(reviews.getVerdict('main', 'co/feature', 'pr_merge')).toBeUndefined();
+    const responses = inboxOf(projectId, 'lead-review').filter(
+      (m) => m.type === MAIL_REVIEW_RESPONSE,
+    );
+    expect(responses).toHaveLength(0);
+  });
+
+  it('reply rejects review_response when submitted review evidence fingerprint is stale', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const seedStore = openMailStore(projectId);
+    let request: DeliveredMail;
+    try {
+      request = seedStore.requestHumanReview(
+        {
+          type: 'review_request',
+          to: '@operator',
+          from: 'lead-review',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-opipc-review-stale-context',
+        },
+        {
+          reviewId: 'rev-opipc-review-stale-context',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead-review',
+          reviewerKind: 'human',
+          specRefKind: 'criteria',
+          specRefRef: EVIDENCE_SPEC_REF,
+        },
+      ).mail;
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(evidenceReviewContext(reviewId, { evidenceFingerprint: 'sha256:newer' })),
+    );
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.reply(
+        { seq: request.seq, recipient: '@operator' },
+        {
+          type: MAIL_REVIEW_RESPONSE,
+          subject: 're: review requested',
+          body: 'passes',
+          reviewVerdict: 'PASS',
+          reviewContextFingerprint: 'sha256:stale',
+          idempotencyKey: 'operator-ipc-review-response:stale-context',
+        },
+      ),
+    ).rejects.toThrow(/review evidence|fingerprint|stale/i);
 
     expect(reviews.getVerdict('main', 'co/feature', 'pr_merge')).toBeUndefined();
     const responses = inboxOf(projectId, 'lead-review').filter(
@@ -1552,6 +1622,7 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
           subject: 're: review requested',
           body: 'passes',
           reviewVerdict: 'PASS',
+          reviewContextFingerprint: EVIDENCE_FINGERPRINT,
           idempotencyKey: 'operator-ipc-review-response:no-diff',
         },
       ),
@@ -1612,6 +1683,7 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
       subject: 're: review requested',
       body: 'passes',
       reviewVerdict: 'PASS' as const,
+      reviewContextFingerprint: EVIDENCE_FINGERPRINT,
       idempotencyKey: 'operator-ipc-review-response:retry',
     };
 

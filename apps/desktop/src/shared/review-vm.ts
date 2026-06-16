@@ -66,7 +66,10 @@ function deriveRows(inbox: readonly DeliveredMail[]): readonly ReviewRow[] {
   return rows;
 }
 
-function hasReviewEvidence(context: SelectedContext): boolean {
+function hasReviewEvidence(context: SelectedContext): context is {
+  readonly status: 'loaded';
+  readonly value: Extract<ReviewContext, { kind: 'resolved' }>;
+} {
   return (
     context?.status === 'loaded' &&
     context.value.kind === 'resolved' &&
@@ -150,7 +153,8 @@ export class ReviewVM {
   async submitVerdict(): Promise<void> {
     const c = this._state.composer;
     if (!c.active || c.pending) return;
-    if (!hasReviewEvidence(this._state.context)) return;
+    const context = this._state.context;
+    if (!hasReviewEvidence(context)) return;
 
     const { selectedReviewId } = this._state;
     if (selectedReviewId == null) return;
@@ -171,6 +175,7 @@ export class ReviewVM {
       subject: `Review ${verdict}`,
       body,
       reviewVerdict: verdict,
+      reviewContextFingerprint: context.value.evidenceFingerprint,
       idempotencyKey,
     };
 
