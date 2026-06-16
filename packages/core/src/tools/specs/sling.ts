@@ -446,14 +446,16 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     }
 
     // Symmetrical to co_merge's reviewer trigger: once the slung child's worktree + kickoff are
-    // recorded, the live spawn must succeed or the caller must see the failure. Returning `placed`
-    // while no pane exists would make launch failure invisible to recovery/operations.
+    // recorded, the live spawn must succeed or the caller must see the failure.
+    // Returning `placed` while no pane exists would make launch failure invisible to recovery/operations.
+    let spawned = false;
     if (ctx.reviewerSpawnGate != null) {
       try {
         await ctx.reviewerSpawnGate.spawn(
           ctx.projectId,
           provisionalPlacementRecord(input.agent, placedPayload),
         );
+        spawned = true;
       } catch (cause) {
         cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd);
         retractKickoff(ctx.mail, ctx.agent, kickoff);
@@ -462,10 +464,18 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     }
     // Record a PLACED decision only after the sandbox exists, kickoff is durable, and the live launch
     // has either succeeded or is intentionally headless. A git, mail, or spawn failure must not leave
-    // a false successful placement.
+    // a false successful placement. If this final durable write fails after a live spawn, release the
+    // spawned pane/session through the optional gate rollback seam before removing durable work.
     try {
       ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
     } catch (cause) {
+      if (spawned) {
+        try {
+          await ctx.reviewerSpawnGate?.release?.(ctx.projectId, input.agent);
+        } catch {
+          // Preserve the original placement failure; host recovery can surface any live residue later.
+        }
+      }
       cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd);
       retractKickoff(ctx.mail, ctx.agent, kickoff);
       throw cause;
@@ -514,14 +524,14 @@ function cleanupFailedSlingWorktree(
   repoCwd: string,
 ): void {
   try {
-    worktrees.removeWorktree(branch, { repoCwd });
+    worktrees.removeWorktree(branch, { repoCwd, force: true });
   } catch {
-    // Preserve the spawn failure. Orphan detection can surface any cleanup residue later.
+    // Preserve the original failure. Orphan detection can surface any cleanup residue later.
   }
   try {
     defaultGitExec(repoCwd, ['branch', '-D', branch]);
   } catch {
-    // Preserve the spawn failure. A missing/locked branch can be surfaced by later cleanup.
+    // Preserve the original failure. A missing/locked branch can be surfaced by later cleanup.
   }
 }
 
@@ -529,7 +539,7 @@ function retractKickoff(mail: MailStore, sender: string, kickoff: DeliveredMail)
   try {
     mail.retract(sender, kickoff.seq);
   } catch {
-    // Preserve the spawn failure. Orphan detection can surface any cleanup residue later.
+    // Preserve the original failure. Orphan detection can surface any cleanup residue later.
   }
 }
 

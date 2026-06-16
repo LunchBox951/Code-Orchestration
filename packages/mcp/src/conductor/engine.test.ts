@@ -22,7 +22,7 @@ import {
   openMailStore,
   openRegistry,
   openRosterStore,
-  QUIET_WINDOW_MS,
+  WEDGE_MS,
   type DeliveredMail,
   type DetectorEvent,
   type MailStore,
@@ -249,7 +249,7 @@ async function driveTurnToIdle(
   clock.set(1000);
   pane.emit('⠋ working…\r\n'); // the turn produces bytes, then goes quiet
   await tick(); // the new bytes re-arm the quiet window
-  clock.set(1000 + QUIET_WINDOW_MS + 1);
+  clock.set(1000 + WEDGE_MS + 1);
   qw.settle(); // the window elapses with no further output ⇒ idle
 }
 
@@ -412,7 +412,7 @@ describe('ConductorEngine — ensure-hosted → bind → inject → ONE turn →
 
     expect(pane.written.slice(writeCountBeforeDialog)).toEqual(['\r']);
 
-    clock.set(1000 + QUIET_WINDOW_MS + 1);
+    clock.set(1000 + WEDGE_MS + 1);
     qw.settle();
     const outcome = await turnP;
     expect(outcome.errored).toBe(false);

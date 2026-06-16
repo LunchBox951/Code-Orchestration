@@ -132,6 +132,8 @@ export class ReconcileLoop {
   private readonly config: LivenessConfig;
   /** One watchdog per RUNNING agent, persisted across ticks so a repeat break escalates. */
   private readonly watchdogs = new Map<string, LivenessWatchdog>();
+  /** Reconcile ticks are serialized so overlap watchdog beats cannot race cadence reconciles. */
+  private inFlight: Promise<ReconcileTickResult> | undefined;
 
   constructor(seams: ReconcileSeams, config: LivenessConfig = {}) {
     this.seams = seams;
@@ -150,6 +152,17 @@ export class ReconcileLoop {
    * the whole sweep always completes.
    */
   async tick(): Promise<ReconcileTickResult> {
+    if (this.inFlight !== undefined) return this.inFlight;
+    const run = this.runTick();
+    this.inFlight = run;
+    try {
+      return await run;
+    } finally {
+      if (this.inFlight === run) this.inFlight = undefined;
+    }
+  }
+
+  private async runTick(): Promise<ReconcileTickResult> {
     const running = this.seams.runningAgents();
     const observedAt = this.seams.now();
 

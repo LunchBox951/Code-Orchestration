@@ -208,7 +208,7 @@ function cleanupFailedStartWorktree(
   const worktrees = openWorktrees(projectId);
   try {
     try {
-      worktrees.removeWorktree(branch, { repoCwd });
+      worktrees.removeWorktree(branch, { repoCwd, force: true });
     } catch {
       // Preserve the original start failure. Orphan detection can surface cleanup residue later.
     }

@@ -220,7 +220,7 @@ async function driveTurnToIdle(
   clock.set(1000);
   pane.emit('turn output before yielding\r\n');
   await tick(); // new bytes re-arm the quiet window
-  clock.set(1000 + QUIET_WINDOW_MS + 1);
+  clock.set(1000 + WEDGE_MS + 1);
   qw.settle();
 }
 
@@ -387,7 +387,7 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     await runner.stop();
   });
 
-  it('an overlapping cadence beat can observe an active byte-quiet turn as wedged', async () => {
+  it('overlap beats observe a bytes-then-frozen active turn as wedged, then STUCK', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
 
@@ -418,17 +418,17 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     const pane = await hostPane(engine, pty, makeIdentity('impl-wedged', projectId, cwd));
     const item = outstandingItem(projectId, 'impl-wedged');
 
-    clock.set(0);
-    pane.emit('turn starting\r\n');
-
     scheduler.fire();
     await tick();
-    pane.emit(defaultMailRenderer(item));
+    pane.emit(defaultMailRenderer(item)); // echo-verify injected mail so the turn starts watching output
+    await tick();
+    clock.set(1000);
+    pane.emit('turn output before freeze\r\n');
     await flush();
 
     expect(engine.livenessObservationFor(projectId, 'impl-wedged')?.turnActive).toBe(true);
 
-    clock.set(WEDGE_MS + 1);
+    clock.set(1000 + WEDGE_MS + 1);
     scheduler.fire(); // overlap beat: daemon tick is still in-flight, so only watchdog reconcile runs.
     await flush();
 
@@ -438,6 +438,11 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
       info: { kind: 'wedged' },
     });
     expect(stuck).toEqual([]);
+
+    scheduler.fire(); // persistent wedge on the next overlap beat escalates to STUCK.
+    await flush();
+
+    expect(stuck).toEqual(['impl-wedged']);
 
     qw.settle();
     await runner.stop();
@@ -787,8 +792,8 @@ describe('ConductorEngine.livenessObservationFor — the in-process observation 
     pane.emit('turn bytes\r\n');
     await tick();
 
-    // Settle the turn: advance the clock past the quiet window, then resolve it.
-    clock.set(1000 + QUIET_WINDOW_MS + 1);
+    // Settle the no-completion turn: advance past the wedge window, then resolve it.
+    clock.set(1000 + WEDGE_MS + 1);
     qw.settle();
     await turnP;
 

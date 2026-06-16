@@ -24,7 +24,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
   OPERATOR,
-  QUIET_WINDOW_MS,
+  WEDGE_MS,
   ReconcileLoop,
   defaultMailRenderer,
   openMailStore,
@@ -180,7 +180,7 @@ async function driveTurnToIdle(
   clock.set(1000);
   pane.emit('⠋ working…\r\n');
   await tick();
-  clock.set(1000 + QUIET_WINDOW_MS + 1);
+  clock.set(1000 + WEDGE_MS + 1);
   qw.settle();
 }
 

@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
-  QUIET_WINDOW_MS,
+  WEDGE_MS,
   ReconcileLoop,
   accountForProvider,
   buildCoreRegistry,
@@ -248,7 +248,7 @@ async function driveTurnToIdle(
   clock.set(1000);
   pane.emit('⠋ working…\r\n');
   await tick();
-  clock.set(1000 + QUIET_WINDOW_MS + 1);
+  clock.set(1000 + WEDGE_MS + 1);
   qw.settle();
 }
 

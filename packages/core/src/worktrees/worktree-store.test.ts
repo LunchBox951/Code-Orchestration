@@ -11,6 +11,7 @@ import {
   makeWorktreeCreatedEvent,
   makeBaselineCapturedEvent,
   makeFinishRecordedEvent,
+  makeWorktreeRemovedEvent,
   worktreeSchemas,
   worktreeUpcasters,
   type BaselineCaptured,
@@ -302,6 +303,61 @@ describe('AC-L0-2 (L3) — worktree read-model rebuilds byte-identical', () => {
       expect(live).toContain('"commit_sha":"' + 'd'.repeat(40) + '"'); // co/a's re-finish won
       expect(live).not.toContain('"commit_sha":"' + 'a'.repeat(40) + '"'); // the superseded finish
       expect(live).toContain('"commit_sha":"' + 'e'.repeat(40) + '"'); // co/b's finish
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay drops stale baseline and finish when a removed branch is recreated', () => {
+    const store = openProjectStore('p-replay-recreate');
+    const projectors = [new WorktreeProjector()];
+    const sequence = [
+      makeWorktreeCreatedEvent('p-replay-recreate', rec({ path: '/d/old' })),
+      makeBaselineCapturedEvent(
+        'p-replay-recreate',
+        base({ tests: [{ name: 'old', passed: true }] }),
+      ),
+      makeFinishRecordedEvent('p-replay-recreate', finish({ commitSha: '1'.repeat(40) })),
+      makeWorktreeRemovedEvent('p-replay-recreate', { branch: 'co/feature' }),
+      makeWorktreeCreatedEvent(
+        'p-replay-recreate',
+        rec({ path: '/d/new', baseSha: 'b'.repeat(40), agent: 'impl-retry' }),
+      ),
+      makeBaselineCapturedEvent(
+        'p-replay-recreate',
+        base({
+          baseSha: 'b'.repeat(40),
+          tests: [{ name: 'new', passed: false }],
+        }),
+      ),
+    ];
+    try {
+      for (const e of sequence) {
+        store.transaction((tx) => {
+          const [s] = tx.append([e]);
+          applyEvent(tx, decode(s!, worktreeUpcasters, worktreeSchemas), projectors);
+        });
+      }
+
+      rebuildAll(store, projectors, (e) => decode(e, worktreeUpcasters, worktreeSchemas));
+
+      const state = store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        return JSON.parse(snapshot(db)) as {
+          worktrees: Array<{ branch: string; base_sha: string; path: string; removed: number }>;
+          baselines: Array<{ branch: string; base_sha: string; tests: string }>;
+          finishes: unknown[];
+        };
+      });
+
+      expect(state.worktrees).toMatchObject([
+        { branch: 'co/feature', base_sha: 'b'.repeat(40), path: '/d/new', removed: 0 },
+      ]);
+      expect(state.baselines).toHaveLength(1);
+      expect(state.baselines[0]?.base_sha).toBe('b'.repeat(40));
+      expect(state.baselines[0]?.tests).toContain('new');
+      expect(state.baselines[0]?.tests).not.toContain('old');
+      expect(state.finishes).toEqual([]);
     } finally {
       store.close();
     }

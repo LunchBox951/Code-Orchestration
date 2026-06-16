@@ -66,6 +66,7 @@ import {
   watchDialogs,
   waitingItems,
   WEDGE_MS,
+  COMPLETION_VERBS,
   type ReviewerSpawnGate,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -662,13 +663,12 @@ export class ConductorEngine {
           const turnStartedAt = this.turnStartedAt.get(
             ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent),
           );
-          const hasCurrentTurnBytes = trace.some((ev) => ev.kind === 'bytes');
-          if (
-            turnStartedAt !== undefined &&
-            !hasCurrentTurnBytes &&
-            this.deps.now() - turnStartedAt < WEDGE_MS
-          ) {
-            continue;
+          if (turnStartedAt !== undefined && !traceSawCompletionVerb(trace)) {
+            const lastCurrentByteAt = latestByteAt(trace);
+            const silenceStartedAt = lastCurrentByteAt ?? turnStartedAt;
+            if (this.deps.now() - silenceStartedAt < WEDGE_MS) {
+              continue;
+            }
           }
           break; // window elapsed with no new output ⇒ idle
         }
@@ -980,3 +980,19 @@ export class ConductorEngine {
 }
 
 const noop = (): void => {};
+
+function latestByteAt(trace: readonly DetectorEvent[]): number | undefined {
+  let latest: number | undefined;
+  for (const ev of trace) {
+    if (ev.kind === 'bytes' && (latest === undefined || ev.at > latest)) latest = ev.at;
+  }
+  return latest;
+}
+
+function traceSawCompletionVerb(trace: readonly DetectorEvent[]): boolean {
+  return trace.some(
+    (ev) =>
+      (ev.kind === 'mcp' || ev.kind === 'mcp_start' || ev.kind === 'mcp_end') &&
+      COMPLETION_VERBS.includes(ev.verb),
+  );
+}

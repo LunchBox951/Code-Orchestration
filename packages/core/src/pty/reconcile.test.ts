@@ -234,6 +234,44 @@ describe('ReconcileLoop — MNR-1: idle + no completion verb ⇒ silent_stop ⇒
     expect(router.stuck).toEqual(['impl-7']);
   });
 
+  it('serializes concurrent ticks so an overlap reconcile cannot mark STUCK before the nudge completes', async () => {
+    const host = new FakePty();
+    const router = fakeRouter();
+    let releaseNudge!: () => void;
+    let clock = IDLE_OBSERVED_AT;
+    const loop = buildLoop(
+      {
+        runningAgents: () => [runningAgent('impl-serial', host)],
+        livenessInputFor: () => silentStopInput(),
+        now: () => clock,
+        injectNudge: async (_pane, triggerId) => {
+          router.nudges.push({ triggerId });
+          await new Promise<void>((resolve) => {
+            releaseNudge = resolve;
+          });
+        },
+      },
+      router,
+    );
+
+    const first = loop.tick();
+    await Promise.resolve(); // let the first tick signal the break and park in injectNudge
+    const concurrent = loop.tick();
+    await Promise.resolve();
+
+    expect(router.breaks).toHaveLength(1);
+    expect(router.nudges).toEqual([{ triggerId: SILENT_STOP_TRIGGER }]);
+    expect(router.stuck).toEqual([]);
+
+    releaseNudge();
+    await Promise.all([first, concurrent]);
+    expect(router.stuck).toEqual([]);
+
+    clock += 4000;
+    await loop.tick();
+    expect(router.stuck).toEqual(['impl-serial']);
+  });
+
   it('the INVERSE: an idle turn that DID call co_finish is NOT flagged (no nudge, no false STUCK)', async () => {
     const host = new FakePty();
     const router = fakeRouter();

@@ -51,4 +51,8 @@ export class EngineReviewerSpawnGate implements ReviewerSpawnGate {
     );
     await this.engine.ensureHosted(identity, spec);
   }
+
+  async release(projectId: string, agent: string): Promise<void> {
+    await this.engine.release(projectId, agent);
+  }
 }

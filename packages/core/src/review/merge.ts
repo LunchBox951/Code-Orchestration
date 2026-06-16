@@ -166,6 +166,12 @@ export interface ReviewerSpawnGate {
    * engine.ensureHosted. The stub (default for headless paths) fails loud.
    */
   spawn(projectId: string, placement: PlacementRecord): Promise<void>;
+  /**
+   * Best-effort rollback for a spawn that succeeded before a later durable write failed. Optional so
+   * legacy/test gates remain source-compatible; real engine-backed gates should release the pane and
+   * end its session.
+   */
+  release?(projectId: string, agent: string): Promise<void>;
 }
 
 /**

@@ -916,6 +916,44 @@ describe('co_sling — spawn gate integration (P2 / AC-S10-2)', () => {
     expect(() => git(repo, 'rev-parse', '--verify', 'co/placement-fail')).toThrow();
   });
 
+  it('placed: releases a spawned pane when placement recording fails after live spawn', async () => {
+    const repo = makeMainRepo();
+    const base = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const spawned: string[] = [];
+    const released: string[] = [];
+    const ctx: ToolContext = {
+      ...base,
+      dispatch: {
+        ...base.dispatch,
+        recordPlacement: () => {
+          throw new Error('placement failed');
+        },
+      } as DispatchStore,
+      reviewerSpawnGate: {
+        spawn: async (_projectId, record) => {
+          spawned.push(record.agent);
+        },
+        release: async (_projectId, agent) => {
+          released.push(agent);
+        },
+      },
+    };
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-placement-live-fail',
+        branch: 'co/placement-live-fail',
+      }),
+    ).rejects.toThrow(/placement failed/i);
+
+    expect(spawned).toEqual(['impl-placement-live-fail']);
+    expect(released).toEqual(['impl-placement-live-fail']);
+    expect(base.worktrees?.getWorktree('co/placement-live-fail')?.removed).toBe(true);
+    expect(base.mail.outstanding('impl-placement-live-fail')).toHaveLength(0);
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/placement-live-fail')).toThrow();
+  });
+
   it('headless path (no reviewerSpawnGate): co_sling placed is byte-identical to before — gate never fires', async () => {
     const repo = makeMainRepo();
     const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);

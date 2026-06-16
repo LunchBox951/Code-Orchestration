@@ -188,6 +188,8 @@ export interface RemoveWorktreeDeps {
   readonly gitExec?: GitExec;
   /** Sandbox-dir filesystem seam (default {@link defaultSandboxFs}); injectable for headless tests. */
   readonly fs?: SandboxFs;
+  /** Force git worktree removal. Used only by rollback paths for partially-started sandboxes. */
+  readonly force?: boolean;
 }
 
 /**
@@ -408,7 +410,12 @@ export function openWorktreeStore(projectId: string): WorktreeStore {
       //    admin write + the dir deletion are teardown's job — NOT an orchestration write, so they
       //    are deliberately NOT wrapped over the repo (Principle 12 holds via the record path below).
       if (fs.exists(sandboxPath)) {
-        gitExec(deps.repoCwd, ['worktree', 'remove', sandboxPath]);
+        gitExec(deps.repoCwd, [
+          'worktree',
+          'remove',
+          ...(deps.force === true ? ['--force'] : []),
+          sandboxPath,
+        ]);
       } else {
         gitExec(deps.repoCwd, ['worktree', 'prune']);
       }

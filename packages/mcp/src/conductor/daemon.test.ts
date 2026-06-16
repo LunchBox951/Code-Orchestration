@@ -26,7 +26,7 @@ import {
   openRosterStore,
   openSessionStore,
   recoverProjectStore,
-  QUIET_WINDOW_MS,
+  WEDGE_MS,
   type BreakInfo,
   type DeliveredMail,
   type DetectorEvent,
@@ -259,7 +259,7 @@ async function driveTurnToIdle(
   clock.set(1000);
   pane.emit('⠋ working…\r\n');
   await tick();
-  clock.set(1000 + QUIET_WINDOW_MS + 1);
+  clock.set(1000 + WEDGE_MS + 1);
   qw.settle();
 }
 

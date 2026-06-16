@@ -71,7 +71,7 @@ import {
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   OPERATOR,
-  QUIET_WINDOW_MS,
+  WEDGE_MS,
   ReconcileLoop,
   accountForProvider,
   buildCoreRegistry,
@@ -484,7 +484,7 @@ async function driveTurnToIdle(
   clock.set(base);
   pane.emit('⠋ working…\r\n'); // the turn produces bytes, then goes quiet
   await tick(); // the new bytes re-arm the quiet window
-  clock.set(base + QUIET_WINDOW_MS + 1);
+  clock.set(base + WEDGE_MS + 1);
   qw.settle(); // the window elapses with no further output ⇒ idle
 }
 
