@@ -26,8 +26,8 @@ export interface RunProjectIdDeps {
 
 /**
  * The `co-mcp project-id` entry: resolve the absolute repo path (argv[0] or cwd), register it
- * (idempotent), and print the projectId to stdout. Fails loud on a non-absolute/invalid path
- * (Principle 9).
+ * (idempotent), and print the projectId to stdout. `resolvePath()` guarantees an absolute path
+ * before the registry call; `registry.register()` normalizes and validates it internally.
  */
 export async function runProjectIdCommand(
   argv: readonly string[],
