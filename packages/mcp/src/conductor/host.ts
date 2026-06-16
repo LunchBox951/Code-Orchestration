@@ -30,6 +30,7 @@ import {
   queryLiveObservability,
   QUIET_WINDOW_MS,
   type BreakSignal,
+  type InjectNudgeFn,
   type LiveObservabilitySnapshot,
   type MarkStuck,
   type ProjectId,
@@ -315,6 +316,21 @@ export interface ServeConductorOptions {
   /** Whether to arm the cadence immediately. Default: true (an operator launch runs). */
   readonly autoStart?: boolean;
   /**
+   * P6 (watchdog-seam) — injectable `kill(pid, 0)` probe for the reconcile watchdog. Returns `true`
+   * when the agent's OS process is still alive. Default: `process.kill(pane.pid, 0)` when the pane
+   * exposes its PID (NodePtyHost); conservative `true` when no PID is available (FakePty / test
+   * doubles where the pane exited-flag is the authoritative dead signal). Inject a fake in sandbox
+   * tests — no real OS probe in the testable path.
+   */
+  readonly pidAliveFor?: (agent: RunningAgent) => boolean;
+  /**
+   * P6 (watchdog-seam) — injectable nudge injector for the reconcile watchdog's `LivenessWatchdog`
+   * instances. Default: the real `defaultInjectNudge` (catalog-driven `injectMail`). Inject a no-op
+   * in sandbox tests to avoid the real pane-write+echo-verify cycle (which uses wall-clock timers and
+   * never echoes on FakePty, blocking the tick's in-flight promise and starving the next tick).
+   */
+  readonly injectNudge?: InjectNudgeFn;
+  /**
    * Co MCP + CLI binary paths for the `EngineReviewerSpawnGate` (P2 / AC-S10-2 / RG-4). When
    * provided, a live `EngineReviewerSpawnGate` is wired into every hosted session's ctx so `co_merge`
    * calls can trigger live reviewer spawns. When absent, no spawn gate is wired (headless path).
@@ -467,11 +483,31 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     );
   }
 
+  // P6 (watchdog-seam) — the injected pidAlive probe. Default: the real `kill(pid, 0)` OS check when
+  // the pane exposes its PID; conservative `true` when no PID is available (FakePty / orphan panes
+  // where the `paneExited` flag is the authoritative dead signal). Tests inject a fake.
+  const pidAliveFor: (agent: RunningAgent) => boolean =
+    opts.pidAliveFor ??
+    ((agent: RunningAgent): boolean => {
+      const pid = agent.pane.pid;
+      if (pid == null) return true; // no PID — conservative: assume alive, rely on paneExited for dead
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
   const reconcile = new ReconcileLoop({
     runningAgents: () => liveRunningAgents(projectId, engine),
-    // [host-live]: the per-agent hosted-pane trace + `kill(pid, 0)` probe is the operator handoff;
-    // until it is wired, the loop skips (it never fabricates a liveness verdict — Principle 9).
-    livenessInputFor: () => undefined,
+    // P6 (watchdog-seam): derive a real LivenessInput from in-process engine state + the injected
+    // pidAlive probe. Returns undefined only for orphan agents with no hosted pane (skip — Principle 9).
+    livenessInputFor: (agent: RunningAgent) => {
+      const obs = engine.livenessObservationFor(projectId, agent.agentId);
+      if (obs == null) return undefined; // not hosted — skip (orphan with no live pane)
+      return { ...obs, pidAlive: pidAliveFor(agent) };
+    },
     now,
     onBreak: opts.onBreak ?? (() => {}),
     // P3 §3a/§3d — the router IS the host-side markStuck owner: a watchdog escalation lands in its
@@ -481,6 +517,10 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       router.markStuck(agent);
       opts.markStuck?.(agent);
     },
+    // P6 (watchdog-seam): thread the injectable nudge injector to each LivenessWatchdog. Absent →
+    // the watchdog defaults to `defaultInjectNudge` (real catalog-driven injectMail). In sandbox
+    // tests a no-op is injected so the tick's beat() completes without waiting on real timers.
+    ...(opts.injectNudge !== undefined ? { injectNudge: opts.injectNudge } : {}),
   });
 
   const daemon = new ConductorDaemon({

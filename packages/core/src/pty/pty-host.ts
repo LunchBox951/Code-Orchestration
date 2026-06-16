@@ -40,6 +40,8 @@ export interface PtyExit {
 
 export interface Pane {
   readonly id: string;
+  /** OS process ID of the hosted pty. Present when the host can supply it (NodePtyHost). Absent for FakePty and test doubles. */
+  readonly pid?: number;
   /** Send bytes into the pty (matches node-pty IPty.write). */
   write(data: string): void;
   /** Subscribe to output bytes; returns an unsubscribe function. */

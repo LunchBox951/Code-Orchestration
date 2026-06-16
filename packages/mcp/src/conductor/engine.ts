@@ -351,6 +351,21 @@ export class ConductorEngine {
    * from `candidates` this tick are never touched — their clocks survive unharmed.
    */
   private readonly clarifyFirstSeen = new Map<string, number>();
+  /**
+   * P6 (watchdog-seam) — the injected-time monotonic timestamp of the last pane byte seen per
+   * agent, keyed `${projectId}:${agent}`. Set by {@link appendTranscript} using `deps.now()`;
+   * read by {@link livenessObservationFor} to build the reconcile-loop liveness trace. Absent when
+   * no bytes have been seen yet. Torn down on release (mirrors {@link paneExited}).
+   */
+  private readonly lastByteAt = new Map<string, number>();
+  /**
+   * P6 (watchdog-seam) — whether a turn is currently in flight for each agent, keyed
+   * `${projectId}:${agent}`. Set `true` at the start of {@link runOneTurn}, `false` on
+   * completion (success or error). The reconcile loop reads this as `turnActive` to distinguish a
+   * frozen-mid-turn wedge from a silent-stop (turn yielded without a completion verb). Torn down
+   * on release.
+   */
+  private readonly turnInFlight = new Map<string, boolean>();
 
   constructor(deps: ConductorEngineDeps) {
     this.deps = deps;
@@ -398,6 +413,41 @@ export class ConductorEngine {
       offset: this.transcriptTailOffsets.get(agentKey) ?? 0,
       tail: this.transcriptTails.get(agentKey) ?? '',
     };
+  }
+
+  /**
+   * P6 (watchdog-seam) — build the in-process liveness observation for `agent` without the OS
+   * `pidAlive` probe. Returns `{ trace, exited, turnActive }` from durable in-process state:
+   *   - `trace`: a single `bytes` event at the last pane byte time (from {@link lastByteAt}) — enough
+   *     for the classifier to check byte-quiescence (idle). Empty when no bytes have been seen yet,
+   *     which is still a valid observation (no byte activity at all is not an idle signal on its own).
+   *   - `exited`: whether the pane has fired `onExit` (the `dead` liveness signal).
+   *   - `turnActive`: whether {@link runOneTurn} is currently in flight (mail injected, turn not
+   *     yet yielded) — the semantic `turnActive` signal that separates a wedge from a silent-stop.
+   *
+   * Returns `undefined` when `agent` is not hosted (orphan — the reconcile loop skips it). The
+   * caller (`host.ts`) adds the injected `pidAlive` to complete the {@link LivenessInput}.
+   *
+   * NO I/O, never throws — pure in-memory reads.
+   */
+  livenessObservationFor(
+    projectId: ProjectId,
+    agentId: string,
+  ):
+    | {
+        readonly trace: readonly DetectorEvent[];
+        readonly exited: boolean;
+        readonly turnActive: boolean;
+      }
+    | undefined {
+    const agentKey = ConductorEngine.agentKey(projectId, agentId);
+    if (!this.hosted.has(agentKey)) return undefined; // not hosted — unobservable (skip)
+    const exited = this.paneExited.get(agentKey) ?? false;
+    const turnActive = this.turnInFlight.get(agentKey) ?? false;
+    const lastByte = this.lastByteAt.get(agentKey);
+    const trace: DetectorEvent[] =
+      lastByte !== undefined ? [{ kind: 'bytes', at: lastByte, bytes: 1 }] : [];
+    return { trace, exited, turnActive };
   }
 
   /**
@@ -532,6 +582,8 @@ export class ConductorEngine {
     mail: DeliveredMail,
     opts: RunOneTurnOptions = {},
   ): Promise<TurnOutcome> {
+    const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
+    this.turnInFlight.set(agentKey, true); // P6: mark turn in flight so the reconcile watchdog sees turnActive
     try {
       const text = this.renderMail(mail);
       await injectMail(hosted.pane, text, {
@@ -549,6 +601,8 @@ export class ConductorEngine {
       // MNR-2 seam: yield on an errored turn WITHOUT consuming the mail. We deliberately do nothing
       // that would mark the item read/resolved — it stays outstanding for P1b to re-inject.
       return { errored: true, error };
+    } finally {
+      this.turnInFlight.set(agentKey, false); // P6: turn yielded (success or error) — reset flag
     }
   }
 
@@ -855,6 +909,7 @@ export class ConductorEngine {
     agent: string,
     chunk: string,
   ): void {
+    this.lastByteAt.set(agentKey, this.deps.now()); // P6: track last-byte time for liveness probe
     const chunkOffset = this.transcriptNextOffsets.get(agentKey) ?? 0;
     const tailOffset = this.transcriptTailOffsets.get(agentKey) ?? chunkOffset;
     const next = (this.transcriptTails.get(agentKey) ?? '') + chunk;
@@ -876,7 +931,7 @@ export class ConductorEngine {
     }
   }
 
-  /** Tear down a pane's exit subscription + flag (P1b) and its transcript subscription + tail (C-P1). */
+  /** Tear down a pane's exit subscription + flag (P1b), transcript subscription + tail (C-P1), and liveness tracking (P6). */
   private dropExitTracking(agentKey: string): void {
     this.paneExitUnsub.get(agentKey)?.();
     this.paneExitUnsub.delete(agentKey);
@@ -886,6 +941,8 @@ export class ConductorEngine {
     this.transcriptTails.delete(agentKey);
     this.transcriptTailOffsets.delete(agentKey);
     this.transcriptNextOffsets.delete(agentKey);
+    this.lastByteAt.delete(agentKey); // P6
+    this.turnInFlight.delete(agentKey); // P6
   }
 }
 
