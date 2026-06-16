@@ -23,6 +23,8 @@ import { specLockTool } from './specs/spec-lock.js';
 import { specArchiveTool } from './specs/spec-archive.js';
 import { planIngestTool } from './specs/plan-ingest.js';
 import { phaseStatusTool } from './specs/phase-status.js';
+import { phaseUpdateTool } from './specs/phase-update.js';
+import { taskCompleteTool } from './specs/task-complete.js';
 import { issueCaptureTool } from './specs/issue-capture.js';
 import { issueListTool } from './specs/issue-list.js';
 import { issueDiagnoseTool } from './specs/issue-diagnose.js';
@@ -66,6 +68,8 @@ export function buildCoreRegistry(): ToolRegistry {
   registry.register(specArchiveTool);
   registry.register(planIngestTool);
   registry.register(phaseStatusTool);
+  registry.register(phaseUpdateTool);
+  registry.register(taskCompleteTool);
   registry.register(issueCaptureTool);
   registry.register(issueListTool);
   registry.register(issueDiagnoseTool);

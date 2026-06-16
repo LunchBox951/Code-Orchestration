@@ -8,6 +8,7 @@ import {
   EVENT_PHASE_VERIFIED,
   EVENT_PLAN_DRAFTED,
   EVENT_PLAN_REPLANNED,
+  EVENT_TASK_COMPLETED,
   type PhaseRecord,
   type PhaseStatus,
   type PhaseStatusChanged,
@@ -16,6 +17,7 @@ import {
   type PlanRecord,
   type PlanReplanned,
   type PhaseNode,
+  type TaskCompleted,
 } from './events.js';
 
 const CREATE_PLANS_TABLE = `
@@ -24,7 +26,8 @@ const CREATE_PLANS_TABLE = `
     goal          TEXT NOT NULL,
     task_criteria TEXT NOT NULL,
     drafted_ts    INTEGER NOT NULL,
-    replan_count  INTEGER NOT NULL DEFAULT 0
+    replan_count  INTEGER NOT NULL DEFAULT 0,
+    completed_ts  INTEGER
   );
 `;
 
@@ -54,9 +57,15 @@ export function ensurePlansTables(db: DatabaseSync): void {
   if (!columns.some((c) => c.name === 'ordinal')) {
     db.exec(`ALTER TABLE plan_phases ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0`);
   }
+  const planColumns = db.prepare(`PRAGMA table_info(plans)`).all() as Array<{
+    name: string;
+  }>;
+  if (!planColumns.some((c) => c.name === 'completed_ts')) {
+    db.exec(`ALTER TABLE plans ADD COLUMN completed_ts INTEGER`);
+  }
 }
 
-const PLAN_COLUMNS = 'task_id, goal, task_criteria, drafted_ts, replan_count';
+const PLAN_COLUMNS = 'task_id, goal, task_criteria, drafted_ts, replan_count, completed_ts';
 const PHASE_COLUMNS =
   'task_id, phase_id, ordinal, name, owner, deps, criteria, status, verified_pass, baseline_sha';
 
@@ -90,6 +99,7 @@ function rowToPlanRecord(db: DatabaseSync, row: Record<string, unknown>): PlanRe
     phases: selectPhases(db, String(row.task_id)),
     draftedTs: Number(row.drafted_ts),
     replanCount: Number(row.replan_count),
+    ...(row.completed_ts != null ? { completedTs: Number(row.completed_ts) } : {}),
   };
 }
 
@@ -166,11 +176,16 @@ interface PlanReplannedEvent extends StoredEvent {
   readonly type: typeof EVENT_PLAN_REPLANNED;
   readonly payload: PlanReplanned;
 }
+interface TaskCompletedEvent extends StoredEvent {
+  readonly type: typeof EVENT_TASK_COMPLETED;
+  readonly payload: TaskCompleted;
+}
 type PlanEvent =
   | PlanDraftedEvent
   | PhaseStatusChangedEvent
   | PhaseVerifiedEvent
-  | PlanReplannedEvent;
+  | PlanReplannedEvent
+  | TaskCompletedEvent;
 
 /**
  * Folds plan events into the `plans` and `plan_phases` read-model tables. Enforces lifecycle
@@ -185,7 +200,8 @@ export class PlansProjector implements Projector {
       type === EVENT_PLAN_DRAFTED ||
       type === EVENT_PHASE_STATUS_CHANGED ||
       type === EVENT_PHASE_VERIFIED ||
-      type === EVENT_PLAN_REPLANNED
+      type === EVENT_PLAN_REPLANNED ||
+      type === EVENT_TASK_COMPLETED
     );
   }
 
@@ -270,6 +286,16 @@ export class PlansProjector implements Projector {
           taskId,
         );
         upsertPhases(db, taskId, phases);
+        return;
+      }
+      case EVENT_TASK_COMPLETED: {
+        const { taskId } = planEvent.payload;
+        const existing = selectPlan(db, taskId);
+        if (existing == null) {
+          throw new Error(`plans: task.completed for unknown plan '${taskId}' — draft it first`);
+        }
+        // `event.ts` is the completion mark (freeze #6 — never a wall clock).
+        db.prepare(`UPDATE plans SET completed_ts = ? WHERE task_id = ?`).run(event.ts, taskId);
         return;
       }
       default:

@@ -33,6 +33,8 @@ const EXPECTED_TOOLS = [
   'co_spec_archive',
   'co_plan_ingest',
   'co_phase_status',
+  'co_phase_update',
+  'co_task_complete',
   'co_issue_capture',
   'co_issue_list',
   'co_issue_diagnose',

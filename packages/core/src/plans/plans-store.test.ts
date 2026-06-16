@@ -12,10 +12,12 @@ import {
   EVENT_PHASE_VERIFIED,
   EVENT_PLAN_DRAFTED,
   EVENT_PLAN_REPLANNED,
+  EVENT_TASK_COMPLETED,
   makePlanDraftedEvent,
   makePhaseStatusChangedEvent,
   makePhaseVerifiedEvent,
   makePlanReplannedEvent,
+  makeTaskCompletedEvent,
   planScope,
   plansSchemas,
   plansUpcasters,
@@ -78,7 +80,7 @@ const ACTOR = 'coord-1';
 function snapshot(db: DatabaseSync): string {
   const plans = db
     .prepare(
-      'SELECT task_id, goal, replan_count, drafted_ts FROM plans ORDER BY drafted_ts, task_id',
+      'SELECT task_id, goal, replan_count, drafted_ts, completed_ts FROM plans ORDER BY drafted_ts, task_id',
     )
     .all();
   const phases = db
@@ -175,6 +177,47 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
       const ph1 = after.phases.find((p) => p.phaseId === 'ph-1')!;
       expect(ph1.verifiedPass).toBe(true);
       expect(ph1.baselineSha).toBe('abc123');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('records task.completed and sets completedTs from event.ts', () => {
+    const projectId = 'p-plans-completed';
+    const store = openPlanStore(projectId);
+    try {
+      const drafted = store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      expect(drafted.completedTs).toBeUndefined();
+      const after = store.recordTaskCompleted('task-1', 'coord-done');
+      expect(after.completedTs).toBeGreaterThan(0);
+      // The fold sets completed_ts WITHOUT mutating phase status or replan count.
+      expect(after.replanCount).toBe(0);
+      expect(after.phases).toHaveLength(2);
+
+      // The terminal close is appended to the audit trail as task.completed by the recording actor.
+      const audit = openProjectStore(projectId);
+      try {
+        const events = audit.readStream(planScope('task-1'));
+        expect(events.at(-1)?.type).toBe(EVENT_TASK_COMPLETED);
+        expect(events.at(-1)?.actor).toBe('coord-done');
+      } finally {
+        audit.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it('task.completed for an unknown plan fails loud (Principle 9)', () => {
+    const store = openPlanStore('p-plans-completed-unknown');
+    try {
+      expect(() => store.recordTaskCompleted('ghost-task', ACTOR)).toThrow(/unknown plan/i);
     } finally {
       store.close();
     }
@@ -451,6 +494,7 @@ describe('PlanStore — replay-equal: live fold → rebuildAll → byte-equal', 
         { taskId: 'task-2', goal: 'Do Y', taskCriteria: [], phases: [] },
         'coord-1',
       ),
+      makeTaskCompletedEvent('p-plans-replay', { taskId: 'task-2' }, 'coord-1'),
     ];
     try {
       for (const e of events) {
@@ -470,6 +514,8 @@ describe('PlanStore — replay-equal: live fold → rebuildAll → byte-equal', 
       // ph-1 was replaced by replan → ph-new is the final phase; replanCount=1
       expect(live).toContain('"ph-new"');
       expect(live).toContain('"replan_count":1');
+      // task-2 was completed → its completed_ts survives the replay (non-vacuous; from event.ts).
+      expect(live).toMatch(/"completed_ts":\d+/);
     } finally {
       store.close();
     }

@@ -16,6 +16,7 @@ import {
   makePhaseStatusChangedEvent,
   makePhaseVerifiedEvent,
   makePlanReplannedEvent,
+  makeTaskCompletedEvent,
   plansSchemas,
   plansUpcasters,
   type PhaseNode,
@@ -60,6 +61,8 @@ export interface PlanStore {
     phases: readonly PhaseNode[],
     actor: string,
   ): PlanRecord;
+  /** Record a task completion (append `task.completed` + fold); returns the completed plan. */
+  recordTaskCompleted(taskId: string, actor: string): PlanRecord;
   /** The plan record for `taskId`, or undefined. */
   getPlan(taskId: string): PlanRecord | undefined;
   /** Every recorded plan, in stable order (by drafted_ts then task_id). */
@@ -233,6 +236,22 @@ export function openPlanStore(projectId: string): PlanStore {
         if (!row) {
           throw new Error(
             `openPlanStore.recordReplan: row missing after projection (taskId='${taskId}')`,
+          );
+        }
+        return row;
+      });
+    },
+
+    recordTaskCompleted(taskId: string, actor: string): PlanRecord {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensurePlansTables(db);
+        const [stored] = tx.append([makeTaskCompletedEvent(projectId, { taskId }, actor)]);
+        applyEvent(tx, decode(stored!, plansUpcasters, plansSchemas), projectors);
+        const row = selectPlan(db, taskId);
+        if (!row) {
+          throw new Error(
+            `openPlanStore.recordTaskCompleted: row missing after projection (taskId='${taskId}')`,
           );
         }
         return row;
