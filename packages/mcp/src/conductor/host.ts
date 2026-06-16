@@ -132,11 +132,11 @@ export interface ConductorHostRunnerDeps {
 }
 
 /**
- * Drives {@link ConductorDaemon.tick} on a real cadence. Re-entrancy-guarded: if a tick is still in
- * flight when the next beat fires, that beat is SKIPPED (ticks never overlap or stack — a slow turn
- * must not pile up concurrent cycles). Lifecycle is `start()` (recover + arm) → beats → `stop()`
- * (disarm). The cadence + guard + lifecycle are sandbox-proven over `FakePty` + a controllable
- * scheduler; the real timers are the only un-exercised host-live part.
+ * Drives {@link ConductorDaemon.tick} on a real cadence. Re-entrancy-guarded: daemon ticks never
+ * overlap or stack, but an overlap beat still runs the watchdog reconcile sweep so an active long turn
+ * can be diagnosed as wedged. Lifecycle is `start()` (recover + arm) → beats → `stop()` (disarm). The
+ * cadence + guard + lifecycle are sandbox-proven over `FakePty` + a controllable scheduler; the real
+ * timers are the only un-exercised host-live part.
  */
 export class ConductorHostRunner {
   private readonly daemon: ConductorDaemon;
@@ -149,6 +149,7 @@ export class ConductorHostRunner {
   readonly control: ConductorControlSurface | undefined;
   private handle: IntervalHandle | null = null;
   private inFlight: Promise<void> | null = null;
+  private watchdogInFlight: Promise<void> | null = null;
   private stopped = false;
 
   constructor(deps: ConductorHostRunnerDeps) {
@@ -194,12 +195,19 @@ export class ConductorHostRunner {
     if (this.stopped) return;
     this.stopped = true;
     await this.inFlight;
+    await this.watchdogInFlight;
     await this.onStop?.();
   }
 
-  /** One cadence beat: run a tick unless a prior one is still in flight; report the outcome / error. */
+  /**
+   * One cadence beat: run a daemon tick unless a prior one is still in flight. If a turn is still
+   * active, run only the reconcile watchdog so wedged sessions are still detected on cadence.
+   */
   private async beat(): Promise<void> {
-    if (this.inFlight != null) return; // a prior tick is still running — skip this beat (no overlap)
+    if (this.inFlight != null) {
+      this.runOverlapWatchdogBeat();
+      return;
+    }
     const run = this.runBeat();
     this.inFlight = run;
     try {
@@ -207,6 +215,21 @@ export class ConductorHostRunner {
     } finally {
       if (this.inFlight === run) this.inFlight = null;
     }
+  }
+
+  private runOverlapWatchdogBeat(): void {
+    if (this.watchdogInFlight != null) return;
+    const run = this.daemon.reconcile
+      .tick()
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        if (this.onError != null) this.onError(error);
+        else console.error('[co-mcp serve] watchdog error:', error);
+      });
+    this.watchdogInFlight = run;
+    run.finally(() => {
+      if (this.watchdogInFlight === run) this.watchdogInFlight = null;
+    });
   }
 
   private async runBeat(): Promise<void> {
@@ -520,7 +543,10 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     });
 
   const reconcile = new ReconcileLoop({
-    runningAgents: () => liveRunningAgents(projectId, engine),
+    runningAgents: () =>
+      liveRunningAgents(projectId, engine).filter(
+        (agent) => !router.shouldSkip(projectId, agent.agentId),
+      ),
     // P6 (watchdog-seam): derive a real LivenessInput from in-process engine state + the injected
     // pidAlive probe. Returns undefined only for orphan agents with no hosted pane (skip — Principle 9).
     livenessInputFor: (agent: RunningAgent) => {

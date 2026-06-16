@@ -36,7 +36,12 @@ import { createHash } from 'node:crypto';
 import { MAIL_CLARIFY_REQUEST, OPERATOR } from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { openRosterStore, type RosterStore } from '../roles/roster-store.js';
-import { slingWorktree, type SlingDeps, type SlingResult } from '../worktrees/sling.js';
+import {
+  defaultGitExec,
+  slingWorktree,
+  type SlingDeps,
+  type SlingResult,
+} from '../worktrees/sling.js';
 import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
 
 /** Inputs to {@link startCoordinatorSession}. Exactly one of `prompt` / `specBody` (Principle 9). */
@@ -139,27 +144,32 @@ export function startCoordinatorSession(
     worktreeStore.close();
   }
 
-  // 2) REGISTER the root in the roster (idempotent): a coordinator parented to @operator.
-  const roster = openRoster(projectId);
   try {
-    roster.recordAgent({ agentId: coordinator, role: 'coordinator', parent: OPERATOR });
-  } finally {
-    roster.close();
-  }
+    // 2) REGISTER the root in the roster (idempotent): a coordinator parented to @operator.
+    const roster = openRoster(projectId);
+    try {
+      roster.recordAgent({ agentId: coordinator, role: 'coordinator', parent: OPERATOR });
+    } finally {
+      roster.close();
+    }
 
-  // 3) SEED the ACTIONABLE kickoff `clarify_request` (NOT `operator_message` — that is informational and
-  //    would not drive a turn). To the root, from @operator, carrying the prompt / draft-spec brief.
-  const mail = openMail(projectId);
-  try {
-    mail.send({
-      type: MAIL_CLARIFY_REQUEST,
-      to: coordinator,
-      from: OPERATOR,
-      subject: fromPrompt ? 'Operator kickoff' : 'Operator kickoff (draft spec)',
-      body: fromPrompt ? prompt : specBody,
-    });
-  } finally {
-    mail.close();
+    // 3) SEED the ACTIONABLE kickoff `clarify_request` (NOT `operator_message` — that is informational and
+    //    would not drive a turn). To the root, from @operator, carrying the prompt / draft-spec brief.
+    const mail = openMail(projectId);
+    try {
+      mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: coordinator,
+        from: OPERATOR,
+        subject: fromPrompt ? 'Operator kickoff' : 'Operator kickoff (draft spec)',
+        body: fromPrompt ? prompt : specBody,
+      });
+    } finally {
+      mail.close();
+    }
+  } catch (cause) {
+    cleanupFailedStartWorktree(openWorktrees, projectId, branch, repoCwd);
+    throw cause;
   }
 
   return {
@@ -169,4 +179,27 @@ export function startCoordinatorSession(
     baseRef: slung.baseRef,
     baseSha: slung.baseSha,
   };
+}
+
+function cleanupFailedStartWorktree(
+  openWorktrees: (projectId: string) => WorktreeStore,
+  projectId: string,
+  branch: string,
+  repoCwd: string,
+): void {
+  const worktrees = openWorktrees(projectId);
+  try {
+    try {
+      worktrees.removeWorktree(branch, { repoCwd });
+    } catch {
+      // Preserve the original start failure. Orphan detection can surface cleanup residue later.
+    }
+  } finally {
+    worktrees.close();
+  }
+  try {
+    defaultGitExec(repoCwd, ['branch', '-D', branch]);
+  } catch {
+    // Preserve the original start failure. A missing/locked branch can be surfaced by later cleanup.
+  }
 }

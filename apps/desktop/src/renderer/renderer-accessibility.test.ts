@@ -7,6 +7,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const rendererSource = readFileSync(join(here, 'renderer.ts'), 'utf8');
 const htmlSource = readFileSync(join(here, 'index.html'), 'utf8');
 const appShellSource = readFileSync(join(here, '../main/app-shell.ts'), 'utf8');
+const mainSource = readFileSync(join(here, '../main/index.ts'), 'utf8');
 
 describe('review view', () => {
   it('review view markup has required structural elements', () => {
@@ -180,11 +181,16 @@ describe('session start (P4)', () => {
     expect(rendererSource).toContain('showAppError(');
   });
 
-  it('session:start returned errors are surfaced even when no push error is emitted', () => {
+  it('session:start request errors surface exactly once through the returned result', () => {
+    const returnedErrorDisplays = rendererSource.match(
+      /showAppError\(r\.error \?\? 'Failed to start coordinator session'\)/g,
+    );
     expect(rendererSource).toContain('else if (!r.ok)');
     expect(rendererSource).toContain(
       "showAppError(r.error ?? 'Failed to start coordinator session')",
     );
+    expect(returnedErrorDisplays).toHaveLength(1);
+    expect(mainSource).not.toContain("sendToRenderer('session:error'");
   });
 });
 

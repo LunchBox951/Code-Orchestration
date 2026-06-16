@@ -371,14 +371,13 @@ ipcMain.handle('session:start', async (_event, prompt: unknown, specBody: unknow
       typeof prompt === 'string' && prompt.trim().length > 0 ? prompt.trim() : undefined;
     const specStr =
       typeof specBody === 'string' && specBody.trim().length > 0 ? specBody.trim() : undefined;
-    const result = await shell.client.startSession({
+    await shell.client.startSession({
       ...(promptStr != null ? { prompt: promptStr } : {}),
       ...(specStr != null ? { specBody: specStr } : {}),
     });
-    return { ok: true, result };
+    return { ok: true };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    sendToRenderer('session:error', msg);
     return { ok: false, error: msg };
   }
 });

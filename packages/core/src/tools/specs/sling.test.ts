@@ -872,6 +872,7 @@ describe('co_sling — spawn gate integration (P2 / AC-S10-2)', () => {
 
     expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(0);
     expect(ctx.worktrees?.getWorktree('co/sling-fail')?.removed).toBe(true);
+    expect(ctx.mail.outstanding('impl-sling-fail')).toHaveLength(0);
     expect(() => git(repo, 'rev-parse', '--verify', 'co/sling-fail')).toThrow();
   });
 

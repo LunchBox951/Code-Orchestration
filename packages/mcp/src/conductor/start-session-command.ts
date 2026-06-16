@@ -93,7 +93,7 @@ export async function runStartSessionCommand(
   const openRegistryFn = deps.openRegistry ?? openRegistry;
   const readSpecFile = deps.readSpecFile ?? ((path: string) => readFileSync(path, 'utf8'));
   const start = deps.start ?? startCoordinatorSession;
-  const log = deps.log ?? ((line: string) => console.log(line));
+  const log = deps.log ?? ((line: string) => console.error(line));
 
   const registry = openRegistryFn();
   let repoCwd: string | undefined;

@@ -16,8 +16,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OPERATOR, mailKind } from '../mail/events.js';
-import { openMailStore } from '../mail/mail-store.js';
-import { openRosterStore } from '../roles/roster-store.js';
+import { openMailStore, type MailStore } from '../mail/mail-store.js';
+import { openRosterStore, type RosterStore } from '../roles/roster-store.js';
 import { openSessionStore } from '../session/session-store.js';
 import { openWorktreeStore } from '../worktrees/worktree-store.js';
 import { openRegistry } from '../registry/registry.js';
@@ -179,6 +179,76 @@ describe('startCoordinatorSession — provisions worktree, registers the root, s
         { slingDeps: SLING_DEPS },
       ),
     ).not.toThrow();
+  });
+
+  it('cleans up the provisioned root worktree when roster registration fails', () => {
+    const { projectId, repo } = makeProject();
+    const coordinator = rootCoordinatorId(projectId);
+    const branch = `co/${coordinator}`;
+
+    expect(() =>
+      startCoordinatorSession(
+        { projectId, repoCwd: repo, prompt: 'go', base: 'main' },
+        {
+          slingDeps: SLING_DEPS,
+          openRoster: () =>
+            ({
+              recordAgent: () => {
+                throw new Error('roster failed');
+              },
+              close: () => {},
+            }) as unknown as RosterStore,
+        },
+      ),
+    ).toThrow(/roster failed/i);
+
+    const wt = openWorktreeStore(projectId);
+    try {
+      expect(wt.getWorktree(branch)?.removed).toBe(true);
+    } finally {
+      wt.close();
+    }
+    expect(() =>
+      execFileSync('git', ['rev-parse', '--verify', branch], { cwd: repo, stdio: 'ignore' }),
+    ).toThrow();
+  });
+
+  it('cleans up the provisioned root worktree when kickoff mail fails', () => {
+    const { projectId, repo } = makeProject();
+    const coordinator = rootCoordinatorId(projectId);
+    const branch = `co/${coordinator}`;
+
+    expect(() =>
+      startCoordinatorSession(
+        { projectId, repoCwd: repo, prompt: 'go', base: 'main' },
+        {
+          slingDeps: SLING_DEPS,
+          openMail: () =>
+            ({
+              send: () => {
+                throw new Error('mail failed');
+              },
+              close: () => {},
+            }) as unknown as MailStore,
+        },
+      ),
+    ).toThrow(/mail failed/i);
+
+    const wt = openWorktreeStore(projectId);
+    try {
+      expect(wt.getWorktree(branch)?.removed).toBe(true);
+    } finally {
+      wt.close();
+    }
+    const mail = openMailStore(projectId);
+    try {
+      expect(mail.outstanding(coordinator)).toHaveLength(0);
+    } finally {
+      mail.close();
+    }
+    expect(() =>
+      execFileSync('git', ['rev-parse', '--verify', branch], { cwd: repo, stdio: 'ignore' }),
+    ).toThrow();
   });
 
   it('fails loud when BOTH --prompt and --spec are supplied', () => {

@@ -65,6 +65,12 @@ describe('runProjectIdCommand', () => {
     expect(lines[0]).toMatch(UUID_RE);
   });
 
+  it('fails loud on extra repoPath arguments', async () => {
+    await expect(runProjectIdCommand(['/tmp/a', '/tmp/b'])).rejects.toThrow(
+      /at most one repoPath/i,
+    );
+  });
+
   it('prints the same id as the registry resolve after registration', async () => {
     const repoPath = mkdtempSync(join(tmpdir(), 'co-repo-'));
     dataDirs.push(repoPath);

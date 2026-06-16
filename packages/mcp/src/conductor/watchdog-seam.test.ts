@@ -23,6 +23,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
   ReconcileLoop,
+  WEDGE_MS,
+  defaultMailRenderer,
   openMailStore,
   openRegistry,
   openRosterStore,
@@ -182,6 +184,17 @@ function seedActionableMail(projectId: ProjectId, agent: string): void {
   }
 }
 
+function outstandingItem(projectId: ProjectId, agent: string) {
+  const mail = openMailStore(projectId);
+  try {
+    const item = mail.outstanding(agent)[0];
+    if (item == null) throw new Error(`expected outstanding mail for '${agent}'`);
+    return item;
+  } finally {
+    mail.close();
+  }
+}
+
 async function hostPane(
   engine: ConductorEngine,
   pty: FakePty,
@@ -218,6 +231,7 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
       quietWindow: qw.quietWindow,
       scheduler,
       reconcileEvery: 1, // reconcile on every tick
+      autoStart: false,
       // P6 seam: inject a fake pidAlive — always true (agent process is alive but stalled).
       pidAliveFor: () => true,
       // P6 seam: inject a no-op nudge so tick 1's beat() resolves immediately (FakePty never echoes,
@@ -234,7 +248,8 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     // needs a completion verb, not a merely warm idle pane.
     seedActionableMail(projectId, 'impl-stalled');
     const pane = await hostPane(engine, pty, makeIdentity('impl-stalled', projectId, cwd));
-    runner.control?.router.pause('impl-stalled');
+    const reconcile = (runner as unknown as { daemon: { reconcile: ReconcileLoop } }).daemon
+      .reconcile;
 
     // Emit some bytes so the engine's lastByteAt is set (the agent was active at clock=0).
     pane.emit('⠋ working…\r\n');
@@ -244,10 +259,9 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     const AFTER_QUIET = 1000 + QUIET_WINDOW_MS + 1;
     clock.set(AFTER_QUIET);
 
-    // Tick 1 — the reconcile watchdog observes the agent: idle, no completion verb, pidAlive=true,
+    // Reconcile 1 — the watchdog observes the agent: idle, no completion verb, pidAlive=true,
     // turnActive=false ⇒ SILENT STOP break-signal + finish-before-yield nudge. NOT stuck yet.
-    scheduler.fire();
-    await flush();
+    await reconcile.tick();
 
     expect(breaks).toHaveLength(1);
     expect(breaks[0]).toMatchObject({
@@ -256,13 +270,115 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     });
     expect(stuck).toEqual([]); // nudge injected first; STUCK requires a persisting break
 
-    // Tick 2 — still idle, no completion ⇒ persisting break ⇒ STUCK-and-surfaced (bounded: 2 ticks).
+    // Reconcile 2 — still idle, no completion ⇒ persisting break ⇒ STUCK-and-surfaced.
     clock.set(AFTER_QUIET + 4000);
-    scheduler.fire();
-    await flush();
+    await reconcile.tick();
 
     expect(stuck).toEqual(['impl-stalled']);
 
+    await runner.stop();
+  });
+
+  it('a paused hosted agent with outstanding mail is excluded from watchdog escalation', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const scheduler = new FakeScheduler();
+
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const stuck: string[] = [];
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      autoStart: false,
+      pidAliveFor: () => true,
+      injectNudge: async () => {},
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: (agent) => stuck.push(agent),
+    });
+
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const reconcile = (runner as unknown as { daemon: { reconcile: ReconcileLoop } }).daemon
+      .reconcile;
+    seedActionableMail(projectId, 'impl-paused');
+    const pane = await hostPane(engine, pty, makeIdentity('impl-paused', projectId, cwd));
+    runner.control?.router.pause('impl-paused');
+
+    pane.emit('warm but paused\r\n');
+    clock.set(1000 + QUIET_WINDOW_MS + 1);
+
+    const result = await reconcile.tick();
+
+    expect(result.assessed).toEqual([]);
+    expect(result.skipped).toEqual([]);
+    expect(breaks).toEqual([]);
+    expect(stuck).toEqual([]);
+
+    await runner.stop();
+  });
+
+  it('an overlapping cadence beat can observe an active byte-quiet turn as wedged', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const scheduler = new FakeScheduler();
+
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const stuck: string[] = [];
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      pidAliveFor: () => true,
+      injectNudge: async () => {},
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: (agent) => stuck.push(agent),
+    });
+
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    seedActionableMail(projectId, 'impl-wedged');
+    const pane = await hostPane(engine, pty, makeIdentity('impl-wedged', projectId, cwd));
+    const item = outstandingItem(projectId, 'impl-wedged');
+
+    clock.set(0);
+    pane.emit('turn starting\r\n');
+
+    scheduler.fire();
+    await tick();
+    pane.emit(defaultMailRenderer(item));
+    await flush();
+
+    expect(engine.livenessObservationFor(projectId, 'impl-wedged')?.turnActive).toBe(true);
+
+    clock.set(WEDGE_MS + 1);
+    scheduler.fire(); // overlap beat: daemon tick is still in-flight, so only watchdog reconcile runs.
+    await flush();
+
+    expect(breaks).toHaveLength(1);
+    expect(breaks[0]).toMatchObject({
+      agent: 'impl-wedged',
+      info: { kind: 'wedged' },
+    });
+    expect(stuck).toEqual([]);
+
+    qw.settle();
     await runner.stop();
   });
 

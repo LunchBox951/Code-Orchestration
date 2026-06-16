@@ -37,6 +37,13 @@ export async function runProjectIdCommand(
   const cwd = deps.cwd ?? process.cwd();
   const print = deps.print ?? ((line: string) => process.stdout.write(line + '\n'));
 
+  if (argv.length > 1) {
+    throw new Error(
+      `co-mcp project-id: expected at most one repoPath argument, got ${argv.length}. ` +
+        'Usage: co-mcp project-id [repoPath]',
+    );
+  }
+
   const rawPath = argv[0] ?? cwd;
   const absPath = resolvePath(rawPath);
 
