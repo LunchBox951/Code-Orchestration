@@ -564,6 +564,8 @@ function getOrCreateTerm(): XtermTerminal | null {
     createTerminal: (options) => new window.Terminal(options),
     createFitAddon: () => new window.FitAddon.FitAddon(),
     observeResize: (target, onResize) => {
+      // getOrCreateTerm caches agentsTerm, so this closure runs exactly once per app lifetime; the
+      // disconnect is a defensive guard against a future caller invoking it twice, not a live path.
       agentsResizeObserver?.disconnect();
       agentsResizeObserver = new ResizeObserver(() => onResize());
       agentsResizeObserver.observe(target);

@@ -266,10 +266,14 @@ export class AgentsConsoleVM {
     // Trim the head to the transcript bound. The cut is computed on the joined string (what xterm
     // consumes) and advanced past any dangling escape sequence so a half-cut ESC never lands at the START
     // of the retained transcript (which would corrupt xterm's emulator). The bound stays a MAX — the
-    // escape-safety only ever drops a few extra leading bytes.
-    const joined = merged.map((segment) => segment.text).join('');
-    const rawCut = Math.max(0, joined.length - CONSOLE_TRANSCRIPT_MAX_CHARS);
-    let remaining = rawCut > 0 ? escapeSafeCut(joined, rawCut) : 0;
+    // escape-safety only ever drops a few extra leading bytes. The join allocation is skipped entirely in
+    // the common (under-bound) case — total length is summed cheaply from the segments first.
+    const total = merged.reduce((sum, segment) => sum + segment.text.length, 0);
+    let remaining = 0;
+    if (total > CONSOLE_TRANSCRIPT_MAX_CHARS) {
+      const joined = merged.map((segment) => segment.text).join('');
+      remaining = escapeSafeCut(joined, joined.length - CONSOLE_TRANSCRIPT_MAX_CHARS);
+    }
     while (remaining > 0 && merged.length > 0) {
       const first = merged[0]!;
       const drop = Math.min(first.text.length, remaining);
