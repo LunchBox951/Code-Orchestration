@@ -1144,6 +1144,18 @@ export {
 export type { SessionStore } from './session/session-store.js';
 export { openSessionStore } from './session/session-store.js';
 
+// Stage 14 P1 (KEYSTONE) — the operator-only START PRIMITIVE: launch a ROOT coordinator (no warm
+// parent) from a prompt OR a draft spec. Provisions the root's worktree, registers it in the roster
+// (coordinator/@operator), and seeds the ACTIONABLE `clarify_request` kickoff — but mints NO session
+// (the daemon cold-starts the registered-but-unhosted root). The `co-mcp start-session` verb and the
+// P4 desktop operator-IPC path both call THIS core primitive (single source of truth).
+export type {
+  StartCoordinatorSessionParams,
+  StartCoordinatorSessionDeps,
+  StartCoordinatorSessionResult,
+} from './session/start-coordinator-session.js';
+export { startCoordinatorSession, rootCoordinatorId } from './session/start-coordinator-session.js';
+
 // L7 B0 — PtyHost / FakePty contract (FROZEN cross-phase interface — B1/C1/C2/E1/P1 all import).
 // PtyHost.spawn() returns a Pane; NodePtyHost (B1) wraps a real node-pty IPty over this interface.
 // FakePty is the in-sandbox test double: no real binaries, no timers, deterministic CI.

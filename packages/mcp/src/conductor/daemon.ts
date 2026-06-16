@@ -33,8 +33,10 @@
  * engine is never hidden behind it.
  */
 import {
+  OPERATOR,
   openRosterStore,
   openSessionStore,
+  openWorktreeStore,
   recoverProjectStore,
   type AgentRecord,
   type DeliveredMail,
@@ -44,6 +46,7 @@ import {
   type RosterStore,
   type SessionRecord,
   type SessionStore,
+  type WorktreeStore,
 } from '@co/core';
 import type { ConductorEngine, CycleOutcome } from './engine.js';
 import type { HostedIdentity } from '../live-session-host.js';
@@ -86,6 +89,11 @@ export interface ConductorDaemonDeps {
   /** Opens the roster store to join role/sub-role/parent onto each session. Default: {@link openRosterStore}. */
   readonly openRoster?: (projectId: ProjectId) => RosterStore;
   /**
+   * Stage 14 P1 — opens the worktree store to resolve a cold-start ROOT coordinator's provisioned cwd
+   * (the start primitive recorded the worktree keyed to the root's agent id). Default: {@link openWorktreeStore}.
+   */
+  readonly openWorktrees?: (projectId: ProjectId) => WorktreeStore;
+  /**
    * Stage 10 P3 (§3c) — the OPERATOR-CONTROL candidate-skip predicate. Consulted when the daemon builds
    * its candidate set; an agent for which this returns `true` is FILTERED OUT (not driven this tick). The
    * daemon-backed router wires its paused ∪ stuck sets here (so `pause` actually takes effect and an
@@ -108,6 +116,12 @@ export interface DaemonTickOutcome {
   readonly tick: number;
   /** Size of the reconstructed live set (candidates) this tick. */
   readonly candidateCount: number;
+  /**
+   * Stage 14 P1 — root coordinators COLD-STARTED this tick: a registered-but-unhosted root
+   * (`coordinator` / parent `@operator`) the daemon launched (minting its session) so it becomes
+   * drivable. Empty on every tick that launches no root (the common case).
+   */
+  readonly coldStarted: readonly string[];
   /** Recovered RUNNING sessions that are cold in this engine process and therefore not driven. */
   readonly coldCandidates: readonly string[];
   /** The engine's ≤1-turn outcome, or `null` when no candidate was eligible. */
@@ -138,6 +152,7 @@ export class ConductorDaemon {
   private readonly recoverFn: (projectId: ProjectId) => void;
   private readonly openSessions: (projectId: ProjectId) => SessionStore;
   private readonly openRoster: (projectId: ProjectId) => RosterStore;
+  private readonly openWorktrees: (projectId: ProjectId) => WorktreeStore;
   private readonly isSkipped: (projectId: ProjectId, agent: string) => boolean;
   private tickCount = 0;
   private recovered = false;
@@ -157,6 +172,7 @@ export class ConductorDaemon {
     this.recoverFn = deps.recover ?? recoverProjectStore;
     this.openSessions = deps.openSessions ?? openSessionStore;
     this.openRoster = deps.openRoster ?? openRosterStore;
+    this.openWorktrees = deps.openWorktrees ?? openWorktreeStore;
     this.isSkipped = deps.isSkipped ?? (() => false);
   }
 
@@ -237,7 +253,11 @@ export class ConductorDaemon {
   }
 
   /**
-   * One deterministic tick (the unit tests drive). In order (AC-S10-1, steps 2–3):
+   * One deterministic tick (the unit tests drive). In order (AC-S10-1 steps 2–3, + AC-S14-1 step 0):
+   *   0. ROOT COLD-START ({@link coldStartRootCoordinators}): discover a registered-but-unhosted ROOT
+   *      coordinator (the start primitive registered it + provisioned its worktree but minted NO
+   *      session) and LAUNCH it via the engine's single launch authority — which MINTS its session, so
+   *      the rebuilt live set below includes it and `runCycle` drives its FIRST turn THIS tick;
    *   1. reconstruct the live set ({@link buildCandidates});
    *   2. `engine.runCycle(drivable)` — select a WAITING+actionable WARM agent, reuse its pane,
    *      inject, drive EXACTLY ONE turn, yield (the pane stays warm);
@@ -253,6 +273,11 @@ export class ConductorDaemon {
     if (!this.recovered) this.recover();
     this.tickCount += 1;
     const observedAt = this.now();
+
+    // Step 0 (AC-S14-1): cold-start any registered-but-unhosted ROOT coordinator BEFORE building the
+    // candidate set, so a freshly-started root (no session yet) is hosted + minted in time to be
+    // selected + driven THIS tick. GATED to the root — a recovered child session is never cold-launched.
+    const coldStarted = await this.coldStartRootCoordinators();
 
     const candidates = this.buildCandidates();
     // Recovered sessions are durable inputs, not launch authority. A fresh daemon can reconstruct them
@@ -277,12 +302,108 @@ export class ConductorDaemon {
       observedAt,
       tick: this.tickCount,
       candidateCount: candidates.length,
+      coldStarted,
       coldCandidates,
       cycle,
       selected: cycle?.hosted.identity.agent ?? null,
       cadenceFired,
       clarifyForwarded,
       reconcile,
+    };
+  }
+
+  /**
+   * Stage 14 P1 (AC-S14-1) — ROOT COLD-START. Discover every ROOT coordinator that is
+   * registered-but-unhosted — `role === 'coordinator'` AND `parent === '@operator'`, with NO live
+   * session and not already warm in this engine — and LAUNCH each via {@link ConductorEngine.ensureHosted}
+   * (the same launch authority the reviewer spawn-gate uses). `ensureHosted` mints the root's
+   * `session.created` (via `hostSession`), so after this returns the root is in the live set and
+   * drivable. Returns the ids cold-started this tick (for the {@link DaemonTickOutcome} + host log).
+   *
+   * GATE (must-not-regress): only a ROOT coordinator is cold-started. A recovered CHILD session (e.g.
+   * an implementer that is cold in this engine process) is NEVER cold-launched — it stays a cold
+   * candidate, exactly as before. Re-launching a crashed child into a fresh pane is the `[host-live]`
+   * operator handoff, not this in-process cold-start.
+   *
+   * Over `FakePty` the default-spec `ensureHosted(identity)` path is sufficient (mirrors `hostPane`);
+   * the placement-launch-spec + injected `coMcpPaths` wiring is the host-live seam (see `host.ts`).
+   * No wall clock — discovery is pure store reads and the launch carries the daemon's injected seams.
+   */
+  private async coldStartRootCoordinators(): Promise<readonly string[]> {
+    const roots = this.discoverColdStartRoots();
+    const started: string[] = [];
+    for (const identity of roots) {
+      await this.engine.ensureHosted(identity);
+      started.push(identity.agent);
+    }
+    return started;
+  }
+
+  /**
+   * Resolve the launch {@link HostedIdentity} of every registered-but-unhosted ROOT coordinator that is
+   * READY to cold-start. The root has no session yet, so discovery is roster-based (joined to the
+   * live-session set + the engine's warm set to exclude already-hosted roots) and then gated on a LIVE
+   * PROVISIONED WORKTREE keyed to the root's agent id (the cwd to host into, mirroring the reviewer
+   * spawn-gate lookup).
+   *
+   * The worktree is the readiness signal: the start primitive provisions it BEFORE registering the
+   * root, so a genuine operator-started root always has one. A coordinator with NO live worktree is NOT
+   * a launchable root (e.g. a roster PARENT-ANCESTOR the chain recorded, or a finished root whose
+   * sandbox was torn down) — it is skipped, never cold-launched. This is not a silent drop of a live
+   * agent: such a coordinator has no pane to drive and no work sandbox to host into.
+   */
+  private discoverColdStartRoots(): readonly HostedIdentity[] {
+    const roster = this.openRoster(this.projectId);
+    try {
+      const sessions = this.openSessions(this.projectId);
+      try {
+        const live = new Set(sessions.listSessions().map((session) => session.agentId));
+        const roots = roster
+          .listAgents()
+          .filter(
+            (agent) =>
+              agent.role === 'coordinator' &&
+              agent.parent === OPERATOR &&
+              !live.has(agent.agentId) &&
+              !this.engine.isHosted(this.projectId, agent.agentId),
+          );
+        if (roots.length === 0) return [];
+        const worktrees = this.openWorktrees(this.projectId);
+        try {
+          const live2 = worktrees.listWorktrees();
+          const identities: HostedIdentity[] = [];
+          for (const agent of roots) {
+            const worktree = live2.find((w) => !w.removed && w.agent === agent.agentId);
+            if (worktree == null) continue; // not a launchable root — see method docstring.
+            identities.push(this.toRootIdentity(agent, worktree.path));
+          }
+          return identities;
+        } finally {
+          worktrees.close();
+        }
+      } finally {
+        sessions.close();
+      }
+    } finally {
+      roster.close();
+    }
+  }
+
+  /**
+   * Build a root coordinator's launch {@link HostedIdentity}: cwd = its provisioned worktree path,
+   * `pane = pane-<id>`, provider `claude`, resume `{ provider:'claude', sessionId:<id> }`.
+   */
+  private toRootIdentity(agent: AgentRecord, cwd: string): HostedIdentity {
+    return {
+      agent: agent.agentId,
+      role: agent.role,
+      ...(agent.subRole != null ? { subRole: agent.subRole } : {}),
+      parent: agent.parent,
+      pane: `pane-${agent.agentId}`,
+      projectId: this.projectId,
+      cwd,
+      provider: 'claude',
+      resume: { provider: 'claude', sessionId: agent.agentId },
     };
   }
 }
