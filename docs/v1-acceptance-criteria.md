@@ -49,16 +49,15 @@ These are the top-level conditions that, all met, *are* v1.
   (Offline-mode)** repo with no remote — proving Principle 5 (`self-describing`) and that GitHub is
   never a hard dependency.
 - `SH-5` ☐ Every hard gate holds under self-hosting: no raw `git push` / `gh pr create` /
-  `gh pr merge` path exists; only gated `co merge` / `co push` / `co pr-merge` reach
-  `master`/remote/PR (Principle 7 — `gated-by-default`).
+  `gh pr merge` path exists; only gated MCP tools (`co_merge`, `co_push`, `co_pr_merge`) reach a
+  protected target, remote, or PR (Principle 7 — `gated-by-default`).
 
 ## B. The two surfaces (P1, P2, P3, P15)
 
 - `SF-1` ◐ `co` hosts the **authentic interactive `claude`/`codex`** in a real terminal emulator
-  (pty), not a headless reconstruction, not tmux (Principle 2). Substrate decided (Option C); L7 lands
-  the sandbox-tested pty host (`PtyHost`/`FakePty`) + the Conductor engine that drives it (spawn →
-  drive → bind → inject → route → classify liveness). Remaining: the host-side live proof against the
-  real `claude`/`codex` binaries.
+  (pty), not a headless reconstruction, not tmux (Principle 2). The Electron shell, pty abstraction,
+  `NodePtyHost` adapter, sandbox-tested `FakePty`, and Conductor engine/daemon have landed. Remaining:
+  the host-side live proof against the real `claude`/`codex` binaries.
 - `SF-2` ◐ The operator can **steer any agent mid-turn** from its terminal pane (answer, redirect,
   interrupt) without tearing it down (Principle 1). L7-F lands the sandbox seam (`steerPane` +
   `ConductorEngine.steer`) proven in-sandbox over `FakePty`. Remaining: the host-side live proof
@@ -66,18 +65,21 @@ These are the top-level conditions that, all met, *are* v1.
 - `SF-3` ◐ Agents coordinate **only** via the typed, persisted **mail bus**; the operator is a
   first-class participant and escalations/approvals **filter up** to their inbox (Principles 1, 8). L1 delivers the typed, schema-validated, persisted mail bus over the L0 event log, with `@operator` first-class. Remaining: 'ONLY via mail' (no other channel) is enforced once the MCP surface (L2) + Conductor (L7) wire it.
 - `SF-4` ◐ Actionable mail is **un-loseable** (sticky until acted on); informational mail is not
-  (Principle 8, `MAIL-BUS`). L1 delivers actionable-vs-informational with sticky-until-resolved as a tested REPLAY invariant + an outstanding-action-count projection. Remaining: the operator-facing inbox UX is the app (L9).
+  (Principle 8, `MAIL-BUS`). L1 delivers actionable-vs-informational with sticky-until-resolved as a
+  tested replay invariant + an outstanding-action-count projection. Stage 12 adds the desktop Mail
+  surface with actionable approvals/replies. Remaining: richer operator inbox polish and host-live
+  proof under real Conductor traffic.
 - `SF-5` ◐ A **desktop app** is the operator's one-stop surface — observe and steer all agents in
-  one place (Principle 15). Stage 11 stands up the Electron shell (`apps/desktop`): the 6-view nav
-  shell, the main-process `@co/core` + P1 `OperatorIpcClient` wiring, the contextBridge
-  view-model bridge, and real Dashboard/Mail/Cost data surfaces. Remaining: the agent-console pty
-  pane and the host-live proof (operator handoff).
+  one place (Principle 15). Stage 11 resolves the shell as Electron; Stage 12 stands up the 6-view nav
+  shell, main-process `@co/core` + `OperatorIpcClient` wiring, the contextBridge view-model bridge,
+  real Dashboard/Mail/Cost data surfaces, transcript display, and steer controls. Remaining: host-live
+  proof against real provider panes plus completing the Review/Source surfaces.
 - `SF-6` ◐ Artifacts (mail, commit messages) are **rendered per audience** — structured under the
   hood, clean human view on top; provider voice stays out of artifacts (Principle 3). L1 ships the
   renderer-registry seam + a generic default renderer; L3 ships provider-deterministic commit /
   merge / PR message renderers and `co_finish` consumes the commit renderer. L6a wires merge / PR
-  renderers into the gated `co_merge` and `co_pr_merge` tools. Remaining: per-type human mail
-  renderers are the app (L9).
+  renderers into the gated `co_merge` and `co_pr_merge` tools. Stage 12 carries renderer plumbing into
+  the desktop Mail surface. Remaining: richer per-type human mail renderers and review/source views.
 
 ## C. Roles, dispatch & escalation (P8, P11, P13)
 
@@ -101,9 +103,9 @@ These are the top-level conditions that, all met, *are* v1.
 
 ## D. Review gate & integration (P6, P7, P10)
 
-- `RG-1` ◐ Nothing reaches `master`/remote/PR without a **PASS** (agent or human) except the
+- `RG-1` ◐ Nothing reaches a protected target/remote/PR without a **PASS** (agent or human) except the
   audited `@operator` override in `RG-3`; two verdicts only (PASS / ISSUES) (Principle 7). L6a
-  lands the headless `co_merge` / `co_push` / `co_pr_merge` PASS gates, stale-finish checks, and
+  lands the MCP `co_merge` / `co_push` / `co_pr_merge` PASS gates, stale-finish checks, and
   owner/contributor publish guards. Remaining: L7 hosted-surface enforcement so live agents cannot
   use a raw fallback path.
 - `RG-2` ◐ The blocker bar **tightens toward production** — nits ride as suggestions into `dev`,
@@ -111,7 +113,7 @@ These are the top-level conditions that, all met, *are* v1.
   and reviewer-profile routing by scope. Remaining: live reviewer sessions must apply the ladder
   while producing verdicts.
 - `RG-3` ◐ Operator override exists, is **audited, and records its reason** (Principle 7). L6a
-  lands the headless `co_merge`/`co_push`/`co_pr_merge` override path with operator-only reasoned
+  lands the MCP `co_merge`/`co_push`/`co_pr_merge` override path with operator-only reasoned
   audit records. Remaining: L7 hosted-surface enforcement/UX around invoking the override.
 - `RG-4` ◐ Acceptance criteria are the **cohesion contract**: the spec produces them, the plan
   structures them, the implementer targets them, tests encode them, the reviewer enforces them
@@ -132,7 +134,7 @@ These are the top-level conditions that, all met, *are* v1.
 - `WT-1` ◐ Every worker gets an **isolated worktree/branch**; parallel work never collides; merges
   are explicit and locked (Principle 6, `WORKTREES`). L3 ships `co_sling`: branch/base capture,
   injective program-data sandbox paths, and recorded worktree+baseline facts. L6a adds locked,
-  gated headless integration through the review/publish tools. Remaining: worker spawn into those
+  gated MCP integration through the review/publish tools. Remaining: worker spawn into those
   sandboxes (L7) and live hosted enforcement around the same gates.
 - `WT-2` ◐ Gitignored essentials are copied/pointer-linked into worktrees so non-trivial repos and
   environments don't break (Principle 6). L3 ships the provisioning manifest with symlink / copy /
@@ -159,8 +161,9 @@ These are the top-level conditions that, all met, *are* v1.
   `phase.verified`, `plan.replanned`), replay-equal (see
   [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md), AC-L6b-1/5). L6b G/H add **issues and
   research records** as events (`issue.captured/diagnosed/filed/self_assigned`,
-  `research.finalized`), replay-equal (AC-L6b-G1/H1). Remaining: agents/turns/reviews
-  as events in later layers. Evidence: L0 on `main` (PR #11); L1 on `dev`; L4 dispatch/cost in
+  `research.finalized`), replay-equal (AC-L6b-G1/H1). Later layers add roster/session/review events
+  and replay coverage. Remaining: explicit turn lifecycle events. Evidence: L0 on `main` (PR #11);
+  L1 on `dev`; L4 dispatch/cost in
   `co/l4-dispatch-cost`; L6b specs/plans in `co/l6b-core`; L6b issues/locator in
   `co/l6b-issues-locator`.
 - `ST-2` ◐ The system can be **reconstructed and recovered** from its record after a crash/restart;
@@ -184,7 +187,8 @@ These are the top-level conditions that, all met, *are* v1.
 - `MC-2` ◐ **One core, thin adapters** — the CLI, MCP server, and app import the same core; logic
   cannot drift (Principle 4, `MCP-TOOLS`). L2 ships the public core tool surface plus a mechanical
   lint guard that prevents `cli`/`mcp` from deep-importing core internals or opening stores directly.
-  Remaining: carry the same rule through the app once it leaves its parked stub.
+  Stage 12 carries the same rule through the app via adapter/layering checks. Remaining: keep the
+  guard current as the app grows.
 - `MC-3` ◐ The protocol is **self-describing**: `orient` teaches workflow, schemas teach syntax,
   native project memory teaches the repo, the locator maps unfamiliar code (Principle 5). L2 ships
   workflow-only, role-scoped `co_orient` and schema-publication through MCP, with drift tests
@@ -201,9 +205,9 @@ These are the top-level conditions that, all met, *are* v1.
   policy, default Claude+Codex account candidates, passive usage sources, and shared CLI/MCP core
   routing. Remaining: full live-session execution/monitoring behind the same abstraction and the
   self-host proof that both providers can run real worker turns.
-- `PV-2` ◐ Interactive (non-headless) **subscription auth** works for both providers. Substrate
-  decided (Option C); L7 lands the spawn/transport seam, proven in-sandbox. Remaining: the host-side
-  live proof that interactive subscription auth works for both providers.
+- `PV-2` ◐ Interactive (non-headless) **subscription auth** works for both providers. The spawn/
+  transport seam is proven in-sandbox. Remaining: the host-side live proof that interactive
+  subscription auth works for both providers.
 
 ---
 
@@ -219,10 +223,11 @@ Explicitly **out** of the self-hosting bar; revisit post-v1:
 
 ## Parked dependencies on the v1 critical path (`⏸`)
 
-These deferred decisions **must resolve before v1** (they gate `SF-1`, `SF-5`, `PV-2`):
+These deferred proofs **must resolve before v1** (they gate `SF-1`, `SF-5`, `PV-2`):
 
-- **Runtime substrate** — how the Conductor drives a live interactive session (turn execution,
-  spawn/transport, liveness, recovery). See [`research/runtime-substrate.md`](research/runtime-substrate.md).
+- **Runtime host-live proof** — prove Conductor turn execution, spawn/transport, liveness, recovery,
+  and provider auth against real interactive sessions. See
+  [`research/runtime-substrate.md`](research/runtime-substrate.md).
 - **Desktop shell** — ✅ RESOLVED: Electron (Stage 11, 2026-06-15). See
   [`research/language-and-stack.md`](research/language-and-stack.md).
 

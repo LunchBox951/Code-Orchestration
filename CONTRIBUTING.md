@@ -6,18 +6,19 @@ orchestrates work. Read [`docs/README.md`](docs/README.md) and
 
 ## Development setup
 
-- Node ≥ 22 (see `.nvmrc`), **pnpm 10** — enable via `corepack enable` **or** `npm i -g pnpm@10`
-  (corepack is optional).
+- Node ≥ 24 (see `.nvmrc`), **pnpm 10.33.0** (see `package.json`) — enable via
+  `corepack enable` **or** `npm i -g pnpm@10.33.0` (corepack is optional).
 - `pnpm install`, then `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and
   `pnpm format:check` — run all five before considering a change done.
 
 ## How work is structured (the model)
 
-Issues map to `co`'s work units:
+Issues map to `co`'s work units and governance views:
 
-- **spec** — top-level intent, locked before work starts.
-- **phase** — an independently-mergeable slice of a spec.
-- **task** — an implementer-sized unit inside a phase.
+- **task** — the top-level product unit of work; it owns the spec, phases, agent tree, and state.
+- **spec** — the locked source-of-truth requirements document for a task.
+- **phase** — an independently-mergeable slice of a task.
+- **implementation task** — an implementer-sized issue or PR inside a phase.
 - **bug** — a defect report. **research** — an open, evidence-pending decision.
 
 The [Project board](docs/governance/project-board.md) tracks items across the lifecycle

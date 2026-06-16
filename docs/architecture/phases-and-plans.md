@@ -53,7 +53,7 @@ resources, so it's **bounded**:
   rate-limit-aware routing that complements it).
 - **One active reviewer per merge target — serialize review+merge.** A review is bound to a
   base SHA; a *parallel* merge to the same target changes that SHA and invalidates a
-  concurrent review (the prototype's "second `co merge` re-review" thrash). So reviews and
+  concurrent review (the prototype's second-merge re-review thrash). So reviews and
   merges to a given target are **serialized** — one at a time. When the first lands, the next
   reviewed branch is (correctly) re-reviewed against the new base before merging. The
   prototype's merge-locks become a per-target review+merge serialization.

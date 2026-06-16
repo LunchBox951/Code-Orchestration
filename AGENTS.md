@@ -8,7 +8,7 @@ This repo is a TypeScript pnpm-workspace monorepo:
 
 - `packages/core` is the domain core and single source of truth.
 - `packages/cli` and `packages/mcp` are thin adapters over core; do not duplicate core logic there.
-- `apps/desktop` is the operator app surface.
+- `apps/desktop` is the Electron operator app surface.
 - `docs/` is the canonical design corpus and should carry rationale, not this file.
 
 ## Read These First
@@ -20,7 +20,8 @@ This repo is a TypeScript pnpm-workspace monorepo:
   architecture or terminology.
 - [`docs/concepts.md`](docs/concepts.md) — the shared vocabulary for Operator, Conductor, Agent,
   Mail, Task, Phase, Spec, Review, Worktree, and Provider.
-- [`docs/principles.md`](docs/principles.md) — the 16 invariants cited as `Principle N — handle`;
+- [`docs/principles.md`](docs/principles.md) — the 16 invariants, preferably cited as
+  `Principle N — handle`;
   use this instead of the frozen root `PRINCIPLES.md` migration residue.
 - [`docs/v1-acceptance-criteria.md`](docs/v1-acceptance-criteria.md) — the project-wide definition
   of v1; every spec's acceptance criteria must ladder up to IDs here.
@@ -35,7 +36,7 @@ This repo is a TypeScript pnpm-workspace monorepo:
   only if every agent truly needs the pointer.
 - Follow the check and contribution flow in [`CONTRIBUTING.md`](CONTRIBUTING.md) before considering a
   diff done.
-- Do not bypass the review gate: use the sanctioned `co` gated publish/merge path instead of raw
-  `git push`, `gh pr create`, or `gh pr merge`.
+- Do not bypass the review gate: use the gated MCP tools (`co_merge`, `co_push`, `co_pr_merge`)
+  instead of raw `git push`, `gh pr create`, or `gh pr merge`.
 - Do not treat `.co/`, `.claude/`, or `.codex/` as product code; they are temporary prototype
   residue documented in [`docs/migration.md`](docs/migration.md).
