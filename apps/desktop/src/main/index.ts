@@ -378,6 +378,7 @@ ipcMain.handle('session:start', async (_event, prompt: unknown, specBody: unknow
     return { ok: true, result };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
+    sendToRenderer('session:error', msg);
     return { ok: false, error: msg };
   }
 });

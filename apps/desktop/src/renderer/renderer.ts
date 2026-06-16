@@ -916,11 +916,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const textarea = document.getElementById('session-prompt-input') as HTMLTextAreaElement | null;
     const prompt = textarea?.value.trim() ?? '';
     void bridge.sessionStart(prompt.length > 0 ? prompt : null, null).then((r) => {
-      if (r.ok) {
-        if (textarea) textarea.value = '';
-      } else {
-        showAppError(r.error ?? 'Failed to start session');
-      }
+      if (r.ok && textarea) textarea.value = '';
+      // Errors are pushed via session:error → onSessionError → showAppError.
     });
   });
 
