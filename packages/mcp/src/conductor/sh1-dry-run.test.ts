@@ -88,6 +88,11 @@ import {
   openSpecStore,
   openWorktreeStore,
   parseSubRoleId,
+  CoRepoModeGate,
+  defaultRemoteProbe,
+  detectRepoMode,
+  repoModeCapabilities,
+  resolveRepoMode,
   reviewReviewerKey,
   startCoordinatorSession,
   worktreePathFor,
@@ -531,6 +536,7 @@ interface Sh1DryRunResult {
   readonly passVerdictRecorded: boolean;
   readonly merged: boolean;
   readonly mergeCommitSha: string;
+  readonly mergeMode: string;
   readonly mergedFileOnIntegration: boolean;
   readonly finalTick: DaemonTickOutcome;
 }
@@ -733,7 +739,7 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
   // driven turn — so even the merge transitions are daemon-sequenced, never directly invoked.
   // Capture the tool JSON via an outer `let` (driveDaemonTurn returns the tick outcome, not the result).
   skipped.delete(LEAD);
-  let merge1: { review_pending?: boolean; merged?: boolean } | undefined;
+  let merge1: { review_pending?: boolean; merged?: boolean; mode?: string } | undefined;
   await driveDaemonTurn(daemon, clock, qw, projectId, LEAD, agentPanes, 410000, async () => {
     merge1 = (await callToolJson(leadClient, 'co_merge', {
       branch: TOY_BRANCH,
@@ -744,6 +750,9 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
   });
   if (merge1 == null) throw new Error('sh1-dry-run: co_merge (#1) returned no result');
   const mergePending = merge1.review_pending === true && merge1.merged !== true;
+  // The repo mode co_merge itself resolved (merge.ts → resolveRepoMode). For the no-remote harness
+  // repo this is 'offline' — direct evidence the gated round-trip below ran in Offline mode (SH-4).
+  const mergeMode = merge1.mode ?? '';
   const reviewRequest = reviews(projectId).getReviewRequest(INTEGRATION, TOY_BRANCH);
   const reviewRequested = reviewRequest != null;
   if (reviewRequest == null) throw new Error('sh1-dry-run: co_merge did not request a review');
@@ -794,6 +803,7 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     passVerdictRecorded,
     merged,
     mergeCommitSha,
+    mergeMode,
     mergedFileOnIntegration,
     finalTick,
   };
@@ -1057,5 +1067,49 @@ describe('SH-1 proof harness — PROVES THE FULL LOOP (cold-start → slings →
     expect(run2.merged).toBe(true);
     expect(run1.passVerdictRecorded).toBe(true);
     expect(run2.passVerdictRecorded).toBe(true);
+  });
+});
+
+// ── SH-4 — the loop drives on a LOCAL-ONLY, no-remote repo (Offline mode) ──────────────────────────────
+// The harness repo (makeRepo) deliberately has NO remote, so it resolves to Offline mode. This proves
+// the SH-4 IN-SANDBOX half: Offline auto-detect (repo-mode.ts / WT-4), push/PR disabled, merge STILL
+// gated. The real stranger-repo live run stays an operator TODO (docs/offline-runbook.md, docs/v1-handoff.md).
+describe('SH-4 offline self-host — drives the loop on a local-only no-remote repo: Offline auto-detect, push/PR disabled, merge still gated (NOT the host-live stranger-repo bar — docs/offline-runbook.md)', () => {
+  it('auto-detects Offline mode, disables push/PR, and still gates the merge through the human-review round-trip', async () => {
+    const { projectId, repo } = makeProject();
+
+    // (1) OFFLINE AUTO-DETECT (WT-4). The repo has no remote, so BOTH the pure detector over the real
+    //     read-only prober AND the effective resolver (override ⊕ detection) resolve to 'offline'. The
+    //     default prober's `git ls-remote origin` fails fast on a remote-less repo — no network read.
+    expect(detectRepoMode(defaultRemoteProbe(repo))).toBe('offline');
+    expect(resolveRepoMode(projectId, repo)).toBe('offline');
+
+    // (2) PUSH / PR DISABLED. Offline's capability lookup refuses both, and the enactment gate fails
+    //     LOUD (Principle 9 — no silent no-op) instead of silently skipping a push / PR.
+    expect(repoModeCapabilities('offline')).toEqual({ push: false, pr: false });
+    const gate = new CoRepoModeGate();
+    expect(() =>
+      gate.enactPush({ branch: TOY_BRANCH, into: INTEGRATION, repoCwd: repo }, 'offline'),
+    ).toThrow(/offline/iu);
+    expect(() =>
+      gate.enactPrMerge(
+        { branch: TOY_BRANCH, into: INTEGRATION, title: 'x', description: 'y', repoCwd: repo },
+        'offline',
+      ),
+    ).toThrow(/offline/iu);
+
+    // (3) MERGE STILL GATED. Drive the full loop on the offline repo. co_merge resolves the repo mode
+    //     itself (merge.ts → resolveRepoMode), so the landed merge ran in 'offline' mode — yet it STILL
+    //     round-tripped the human-review gate: merge #1 returned review_pending (no PASS yet), and the
+    //     merge LANDED only after the operator's recorded PASS, as a LOCAL merge (no push, no PR).
+    const result = await driveSh1DryRun(projectId, repo);
+    expect(result.mergeMode).toBe('offline');
+    expect(result.reviewRequested).toBe(true);
+    expect(result.mergePending).toBe(true); // the gate held: pending before PASS
+    expect(result.passVerdictRecorded).toBe(true);
+    expect(result.merged).toBe(true); // landed only after the recorded PASS
+    expect(result.mergedFileOnIntegration).toBe(true);
+    // The repo never gained a remote — the whole loop ran Offline end to end.
+    expect(resolveRepoMode(projectId, repo)).toBe('offline');
   });
 });
