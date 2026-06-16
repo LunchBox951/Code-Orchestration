@@ -35,8 +35,16 @@ The motivating sentence: **"`co` built the next `co`."**
 
 These are the top-level conditions that, all met, *are* v1.
 
-- `SH-1` ☐ `co` runs a real multi-phase change on the **`co` repo itself** start to finish
+- `SH-1` ◐ `co` runs a real multi-phase change on the **`co` repo itself** start to finish
   (spec-lock → phases → worktrees → review gate → gated merge) with zero prototype involvement.
+  **In-sandbox autonomy is proven:** the Stage 14 `sh1-dry-run` harness
+  (`packages/mcp/src/conductor/sh1-dry-run.test.ts`) drives the FULL loop — operator-start → daemon
+  cold-start → draft/brainstorm/lock → slings → finish → gated review-merge round-trip → land — over
+  `FakePty` with **zero hand-stitched transitions**; Stage 13 landed the operator
+  [`sh1-runbook.md`](sh1-runbook.md) + the desktop Review view the live gate uses. A green `FakePty`
+  run is **not** host-live evidence (Principle 9), so `☑` stays gated on the operator's live
+  host-run against the real `claude`/`codex` binaries (deferral catalogued in
+  [`v1-handoff.md`](v1-handoff.md)).
 - `SH-2` ☐ `co` reads all of its own state/specs/plans from its **own program-data** — no `.co/`
   dependency remains (Principle 12 — `pristine-repo`; Principle 14 — `recoverable`). L6b lands the
   **records half**: specs (`draft→locked→archived`, queryable via `co_spec_get`) and plans
@@ -57,8 +65,11 @@ These are the top-level conditions that, all met, *are* v1.
 - `SF-1` ◐ `co` hosts the **authentic interactive `claude`/`codex`** in a real terminal emulator
   (pty), not a headless reconstruction, not tmux (Principle 2). Substrate decided (Option C); L7 lands
   the sandbox-tested pty host (`PtyHost`/`FakePty`) + the Conductor engine that drives it (spawn →
-  drive → bind → inject → route → classify liveness). Remaining: the host-side live proof against the
-  real `claude`/`codex` binaries.
+  drive → bind → inject → route → classify liveness). Stage 12 lands the desktop **agent-console pty
+  pane** (transcript + live console view over the raw stream); Stage 14 wires the **autonomous
+  self-drive loop** (`co-mcp serve` cold-starts root coordinators and drives warm turns) and the
+  watchdog liveness seam (AC-S14-6), all proven over `FakePty`. Remaining: the host-side live proof
+  against the real `claude`/`codex` binaries.
 - `SF-2` ◐ The operator can **steer any agent mid-turn** from its terminal pane (answer, redirect,
   interrupt) without tearing it down (Principle 1). L7-F lands the sandbox seam (`steerPane` +
   `ConductorEngine.steer`) proven in-sandbox over `FakePty`. Remaining: the host-side live proof
@@ -70,8 +81,11 @@ These are the top-level conditions that, all met, *are* v1.
 - `SF-5` ◐ A **desktop app** is the operator's one-stop surface — observe and steer all agents in
   one place (Principle 15). Stage 11 stands up the Electron shell (`apps/desktop`): the 6-view nav
   shell, the main-process `@co/core` + P1 `OperatorIpcClient` wiring, the contextBridge
-  view-model bridge, and real Dashboard/Mail/Cost data surfaces. Remaining: the agent-console pty
-  pane and the host-live proof (operator handoff).
+  view-model bridge, and real Dashboard/Mail/Cost data surfaces. Stage 12 lands the **agent-console
+  pty pane** (transcript + live console view); Stage 13 lands the **Review view** (diff + locked
+  acceptance criteria → PASS/ISSUES verdict — the SH-1 human gate); Stage 14 wires **in-app session
+  launch** (`session:start`) and **agent stop/unstick** controls. Remaining: the host-live proof
+  (operator handoff) — the live pty stream + mid-turn steer against the real binaries.
 - `SF-6` ◐ Artifacts (mail, commit messages) are **rendered per audience** — structured under the
   hood, clean human view on top; provider voice stays out of artifacts (Principle 3). L1 ships the
   renderer-registry seam + a generic default renderer; L3 ships provider-deterministic commit /
@@ -96,7 +110,9 @@ These are the top-level conditions that, all met, *are* v1.
   provider/account usage buckets, passive live usage adapters, provider-neutral tier placement across
   the default Claude/Codex accounts, throttle-as-WAITING with reset ETA, CLI dry-run diagnostics, and
   `co_sling` placement recording. L9 (RL4-MS) lands same-provider multi-subscription placement —
-  the balancer selects the roomiest healthy account among same-provider candidates.
+  the balancer selects the roomiest healthy account among same-provider candidates. Stage 14 lands
+  the **autonomous self-drive** that exercises this dispatch path end to end (the daemon cold-starts
+  roots and a `co_sling` kickoff seeds the next driven turn), proven in `sh1-dry-run` over `FakePty`.
   Remaining: L7 live session hosting/re-wake, and full self-host proof under real worker load.
 
 ## D. Review gate & integration (P6, P7, P10)
@@ -171,8 +187,9 @@ These are the top-level conditions that, all met, *are* v1.
 - `ST-3` ◐ **No silent failures** — pre-flight (the doctor), in-flight (live stream monitoring),
   post-hoc (observability); never-drop, fail-loud, degrade safely under pressure (Principle 9). Doctor/
   observability/never-drop landed in-sandbox: L8-WDOG silent-stop watchdog + STUCK escalation; L8-B
-  doctor probes; MNR-2 errored-turn re-wake signal; SH-2 `.co/`-read guard (Principle 12). Remaining:
-  the host-live live-stream-monitoring proof.
+  doctor probes; MNR-2 errored-turn re-wake signal; SH-2 `.co/`-read guard (Principle 12). Stage 14
+  wires the **watchdog liveness seam** into the live conductor (silent-stop detection over `FakePty`,
+  AC-S14-6). Remaining: the host-live live-stream-monitoring proof.
 
 ## G. The agent surface — MCP & self-describing (P4, P5)
 
