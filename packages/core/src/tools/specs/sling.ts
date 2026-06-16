@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { defaultGitExec, slingWorktree } from '../../worktrees/sling.js';
 import type { ToolSpec } from '../registry.js';
+import {
+  MAIL_CLARIFY_REQUEST,
+  turnKickoffCorrelationId,
+  type DeliveredMail,
+} from '../../mail/events.js';
+import type { MailStore } from '../../mail/mail-store.js';
 import { defaultProviderAccounts } from '../../dispatch/balancer.js';
 import { refreshUsageForAccounts, runDispatchPolicy } from '../../dispatch/cli-render.js';
 import { providerSchema } from '../../dispatch/events.js';
@@ -26,6 +32,7 @@ import {
 } from '../../plans/child-cap.js';
 import { branchMerged, resolveAgentBranch } from '../../plans/worker-branch.js';
 import type { WorktreeStore } from '../../worktrees/worktree-store.js';
+import { rollbackError, throwWithRollbackErrors } from '../../rollback-errors.js';
 
 // Every input field carries a .describe() (Principle 5 — the schemas are the single syntax source).
 // The caller never supplies its own identity; `parent` is the SPAWNER this sandbox is for, a
@@ -75,6 +82,18 @@ const slingInput = z
       .optional()
       .describe(
         reasoningBudgetSchema.description ?? 'Reasoning depth preference for effort selection.',
+      ),
+    // ── P2 (AC-S14-2) kickoff field ───────────────────────────────────────────────────────────
+    kickoff: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Optional first-task brief for the child. Carried in the body of the actionable ' +
+          "'clarify_request' that co_sling seeds so the daemon's run-cycle can select the child " +
+          'on the next tick (selection reads `outstanding`, which is ACTIONABLE-only). When omitted, ' +
+          "a directive fallback is used ('Begin your assigned task...'). Additive — existing " +
+          'callers without this field are unaffected.',
       ),
   })
   .strict();
@@ -271,6 +290,12 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       throw new Error('co_sling: the mount did not inject a roster store (ctx.roster absent).');
     }
     assertToolCallerRole('co_sling', ctx.roster, ctx.agent, ['coordinator', 'lead', 'implementer']);
+    if (ctx.roster.getAgent(input.agent) != null) {
+      throw new Error(
+        `co_sling: child agent '${input.agent}' is already registered in the roster; ` +
+          'refusing to reuse an existing live agent id for a new sandbox.',
+      );
+    }
 
     const role = input.role?.trim().toLowerCase() ?? 'implementer';
     const parsedRole = parseSubRoleId(role);
@@ -411,23 +436,70 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       projectId: ctx.projectId,
     });
 
-    // Symmetrical to co_merge's reviewer trigger: once the slung child's worktree + placement are
-    // recorded, the live spawn must succeed or the caller must see the failure. Returning `placed`
-    // while no pane exists would make launch failure invisible to recovery/operations.
+    // AC-S14-2 (P2 kickoff): seed an actionable clarify_request to the child so the daemon's
+    // run-cycle can select it on the next tick (selection reads `outstanding`, ACTIONABLE-only).
+    // Seed BEFORE live spawn/placement so a mail failure cannot leave a placed or hosted child with no
+    // first actionable item.
+    let kickoff: DeliveredMail;
+    try {
+      kickoff = ctx.mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: input.agent,
+        from: ctx.agent,
+        subject: 'Kickoff',
+        body:
+          input.kickoff ??
+          'Begin your assigned task; your full assignment is in your session context. Report completion via `co_finish`/`worker_done`.',
+        correlationId: turnKickoffCorrelationId(input.agent),
+      });
+    } catch (cause) {
+      throwWithRollbackErrors(
+        'co_sling: kickoff failed',
+        cause,
+        cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd),
+      );
+    }
+
+    // Symmetrical to co_merge's reviewer trigger: once the slung child's worktree + kickoff are
+    // recorded, the live spawn must succeed or the caller must see the failure.
+    // Returning `placed` while no pane exists would make launch failure invisible to recovery/operations.
+    let spawned = false;
     if (ctx.reviewerSpawnGate != null) {
       try {
         await ctx.reviewerSpawnGate.spawn(
           ctx.projectId,
           provisionalPlacementRecord(input.agent, placedPayload),
         );
+        spawned = true;
       } catch (cause) {
-        cleanupFailedSpawnWorktree(ctx.worktrees, input.branch, ctx.cwd);
-        throw cause;
+        const rollbackErrors = [
+          ...cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd),
+          ...retractKickoff(ctx.mail, ctx.agent, kickoff),
+        ];
+        throwWithRollbackErrors('co_sling: live spawn failed', cause, rollbackErrors);
       }
     }
-    // Record a PLACED decision only after the sandbox exists and the live launch has either succeeded
-    // or is intentionally headless. A git or spawn failure must not leave a false successful placement.
-    ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
+    // Record a PLACED decision only after the sandbox exists, kickoff is durable, and the live launch
+    // has either succeeded or is intentionally headless. A git, mail, or spawn failure must not leave
+    // a false successful placement. If this final durable write fails after a live spawn, release the
+    // spawned pane/session through the optional gate rollback seam before removing durable work.
+    try {
+      ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
+    } catch (cause) {
+      const rollbackErrors: Error[] = [];
+      if (spawned) {
+        try {
+          await ctx.reviewerSpawnGate?.release?.(ctx.projectId, input.agent);
+        } catch (releaseCause) {
+          rollbackErrors.push(
+            rollbackError(`release spawned agent '${input.agent}'`, releaseCause),
+          );
+        }
+      }
+      rollbackErrors.push(...cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd));
+      rollbackErrors.push(...retractKickoff(ctx.mail, ctx.agent, kickoff));
+      throwWithRollbackErrors('co_sling: placement recording failed', cause, rollbackErrors);
+    }
 
     return {
       status: 'placed',
@@ -466,21 +538,33 @@ function provisionalPlacementRecord(agent: string, placement: PlacementDecided):
   };
 }
 
-function cleanupFailedSpawnWorktree(
+function cleanupFailedSlingWorktree(
   worktrees: WorktreeStore,
   branch: string,
   repoCwd: string,
-): void {
+): Error[] {
+  const errors: Error[] = [];
   try {
-    worktrees.removeWorktree(branch, { repoCwd });
-  } catch {
-    // Preserve the spawn failure. Orphan detection can surface any cleanup residue later.
+    worktrees.removeWorktree(branch, { repoCwd, force: true });
+  } catch (cause) {
+    errors.push(rollbackError(`remove worktree '${branch}'`, cause));
   }
   try {
     defaultGitExec(repoCwd, ['branch', '-D', branch]);
-  } catch {
-    // Preserve the spawn failure. A missing/locked branch can be surfaced by later cleanup.
+  } catch (cause) {
+    errors.push(rollbackError(`git branch -D '${branch}'`, cause));
   }
+  return errors;
+}
+
+function retractKickoff(mail: MailStore, sender: string, kickoff: DeliveredMail): Error[] {
+  const errors: Error[] = [];
+  try {
+    mail.retract(sender, kickoff.seq);
+  } catch (cause) {
+    errors.push(rollbackError(`retract kickoff seq ${kickoff.seq}`, cause));
+  }
+  return errors;
 }
 
 function withDiagnostics(

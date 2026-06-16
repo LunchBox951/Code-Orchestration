@@ -18,7 +18,7 @@ import {
   FakePty,
   MAIL_CHAT,
   OPERATOR,
-  QUIET_WINDOW_MS,
+  WEDGE_MS,
   defaultMailRenderer,
   openMailStore,
   openRegistry,
@@ -199,7 +199,7 @@ async function driveTurnToIdle(
   clock.set(1000);
   pane.emit('⠋ working…\r\n'); // the turn produces bytes, then goes quiet
   await tick(); // the new bytes re-arm the quiet window
-  clock.set(1000 + QUIET_WINDOW_MS + 1);
+  clock.set(1000 + WEDGE_MS + 1);
   qw.settle(); // the window elapses with no further output ⇒ idle
 }
 
@@ -464,7 +464,7 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
         expect(pane.written.filter((w) => w === '\r')).toHaveLength(2);
         expect(pane.written).not.toContain(ESC);
         setTimeout(() => {
-          clock.set(2000 + QUIET_WINDOW_MS + 1);
+          clock.set(2000 + WEDGE_MS + 1);
           qw.settle();
         }, 0);
       },
@@ -565,7 +565,7 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
         pane.emit('⠋ still working after fallback submit\r\n');
         await tick();
         setTimeout(() => {
-          clock.set(2000 + QUIET_WINDOW_MS + 1);
+          clock.set(2000 + WEDGE_MS + 1);
           qw.settle();
         }, 0);
       },

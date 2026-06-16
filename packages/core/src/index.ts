@@ -79,6 +79,7 @@ export {
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
+  TURN_KICKOFF_CORRELATION_PREFIX,
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
   EVENT_MAIL_RETRACTED,
@@ -97,6 +98,8 @@ export {
   makeMailReadEvent,
   makeMailForwardEvent,
   makeMailRetractEvent,
+  turnKickoffCorrelationId,
+  isTurnKickoffMail,
   mailKinds,
   mailKind,
   completionPredicates,
@@ -833,19 +836,22 @@ export type { RoleProfile, WriteScope, Capability, RoleProfileViolation } from '
 export { ROLE_PROFILES, profileFor, checkRoleProfileCompleteness } from './roles/profile.js';
 // L6a roles events: `agent.registered` — the durable, validated record of which role an agent was
 // dispatched under and who spawned it. Event-sourced over L0 (program-data only, Principle 12).
-export type { AgentRegistered, AgentRecord } from './roles/events.js';
+export type { AgentRegistered, AgentRemoved, AgentRecord } from './roles/events.js';
 export {
   ROLES_EVENT_V,
   EVENT_AGENT_REGISTERED,
+  EVENT_AGENT_REMOVED,
   AGENT_SCOPE_PREFIX,
   agentScope,
   agentRegisteredSchema,
+  agentRemovedSchema,
   rolesSchemas,
   rolesUpcasters,
   makeAgentRegisteredEvent,
+  makeAgentRemovedEvent,
 } from './roles/events.js';
-// L6a roster projection: the `RosterProjector` folds `agent.registered` into a `roster` read-model
-// table; `openRosterStore` is the typed facade (record + read-back + replay-equal). The
+// L6a roster projection: the `RosterProjector` folds `agent.registered` / `agent.removed` into a
+// `roster` read-model table; `openRosterStore` is the typed facade (record + read-back + replay-equal). The
 // `selectAllAgents`/`selectAgent` read-model selectors are exported so a post-recovery reader (the L7
 // Conductor daemon) can join the recovered roster to the recovered session set under one store handle.
 export { RosterProjector, selectAllAgents, selectAgent } from './roles/roster-projector.js';
@@ -1144,6 +1150,18 @@ export {
 export type { SessionStore } from './session/session-store.js';
 export { openSessionStore } from './session/session-store.js';
 
+// Stage 14 P1 (KEYSTONE) — the operator-only START PRIMITIVE: launch a ROOT coordinator (no warm
+// parent) from a prompt OR a draft spec. Provisions the root's worktree, registers it in the roster
+// (coordinator/@operator), and seeds the ACTIONABLE `clarify_request` kickoff — but mints NO session
+// (the daemon cold-starts the registered-but-unhosted root). The `co-mcp start-session` verb and the
+// P4 desktop operator-IPC path both call THIS core primitive (single source of truth).
+export type {
+  StartCoordinatorSessionParams,
+  StartCoordinatorSessionDeps,
+  StartCoordinatorSessionResult,
+} from './session/start-coordinator-session.js';
+export { startCoordinatorSession, rootCoordinatorId } from './session/start-coordinator-session.js';
+
 // L7 B0 — PtyHost / FakePty contract (FROZEN cross-phase interface — B1/C1/C2/E1/P1 all import).
 // PtyHost.spawn() returns a Pane; NodePtyHost (B1) wraps a real node-pty IPty over this interface.
 // FakePty is the in-sandbox test double: no real binaries, no timers, deterministic CI.
@@ -1285,6 +1303,8 @@ export type {
   OperatorUnavailableReason,
   OperatorObservation,
   OperatorIpcConnectionState,
+  StartSessionParams,
+  StartSessionResult,
 } from './operator-ipc/contract.js';
 export {
   OPERATOR_IPC_METHODS,

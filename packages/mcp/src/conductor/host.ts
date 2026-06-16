@@ -22,14 +22,17 @@ import { join } from 'node:path';
 import {
   NodePtyHost,
   defaultGitRawReader,
+  openMailStore,
   openRegistry,
   openReviewStore,
   openSessionStore,
   openSpecStore,
   openWorktreeStore,
   queryLiveObservability,
+  waitingItems,
   QUIET_WINDOW_MS,
   type BreakSignal,
+  type InjectNudgeFn,
   type LiveObservabilitySnapshot,
   type MarkStuck,
   type ProjectId,
@@ -45,7 +48,7 @@ import { DaemonBackedAgentRouter } from './agent-router.js';
 import { EngineLiveStateProvider } from './live-observe.js';
 import type { HostedIdentity } from '../live-session-host.js';
 import { EngineReviewerSpawnGate } from './reviewer-gate.js';
-import { type CoMcpPaths } from './placement-launch.js';
+import { buildHostedLaunchSpec, type CoMcpPaths } from './placement-launch.js';
 import { createSocketBridgeTransportPair } from './real-transport.js';
 import { defaultCoMcpPaths, type HostLaunchPathOptions } from './host-launch-paths.js';
 import { resolveReviewContext } from './review-context.js';
@@ -130,11 +133,11 @@ export interface ConductorHostRunnerDeps {
 }
 
 /**
- * Drives {@link ConductorDaemon.tick} on a real cadence. Re-entrancy-guarded: if a tick is still in
- * flight when the next beat fires, that beat is SKIPPED (ticks never overlap or stack — a slow turn
- * must not pile up concurrent cycles). Lifecycle is `start()` (recover + arm) → beats → `stop()`
- * (disarm). The cadence + guard + lifecycle are sandbox-proven over `FakePty` + a controllable
- * scheduler; the real timers are the only un-exercised host-live part.
+ * Drives {@link ConductorDaemon.tick} on a real cadence. Re-entrancy-guarded: daemon ticks never
+ * overlap or stack, but an overlap beat still runs the watchdog reconcile sweep so an active long turn
+ * can be diagnosed as wedged. Lifecycle is `start()` (recover + arm) → beats → `stop()` (disarm). The
+ * cadence + guard + lifecycle are sandbox-proven over `FakePty` + a controllable scheduler; the real
+ * timers are the only un-exercised host-live part.
  */
 export class ConductorHostRunner {
   private readonly daemon: ConductorDaemon;
@@ -147,6 +150,7 @@ export class ConductorHostRunner {
   readonly control: ConductorControlSurface | undefined;
   private handle: IntervalHandle | null = null;
   private inFlight: Promise<void> | null = null;
+  private watchdogInFlight: Promise<void> | null = null;
   private stopped = false;
 
   constructor(deps: ConductorHostRunnerDeps) {
@@ -192,12 +196,19 @@ export class ConductorHostRunner {
     if (this.stopped) return;
     this.stopped = true;
     await this.inFlight;
+    await this.watchdogInFlight;
     await this.onStop?.();
   }
 
-  /** One cadence beat: run a tick unless a prior one is still in flight; report the outcome / error. */
+  /**
+   * One cadence beat: run a daemon tick unless a prior one is still in flight. If a turn is still
+   * active, run only the reconcile watchdog so wedged sessions are still detected on cadence.
+   */
   private async beat(): Promise<void> {
-    if (this.inFlight != null) return; // a prior tick is still running — skip this beat (no overlap)
+    if (this.inFlight != null) {
+      this.runOverlapWatchdogBeat();
+      return;
+    }
     const run = this.runBeat();
     this.inFlight = run;
     try {
@@ -205,6 +216,21 @@ export class ConductorHostRunner {
     } finally {
       if (this.inFlight === run) this.inFlight = null;
     }
+  }
+
+  private runOverlapWatchdogBeat(): void {
+    if (this.watchdogInFlight != null) return;
+    const run = this.daemon.reconcile
+      .tick()
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        if (this.onError != null) this.onError(error);
+        else console.error('[co-mcp serve] watchdog error:', error);
+      });
+    this.watchdogInFlight = run;
+    run.finally(() => {
+      if (this.watchdogInFlight === run) this.watchdogInFlight = null;
+    });
   }
 
   private async runBeat(): Promise<void> {
@@ -286,6 +312,24 @@ function liveRunningAgents(projectId: ProjectId, engine: ConductorEngine): reado
   }
 }
 
+function hasOutstandingActionable(projectId: ProjectId, agentId: string): boolean {
+  const mail = openMailStore(projectId);
+  try {
+    return mail.outstanding(agentId).length > 0;
+  } finally {
+    mail.close();
+  }
+}
+
+function hasWaitingItems(projectId: ProjectId, agentId: string): boolean {
+  const mail = openMailStore(projectId);
+  try {
+    return waitingItems(mail, agentId).length > 0;
+  } finally {
+    mail.close();
+  }
+}
+
 /** Options for {@link serveConductor}. The genuinely host-live seams carry honest defaults. */
 export interface ServeConductorOptions {
   /** The project whose live set the conductor drives. */
@@ -315,9 +359,25 @@ export interface ServeConductorOptions {
   /** Whether to arm the cadence immediately. Default: true (an operator launch runs). */
   readonly autoStart?: boolean;
   /**
-   * Co MCP + CLI binary paths for the `EngineReviewerSpawnGate` (P2 / AC-S10-2 / RG-4). When
-   * provided, a live `EngineReviewerSpawnGate` is wired into every hosted session's ctx so `co_merge`
-   * calls can trigger live reviewer spawns. When absent, no spawn gate is wired (headless path).
+   * P6 (watchdog-seam) — injectable `kill(pid, 0)` probe for the reconcile watchdog. Returns `true`
+   * when the agent's OS process is still alive. Default: `process.kill(pane.pid, 0)` when the pane
+   * exposes its PID (NodePtyHost); conservative `true` when no PID is available (FakePty / test
+   * doubles where the pane exited-flag is the authoritative dead signal). Inject a fake in sandbox
+   * tests — no real OS probe in the testable path.
+   */
+  readonly pidAliveFor?: (agent: RunningAgent) => boolean;
+  /**
+   * P6 (watchdog-seam) — injectable nudge injector for the reconcile watchdog's `LivenessWatchdog`
+   * instances. Default: the real `defaultInjectNudge` (catalog-driven `injectMail`). Inject a no-op
+   * in sandbox tests to avoid the real pane-write+echo-verify cycle (which uses wall-clock timers and
+   * never echoes on FakePty, blocking the tick's in-flight promise and starving the next tick).
+   */
+  readonly injectNudge?: InjectNudgeFn;
+  /**
+   * Co MCP + CLI binary paths for the `EngineReviewerSpawnGate` placement launcher (P2 / AC-S10-2 /
+   * RG-4). When provided, the live gate is wired into every hosted session's ctx so `co_merge` /
+   * `co_sling` calls can trigger live reviewer or child spawns. When absent, no spawn gate is wired
+   * (headless path).
    *
    * [host-live] The real binary paths bind here at `co-mcp serve` time. For sandbox proofs, inject
    * fixture paths (clone `TEST_MCP_PATHS` from `placement-launch.test.ts`).
@@ -344,17 +404,17 @@ export interface OperatorIpcServeConfig {
 /**
  * Build the full Conductor host stack and (by default) start it: a real {@link ConductorEngine} (real
  * panes + cadence), the watchdog {@link ReconcileLoop} (running set = the agents this process hosts;
- * the live OS liveness probe is the `[host-live]` handoff, so it skips), the deterministic
- * {@link ConductorDaemon}, and the {@link ConductorHostRunner}. Every genuinely host-live seam is
- * injectable; the defaults let `co-mcp serve` recover + idle-tick and fail loud ONLY when it must bind a
- * real provider transport. Returns the (started) runner.
+ * liveness input is derived from the hosted engine state plus the injected/default `pidAliveFor`
+ * probe), the deterministic {@link ConductorDaemon}, and the {@link ConductorHostRunner}. Every
+ * genuinely host-live seam is injectable; the defaults let `co-mcp serve` recover + idle-tick and fail
+ * loud ONLY when it must bind a real provider transport. Returns the (started) runner.
  */
 export async function serveConductor(opts: ServeConductorOptions): Promise<ConductorHostRunner> {
   const projectId = opts.projectId;
   const now = opts.now ?? monotonicNowMs;
   const pty = opts.pty ?? (await NodePtyHost.create());
 
-  // P2 / AC-S10-2 — lazy reviewer-spawn gate: breaks the construction cycle (gate wraps engine).
+  // P2 / AC-S10-2 — lazy placement-spawn gate: breaks the construction cycle (gate wraps engine).
   // [host-live] isolatedHomeDirFor: per-agent isolated home dir under the project data dir.
   let spawnGate: EngineReviewerSpawnGate | undefined;
   let ownedWtStore: ReturnType<typeof openWorktreeStore> | undefined;
@@ -385,12 +445,22 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       }
       return createSocketBridgeTransportPair(socketPath);
     });
+  const spawnSpecFor =
+    opts.coMcpPaths != null && isolatedHomeDirFor != null
+      ? (() => {
+          const coMcpPaths = opts.coMcpPaths;
+          const homeFor = isolatedHomeDirFor;
+          return (identity: HostedIdentity) =>
+            buildHostedLaunchSpec(identity, homeFor(identity.agent), coMcpPaths);
+        })()
+      : undefined;
   const engine = new ConductorEngine({
     pty,
     makeTransport,
     now,
     quietWindow: opts.quietWindow ?? realQuietWindow,
     reviewerSpawnGate: () => spawnGate,
+    ...(spawnSpecFor != null ? { spawnSpecFor } : {}),
   });
   if (opts.coMcpPaths != null) {
     ownedWtStore = openWorktreeStore(projectId);
@@ -467,11 +537,40 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     );
   }
 
+  // P6 (watchdog-seam) — the injected pidAlive probe. Default: the real `kill(pid, 0)` OS check when
+  // the pane exposes its PID; conservative `true` when no PID is available (FakePty / orphan panes
+  // where the `paneExited` flag is the authoritative dead signal). Tests inject a fake.
+  const pidAliveFor: (agent: RunningAgent) => boolean =
+    opts.pidAliveFor ??
+    ((agent: RunningAgent): boolean => {
+      const pid = agent.pane.pid;
+      if (pid == null) return true; // no PID — conservative: assume alive, rely on paneExited for dead
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
   const reconcile = new ReconcileLoop({
-    runningAgents: () => liveRunningAgents(projectId, engine),
-    // [host-live]: the per-agent hosted-pane trace + `kill(pid, 0)` probe is the operator handoff;
-    // until it is wired, the loop skips (it never fabricates a liveness verdict — Principle 9).
-    livenessInputFor: () => undefined,
+    runningAgents: () =>
+      liveRunningAgents(projectId, engine).filter(
+        (agent) => !router.shouldSkip(projectId, agent.agentId),
+      ),
+    // P6 (watchdog-seam): derive a real LivenessInput from in-process engine state + the injected
+    // pidAlive probe. Returns undefined only for orphan agents with no hosted pane (skip — Principle 9).
+    livenessInputFor: (agent: RunningAgent) => {
+      const obs = engine.livenessObservationFor(projectId, agent.agentId);
+      if (obs == null) return undefined; // not hosted — skip (orphan with no live pane)
+      return {
+        ...obs,
+        pidAlive: pidAliveFor(agent),
+        hasWaitingItems: hasWaitingItems(projectId, agent.agentId),
+        hasOutstandingActionable:
+          obs.turnStartedAt !== undefined && hasOutstandingActionable(projectId, agent.agentId),
+      };
+    },
     now,
     onBreak: opts.onBreak ?? (() => {}),
     // P3 §3a/§3d — the router IS the host-side markStuck owner: a watchdog escalation lands in its
@@ -481,6 +580,10 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       router.markStuck(agent);
       opts.markStuck?.(agent);
     },
+    // P6 (watchdog-seam): thread the injectable nudge injector to each LivenessWatchdog. Absent →
+    // the watchdog defaults to `defaultInjectNudge` (real catalog-driven injectMail). In sandbox
+    // tests a no-op is injected so the tick's beat() completes without waiting on real timers.
+    ...(opts.injectNudge !== undefined ? { injectNudge: opts.injectNudge } : {}),
   });
 
   const daemon = new ConductorDaemon({

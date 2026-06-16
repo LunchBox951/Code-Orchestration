@@ -4,7 +4,13 @@ import { OPERATOR } from '../mail/events.js';
 import type { Projector } from '../replay/projector.js';
 import type { StoredEvent, StoreTx } from '../store/types.js';
 import type { Role } from '../tools/scoping.js';
-import { EVENT_AGENT_REGISTERED, type AgentRecord, type AgentRegistered } from './events.js';
+import {
+  EVENT_AGENT_REGISTERED,
+  EVENT_AGENT_REMOVED,
+  type AgentRecord,
+  type AgentRegistered,
+  type AgentRemoved,
+} from './events.js';
 import { checkSpawnPlan } from './spawn-rules.js';
 import { findSubRole } from './sub-roles.js';
 
@@ -119,11 +125,35 @@ export function validateAgentRegistration(
   return undefined;
 }
 
+/** Validate that `rec.agentId` is a registered leaf that may be removed without orphaning children. */
+export function validateAgentRemoval(db: DatabaseSync, rec: AgentRemoved): AgentRecord {
+  const existing = selectAgent(db, rec.agentId);
+  if (existing == null) {
+    throw new Error(`roster: agent '${rec.agentId}' is not registered — cannot remove it`);
+  }
+  const child = db
+    .prepare(
+      'SELECT agent_id FROM roster WHERE parent = ? ORDER BY registered_ts, agent_id LIMIT 1',
+    )
+    .get(rec.agentId) as { agent_id?: unknown } | undefined;
+  if (child != null) {
+    throw new Error(
+      `roster: agent '${rec.agentId}' still has child agent '${String(child.agent_id)}' — ` +
+        'remove children before removing their parent',
+    );
+  }
+  return existing;
+}
+
 interface AgentRegisteredEvent extends StoredEvent {
   readonly type: typeof EVENT_AGENT_REGISTERED;
   readonly payload: AgentRegistered;
 }
-type RosterEvent = AgentRegisteredEvent;
+interface AgentRemovedEvent extends StoredEvent {
+  readonly type: typeof EVENT_AGENT_REMOVED;
+  readonly payload: AgentRemoved;
+}
+type RosterEvent = AgentRegisteredEvent | AgentRemovedEvent;
 
 /**
  * Folds `agent.registered` events into the `roster` read-model. Agent identity is immutable:
@@ -134,7 +164,7 @@ export class RosterProjector implements Projector {
   readonly name = 'roster';
 
   handles(type: string): boolean {
-    return type === EVENT_AGENT_REGISTERED;
+    return type === EVENT_AGENT_REGISTERED || type === EVENT_AGENT_REMOVED;
   }
 
   reset(tx: StoreTx): void {
@@ -157,6 +187,11 @@ export class RosterProjector implements Projector {
           `INSERT INTO roster (agent_id, role, sub_role, parent, registered_ts)
            VALUES (?, ?, ?, ?, ?)`,
         ).run(agentId, role, subRole ?? null, parent, event.ts);
+        return;
+      }
+      case EVENT_AGENT_REMOVED: {
+        validateAgentRemoval(db, rosterEvent.payload);
+        db.prepare('DELETE FROM roster WHERE agent_id = ?').run(rosterEvent.payload.agentId);
         return;
       }
       default:

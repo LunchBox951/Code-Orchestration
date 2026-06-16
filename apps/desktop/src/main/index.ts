@@ -338,6 +338,50 @@ ipcMain.handle('agents:steer', async (_event, agentId: unknown, steer: unknown) 
   }
 });
 
+ipcMain.handle('agent:stop', async (_event, agentId: unknown) => {
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  try {
+    await shell.client.stop(requireAgentId(agentId));
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    sendToRenderer('agentsConsole:error', msg);
+    return { ok: false, error: msg };
+  }
+});
+
+ipcMain.handle('agent:unstick', async (_event, agentId: unknown) => {
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  try {
+    await shell.client.unstick(requireAgentId(agentId));
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    sendToRenderer('agentsConsole:error', msg);
+    return { ok: false, error: msg };
+  }
+});
+
+// ── Session IPC channels ─────────────────────────────────────────────────────
+
+ipcMain.handle('session:start', async (_event, prompt: unknown, specBody: unknown) => {
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  try {
+    const promptStr =
+      typeof prompt === 'string' && prompt.trim().length > 0 ? prompt.trim() : undefined;
+    const specStr =
+      typeof specBody === 'string' && specBody.trim().length > 0 ? specBody.trim() : undefined;
+    await shell.client.startSession({
+      ...(promptStr != null ? { prompt: promptStr } : {}),
+      ...(specStr != null ? { specBody: specStr } : {}),
+    });
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg };
+  }
+});
+
 // ── Review IPC channels ─────────────────────────────────────────────────────
 
 ipcMain.handle('review:select', (_event, reviewId: unknown) => {

@@ -131,35 +131,6 @@ export function buildPlacementLaunchSpec(
 ): { readonly identity: HostedIdentity; readonly spec: SpawnSpec } {
   const provider = record.provider as 'claude' | 'codex';
   const parsed = parseSubRoleId(record.role);
-  const mountedRole = parsed.name != null ? `${parsed.baseRole}:${parsed.name}` : parsed.baseRole;
-  const bridgeSocketPath = coMcpPaths.coMcpBridgeSocketPath?.(isolatedHomeDir, record.agent);
-  const coMcpArgs =
-    bridgeSocketPath == null
-      ? coMcpPaths.coMcpArgs
-      : [...(coMcpPaths.coMcpArgs ?? []), 'bridge', bridgeSocketPath];
-  const paneIdentity: PaneIdentity = {
-    cwd: worktree.path,
-    isolatedHomeDir,
-    ...(provider === 'claude'
-      ? {
-          coMcpConfig:
-            coMcpPaths.coMcpConfig ?? `${isolatedHomeDir.replace(/\/+$/u, '')}/mcp/co-mcp.json`,
-        }
-      : {}),
-    coMcpCommand: coMcpPaths.coMcpCommand,
-    coMcpArgs,
-    coMcpEnv: {
-      [CO_AGENT_ENV]: record.agent,
-      [CO_ROLE_ENV]: mountedRole,
-      [CO_PARENT_ENV]: worktree.parent,
-      [CO_PROJECT_ID_ENV]: projectId,
-      ...bridgeDiagnosticEnv(isolatedHomeDir, bridgeSocketPath),
-    },
-    coCliCommand: coMcpPaths.coCliCommand,
-    ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),
-  };
-  const paneLaunchConfig = buildPaneLaunchConfig(provider, paneIdentity);
-
   const identity: HostedIdentity = {
     agent: record.agent,
     role: parsed.baseRole as Role,
@@ -175,18 +146,64 @@ export function buildPlacementLaunchSpec(
         : { provider: 'claude', sessionId: record.agent },
   };
 
-  const spec: SpawnSpec = {
+  return {
+    identity,
+    spec: buildHostedLaunchSpec(identity, isolatedHomeDir, coMcpPaths),
+  };
+}
+
+/**
+ * Build the host-side isolated launch spec for an already-resolved hosted identity. Placement-based
+ * spawns call this after deriving the identity from the placement/worktree pair; root coordinator
+ * cold-starts call it directly because they are registered/provisioned by the operator start primitive,
+ * not by `co_sling` placement.
+ */
+export function buildHostedLaunchSpec(
+  identity: HostedIdentity,
+  isolatedHomeDir: string,
+  coMcpPaths: CoMcpPaths,
+): SpawnSpec {
+  const provider = identity.provider;
+  const mountedRole =
+    identity.subRole != null ? `${identity.role}:${identity.subRole}` : identity.role;
+  const bridgeSocketPath = coMcpPaths.coMcpBridgeSocketPath?.(isolatedHomeDir, identity.agent);
+  const coMcpArgs =
+    bridgeSocketPath == null
+      ? coMcpPaths.coMcpArgs
+      : [...(coMcpPaths.coMcpArgs ?? []), 'bridge', bridgeSocketPath];
+  const paneIdentity: PaneIdentity = {
+    cwd: identity.cwd,
+    isolatedHomeDir,
+    ...(provider === 'claude'
+      ? {
+          coMcpConfig:
+            coMcpPaths.coMcpConfig ?? `${isolatedHomeDir.replace(/\/+$/u, '')}/mcp/co-mcp.json`,
+        }
+      : {}),
+    coMcpCommand: coMcpPaths.coMcpCommand,
+    coMcpArgs,
+    coMcpEnv: {
+      [CO_AGENT_ENV]: identity.agent,
+      [CO_ROLE_ENV]: mountedRole,
+      [CO_PARENT_ENV]: identity.parent,
+      [CO_PROJECT_ID_ENV]: identity.projectId,
+      ...bridgeDiagnosticEnv(isolatedHomeDir, bridgeSocketPath),
+    },
+    coCliCommand: coMcpPaths.coCliCommand,
+    ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),
+  };
+  const paneLaunchConfig = buildPaneLaunchConfig(provider, paneIdentity);
+
+  return {
     command: provider,
     args: [...paneLaunchConfig.args, ...codexBridgeSocketArgs(provider, bridgeSocketPath)],
-    cwd: worktree.path,
+    cwd: identity.cwd,
     env: { ...paneLaunchConfig.env },
     prelaunchFiles: [
       ...(paneLaunchConfig.prelaunchFiles ?? []),
       ...providerAuthPrelaunchFiles(provider, isolatedHomeDir, coMcpPaths),
     ],
   };
-
-  return { identity, spec };
 }
 
 function bridgeDiagnosticEnv(

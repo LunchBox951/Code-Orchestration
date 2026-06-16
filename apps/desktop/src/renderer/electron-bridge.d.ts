@@ -231,6 +231,8 @@ interface CoShellBridge {
   onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
+  agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
+  agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
   // ── Review ────────────────────────────────────────────────────────────────
   onReviewState(listener: (state: ReviewState) => void): () => void;
   onReviewError(listener: (message: string) => void): () => void;
@@ -240,6 +242,11 @@ interface CoShellBridge {
   reviewCancelVerdict(): Promise<ReviewState | null>;
   reviewSubmitVerdict(): Promise<ReviewState | null>;
   reviewRefresh(): Promise<ReviewState | null>;
+  // ── Session ───────────────────────────────────────────────────────────────
+  sessionStart(
+    prompt: string | null,
+    specBody: string | null,
+  ): Promise<{ ok: boolean; error?: string }>;
 }
 
 interface Window {

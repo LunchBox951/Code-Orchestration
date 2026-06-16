@@ -61,10 +61,19 @@ import {
   openMailStore,
   openRosterStore,
   parseOsc0Titles,
+  classifyStartup,
+  normalizeStartupOutput,
+  isTurnKickoffMail,
+  MAIL_APPROVAL_RESPONSE,
+  MAIL_CLARIFY_RESPONSE,
+  MAIL_REVIEW_RESPONSE,
+  MAIL_WORKER_DONE,
   roleParentResolver,
   steerPane,
   watchDialogs,
   waitingItems,
+  WEDGE_MS,
+  COMPLETION_VERBS,
   type ReviewerSpawnGate,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -74,6 +83,7 @@ import {
   type HostedSession,
   type LiveSessionHost,
 } from '../live-session-host.js';
+import type { ToolActivityEvent } from '../server.js';
 
 /**
  * A linked transport pair for one MCP bind. The engine gives the SERVER side to
@@ -172,12 +182,12 @@ export interface ConductorEngineDeps {
    */
   readonly onRouteFailure?: (failure: RouteFailure) => void;
   /**
-   * LAZY factory for the P2 reviewer-spawn gate (AC-S10-2 / RG-4). Called per `ensureHosted` to
-   * forward the gate into each hosted session's ctx so `co_merge` calls can trigger live reviewer
-   * spawns. LAZY (factory, not gate) to break the construction cycle: the gate wraps THIS engine, so
-   * it can only be constructed AFTER the engine is created. Absent ⇒ no spawn gate in hosted sessions
-   * (headless path; co_merge gates on recorded verdicts). Conditionally-spread in hostSession opts so
-   * an absent gate never passes an explicit `undefined` (exactOptionalPropertyTypes safe).
+   * LAZY factory for the P2 placement-spawn gate (AC-S10-2 / RG-4). Called per `ensureHosted` to
+   * forward the gate into each hosted session's ctx so `co_merge` / `co_sling` calls can trigger live
+   * reviewer or child spawns. LAZY (factory, not gate) to break the construction cycle: the gate wraps
+   * THIS engine, so it can only be constructed AFTER the engine is created. Absent ⇒ no spawn gate in
+   * hosted sessions (headless path). Conditionally-spread in hostSession opts so an absent gate never
+   * passes an explicit `undefined` (exactOptionalPropertyTypes safe).
    */
   readonly reviewerSpawnGate?: () => ReviewerSpawnGate | undefined;
 }
@@ -250,10 +260,12 @@ export interface CycleOutcome {
 }
 
 /**
- * SELECT a WAITING agent with work to do: the first candidate that has an outstanding INJECTABLE
- * ACTIONABLE item (an unresolved actionable mail) in its inbox — the same predicate `LiveDelivery`
- * uses to decide what to push into a live pane. Pure over the mail bus; candidates that share a
- * project reuse one opened store. Returns the chosen `{ identity, mail }`, or `undefined` if none.
+ * SELECT a WAITING agent with work to do: first an outstanding INJECTABLE ACTIONABLE item (the same
+ * predicate `LiveDelivery` uses to decide what to push into a live pane), then a small set of unread
+ * informational wake items that must drive the recipient's next turn (`clarify_response`,
+ * `approval_response`, `worker_done`, `review_response`). Pure over the mail bus; candidates that
+ * share a project reuse one opened store. Returns the chosen `{ identity, mail }`, or `undefined` if
+ * none.
  */
 export function selectEligible(
   candidates: readonly HostedIdentity[],
@@ -269,11 +281,28 @@ export function selectEligible(
       }
       const [mail] = store.outstanding(identity.agent);
       if (mail != null) return { identity, mail };
+      const wakeMail = firstUnreadTurnWakeMail(store, identity.agent);
+      if (wakeMail != null) return { identity, mail: wakeMail };
     }
     return undefined;
   } finally {
     for (const store of stores.values()) store.close();
   }
+}
+
+function firstUnreadTurnWakeMail(store: MailStore, agent: string): DeliveredMail | undefined {
+  return store.inbox(agent).find(isUnreadTurnWakeMail);
+}
+
+function isUnreadTurnWakeMail(mail: DeliveredMail): boolean {
+  return (
+    !mail.read &&
+    !mail.retracted &&
+    (mail.type === MAIL_APPROVAL_RESPONSE ||
+      mail.type === MAIL_CLARIFY_RESPONSE ||
+      mail.type === MAIL_WORKER_DONE ||
+      mail.type === MAIL_REVIEW_RESPONSE)
+  );
 }
 
 /** Default {@link SpawnSpec}: a minimal fresh spawn. Host-side hardening (isolation env, resume) is deferred. */
@@ -351,6 +380,31 @@ export class ConductorEngine {
    * from `candidates` this tick are never touched — their clocks survive unharmed.
    */
   private readonly clarifyFirstSeen = new Map<string, number>();
+  /**
+   * P6 (watchdog-seam) — the injected-time monotonic timestamp of the last pane byte seen per
+   * agent, keyed `${projectId}:${agent}`. Set by {@link appendTranscript} using `deps.now()`;
+   * read by {@link livenessObservationFor} to build the reconcile-loop liveness trace. Absent when
+   * no bytes have been seen yet. Torn down on release (mirrors {@link paneExited}).
+   */
+  private readonly lastByteAt = new Map<string, number>();
+  /**
+   * P6 (watchdog-seam) — whether a turn is currently in flight for each agent, keyed
+   * `${projectId}:${agent}`. Set `true` at the start of {@link runOneTurn}, `false` on
+   * completion (success or error). The reconcile loop reads this as `turnActive` to distinguish a
+   * frozen-mid-turn wedge from a silent-stop (turn yielded without a completion verb). Torn down
+   * on release.
+   */
+  private readonly turnInFlight = new Map<string, boolean>();
+  /**
+   * P6 (watchdog-seam) — the injected-time start of the current or most-recent unfinished turn. Used
+   * to scope host liveness to current-turn bytes instead of stale startup/prior-turn output, and to
+   * prove a hosted pane has actually had a turn injected before silent-stop classification is enabled.
+   */
+  private readonly turnStartedAt = new Map<string, number>();
+  /** Per-hosted-agent MCP tool-call listeners feeding the current turn trace. */
+  private readonly toolActivityListeners = new Map<string, Set<(ev: DetectorEvent) => void>>();
+  /** Agents whose most recent driven turn errored before consuming their selected mail. */
+  private readonly lastTurnErrored = new Map<string, boolean>();
 
   constructor(deps: ConductorEngineDeps) {
     this.deps = deps;
@@ -397,6 +451,54 @@ export class ConductorEngine {
       agentId: agent,
       offset: this.transcriptTailOffsets.get(agentKey) ?? 0,
       tail: this.transcriptTails.get(agentKey) ?? '',
+    };
+  }
+
+  /**
+   * P6 (watchdog-seam) — build the in-process liveness observation for `agent` without the OS
+   * `pidAlive` probe. Returns `{ trace, exited, turnActive }` from durable in-process state:
+   *   - `trace`: a single `bytes` event at the last current-turn pane byte time (from
+   *     {@link lastByteAt}) — enough for the classifier to check byte-quiescence (idle). Empty when no
+   *     current-turn bytes have been seen yet, which is still a valid observation (absence alone is not
+   *     an idle signal).
+   *   - `exited`: whether the pane has fired `onExit` (the `dead` liveness signal).
+   *   - `turnActive`: whether {@link runOneTurn} is currently in flight (mail injected, turn not
+   *     yet yielded) — the semantic `turnActive` signal that separates a wedge from a silent-stop.
+   *   - `lastTurnErrored`: whether the most recent driven turn threw before consuming its mail.
+   *
+   * Returns `undefined` when `agent` is not hosted (orphan — the reconcile loop skips it). The
+   * caller (`host.ts`) adds the injected `pidAlive` to complete the {@link LivenessInput}.
+   *
+   * NO I/O, never throws — pure in-memory reads.
+   */
+  livenessObservationFor(
+    projectId: ProjectId,
+    agentId: string,
+  ):
+    | {
+        readonly trace: readonly DetectorEvent[];
+        readonly exited: boolean;
+        readonly turnActive: boolean;
+        readonly turnStartedAt?: number;
+        readonly lastTurnErrored?: boolean;
+      }
+    | undefined {
+    const agentKey = ConductorEngine.agentKey(projectId, agentId);
+    if (!this.hosted.has(agentKey)) return undefined; // not hosted — unobservable (skip)
+    const exited = this.paneExited.get(agentKey) ?? false;
+    const turnActive = this.turnInFlight.get(agentKey) ?? false;
+    const turnStartedAt = this.turnStartedAt.get(agentKey);
+    const lastByte = this.lastByteAt.get(agentKey);
+    const trace: DetectorEvent[] =
+      lastByte !== undefined && (turnStartedAt == null || lastByte >= turnStartedAt)
+        ? [{ kind: 'bytes', at: lastByte, bytes: 1 }]
+        : [];
+    return {
+      trace,
+      exited,
+      turnActive,
+      ...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
+      ...(this.lastTurnErrored.get(agentKey) === true ? { lastTurnErrored: true } : {}),
     };
   }
 
@@ -482,6 +584,7 @@ export class ConductorEngine {
         deliveryFactory: this.routingDeliveryFactory(),
         ...(spawnGate != null ? { reviewerSpawnGate: spawnGate } : {}),
         ...(sessionTools != null ? { tools: sessionTools } : {}),
+        onToolActivity: (activity) => this.emitToolActivity(agentKey, activity),
       });
 
       // Drive it through its startup interstitials to ready (or surface a terminal login menu).
@@ -508,9 +611,25 @@ export class ConductorEngine {
       } catch {
         /* best-effort: the pty may already be gone (e.g. driveToReady rejected on exit) */
       }
-      await Promise.allSettled([session?.close(), clientTransport?.close?.()]);
+      const cleanupErrors: Error[] = [];
+      await collectCleanupError(cleanupErrors, 'close hosted MCP session', () => session?.close());
+      await collectCleanupError(cleanupErrors, 'close client transport', () =>
+        clientTransport?.close?.(),
+      );
       await Promise.allSettled([startupP]);
+      await collectCleanupError(cleanupErrors, 'rollback hosted roster registration', () =>
+        session?.rollbackRegistration?.(),
+      );
       this.dropExitTracking(agentKey);
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupErrors],
+          `ConductorEngine.ensureHosted: launch failed for '${identity.agent}': ` +
+            `${errorMessage(error)}; cleanup also failed: ` +
+            cleanupErrors.map((cleanupError) => cleanupError.message).join('; '),
+          { cause: error },
+        );
+      }
       throw error;
     }
   }
@@ -532,6 +651,9 @@ export class ConductorEngine {
     mail: DeliveredMail,
     opts: RunOneTurnOptions = {},
   ): Promise<TurnOutcome> {
+    const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
+    this.turnStartedAt.set(agentKey, this.deps.now());
+    this.turnInFlight.set(agentKey, true); // P6: mark turn in flight so the reconcile watchdog sees turnActive
     try {
       const text = this.renderMail(mail);
       await injectMail(hosted.pane, text, {
@@ -539,16 +661,25 @@ export class ConductorEngine {
         ...this.deps.injectOptions,
       });
       opts.onInjected?.();
-      const { turnEnd, trace, observedAt } = await this.observeTurnEnd(hosted);
+      const { turnEnd, trace, observedAt, sawMcpActivity } = await this.observeTurnEnd(hosted);
+      if (turnEnd.sawCompletionVerb) this.turnStartedAt.delete(agentKey);
       // P1b: classify liveness over the SAME turn trace and surface it. The turn has yielded
       // (turnActive=false), so the classifier reads `dead` (pane exited) or a `silent_stop` break
       // (idle without a completion verb); otherwise the session is healthy and the pane stays WARM.
       const liveness = this.classifyTurnLiveness(hosted, trace, observedAt);
+      if (sawMcpActivity) {
+        this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+        this.consumeUnreadTurnWakeMail(hosted.identity.projectId, mail);
+      }
+      this.lastTurnErrored.delete(agentKey);
       return { turnEnd, errored: false, liveness };
     } catch (error) {
       // MNR-2 seam: yield on an errored turn WITHOUT consuming the mail. We deliberately do nothing
       // that would mark the item read/resolved — it stays outstanding for P1b to re-inject.
+      this.lastTurnErrored.set(agentKey, true);
       return { errored: true, error };
+    } finally {
+      this.turnInFlight.set(agentKey, false); // P6: turn yielded (success or error) — reset flag
     }
   }
 
@@ -559,13 +690,21 @@ export class ConductorEngine {
    * the verdict at `observedAt = now()`. Returns the verdict, the trace (for P1b liveness
    * classification), and `observedAt`. Subscriptions are torn down on settle.
    */
-  private async observeTurnEnd(
-    hosted: HostedPane,
-  ): Promise<{ turnEnd: TurnEndResult; trace: readonly DetectorEvent[]; observedAt: number }> {
+  private async observeTurnEnd(hosted: HostedPane): Promise<{
+    turnEnd: TurnEndResult;
+    trace: readonly DetectorEvent[];
+    observedAt: number;
+    sawMcpActivity: boolean;
+  }> {
     const trace: DetectorEvent[] = [];
+    let currentTurnOutput = '';
+    let sawReadyComposer = false;
+    let sawMcpActivity = false;
     let abortCurrent: (() => void) | null = null;
+    const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
 
     const record = (ev: DetectorEvent): void => {
+      if (isMcpEvent(ev)) sawMcpActivity = true;
       trace.push(ev);
       // New activity → abort the in-flight quiet window so the loop re-arms (a working session is
       // never silent; quiescence only counts once output truly stops).
@@ -573,9 +712,17 @@ export class ConductorEngine {
     };
     const unsubData = hosted.pane.onData((chunk) => {
       const at = this.deps.now();
+      currentTurnOutput = boundedAppend(currentTurnOutput, chunk);
+      if (
+        classifyStartup(hosted.identity.provider, normalizeStartupOutput(currentTurnOutput))
+          .kind === 'ready'
+      ) {
+        sawReadyComposer = true;
+      }
       record({ kind: 'bytes', at, bytes: chunk.length });
       for (const title of parseOsc0Titles(chunk)) record({ kind: 'osc0', at, title });
     });
+    const unsubToolActivity = this.subscribeToolActivity(agentKey, record);
     const unsubMcp = this.deps.mcpActivity?.(hosted.pane, record) ?? noop;
     const unsubDialogs = watchDialogs(hosted.pane, { provider: hosted.identity.provider });
 
@@ -585,7 +732,22 @@ export class ConductorEngine {
         abortCurrent = () => controller.abort();
         await this.deps.quietWindow(controller.signal);
         abortCurrent = null;
-        if (!controller.signal.aborted) break; // window elapsed with no new output ⇒ idle
+        if (!controller.signal.aborted) {
+          const turnStartedAt = this.turnStartedAt.get(agentKey);
+          if (turnStartedAt !== undefined && !traceSawCompletionVerb(trace)) {
+            const tentativeTurnEnd = detectTurnEnd(trace, this.deps.now(), {
+              ...this.deps.turnConfig,
+              provider: hosted.identity.provider,
+            });
+            if (tentativeTurnEnd.idle && sawReadyComposer) break;
+            const lastCurrentByteAt = latestByteAt(trace);
+            const silenceStartedAt = lastCurrentByteAt ?? turnStartedAt;
+            if (this.deps.now() - silenceStartedAt < WEDGE_MS) {
+              continue;
+            }
+          }
+          break; // window elapsed with no new output ⇒ idle
+        }
         // else: new output arrived during the window ⇒ re-arm and keep watching.
       }
       const observedAt = this.deps.now();
@@ -593,9 +755,10 @@ export class ConductorEngine {
         ...this.deps.turnConfig,
         provider: hosted.identity.provider,
       });
-      return { turnEnd, trace, observedAt };
+      return { turnEnd, trace, observedAt, sawMcpActivity };
     } finally {
       unsubData();
+      unsubToolActivity();
       unsubMcp();
       unsubDialogs();
     }
@@ -637,6 +800,57 @@ export class ConductorEngine {
         onInjectFailure: (recipient, mail, error) =>
           this.deps.onRouteFailure?.({ phase: 'inject', projectId, recipient, mail, error }),
       });
+  }
+
+  private subscribeToolActivity(
+    agentKey: string,
+    listener: (ev: DetectorEvent) => void,
+  ): () => void {
+    let listeners = this.toolActivityListeners.get(agentKey);
+    if (listeners == null) {
+      listeners = new Set();
+      this.toolActivityListeners.set(agentKey, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      const current = this.toolActivityListeners.get(agentKey);
+      current?.delete(listener);
+      if (current?.size === 0) this.toolActivityListeners.delete(agentKey);
+    };
+  }
+
+  private emitToolActivity(agentKey: string, activity: ToolActivityEvent): void {
+    const listeners = this.toolActivityListeners.get(agentKey);
+    if (listeners == null || listeners.size === 0) return;
+    const ev: DetectorEvent = {
+      kind: activity.phase === 'start' ? 'mcp_start' : 'mcp_end',
+      at: this.deps.now(),
+      verb: activity.tool,
+    };
+    for (const listener of [...listeners]) listener(ev);
+  }
+
+  private consumeOneShotKickoff(projectId: ProjectId, mail: DeliveredMail): void {
+    if (!isTurnKickoffMail(mail)) return;
+    const store = this.openMail(projectId);
+    try {
+      store.retract(mail.sender, mail.seq);
+    } finally {
+      store.close();
+    }
+  }
+
+  private consumeUnreadTurnWakeMail(projectId: ProjectId, mail: DeliveredMail): void {
+    if (!isUnreadTurnWakeMail(mail)) return;
+    const store = this.openMail(projectId);
+    try {
+      const current = store.inbox(mail.recipient).find((item) => item.seq === mail.seq);
+      if (current != null && isUnreadTurnWakeMail(current)) {
+        store.markRead(mail.recipient, mail.seq);
+      }
+    } finally {
+      store.close();
+    }
   }
 
   /**
@@ -855,6 +1069,7 @@ export class ConductorEngine {
     agent: string,
     chunk: string,
   ): void {
+    this.lastByteAt.set(agentKey, this.deps.now()); // P6: track last-byte time for liveness probe
     const chunkOffset = this.transcriptNextOffsets.get(agentKey) ?? 0;
     const tailOffset = this.transcriptTailOffsets.get(agentKey) ?? chunkOffset;
     const next = (this.transcriptTails.get(agentKey) ?? '') + chunk;
@@ -876,7 +1091,7 @@ export class ConductorEngine {
     }
   }
 
-  /** Tear down a pane's exit subscription + flag (P1b) and its transcript subscription + tail (C-P1). */
+  /** Tear down a pane's exit subscription + flag (P1b), transcript subscription + tail (C-P1), and liveness tracking (P6). */
   private dropExitTracking(agentKey: string): void {
     this.paneExitUnsub.get(agentKey)?.();
     this.paneExitUnsub.delete(agentKey);
@@ -886,7 +1101,54 @@ export class ConductorEngine {
     this.transcriptTails.delete(agentKey);
     this.transcriptTailOffsets.delete(agentKey);
     this.transcriptNextOffsets.delete(agentKey);
+    this.lastByteAt.delete(agentKey); // P6
+    this.turnInFlight.delete(agentKey); // P6
+    this.turnStartedAt.delete(agentKey); // P6
+    this.lastTurnErrored.delete(agentKey);
+    this.toolActivityListeners.delete(agentKey);
   }
 }
 
 const noop = (): void => {};
+
+function boundedAppend(current: string, chunk: string): string {
+  const next = current + chunk;
+  if (next.length <= TRANSCRIPT_TAIL_MAX_CHARS) return next;
+  return next.slice(next.length - TRANSCRIPT_TAIL_MAX_CHARS);
+}
+
+function latestByteAt(trace: readonly DetectorEvent[]): number | undefined {
+  let latest: number | undefined;
+  for (const ev of trace) {
+    if (ev.kind === 'bytes' && (latest === undefined || ev.at > latest)) latest = ev.at;
+  }
+  return latest;
+}
+
+function traceSawCompletionVerb(trace: readonly DetectorEvent[]): boolean {
+  return trace.some(
+    (ev) =>
+      (ev.kind === 'mcp' || ev.kind === 'mcp_start' || ev.kind === 'mcp_end') &&
+      COMPLETION_VERBS.includes(ev.verb),
+  );
+}
+
+function isMcpEvent(ev: DetectorEvent): boolean {
+  return ev.kind === 'mcp' || ev.kind === 'mcp_start' || ev.kind === 'mcp_end';
+}
+
+async function collectCleanupError(
+  errors: Error[],
+  operation: string,
+  cleanup: () => Promise<void> | void | undefined,
+): Promise<void> {
+  try {
+    await cleanup();
+  } catch (cause) {
+    errors.push(new Error(`${operation} failed: ${errorMessage(cause)}`, { cause }));
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

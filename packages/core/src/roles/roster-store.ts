@@ -11,10 +11,12 @@ import { decode } from '../replay/decode.js';
 import { applyEvent, type Projector } from '../replay/projector.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import {
+  makeAgentRemovedEvent,
   makeAgentRegisteredEvent,
   rolesSchemas,
   rolesUpcasters,
   type AgentRecord,
+  type AgentRemoved,
   type AgentRegistered,
 } from './events.js';
 import {
@@ -22,12 +24,15 @@ import {
   ensureRosterTables,
   selectAgent,
   selectAllAgents,
+  validateAgentRemoval,
   validateAgentRegistration,
 } from './roster-projector.js';
 
 export interface RosterStore {
   /** Record an agent registration (append `agent.registered` + fold); returns the read-back record. */
   recordAgent(rec: AgentRegistered): AgentRecord;
+  /** Remove a registered leaf agent (append `agent.removed` + fold); used by launch rollback. */
+  removeAgent(agentId: string): AgentRecord;
   /** The agent record for `agentId`, or undefined. */
   getAgent(agentId: string): AgentRecord | undefined;
   /** Every recorded agent, in registration order. */
@@ -62,6 +67,24 @@ export function openRosterStore(projectId: string): RosterStore {
           );
         }
         return row;
+      });
+    },
+
+    removeAgent(agentId: string): AgentRecord {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureRosterTables(db);
+        const payload: AgentRemoved = { agentId };
+        const existing = validateAgentRemoval(db, payload);
+        const [stored] = tx.append([makeAgentRemovedEvent(projectId, payload)]);
+        applyEvent(tx, decode(stored!, rolesUpcasters, rolesSchemas), projectors);
+        const row = selectAgent(db, agentId);
+        if (row != null) {
+          throw new Error(
+            `openRosterStore.removeAgent: row remained after projection (agentId='${agentId}')`,
+          );
+        }
+        return existing;
       });
     },
 

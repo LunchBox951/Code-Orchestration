@@ -10,6 +10,7 @@
  */
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
+  openRosterStore,
   openSessionStore,
   toolsForRole,
   type DeliveryFactory,
@@ -20,7 +21,7 @@ import {
   type SessionStore,
   type ToolSpec,
 } from '@co/core';
-import { createCoMcpServer } from './server.js';
+import { createCoMcpServer, type ToolActivityEvent } from './server.js';
 import { openContextStores } from './context.js';
 
 /**
@@ -60,6 +61,11 @@ export interface HostedSession {
    * Conductor when the pane's session ends.
    */
   close(): Promise<void>;
+  /**
+   * Remove this session's newly-created roster registration during failed launch cleanup, but only
+   * after the durable session row is gone. Normal session close keeps roster history intact.
+   */
+  rollbackRegistration?(): Promise<void>;
 }
 
 /** Optional per-session wiring the Conductor supplies when hosting a pane. */
@@ -71,9 +77,9 @@ export interface HostSessionOptions {
    */
   readonly deliveryFactory?: DeliveryFactory;
   /**
-   * The P2 reviewer-spawn gate (AC-S10-2 / RG-4): when present, this pane's `co_merge` calls can
-   * trigger live reviewer spawns by forwarding the gate through the assembled ToolContext. Absent ⇒
-   * `co_merge` gates on an already-recorded verdict (headless path; unchanged).
+   * The P2 placement-spawn gate (AC-S10-2 / RG-4): when present, this pane's `co_merge` and
+   * `co_sling` calls can trigger live reviewer/child spawns by forwarding the gate through the
+   * assembled ToolContext. Absent ⇒ headless path; unchanged.
    */
   readonly reviewerSpawnGate?: ReviewerSpawnGate;
   /**
@@ -82,6 +88,8 @@ export interface HostSessionOptions {
    * MCP startup from the full role vocabulary.
    */
   readonly tools?: readonly ToolSpec[];
+  /** Optional per-session tool-call activity hook used by the conductor liveness observer. */
+  readonly onToolActivity?: (event: ToolActivityEvent) => void;
 }
 
 /**
@@ -171,6 +179,7 @@ export class LiveSessionHostImpl implements LiveSessionHost {
     let sessionStore: SessionStore | undefined;
     let activeClaimed = false;
     let sessionClaimed = false;
+    let rosterClaimed = false;
     let opened: ReturnType<typeof openContextStores> | undefined;
     let server;
     try {
@@ -197,37 +206,66 @@ export class LiveSessionHostImpl implements LiveSessionHost {
           ...(opts?.reviewerSpawnGate != null ? { reviewerSpawnGate: opts.reviewerSpawnGate } : {}),
         },
       );
+      const existingRosterAgent = opened.ctx.roster!.getAgent(agent);
       opened.ctx.roster!.recordAgent({
         agentId: agent,
         role: identity.role,
         ...(identity.subRole != null ? { subRole: identity.subRole } : {}),
         parent,
       });
+      rosterClaimed = existingRosterAgent == null;
       const scopedTools = opts?.tools ?? toolsForRole(identity.role);
       server = createCoMcpServer({
         tools: scopedTools,
         contextFactory: () => opened!.ctx,
+        ...(opts?.onToolActivity != null ? { onToolActivity: opts.onToolActivity } : {}),
       });
       await server.connect(transport);
     } catch (e) {
+      const rollbackErrors: Error[] = [];
       try {
         await server?.close();
-      } catch {
-        /* best-effort close of a partially connected MCP server */
+      } catch (cause) {
+        rollbackErrors.push(cleanupError('close partially connected MCP server', cause));
       }
       if (activeClaimed) {
         LiveSessionHostImpl.activeHostedAgents.delete(activeKey);
         LiveSessionHostImpl.activeHostedPanes.delete(paneKey);
       }
+      let sessionRolledBack = !sessionClaimed;
       if (sessionClaimed) {
         try {
           sessionStore?.endSession(agent, pane);
-        } catch {
-          /* best-effort rollback of a failed host setup */
+          sessionRolledBack = true;
+        } catch (cause) {
+          rollbackErrors.push(cleanupError(`end session for '${agent}'`, cause));
         }
       }
-      sessionStore?.close();
-      opened?.close();
+      if (rosterClaimed && sessionRolledBack) {
+        try {
+          opened?.ctx.roster?.removeAgent(agent);
+        } catch (cause) {
+          rollbackErrors.push(cleanupError(`remove roster row for '${agent}'`, cause));
+        }
+      }
+      try {
+        sessionStore?.close();
+      } catch (cause) {
+        rollbackErrors.push(cleanupError(`close session store for '${agent}'`, cause));
+      }
+      try {
+        opened?.close();
+      } catch (cause) {
+        rollbackErrors.push(cleanupError(`close context stores for '${agent}'`, cause));
+      }
+      if (rollbackErrors.length > 0) {
+        throw new AggregateError(
+          [e, ...rollbackErrors],
+          `LiveSessionHost.hostSession: setup failed for '${agent}': ${errorMessage(e)}; ` +
+            `rollback also failed: ${rollbackErrors.map((error) => error.message).join('; ')}`,
+          { cause: e },
+        );
+      }
       throw e;
     }
 
@@ -239,23 +277,91 @@ export class LiveSessionHostImpl implements LiveSessionHost {
     }
     const activeHostedAgents = LiveSessionHostImpl.activeHostedAgents;
     const activeHostedPanes = LiveSessionHostImpl.activeHostedPanes;
+    const openSessions = this.openSessions;
     return {
       async close(): Promise<void> {
         if (closed) return;
         closed = true;
+        const cleanupErrors: Error[] = [];
         try {
           await hostedServer.close();
+        } catch (cause) {
+          cleanupErrors.push(cleanupError(`close hosted MCP server for '${agent}'`, cause));
+        }
+        try {
+          hostedSessionStore.endSession(agent, pane);
+        } catch (cause) {
+          cleanupErrors.push(cleanupError(`end session for '${agent}'`, cause));
+        }
+        try {
+          hostedSessionStore.close();
+        } catch (cause) {
+          cleanupErrors.push(cleanupError(`close session store for '${agent}'`, cause));
+        }
+        activeHostedAgents.delete(activeKey);
+        activeHostedPanes.delete(paneKey);
+        try {
+          opened?.close();
+        } catch (cause) {
+          cleanupErrors.push(cleanupError(`close context stores for '${agent}'`, cause));
+        }
+        throwCleanupErrors(`LiveSessionHost.close: cleanup for '${agent}' failed`, cleanupErrors);
+      },
+      async rollbackRegistration(): Promise<void> {
+        if (!rosterClaimed) return;
+        const cleanupErrors: Error[] = [];
+        let sessionStillActive: boolean | undefined;
+        let sessions: SessionStore | undefined;
+        try {
+          sessions = openSessions(identity.projectId);
+          sessionStillActive = sessions.getSession(agent) != null;
+        } catch (cause) {
+          cleanupErrors.push(cleanupError(`inspect session row for '${agent}'`, cause));
         } finally {
           try {
-            hostedSessionStore.endSession(agent, pane);
-          } finally {
-            hostedSessionStore.close();
-            activeHostedAgents.delete(activeKey);
-            activeHostedPanes.delete(paneKey);
-            opened?.close();
+            sessions?.close();
+          } catch (cause) {
+            cleanupErrors.push(cleanupError(`close session store for '${agent}'`, cause));
           }
         }
+        if (sessionStillActive === false) {
+          const roster = openRosterStore(identity.projectId);
+          try {
+            if (roster.getAgent(agent) != null) roster.removeAgent(agent);
+          } catch (cause) {
+            cleanupErrors.push(cleanupError(`remove roster row for '${agent}'`, cause));
+          } finally {
+            try {
+              roster.close();
+            } catch (cause) {
+              cleanupErrors.push(cleanupError(`close roster store for '${agent}'`, cause));
+            }
+          }
+        }
+        throwCleanupErrors(
+          `LiveSessionHost.rollbackRegistration: cleanup for '${agent}' failed`,
+          cleanupErrors,
+        );
       },
     };
   }
+}
+
+function cleanupError(operation: string, cause: unknown): Error {
+  return new Error(`${operation} failed: ${errorMessage(cause)}`, { cause });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function throwCleanupErrors(context: string, errors: readonly Error[]): void {
+  if (errors.length === 0) return;
+  throw new AggregateError(
+    errors,
+    `${context}: ${errors.map((error) => error.message).join('; ')}`,
+    {
+      cause: errors[0],
+    },
+  );
 }

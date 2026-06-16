@@ -15,6 +15,8 @@ describe('co-mcp binary help', () => {
     expect(help).toContain('co-mcp serve <projectId>');
     expect(help).toContain('co-mcp host-proof <provider> [projectId]');
     expect(help).toContain('co-mcp bridge <socketPath>');
+    expect(help).toContain('co-mcp start-session <projectId>');
+    expect(help).toContain('co-mcp project-id [repoPath]');
   });
 
   it('routes --help to the help renderer instead of the stdio MCP server', () => {
@@ -25,7 +27,9 @@ describe('co-mcp binary help', () => {
 
   it('keeps the SH-1 runbook honest about current live serve boundaries', () => {
     expect(runbook).toContain('co-mcp serve <projectId>');
-    expect(runbook).toContain('does not yet auto-discover a freshly locked spec');
+    expect(runbook).toContain('Current Stage 14 boundary');
+    expect(runbook).toContain('cold-starts registered root coordinators');
+    expect(runbook).toContain('Treat any manual tool calls that remain necessary');
     expect(runbook).toMatch(/There is no public\s+`co spec lock` CLI command yet/);
     expect(runbook).toContain('For SH-1 evidence, submit from the Review view');
     expect(runbook).not.toContain(

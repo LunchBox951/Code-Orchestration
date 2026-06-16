@@ -171,6 +171,19 @@ async function hostAndConnect(
   return { client, session };
 }
 
+function sessionStoreWithThrowingClose(inner: SessionStore): SessionStore {
+  return {
+    recordSession: (rec) => inner.recordSession(rec),
+    endSession: (agentId, pane) => inner.endSession(agentId, pane),
+    getSession: (agentId) => inner.getSession(agentId),
+    getSessionByPane: (pane) => inner.getSessionByPane(pane),
+    listSessions: () => inner.listSessions(),
+    close: () => {
+      throw new Error('session store close failed');
+    },
+  };
+}
+
 // ── Handshake + role-scoped surface ────────────────────────────────────────
 
 describe('LiveSessionHostImpl — handshake + role-scoped surface', () => {
@@ -619,6 +632,41 @@ describe('LiveSessionHostImpl — two-pane identity isolation', () => {
     openedSessions.push(session);
   });
 
+  it('surfaces setup rollback failures alongside the original hostSession failure', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-rollback-fail',
+      role: 'implementer',
+      parent: 'lead-1',
+      pane: 'pane-rollback-fail',
+      projectId,
+      cwd,
+    });
+    const realSessions = openSessionStore(projectId);
+    const host = new LiveSessionHostImpl(() => ({
+      recordSession: realSessions.recordSession,
+      getSession: realSessions.getSession,
+      getSessionByPane: realSessions.getSessionByPane,
+      listSessions: realSessions.listSessions,
+      endSession: () => {
+        throw new Error('rollback endSession failed');
+      },
+      close: realSessions.close,
+    }));
+    const [, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    const error = await host
+      .hostSession(identity, serverTransport)
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as Error).message).toMatch(/setup failed.*rollback also failed/i);
+    expect((error as Error).message).toContain('rollback endSession failed');
+    const sessions = openSessionStore(projectId);
+    openedSessionStores.push(sessions);
+    expect(sessions.getSession(identity.agent)?.pane).toBe(identity.pane);
+  });
+
   it('refuses a host when the B0 session store already has the pane active for another agent', async () => {
     const { projectId, cwd } = makeProject();
     const identity = makeHostedIdentity({
@@ -689,6 +737,67 @@ describe('LiveSessionHostImpl — two-pane identity isolation', () => {
     await session.close();
 
     await expect(client.listTools()).rejects.toThrow(/not connected|closed/i);
+  });
+
+  it('close clears active guards even when session-store close fails after ending the session', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-close-store-fails',
+      role: 'implementer',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+    const realSessions = openSessionStore(projectId);
+    const host = new LiveSessionHostImpl(() => sessionStoreWithThrowingClose(realSessions));
+    const [, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = await host.hostSession(identity, serverTransport);
+
+    try {
+      await expect(session.close()).rejects.toThrow(/session store close failed/);
+
+      const sessions = openSessionStore(projectId);
+      openedSessionStores.push(sessions);
+      expect(sessions.getSession(identity.agent)).toBeUndefined();
+
+      const [, nextTransport] = InMemoryTransport.createLinkedPair();
+      const next = await new LiveSessionHostImpl().hostSession(identity, nextTransport);
+      openedSessions.push(next);
+    } finally {
+      realSessions.close();
+    }
+  });
+
+  it('rollbackRegistration removes roster after inactive-session check even when session-store close fails', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-rollback-store-close',
+      role: 'implementer',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+    const realSessions = openSessionStore(projectId);
+    const host = new LiveSessionHostImpl(() => sessionStoreWithThrowingClose(realSessions));
+    const [, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = await host.hostSession(identity, serverTransport);
+    expect(session.rollbackRegistration).toBeDefined();
+    const endSessions = openSessionStore(projectId);
+    openedSessionStores.push(endSessions);
+    endSessions.endSession(identity.agent, identity.pane);
+
+    try {
+      await expect(session.rollbackRegistration!()).rejects.toThrow(/session store close failed/);
+
+      const roster = openRosterStore(projectId);
+      openedRosterStores.push(roster);
+      expect(roster.getAgent(identity.agent)).toBeUndefined();
+    } finally {
+      await session.close().catch(() => {});
+      realSessions.close();
+    }
   });
 });
 

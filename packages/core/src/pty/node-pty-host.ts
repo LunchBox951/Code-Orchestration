@@ -42,6 +42,7 @@ export interface IPtyForkOptionsLike {
 
 /** The minimal surface of node-pty's `IPty` that the adapter actually uses. */
 export interface IPtyLike {
+  readonly pid?: number;
   write(data: string): void;
   onData(listener: (data: string) => void): IDisposableLike;
   onExit(listener: (event: IPtyExitEvent) => void): IDisposableLike;
@@ -88,6 +89,10 @@ class NodePtyPane implements Pane {
     this.#earlyDataSub = pty.onData((chunk) => {
       this.#earlyDataChunks.push(chunk);
     });
+  }
+
+  get pid(): number | undefined {
+    return this.#pty.pid;
   }
 
   write(data: string): void {

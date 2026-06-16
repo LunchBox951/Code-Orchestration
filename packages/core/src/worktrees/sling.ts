@@ -7,6 +7,7 @@ import { detectBaseRef, defaultGitReader, resolveRefSha, type GitReader } from '
 import type { TestOutcome } from './events.js';
 import { provisionWorktree, resolveProvisioningManifest, type Provisioner } from './provision.js';
 import type { WorktreeStore } from './worktree-store.js';
+import { rollbackError, throwWithRollbackErrors } from '../rollback-errors.js';
 
 /**
  * Mutating git seam (e.g. `git worktree add`). Unlike {@link GitReader}, a failure THROWS (fail
@@ -207,17 +208,18 @@ export function slingWorktree(
       { branch, baseRef, baseSha, tests: [...tests] },
     );
   } catch (error) {
+    const rollbackErrors: Error[] = [];
     try {
       gitExec(repoCwd, ['worktree', 'remove', '--force', worktreePath]);
-    } catch {
-      // Preserve the setup failure; orphan detection can surface any cleanup residue later.
+    } catch (cause) {
+      rollbackErrors.push(rollbackError(`git worktree remove '${worktreePath}'`, cause));
     }
     try {
       gitExec(repoCwd, ['branch', '-D', branch]);
-    } catch {
-      // Preserve the setup failure; branch cleanup is best-effort after a failed sling.
+    } catch (cause) {
+      rollbackErrors.push(rollbackError(`git branch -D '${branch}'`, cause));
     }
-    throw error;
+    throwWithRollbackErrors('co_sling: setup failed', error, rollbackErrors);
   }
 
   return { branch, baseRef, baseSha, worktreePath, baselineCaptured: true };

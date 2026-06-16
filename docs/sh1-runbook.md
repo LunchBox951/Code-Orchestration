@@ -11,12 +11,12 @@ runbook builds on and assumes familiarity with [`docs/host-proof.md`](host-proof
 the lower-level Conductor plumbing proof (`co doctor --live`, `co-mcp host-proof`). Complete that
 proof first if you have not already.
 
-> **Current Stage 13 boundary:** the deterministic dry-run harness in
+> **Current Stage 14 boundary:** the deterministic dry-run harness in
 > `packages/mcp/src/conductor/sh1-dry-run.test.ts` proves orchestration plumbing only. A green dry-run
-> is not SH-1 evidence. Likewise, `co-mcp serve <projectId>` starts the live Conductor/IPC process for
-> a registered project, but it does not yet auto-discover a freshly locked spec and drive every
-> downstream plan/worktree/review/merge transition without explicit tool calls. Treat any manual tool
-> calls in this runbook as evidence to capture, not as hidden automation.
+> is not SH-1 evidence. `co-mcp serve <projectId>` now cold-starts registered root coordinators and
+> drives the live Stage 14 self-drive loop, but SH-1 still requires host-live evidence from real
+> provider binaries and the desktop review gate. Treat any manual tool calls that remain necessary
+> during the host run as evidence to capture, not as hidden automation.
 
 ---
 
@@ -31,27 +31,29 @@ proof first if you have not already.
    absolute path wherever the runbook says `co`. `CO_CLI_COMMAND` only helps `co-mcp` locate the CLI
    for commands it launches from the daemon.
 
-3. **The `co` repo registered.** `co doctor` should show `[ok] program-data-integrity`. This
-   confirms the repo is a registered project in program-data. There is no separate registration
-   command — registration happens at first use from within the repo.
+3. **The `co` repo registered.** `co doctor` should show `[ok] program-data-integrity`. Confirm the
+   repo's stable registry id with:
+
+   ```sh
+   PROJECT_ID="$(co-mcp project-id)"
+   printf '%s\n' "$PROJECT_ID"
+   ```
 
 4. **Desktop app built and running with the Reviews view available.** The Review view is required
    for SH-1 evidence because it displays the diff and locked acceptance criteria before verdict
    submission (see Step 3). Build the app (`pnpm build` from `apps/desktop`, or the appropriate
-   desktop build command for your environment) and confirm the **Reviews** nav item is visible before
-   starting.
+   desktop build command for your environment), launch it with `CO_PROJECT_ID="$PROJECT_ID"` in its
+   environment, and confirm the **Reviews** nav item is visible before starting.
 
 5. **Conductor daemon running.** Start it with:
 
    ```sh
-   co-mcp serve <projectId>
+   co-mcp serve "$PROJECT_ID"
    ```
 
    > **Host-live note:** `co-mcp serve` requires an explicit `<projectId>` (unlike
-   > `co-mcp host-proof`, which auto-detects from CWD). The project id is the registry id for the
-   > repo, stored in program-data's project registry for the repo path. `co doctor` confirms the repo
-   > is registered but does not print the id. Confirm the correct id from the registry row and the
-   > exact `co-mcp serve` invocation against your built `co-mcp` at run time before proceeding.
+   > `co-mcp host-proof`, which auto-detects from CWD). `co-mcp project-id` registers the current repo
+   > if needed and prints the id you pass to `serve`.
 
 ---
 
@@ -61,6 +63,11 @@ proof first if you have not already.
 tool; the operator cannot call it directly). Ask a coordinator agent to draft a small, self-contained
 change to the `co` repo — a documentation clarification, a minor fix, or a small enhancement. The
 change must be real (it will actually land on the repo via the gated merge), so keep scope minimal.
+If you do not already have a coordinator for this run, start one after the daemon is running:
+
+```sh
+co-mcp start-session "$PROJECT_ID" --prompt "Draft a small doc clarification for co."
+```
 
 Once the coordinator has drafted the spec and mailed you the task id:
 

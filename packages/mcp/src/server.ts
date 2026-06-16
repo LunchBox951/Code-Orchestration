@@ -19,6 +19,11 @@ const SERVER_TITLE = 'co orchestration tools';
 /** Kept in lockstep with packages/mcp/package.json `version`. */
 const SERVER_VERSION = '0.0.0';
 
+export interface ToolActivityEvent {
+  readonly phase: 'start' | 'end';
+  readonly tool: string;
+}
+
 export interface CoMcpServerOptions {
   /**
    * The tools to offer. Defaults to {@link buildCoreRegistry}().list() — the canonical
@@ -38,6 +43,8 @@ export interface CoMcpServerOptions {
    * through `invokeTool`; this flag only controls optional wire metadata for clients that support it.
    */
   readonly advertiseOutputSchema?: boolean;
+  /** Optional host instrumentation for turn-boundary/liveness: reports tool calls as MCP activity. */
+  readonly onToolActivity?: (event: ToolActivityEvent) => void;
 }
 
 /**
@@ -80,12 +87,17 @@ export function createCoMcpServer(opts: CoMcpServerOptions): McpServer {
       ...(opts.advertiseOutputSchema === true ? { outputSchema: toolOutputShape(spec) } : {}),
     };
     server.registerTool(spec.name, config, async (args: unknown) => {
-      const ctx = await opts.contextFactory();
-      const structured = await invokeTool(registry, ctx, spec.name, args);
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify(structured) }],
-        structuredContent: structured as Record<string, unknown>,
-      };
+      opts.onToolActivity?.({ phase: 'start', tool: spec.name });
+      try {
+        const ctx = await opts.contextFactory();
+        const structured = await invokeTool(registry, ctx, spec.name, args);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(structured) }],
+          structuredContent: structured as Record<string, unknown>,
+        };
+      } finally {
+        opts.onToolActivity?.({ phase: 'end', tool: spec.name });
+      }
     });
   }
 

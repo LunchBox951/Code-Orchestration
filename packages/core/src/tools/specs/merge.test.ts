@@ -1470,7 +1470,7 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
     }
   });
 
-  it('AC-S10-2.1b: rejects when the live reviewer spawn gate fails', async () => {
+  it('AC-S10-2.1b: rejects when the live placement spawn gate fails', async () => {
     vi.useFakeTimers({ now: 0 });
     try {
       const repo = makeRepo();

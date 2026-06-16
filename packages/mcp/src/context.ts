@@ -128,9 +128,9 @@ export interface OpenContextStoresOptions {
    */
   readonly deliveryFactory?: DeliveryFactory;
   /**
-   * The P2 reviewer-spawn gate (AC-S10-2 / RG-4): when present, assembled into the ctx so that
-   * `co_merge` calls by this pane's agent can trigger live reviewer spawns. Absent ⇒ headless
-   * verdict-gate behaviour (unchanged).
+   * The P2 placement-spawn gate (AC-S10-2 / RG-4): when present, assembled into the ctx so that
+   * `co_merge` / `co_sling` calls by this pane's agent can trigger live reviewer or child spawns.
+   * Absent ⇒ headless behaviour (unchanged).
    */
   readonly reviewerSpawnGate?: ReviewerSpawnGate;
 }

@@ -236,6 +236,22 @@ describe('removeWorktree — teardown removes the git worktree + sandbox dir', (
     expect(store.getWorktree('co/e')?.removed).toBe(true);
   });
 
+  it('can force-remove a dirty sandbox for rollback paths', () => {
+    const store = openStore('p-headless-force');
+    const path = worktreePathFor('p-headless-force', 'co/dirty');
+    store.recordWorktree(rec({ branch: 'co/dirty', path }));
+    const fs = recordingFs(true);
+    const calls: Array<{ cwd: string; args: readonly string[] }> = [];
+    store.removeWorktree('co/dirty', {
+      repoCwd: '/main/repo',
+      gitExec: (cwd, args) => calls.push({ cwd, args }),
+      fs,
+      force: true,
+    });
+    expect(calls).toEqual([{ cwd: '/main/repo', args: ['worktree', 'remove', '--force', path] }]);
+    expect(store.getWorktree('co/dirty')?.removed).toBe(true);
+  });
+
   it('refuses to remove a recorded path outside this project’s program-data worktrees root', () => {
     const store = openStore('p-bounded-remove');
     store.recordWorktree(rec({ branch: 'co/unsafe', path: '/tmp/not-co-owned' }));

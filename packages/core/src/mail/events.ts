@@ -75,6 +75,8 @@ export const MAIL_WORKER_DONE = 'worker_done' as const;
  */
 export const MAIL_REVIEW_REQUEST = 'review_request' as const;
 export const MAIL_REVIEW_RESPONSE = 'review_response' as const;
+/** Correlation prefix for daemon one-shot turn kickoffs (root starts and slung child starts). */
+export const TURN_KICKOFF_CORRELATION_PREFIX = 'turn-kickoff:' as const;
 
 /** Registered seed-type enum — `send` rejects any type not in here (freeze #2, #5). */
 export const MAIL_TYPES = [
@@ -300,6 +302,19 @@ export interface DeliveredMail {
   readonly decision?: ApprovalDecision; // set for `approval_response` rows; the gate reads it
   // ── L5-E read-model state (log-derived) ──
   readonly reviewVerdict?: Verdict; // set for `review_response` rows; the human-review gate reads it (AC-L5-5)
+}
+
+/** Build the stable thread marker for a one-shot daemon kickoff addressed to `agent`. */
+export function turnKickoffCorrelationId(agent: string): string {
+  return `${TURN_KICKOFF_CORRELATION_PREFIX}${agent}`;
+}
+
+/** True when `mail` is a daemon one-shot kickoff, not an ordinary sticky clarify. */
+export function isTurnKickoffMail(mail: DeliveredMail): boolean {
+  return (
+    mail.type === MAIL_CLARIFY_REQUEST &&
+    mail.correlationId?.startsWith(TURN_KICKOFF_CORRELATION_PREFIX) === true
+  );
 }
 
 /** A recipient's stream scope: `mail:<recipient>`. */

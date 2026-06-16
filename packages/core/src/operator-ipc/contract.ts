@@ -47,6 +47,13 @@ export const OPERATOR_IPC_METHODS = {
   transcript: 'transcript',
   /** Fetch everything the in-app Review view needs for a pending human review (diff + criteria + refs). */
   reviewContext: 'reviewContext',
+  /**
+   * Start a ROOT coordinator session (operator-only — the IPC socket is operator-uid-only by OS
+   * permission; this is NEVER an agent-callable MCP tool). Provisions the worktree, seeds the
+   * actionable `clarify_request` kickoff, and registers the roster coordinator. The running daemon then
+   * cold-starts the root on its next tick. Exactly one of `prompt` / `specBody` is required.
+   */
+  startSession: 'startSession',
 } as const;
 
 /** The set of operator-IPC request method names. */
@@ -94,6 +101,32 @@ export interface ApprovalReply {
 }
 
 /**
+ * Parameters for the `startSession` operator-IPC method. Exactly one of `prompt` / `specBody` is
+ * required (Principle 9 — fail loud). Operator-only: the IPC socket is operator-uid-only by OS
+ * permission; this is NEVER an agent-callable MCP tool (Principle 4 + D4).
+ */
+export interface StartSessionParams {
+  /** The operator's free-form kickoff prompt. Exactly one of `prompt` / `specBody`. */
+  readonly prompt?: string;
+  /** A draft-spec brief to kick off from. Exactly one of `prompt` / `specBody`. */
+  readonly specBody?: string;
+}
+
+/**
+ * The result of a `startSession` call: the deterministic root coordinator id + worktree facts. The
+ * daemon will cold-start the root on its next tick (the start primitive does NOT mint a session).
+ */
+export interface StartSessionResult {
+  /** The deterministic root coordinator id, now registered (roster) + provisioned (worktree). */
+  readonly coordinator: string;
+  /** Absolute path of the root's provisioned worktree (the daemon's cold-start cwd). */
+  readonly worktreePath: string;
+  readonly branch: string;
+  readonly baseRef: string;
+  readonly baseSha: string;
+}
+
+/**
  * The transport-agnostic operator surface the wire exposes: the daemon-side SERVER implements it over
  * a live Conductor control surface + a {@link MailStore}; the app-side CLIENT calls it over the
  * socket. Every method is async (the wire is async); the void verbs resolve once the daemon has
@@ -122,6 +155,13 @@ export interface OperatorIpcSurface {
   transcript(agentId: string): Promise<TranscriptTail>;
   /** Resolve `reviewId`'s review context (diff + criteria + branch/target/scope). DEGRADES EXPLICITLY. */
   reviewContext(reviewId: string): Promise<ReviewContext>;
+  /**
+   * Start a ROOT coordinator session (operator-only — IPC socket is operator-uid-only). Provisions
+   * the worktree, seeds the `clarify_request` kickoff, and registers the roster coordinator. The
+   * daemon cold-starts the root on its next tick. Fails loud unless exactly one of `prompt` /
+   * `specBody` is supplied (Principle 9).
+   */
+  startSession(params: StartSessionParams): Promise<StartSessionResult>;
 }
 
 /**

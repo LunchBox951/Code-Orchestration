@@ -7,7 +7,12 @@ import { openProjectStore } from '../store/sqlite-store.js';
 import { applyEvent, rebuildAll } from '../replay/projector.js';
 import { decode } from '../replay/decode.js';
 import { assertRepoPristine } from '../config/pristine.js';
-import { makeAgentRegisteredEvent, rolesSchemas, rolesUpcasters } from './events.js';
+import {
+  makeAgentRegisteredEvent,
+  makeAgentRemovedEvent,
+  rolesSchemas,
+  rolesUpcasters,
+} from './events.js';
 import { RosterProjector } from './roster-projector.js';
 import { openRosterStore } from './roster-store.js';
 
@@ -226,6 +231,35 @@ describe('RosterStore — record + read agents', () => {
       b.close();
     }
   });
+
+  it('removes a leaf agent registration for launch rollback', () => {
+    const store = openRosterStore('p-roster-remove-leaf');
+    try {
+      store.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+      store.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
+      const removed = store.removeAgent('lead-1');
+
+      expect(removed.agentId).toBe('lead-1');
+      expect(store.getAgent('lead-1')).toBeUndefined();
+      expect(store.listAgents().map((a) => a.agentId)).toEqual(['coord-1']);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('refuses to remove an agent that still has registered children', () => {
+    const store = openRosterStore('p-roster-remove-parent');
+    try {
+      store.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+      store.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
+      store.recordAgent({ agentId: 'impl-1', role: 'implementer', parent: 'lead-1' });
+
+      expect(() => store.removeAgent('lead-1')).toThrow(/still has child agent 'impl-1'/i);
+      expect(store.getAgent('lead-1')).toBeDefined();
+    } finally {
+      store.close();
+    }
+  });
 });
 
 describe('AC-L6a-1 — replay equality: live fold → rebuildAll → byte-equal', () => {
@@ -269,6 +303,43 @@ describe('AC-L6a-1 — replay equality: live fold → rebuildAll → byte-equal'
       expect(live).toContain('"coordinator"');
       expect(live).toContain('"@operator"');
       expect(live).toContain('"code"');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replays agent.removed as a durable roster deletion', () => {
+    const store = openProjectStore('p-roster-replay-remove');
+    const projectors = [new RosterProjector()];
+    const events = [
+      makeAgentRegisteredEvent('p-roster-replay-remove', {
+        agentId: 'coord-1',
+        role: 'coordinator',
+        parent: '@operator',
+      }),
+      makeAgentRegisteredEvent('p-roster-replay-remove', {
+        agentId: 'lead-1',
+        role: 'lead',
+        parent: 'coord-1',
+      }),
+      makeAgentRemovedEvent('p-roster-replay-remove', { agentId: 'lead-1' }),
+    ];
+    try {
+      for (const e of events) {
+        store.transaction((tx) => {
+          const [s] = tx.append([e]);
+          applyEvent(tx, decode(s!, rolesUpcasters, rolesSchemas), projectors);
+        });
+      }
+
+      const live = store.transaction((tx) => snapshot(tx.raw as DatabaseSync));
+
+      rebuildAll(store, projectors, (e) => decode(e, rolesUpcasters, rolesSchemas));
+      const replayed = store.transaction((tx) => snapshot(tx.raw as DatabaseSync));
+
+      expect(replayed).toBe(live);
+      expect(live).toContain('"coord-1"');
+      expect(live).not.toContain('"lead-1"');
     } finally {
       store.close();
     }

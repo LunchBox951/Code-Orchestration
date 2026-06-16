@@ -3,7 +3,7 @@
  * `FakePty` + a CONTROLLABLE scheduler (NOT real timers, NEVER a real provider binary), this proves:
  *   - `ConductorHostRunner.start()` recovers + arms the cadence and returns the live set;
  *   - each scheduler beat drives exactly one `daemon.tick()` and reports its outcome;
- *   - the re-entrancy guard SKIPS a beat while a prior tick is still in flight (no overlap);
+ *   - the re-entrancy guard skips overlapping daemon ticks while allowing watchdog-only beats;
  *   - `stop()` disarms;
  *   - `serveConductor` wires the whole stack over injected seams and runs;
  *   - the default `makeTransport` is the `[host-live]` operator-handoff seam (fails loud), and
@@ -16,18 +16,22 @@ import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  OPERATOR,
   ReconcileLoop,
   defaultMailRenderer,
   openMailStore,
   openRegistry,
   openRosterStore,
   openSessionStore,
-  QUIET_WINDOW_MS,
+  openWorktreeStore,
+  WEDGE_MS,
+  type BreakInfo,
   type DeliveredMail,
   type MailStore,
   type ProjectId,
   type ProjectRegistry,
   type RosterStore,
+  type WorktreeStore,
 } from '@co/core';
 import { ConductorEngine, type ConductorEngineDeps } from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
@@ -52,6 +56,7 @@ let engines: ConductorEngine[] = [];
 let registries: ProjectRegistry[] = [];
 let mailStores: MailStore[] = [];
 let rosterStores: RosterStore[] = [];
+let worktreeStores: WorktreeStore[] = [];
 
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
@@ -60,6 +65,7 @@ beforeEach(() => {
   registries = [];
   mailStores = [];
   rosterStores = [];
+  worktreeStores = [];
 });
 
 afterEach(async () => {
@@ -70,7 +76,7 @@ afterEach(async () => {
       /* best-effort */
     }
   }
-  for (const closeable of [...mailStores, ...rosterStores, ...registries]) {
+  for (const closeable of [...mailStores, ...rosterStores, ...worktreeStores, ...registries]) {
     try {
       closeable.close();
     } catch {
@@ -135,6 +141,34 @@ function seedActionableMail(projectId: ProjectId, agent: string): void {
   } finally {
     mail.close();
   }
+}
+
+function seedRootCoordinator(projectId: ProjectId, agent: string, cwd: string): void {
+  const roster = openRosterStore(projectId);
+  rosterStores.push(roster);
+  roster.recordAgent({ agentId: agent, role: 'coordinator', parent: OPERATOR });
+
+  const worktrees = openWorktreeStore(projectId);
+  worktreeStores.push(worktrees);
+  worktrees.recordWorktree({
+    branch: `co/${agent}`,
+    baseRef: 'main',
+    baseSha: 'abc123',
+    path: cwd,
+    parent: OPERATOR,
+    agent,
+    role: 'coordinator',
+  });
+
+  const mail = openMailStore(projectId);
+  mailStores.push(mail);
+  mail.send({
+    type: 'clarify_request',
+    to: agent,
+    from: OPERATOR,
+    subject: 'start',
+    body: 'draft a tiny doc change',
+  });
 }
 
 function outstandingItem(projectId: ProjectId, agent: string): DeliveredMail {
@@ -216,7 +250,7 @@ async function driveTurnToIdle(
   clock.set(1000);
   pane.emit('⠋ working…\r\n');
   await tick();
-  clock.set(1000 + QUIET_WINDOW_MS + 1);
+  clock.set(1000 + WEDGE_MS + 1);
   qw.settle();
 }
 
@@ -351,7 +385,7 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     expect(() => runner.start()).toThrow(/already been stopped/i);
   });
 
-  it('skips a beat while a prior tick is still in flight (re-entrancy guard — no overlap)', async () => {
+  it('skips overlapping daemon ticks while allowing watchdog-only beats', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
     const clock = makeClock();
@@ -378,10 +412,10 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
 
     scheduler.fire(); // beat #1 — daemon.tick() starts and parks at the (unsettled) turn
     await tick(); // let beat #1 reach its in-flight await
-    scheduler.fire(); // beat #2 — MUST be skipped (a tick is in flight)
+    scheduler.fire(); // beat #2 — daemon.tick() is skipped; watchdog-only reconcile may run
     await tick();
 
-    // Settle the single in-flight turn; only beat #1 completes (beat #2 never ticked).
+    // Settle the single in-flight turn; only beat #1 completes a daemon tick.
     await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
     await flush();
     expect(ticks).toHaveLength(1);
@@ -480,6 +514,114 @@ describe('serveConductor — wires the full stack over injected seams (no real b
 
     expect(paths.claudeCredentialsJson).toBe('{"claude":true}\n');
     expect(paths.codexAuthJson).toBe('{"codex":true}\n');
+  });
+
+  it('cold-started root coordinators use the host-live isolated MCP bridge launch spec', async () => {
+    const { projectId, cwd } = makeProject();
+    const root = 'coord-root-hostlive';
+    seedRootCoordinator(projectId, root, cwd);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const scheduler = new FakeScheduler();
+    const pty = new FakePty();
+    const ticks: DaemonTickOutcome[] = [];
+    const bridgeRequests: Array<{ readonly isolatedHomeDir: string; readonly agent: string }> = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      coMcpPaths: {
+        coMcpCommand: '/opt/co-mcp',
+        coCliCommand: '/opt/co',
+        coMcpBridgeSocketPath: (isolatedHomeDir, agent) => {
+          bridgeRequests.push({ isolatedHomeDir, agent });
+          return join(isolatedHomeDir, 'mcp', 'bridge.sock');
+        },
+      },
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      injectNudge: async () => {},
+      onTick: (o) => ticks.push(o),
+    });
+
+    scheduler.fire();
+    await tick(); // let the root cold-start spawn and bind before startup bytes arrive
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await driveTurnToIdle(pane, outstandingItem(projectId, root), clock, qw);
+    await flush();
+
+    expect(ticks[0]?.coldStarted).toEqual([root]);
+    expect(bridgeRequests).toEqual([
+      { isolatedHomeDir: expect.stringContaining(`/isolated/${root}`), agent: root },
+    ]);
+    expect(pane.spec.env['CLAUDE_CONFIG_DIR']).toContain(`/isolated/${root}`);
+    expect(pane.spec.args).toContain('--strict-mcp-config');
+    expect(pane.spec.args).toContain('--mcp-config');
+    expect(pane.spec.prelaunchFiles?.[0]?.path).toContain(`/isolated/${root}/mcp/co-mcp.json`);
+    expect(pane.spec.prelaunchFiles?.[0]?.contents).toContain('"bridge"');
+    expect(pane.spec.prelaunchFiles?.[0]?.contents).toContain('/mcp/bridge.sock');
+
+    await runner.stop();
+  });
+
+  it('serveConductor supplies errored_waiting liveness inputs from engine + mail state', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const agent = 'impl-errored-waiting';
+    seedActionableMail(projectId, agent);
+    const mail = openMailStore(projectId);
+    try {
+      mail.send({
+        type: 'clarify_request',
+        to: 'lead-1',
+        from: agent,
+        subject: 'need input',
+        body: 'blocked until lead answers',
+      });
+    } finally {
+      mail.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const scheduler = new FakeScheduler();
+    const pty = new FakePty();
+    const ticks: DaemonTickOutcome[] = [];
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      injectNudge: async () => {},
+      onBreak: (breakAgent, info) => breaks.push({ agent: breakAgent, info }),
+      onTick: (outcome) => ticks.push(outcome),
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const ensureP = engine.ensureHosted(makeIdentity(agent, projectId, cwd));
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await ensureP;
+    (pane as unknown as { write(data: string): void }).write = () => {
+      throw new Error('pane write failed');
+    };
+
+    scheduler.fire();
+    await flush();
+
+    expect(ticks[0]?.selected).toBe(agent);
+    expect(ticks[0]?.cycle?.turn.errored).toBe(true);
+    expect(ticks[0]?.reconcile?.assessed[0]?.verdict.break?.kind).toBe('errored_waiting');
+    expect(breaks.map((b) => b.info.kind)).toContain('errored_waiting');
+
+    await runner.stop();
   });
 
   it('autoStart:false builds without arming the cadence', async () => {

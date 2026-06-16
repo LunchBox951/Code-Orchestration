@@ -124,8 +124,9 @@ export interface ReviewGateDeps {
    */
   readonly teardown?: MergeTeardown;
   /**
-   * The reviewer-SPAWN gate (P2, AC-S9-2). When present and an agent review trigger records a PLACED
-   * placement, `triggerReview` fires this gate while staying sync; async tool callers can then
+   * The placement-SPAWN gate (P2, AC-S9-2). When present and an agent review trigger records a PLACED
+   * reviewer placement, `triggerReview` fires this gate while staying sync; `co_sling` also reuses the
+   * same typed seam for slung-child placement launches. Async tool callers can then
    * {@link CoReviewGate.drainSpawns} to surface launch failure before returning pending. Absent for all
    * headless core tests (the default {@link ReviewerSpawnGateStub} is the loud-fail stand-in; `dispatch`
    * must also be wired to reach this).
@@ -151,9 +152,9 @@ export interface MergeTeardown {
 }
 
 /**
- * The L7 reviewer-SPAWN seam (AC-L5-11). The gate RESOLVES + RECORDS a reviewer placement
- * (`placement.decided`) over injected inputs (pure decision), but LAUNCHING the placed reviewer's live
- * turn is L7. This is a TYPED boundary — mirroring
+ * The L7 placement-SPAWN seam (AC-L5-11). The review gate RESOLVES + RECORDS a reviewer placement
+ * (`placement.decided`) over injected inputs (pure decision), while `co_sling` records a slung-child
+ * placement; LAUNCHING either placed agent's live turn is L7. This is a TYPED boundary — mirroring
  * {@link import('./human-review.js').HumanReviewGateStub} /
  * {@link import('../worktrees/cleanup-gate.js').CleanupGateStub}: the stub fails loud (Principle 9)
  * rather than being a silent no-op. The real engine-backed gate lives in `packages/mcp` (P2,
@@ -166,15 +167,21 @@ export interface ReviewerSpawnGate {
    * engine.ensureHosted. The stub (default for headless paths) fails loud.
    */
   spawn(projectId: string, placement: PlacementRecord): Promise<void>;
+  /**
+   * Best-effort rollback for a spawn that succeeded before a later durable write failed. Optional so
+   * legacy/test gates remain source-compatible; real engine-backed gates should release the pane and
+   * end its session.
+   */
+  release?(projectId: string, agent: string): Promise<void>;
 }
 
 /**
- * The STUB reviewer-spawn gate. `spawn` fails loud until the real P2 gate is wired — never a no-op.
+ * The STUB placement-spawn gate. `spawn` fails loud until the real P2 gate is wired — never a no-op.
  * Used as the default for headless core paths (no engine dependency). The params are optional so
  * existing headless tests that call spawn() without args continue to compile and assert the throw.
  */
 export class ReviewerSpawnGateStub implements ReviewerSpawnGate {
-  // P2 PLUG-POINT (live reviewer spawn). The production gate takes the recorded PlacementRecord
+  // P2 PLUG-POINT (live placement spawn). The production gate takes the recorded PlacementRecord
   // and calls engine.ensureHosted. Until wired it fails loud (Principle 9).
   spawn(): never {
     throw new Error(

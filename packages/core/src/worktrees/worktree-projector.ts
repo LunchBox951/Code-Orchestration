@@ -226,8 +226,8 @@ export function selectFinish(db: DatabaseSync, branch: string): FinishRecord | u
 /**
  * Folds the two L3 worktree events into the `worktrees` / `baselines` read-model, in the SAME tx as
  * the append so the log and the projection commit atomically; carries NO wall-clock field (freeze
- * #6 — it persists the event ts). A duplicate insert (same branch twice) fails loud at the PK —
- * slinging the same branch twice is a programming error (Principle 9), not a silent overwrite.
+ * #6 — it persists the event ts). A duplicate LIVE branch fails loud; a previously removed branch can
+ * be recreated so cleanup-after-failure leaves deterministic root/child branches retryable.
  */
 export class WorktreeProjector implements Projector {
   readonly name = 'worktrees';
@@ -257,22 +257,58 @@ export class WorktreeProjector implements Projector {
       case EVENT_WORKTREE_CREATED: {
         const { branch, baseRef, baseSha, path, parent, agent, role, subRole, provisioned } =
           worktreeEvent.payload;
-        db.prepare(
-          `INSERT INTO worktrees
-             (branch, base_ref, base_sha, path, parent, agent, role, sub_role, created_ts, removed, provisioned)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-        ).run(
-          branch,
-          baseRef,
-          baseSha,
-          path,
-          parent,
-          agent ?? null,
-          role ?? null,
-          subRole ?? null,
-          event.ts,
-          provisioned != null ? JSON.stringify(provisioned) : null,
-        );
+        const existing = selectWorktree(db, branch);
+        if (existing != null && !existing.removed) {
+          throw new Error(
+            `worktree.created: branch '${branch}' already has a live worktree record.`,
+          );
+        }
+        if (existing != null) {
+          db.prepare('DELETE FROM baselines WHERE branch = ?').run(branch);
+          db.prepare('DELETE FROM finishes WHERE branch = ?').run(branch);
+          db.prepare(
+            `UPDATE worktrees
+                SET base_ref = ?,
+                    base_sha = ?,
+                    path = ?,
+                    parent = ?,
+                    agent = ?,
+                    role = ?,
+                    sub_role = ?,
+                    created_ts = ?,
+                    removed = 0,
+                    provisioned = ?
+              WHERE branch = ?`,
+          ).run(
+            baseRef,
+            baseSha,
+            path,
+            parent,
+            agent ?? null,
+            role ?? null,
+            subRole ?? null,
+            event.ts,
+            provisioned != null ? JSON.stringify(provisioned) : null,
+            branch,
+          );
+        } else {
+          db.prepare(
+            `INSERT INTO worktrees
+               (branch, base_ref, base_sha, path, parent, agent, role, sub_role, created_ts, removed, provisioned)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+          ).run(
+            branch,
+            baseRef,
+            baseSha,
+            path,
+            parent,
+            agent ?? null,
+            role ?? null,
+            subRole ?? null,
+            event.ts,
+            provisioned != null ? JSON.stringify(provisioned) : null,
+          );
+        }
         return;
       }
       case EVENT_BASELINE_CAPTURED: {
