@@ -117,6 +117,18 @@ describe('renderer accessibility states', () => {
     expect(rendererSource).toContain('aria-label="Close composer"');
   });
 
+  it('gates the mail-composer detail rebuild to preserve the caret while typing (GitHub #39)', () => {
+    // Typing in #composer-body must NOT unconditionally rebuild the detail pane: that recreates the
+    // focused textarea and drops the caret to offset 0 on every keystroke (typed text reverses).
+    // renderMailDetail gates the rebuild on the shared needsRebuild helper keyed on whether that
+    // textarea is focused, and captures/restores the caret + scroll when a non-body change forces a
+    // rebuild mid-edit. (Substantive behavioural coverage lives in live-render-helpers.test.ts.)
+    expect(rendererSource).toContain("document.activeElement?.id === 'composer-body'");
+    expect(rendererSource).toContain('mailDetailSignature(');
+    expect(rendererSource).toContain('captureInteractionState(');
+    expect(rendererSource).toContain('restoreInteractionState(');
+  });
+
   it('opens non-approval replies against the selected mail recipient inbox', () => {
     const nonApprovalBranch = rendererSource.slice(
       rendererSource.indexOf('} else if (isActionable)'),
