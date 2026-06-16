@@ -890,3 +890,76 @@ describe('co_sling — spawn gate integration (P2 / AC-S10-2)', () => {
     expect(ctx.worktrees?.getWorktree('co/headless-t')).toBeDefined();
   });
 });
+
+// ── P2 (AC-S14-2) kickoff: seed an actionable clarify_request on PLACED so the daemon drives the ──
+// child's first turn. WAITING slings seed nothing (no sandbox — no mail). The kickoff body uses the
+// caller-supplied `kickoff` field, or a directive fallback when omitted.
+describe('co_sling — P2 (AC-S14-2) kickoff: seeds actionable clarify_request on PLACED', () => {
+  it('placed: seeds a clarify_request kickoff addressed to child from parent (directive fallback body)', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-1',
+      branch: 'co/p2-kickoff-default',
+    })) as { status: string };
+
+    expect(out.status).toBe('placed');
+
+    // The child has exactly one outstanding actionable item — the kickoff.
+    const outstanding = ctx.mail.outstanding('impl-1');
+    expect(outstanding).toHaveLength(1);
+    const kickoff = outstanding[0]!;
+    expect(kickoff.type).toBe('clarify_request');
+    expect(kickoff.recipient).toBe('impl-1');
+    expect(kickoff.sender).toBe('lead-7');
+    // The directive fallback must be non-empty actionable work, not a content-free nudge.
+    expect(kickoff.body.length).toBeGreaterThan(0);
+    expect(kickoff.body).toMatch(/task|assign|co_finish|worker_done/i);
+    // Kind must be actionable (the daemon's selection reads `outstanding`, which is ACTIONABLE-only).
+    expect(kickoff.kind).toBe('actionable');
+  });
+
+  it('placed with kickoff input: uses the provided text as the kickoff body', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-1',
+      branch: 'co/p2-kickoff-custom',
+      kickoff: 'Implement the parser module per the spec in your session context.',
+    })) as { status: string };
+
+    expect(out.status).toBe('placed');
+
+    const outstanding = ctx.mail.outstanding('impl-1');
+    expect(outstanding).toHaveLength(1);
+    expect(outstanding[0]!.body).toBe(
+      'Implement the parser module per the spec in your session context.',
+    );
+    expect(outstanding[0]!.type).toBe('clarify_request');
+    expect(outstanding[0]!.sender).toBe('lead-7');
+    expect(outstanding[0]!.recipient).toBe('impl-1');
+  });
+
+  it('waiting: does NOT seed a kickoff (no sandbox created, no mail delivered to child)', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, maxedSnapshot);
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-1',
+      branch: 'co/p2-kickoff-waiting',
+    })) as { status: string };
+
+    expect(out.status).toBe('waiting');
+    // WAITING: no sandbox, no kickoff seeded (spec §3, P9 — no sandbox means no actionable work).
+    expect(ctx.mail.outstanding('impl-1')).toHaveLength(0);
+    expect(ctx.mail.inbox('impl-1')).toHaveLength(0);
+  });
+});

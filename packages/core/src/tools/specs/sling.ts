@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defaultGitExec, slingWorktree } from '../../worktrees/sling.js';
 import type { ToolSpec } from '../registry.js';
+import { MAIL_CLARIFY_REQUEST } from '../../mail/events.js';
 import { defaultProviderAccounts } from '../../dispatch/balancer.js';
 import { refreshUsageForAccounts, runDispatchPolicy } from '../../dispatch/cli-render.js';
 import { providerSchema } from '../../dispatch/events.js';
@@ -75,6 +76,18 @@ const slingInput = z
       .optional()
       .describe(
         reasoningBudgetSchema.description ?? 'Reasoning depth preference for effort selection.',
+      ),
+    // ── P2 (AC-S14-2) kickoff field ───────────────────────────────────────────────────────────
+    kickoff: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Optional first-task brief for the child. Carried in the body of the actionable ' +
+          "'clarify_request' that co_sling seeds so the daemon's run-cycle can select the child " +
+          'on the next tick (selection reads `outstanding`, which is ACTIONABLE-only). When omitted, ' +
+          "a directive fallback is used ('Begin your assigned task...'). Additive — existing " +
+          'callers without this field are unaffected.',
       ),
   })
   .strict();
@@ -428,6 +441,20 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     // Record a PLACED decision only after the sandbox exists and the live launch has either succeeded
     // or is intentionally headless. A git or spawn failure must not leave a false successful placement.
     ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
+
+    // AC-S14-2 (P2 kickoff): seed an actionable clarify_request to the child so the daemon's
+    // run-cycle can select it on the next tick (selection reads `outstanding`, ACTIONABLE-only).
+    // The `kickoff` input carries the child's first task; the directive fallback is actionable work,
+    // not a content-free heartbeat. WAITING slings seed nothing (no sandbox, no actionable item).
+    ctx.mail.send({
+      type: MAIL_CLARIFY_REQUEST,
+      to: input.agent,
+      from: ctx.agent,
+      subject: 'Kickoff',
+      body:
+        input.kickoff ??
+        'Begin your assigned task; your full assignment is in your session context. Report completion via `co_finish`/`worker_done`.',
+    });
 
     return {
       status: 'placed',
