@@ -253,8 +253,8 @@ export interface HumanReviewGate {
 export class HumanReviewGateStub implements HumanReviewGate {
   // L9 PLUG-POINT (operator review presentation). The production gate must, per method:
   //  (1) presentReview — render the diff + review facts (branch, scope, blockers) in the operator UI;
-  //  (2) acceptVerdict — parse the operator's verdict, validate it, send a `review_response` mail,
-  //      and call recordHumanVerdict to re-enter the gate.
+  //  (2) acceptVerdict — parse the operator's verdict, validate the displayed evidence, and record
+  //      the verdict through the operator Review path to re-enter the gate.
   // Until then every method fails loud (Principle 9).
   presentReview(): never {
     throw new Error(
@@ -266,8 +266,9 @@ export class HumanReviewGateStub implements HumanReviewGate {
   acceptVerdict(): never {
     throw new Error(
       'HumanReviewGate.acceptVerdict: the interactive verdict-acceptance flow is not implemented ' +
-        '(deferred to L9): parse the operator verdict, send a review_response mail, and call ' +
-        'recordHumanVerdict to re-enter the gate. The headless path drives this at v1.',
+        '(deferred to L9): parse the operator verdict, validate the displayed evidence, and record ' +
+        'the verdict through the operator Review path to re-enter the gate. The headless path ' +
+        'drives this at v1.',
     );
   }
 }

@@ -25,7 +25,7 @@
  *   - The OPERATOR gates (lock the spec; submit the human verdict) are the HUMAN operator's inputs, driven
  *     through the real operator tool/core with an operator-identity context — NOT a conductor-driven pane
  *     (the operator is not an agent the loop hosts; in SH-1 the operator is host-live). This mirrors the
- *     runbook, where the human locks the spec and replies with a `review_response` PASS.
+ *     runbook, where the human locks the spec and submits PASS through the Review view.
  *   - The L4 dispatch-PLACEMENT shell around `co_sling` (provider/usage selection) is intentionally NOT
  *     driven here: it reads the wall clock + a live usage source, which would make this loop test flaky.
  *     We provision the worktree through `slingWorktree` — the exact core `co_sling` wraps — so the

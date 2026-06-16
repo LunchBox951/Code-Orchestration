@@ -179,7 +179,7 @@ export const reviewFinalizeTool: ToolSpec<ReviewFinalizeInput, ReviewFinalizeOut
     if (request.reviewerKind === 'human') {
       throw new Error(
         `co_review_finalize: refused — review_id '${request.reviewId}' is routed to human ` +
-          'review; record it by replying with review_response mail.',
+          'review; record the verdict through the operator Review view.',
       );
     }
     const expectedReviewer =

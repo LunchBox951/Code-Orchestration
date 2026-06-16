@@ -176,7 +176,7 @@ describe('co_review_finalize (AC-L5-1, AC-L5-3)', () => {
           baseline_compared: true,
         },
       }),
-    ).rejects.toThrow(/human review|review_response/i);
+    ).rejects.toThrow(/human review.*operator Review view/i);
     expect(review!.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
   });
 
