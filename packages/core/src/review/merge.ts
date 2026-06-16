@@ -732,8 +732,9 @@ export class CoReviewGate implements FinishReviewGate {
           subject: `review requested: '${req.branch}' into '${req.target}'`,
           body:
             `A human review has been requested for '${req.branch}' into '${req.target}' ` +
-            `(scope: ${scope}, reviewId: ${req.reviewId}). Reply with a review_response ` +
-            `(review_verdict: PASS or ISSUES) to re-enter the gate.`,
+            `(scope: ${scope}, reviewId: ${req.reviewId}). Open the Reviews view to inspect ` +
+            `the diff and locked acceptance criteria, then submit PASS or ISSUES to re-enter ` +
+            `the gate.`,
           idempotencyKey: `review-request:${req.reviewId}`,
         });
         const rec = this.deps.mail.requestHumanReview(envelope, requested).request;
@@ -797,8 +798,9 @@ export class CoReviewGate implements FinishReviewGate {
         subject: `review requested: '${req.branch}' into '${req.target}'`,
         body:
           `A human review has been requested for '${req.branch}' into '${req.target}' ` +
-          `(scope: ${scope}, reviewId: ${req.reviewId}). Reply with a review_response ` +
-          `(review_verdict: PASS or ISSUES) to re-enter the gate.`,
+          `(scope: ${scope}, reviewId: ${req.reviewId}). Open the Reviews view to inspect ` +
+          `the diff and locked acceptance criteria, then submit PASS or ISSUES to re-enter ` +
+          `the gate.`,
         idempotencyKey: `review-request:${req.reviewId}`,
       });
       const rec = this.deps.mail!.requestHumanReview(envelope, requested).request;

@@ -41,6 +41,7 @@ import {
   type MailType,
   type OperatorIpcMethod,
   type ProjectId,
+  type ReviewContext,
   type ReviewStore,
   type ReviewVerdictValue,
   type ReplyDraft,
@@ -157,6 +158,22 @@ function requireReviewVerdict(obj: WirePayload, key: string): ReviewVerdictValue
     );
   }
   return verdict;
+}
+
+function assertReviewEvidenceReady(context: ReviewContext): void {
+  if (context.kind !== 'resolved') {
+    throw new Error(
+      `operator IPC review reply: review evidence is unavailable for '${context.reviewId}'.`,
+    );
+  }
+  if (context.diff.kind !== 'patch') {
+    throw new Error(
+      `operator IPC review reply: review diff is unavailable (${context.diff.reason}).`,
+    );
+  }
+  if (context.criteria.kind !== 'criteria') {
+    throw new Error('operator IPC review reply: locked acceptance criteria are unavailable.');
+  }
 }
 
 /**
@@ -346,7 +363,7 @@ export class OperatorIpcServer {
         );
       }
       if (draft.type === MAIL_REVIEW_RESPONSE) {
-        return this.handleReviewResponse(mail, found, draft);
+        return await this.handleReviewResponse(mail, found, draft);
       }
       const existing = this.existingIdempotentReply(mail, found, draft);
       if (existing != null) return existing;
@@ -387,11 +404,26 @@ export class OperatorIpcServer {
     return existing;
   }
 
-  private handleReviewResponse(
+  private existingIdempotentReviewReply(
+    mail: MailStore,
+    answered: DeliveredMail,
+    draft: ReplyDraft,
+  ): DeliveredMail | undefined {
+    const existing = this.existingIdempotentReply(mail, answered, draft);
+    if (existing == null) return undefined;
+    if (existing.reviewVerdict !== draft.reviewVerdict) {
+      throw new Error(
+        `operator IPC reply: idempotent retry for mail seq=${answered.seq} changes review verdict.`,
+      );
+    }
+    return existing;
+  }
+
+  private async handleReviewResponse(
     mail: MailStore,
     requestMail: DeliveredMail,
     draft: ReplyDraft,
-  ): DeliveredMail {
+  ): Promise<DeliveredMail> {
     if (requestMail.type !== MAIL_REVIEW_REQUEST) {
       throw new Error(
         `operator IPC review reply: mail seq=${requestMail.seq} is '${requestMail.type}', ` +
@@ -411,6 +443,12 @@ export class OperatorIpcServer {
         `operator IPC review reply: malformed review_request mail seq=${requestMail.seq}.`,
       );
     }
+    const existing = this.existingIdempotentReviewReply(mail, requestMail, draft);
+    if (existing != null) return existing;
+
+    const context = await this.control.reviewContext(reviewId);
+    assertReviewEvidenceReady(context);
+
     const reviews = this.openReview(this.projectId);
     try {
       const request = reviews.getReviewRequestById(reviewId);
@@ -418,6 +456,17 @@ export class OperatorIpcServer {
         throw new Error(
           `operator IPC review reply: review_request mail seq=${requestMail.seq} has no ` +
             'matching review.requested row.',
+        );
+      }
+      if (
+        context.kind === 'resolved' &&
+        (context.target !== request.target ||
+          context.branch !== request.branch ||
+          context.scope !== request.scope)
+      ) {
+        throw new Error(
+          `operator IPC review reply: review evidence for '${reviewId}' does not match the ` +
+            'durable review request.',
         );
       }
       return mail.replyWithReviewVerdict(

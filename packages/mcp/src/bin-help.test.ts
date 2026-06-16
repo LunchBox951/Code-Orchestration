@@ -33,6 +33,7 @@ describe('co-mcp binary help', () => {
     );
     expect(runbook).not.toContain('either the\n> Review view or the Mail view reply');
     expect(runbook).not.toContain('wait for the Reviewer agent to finish');
+    expect(runbook).not.toContain('visible in `co doctor` output');
     expect(runbook).not.toContain('## Step 5 — Verify zero prototype involvement');
   });
 

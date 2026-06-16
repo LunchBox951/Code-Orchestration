@@ -710,4 +710,8 @@ describe('serveConductor — wires the full stack over injected seams (no real b
   it('runServeConductor fails loud on a missing project id', async () => {
     await expect(runServeConductor([])).rejects.toThrow(/project id is required/i);
   });
+
+  it('runServeConductor fails loud on an unknown project id', async () => {
+    await expect(runServeConductor(['missing-project-id'])).rejects.toThrow(/unknown project id/i);
+  });
 });

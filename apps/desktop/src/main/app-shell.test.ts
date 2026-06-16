@@ -432,6 +432,28 @@ describe('createAppShell — mail VM bridge wiring', () => {
     expect(client.reply).not.toHaveBeenCalled();
   });
 
+  it('renders review_request mail as a route to the Review view', () => {
+    const reviewRequest = {
+      ...ACTION_MAIL,
+      type: MAIL_REVIEW_REQUEST,
+      subject: 'Review merge',
+    } as DeliveredMail;
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+      inboxReader: () => [reviewRequest],
+      outboxReader: () => [],
+    });
+
+    shell.refreshMail();
+    shell.mail.selectMail(reviewRequest.seq);
+
+    expect(shell.mail.state.selected?.renderedBody).toContain('Open the Reviews view');
+    expect(shell.mail.state.selected?.renderedBody).not.toContain('> Submit PASS or ISSUES.');
+  });
+
   it('refreshes mail after informational markRead succeeds', async () => {
     let mail = INFO_MAIL;
     const onMailState = vi.fn();

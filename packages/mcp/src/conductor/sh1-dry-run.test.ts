@@ -495,7 +495,9 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     reviewRequestEnvelope({
       from: LEAD,
       subject: `review requested: '${TOY_BRANCH}' into '${INTEGRATION}'`,
-      body: 'A human review has been requested for the toy change. Reply with a review_response PASS.',
+      body:
+        'A human review has been requested for the toy change. Open the Reviews view to inspect ' +
+        'the diff and submit PASS.',
       idempotencyKey: `review-request:${REVIEW_ID}`,
     }),
     {

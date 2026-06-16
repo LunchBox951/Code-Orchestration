@@ -10,7 +10,8 @@ view.** Because mail is typed, the app knows each schema and renders it natively
 
 - `clarify_request` → a question card with a reply box
 - `approval` → an approve / decline card with the action laid out
-- `review_request` (human-review scope) → a diff-review card with the acceptance criteria + **PASS / ISSUES** actions
+- `review_request` (human-review scope) → a Review-view route that opens the diff, acceptance
+  criteria, and **PASS / ISSUES** actions
 - `review_response` → a rendered **PASS / ISSUES** verdict from `review_verdict`, with blocker /
   suggestion prose rendered from the message body
 - `escalation` → a readable problem summary + context

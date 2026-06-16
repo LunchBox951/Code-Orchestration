@@ -50,6 +50,14 @@ function replyLabelFor(mailType: string): string {
   return mailType === MAIL_REVIEW_REQUEST ? 'Open in Reviews' : 'Reply';
 }
 
+function reviewIdFromMailRow(row: MailRow): string | null {
+  const key = row.idempotencyKey;
+  if (key?.startsWith('review-request:') === true) {
+    return key.slice('review-request:'.length);
+  }
+  return null;
+}
+
 function activateView(view: NavView): void {
   for (const el of document.querySelectorAll('.nav-item')) {
     el.classList.toggle('active', el.getAttribute('data-view') === view);
@@ -271,9 +279,11 @@ function renderMailDetail(state: MailState): void {
       `</div>`,
     ].join('');
   } else if (selected.type === MAIL_REVIEW_REQUEST) {
+    const reviewId = reviewIdFromMailRow(selected);
+    const reviewIdAttr = reviewId != null ? ` data-review-id="${esc(reviewId)}"` : '';
     actionButtons = [
       `<div class="mail-card-actions">`,
-      `<button class="btn btn-reply" data-action="open-review-view"${pendingAttr}>${replyLabelFor(selected.type)}</button>`,
+      `<button class="btn btn-reply" data-action="open-review-view"${reviewIdAttr}${pendingAttr}>${replyLabelFor(selected.type)}</button>`,
       `</div>`,
     ].join('');
   } else if (isActionable) {
@@ -1036,9 +1046,18 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'open-review-view':
         activateView('review');
         bridge.navigate('review');
-        void bridge.reviewRefresh().then((s) => {
-          if (s != null) renderReview(s);
-        });
+        {
+          const reviewId = btn.dataset['reviewId'];
+          if (reviewId != null && reviewId.length > 0) {
+            void bridge.reviewSelect(reviewId).then((s) => {
+              if (s != null) renderReview(s);
+            });
+          } else {
+            void bridge.reviewRefresh().then((s) => {
+              if (s != null) renderReview(s);
+            });
+          }
+        }
         break;
       case 'close-composer':
         void bridge.mailCloseComposer();

@@ -1704,8 +1704,8 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
     expect(reviewReq).toBeDefined();
     expect(reviewReq!.recipient).toBe(OPERATOR);
     expect(reviewReq!.sender).toBe('lead-1');
-    expect(reviewReq!.body).toContain('review_verdict');
-    expect(reviewReq!.body).not.toContain('reviewVerdict');
+    expect(reviewReq!.body).toContain('Open the Reviews view');
+    expect(reviewReq!.body).not.toContain('Reply with a review_response');
     expect(reviewReq!.kind).toBe('actionable');
     expect(reviewReq!.resolved).toBe(false);
     expect(mail.outstandingCount(OPERATOR)).toBe(1);

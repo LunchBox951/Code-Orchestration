@@ -569,6 +569,16 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
         'one project’s live set.',
     );
   }
+  const registry = openRegistry();
+  try {
+    if (registry.pathFor(projectId) == null) {
+      throw new Error(
+        `co-mcp serve: unknown project id '${projectId}'. Pass the registered project id for this repo.`,
+      );
+    }
+  } finally {
+    registry.close();
+  }
   const runner = await serveConductor({
     projectId,
     coMcpPaths: defaultServeCoMcpPaths(),

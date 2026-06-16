@@ -116,7 +116,7 @@ function buildRegistry(override?: RendererRegistry): RendererRegistry {
   registry.register(
     MAIL_REVIEW_REQUEST,
     (m) =>
-      `### Review Request\n\n**Subject:** ${m.subject}\n\n${m.body}\n\n> Submit PASS or ISSUES.`,
+      `### Review Request\n\n**Subject:** ${m.subject}\n\n${m.body}\n\n> Open the Reviews view to inspect the diff and submit PASS or ISSUES.`,
   );
   registry.register(MAIL_REVIEW_RESPONSE, (m) => {
     const verdict = m.reviewVerdict ?? 'UNKNOWN';

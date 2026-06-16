@@ -49,9 +49,9 @@ proof first if you have not already.
 
    > **Host-live note:** `co-mcp serve` requires an explicit `<projectId>` (unlike
    > `co-mcp host-proof`, which auto-detects from CWD). The project id is the registry id for the
-   > repo (e.g. `proj-…`), visible in `co doctor` output or your program-data store. Confirm the
-   > correct id and the exact `co-mcp serve` invocation against your built `co-mcp` at run time
-   > before proceeding.
+   > repo, stored in program-data's project registry for the repo path. `co doctor` confirms the repo
+   > is registered but does not print the id. Confirm the correct id from the registry row and the
+   > exact `co-mcp serve` invocation against your built `co-mcp` at run time before proceeding.
 
 ---
 

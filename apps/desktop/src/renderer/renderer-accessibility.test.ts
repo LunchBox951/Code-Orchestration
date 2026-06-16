@@ -129,6 +129,8 @@ describe('renderer accessibility states', () => {
     expect(rendererSource).not.toContain('mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE');
     expect(rendererSource).not.toContain("'Submit verdict'");
     expect(rendererSource).toContain('Open in Reviews');
+    expect(rendererSource).toContain('data-review-id="${esc(reviewId)}"');
+    expect(rendererSource).toContain('bridge.reviewSelect(reviewId)');
   });
 
   it('populates the agent-bus selector from dashboard agents', () => {

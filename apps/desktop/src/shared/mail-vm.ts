@@ -22,6 +22,7 @@ export interface MailRow {
   readonly kind: MailKind;
   readonly read: boolean;
   readonly resolved: boolean;
+  readonly idempotencyKey?: string;
   readonly decision?: ApprovalDecision;
   readonly reviewVerdict?: ReviewVerdictValue;
 }
@@ -354,6 +355,7 @@ export class MailVM {
       kind: mailKind(mail.type),
       read: mail.read ?? false,
       resolved: mail.resolved ?? false,
+      ...(mail.idempotencyKey != null ? { idempotencyKey: mail.idempotencyKey } : {}),
       ...(mail.decision != null ? { decision: mail.decision } : {}),
       ...(mail.reviewVerdict != null ? { reviewVerdict: mail.reviewVerdict } : {}),
     };

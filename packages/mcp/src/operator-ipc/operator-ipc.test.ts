@@ -48,6 +48,7 @@ import {
   type OperatorIpcTranscript,
   type ProjectId,
   type ProjectRegistry,
+  type ReviewContext,
   type ReviewStore,
   type RosterStore,
   type SessionStore,
@@ -302,6 +303,26 @@ function makeControl(
     reviewContext,
   };
   return { router, control };
+}
+
+function evidenceReviewContext(
+  reviewId: string,
+  overrides: Partial<Extract<ReviewContext, { kind: 'resolved' }>> = {},
+): ReviewContext {
+  return {
+    kind: 'resolved',
+    reviewId,
+    branch: 'co/feature',
+    target: 'main',
+    scope: 'pr_merge',
+    diff: { kind: 'patch', patch: '@@ -1 +1 @@\n-old\n+new' },
+    criteria: {
+      kind: 'criteria',
+      specRef: 'spec:review-task#locked',
+      criteria: [{ text: 'change is reviewed', verify: 'pnpm test' }],
+    },
+    ...overrides,
+  };
 }
 
 /**
@@ -1305,7 +1326,9 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     const clock = makeClock();
     const qw = makeQuietWindow();
     const { engine } = makeEngine(clock, qw);
-    const { control } = makeControl(engine, projectId);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(evidenceReviewContext(reviewId)),
+    );
     await startServer(control, projectId, socketPath);
     const client = makeClient(projectId, socketPath);
 
@@ -1327,6 +1350,138 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
       (m) => m.type === MAIL_REVIEW_RESPONSE && m.causationId === String(request.seq),
     );
     expect(response?.reviewVerdict).toBe('PASS');
+  });
+
+  it('reply rejects review_response when locked criteria are unavailable', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const seedStore = openMailStore(projectId);
+    let request: DeliveredMail;
+    try {
+      request = seedStore.requestHumanReview(
+        {
+          type: 'review_request',
+          to: '@operator',
+          from: 'lead-review',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-opipc-review-no-spec',
+        },
+        {
+          reviewId: 'rev-opipc-review-no-spec',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead-review',
+          reviewerKind: 'human',
+        },
+      ).mail;
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(
+        evidenceReviewContext(reviewId, {
+          criteria: { kind: 'no-locked-spec' },
+        }),
+      ),
+    );
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.reply(
+        { seq: request.seq, recipient: '@operator' },
+        {
+          type: MAIL_REVIEW_RESPONSE,
+          subject: 're: review requested',
+          body: 'passes',
+          reviewVerdict: 'PASS',
+          idempotencyKey: 'operator-ipc-review-response:no-spec',
+        },
+      ),
+    ).rejects.toThrow(/locked acceptance criteria|review evidence/i);
+
+    expect(reviews.getVerdict('main', 'co/feature', 'pr_merge')).toBeUndefined();
+    const responses = inboxOf(projectId, 'lead-review').filter(
+      (m) => m.type === MAIL_REVIEW_RESPONSE,
+    );
+    expect(responses).toHaveLength(0);
+  });
+
+  it('reply rejects review_response when the review diff is unavailable', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const seedStore = openMailStore(projectId);
+    let request: DeliveredMail;
+    try {
+      request = seedStore.requestHumanReview(
+        {
+          type: 'review_request',
+          to: '@operator',
+          from: 'lead-review',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-opipc-review-no-diff',
+        },
+        {
+          reviewId: 'rev-opipc-review-no-diff',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead-review',
+          reviewerKind: 'human',
+        },
+      ).mail;
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(
+        evidenceReviewContext(reviewId, {
+          diff: { kind: 'unavailable', reason: 'worktree-missing' },
+        }),
+      ),
+    );
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.reply(
+        { seq: request.seq, recipient: '@operator' },
+        {
+          type: MAIL_REVIEW_RESPONSE,
+          subject: 're: review requested',
+          body: 'passes',
+          reviewVerdict: 'PASS',
+          idempotencyKey: 'operator-ipc-review-response:no-diff',
+        },
+      ),
+    ).rejects.toThrow(/diff|review evidence/i);
+
+    expect(reviews.getVerdict('main', 'co/feature', 'pr_merge')).toBeUndefined();
+    const responses = inboxOf(projectId, 'lead-review').filter(
+      (m) => m.type === MAIL_REVIEW_RESPONSE,
+    );
+    expect(responses).toHaveLength(0);
   });
 
   it('reply treats exact review_response retries as idempotent and rejects changed verdicts', async () => {
@@ -1365,7 +1520,9 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     const clock = makeClock();
     const qw = makeQuietWindow();
     const { engine } = makeEngine(clock, qw);
-    const { control } = makeControl(engine, projectId);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(evidenceReviewContext(reviewId)),
+    );
     await startServer(control, projectId, socketPath);
     const client = makeClient(projectId, socketPath);
     const draft = {

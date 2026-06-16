@@ -60,6 +60,7 @@ interface MailRow {
   kind: MailKind;
   read: boolean;
   resolved: boolean;
+  idempotencyKey?: string;
   decision?: string;
   reviewVerdict?: string;
 }
