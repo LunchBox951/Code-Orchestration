@@ -269,6 +269,49 @@ describe('slingWorktree — create + record from the auto-detected base', () => 
     expect(branchExists(repo, 'co/provision-fail')).toBe(false);
   });
 
+  it('surfaces cleanup failures alongside the original setup failure', () => {
+    const store = openStore('p-cleanup-aggregate');
+    const calls: string[] = [];
+    const gitExec: GitExec = (_cwd, args) => {
+      calls.push(args.join(' '));
+      if (args[0] === 'branch' && args[1] === '-D') {
+        throw new Error('branch cleanup failed');
+      }
+    };
+    const gitReader: GitReader = (_cwd, args) => {
+      if (args[0] === 'symbolic-ref') return null;
+      return 'a'.repeat(40);
+    };
+
+    try {
+      slingWorktree(
+        store,
+        {
+          parent: 'lead-7',
+          branch: 'co/cleanup-aggregate',
+          repoCwd: '/fake-repo',
+          projectId: 'p-cleanup-aggregate',
+        },
+        {
+          gitReader,
+          gitExec,
+          provisioner: () => {
+            throw new Error('provision exploded');
+          },
+          probe: knownProbe,
+        },
+      );
+      throw new Error('expected slingWorktree to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error).toHaveProperty('message', expect.stringContaining('provision exploded'));
+      expect(error).toHaveProperty('message', expect.stringContaining('branch cleanup failed'));
+      expect((error as AggregateError).errors).toHaveLength(2);
+    }
+
+    expect(calls).toContain('branch -D co/cleanup-aggregate');
+  });
+
   it('cleans up the git worktree and branch when the durable store record fails', () => {
     const repo = makeMainRepo();
     const path = worktreePathFor('p-store-fail', 'co/store-fail');

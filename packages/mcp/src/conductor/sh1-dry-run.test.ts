@@ -67,9 +67,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  MAIL_APPROVAL_RESPONSE,
   MAIL_CLARIFY_RESPONSE,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
+  MAIL_WORKER_DONE,
   OPERATOR,
   WEDGE_MS,
   ReconcileLoop,
@@ -488,11 +490,23 @@ async function driveTurnToIdle(
   qw.settle(); // the window elapses with no further output ⇒ idle
 }
 
-/** The first outstanding actionable item for `agent` — exactly what the daemon's runCycle injects. */
-function firstOutstanding(projectId: ProjectId, agent: string): DeliveredMail {
-  const item = mail(projectId).outstanding(agent)[0];
-  if (item == null) throw new Error(`sh1-dry-run: expected an outstanding kickoff for '${agent}'`);
+/** The first daemon-drivable item for `agent` — matching the engine's actionable-or-wake selector. */
+function firstDrivableMail(projectId: ProjectId, agent: string): DeliveredMail {
+  const store = mail(projectId);
+  const item = store.outstanding(agent)[0] ?? store.inbox(agent).find(isUnreadTurnWakeMail);
+  if (item == null) throw new Error(`sh1-dry-run: expected a drivable mail item for '${agent}'`);
   return item;
+}
+
+function isUnreadTurnWakeMail(item: DeliveredMail): boolean {
+  return (
+    !item.read &&
+    !item.retracted &&
+    (item.type === MAIL_APPROVAL_RESPONSE ||
+      item.type === MAIL_CLARIFY_RESPONSE ||
+      item.type === MAIL_WORKER_DONE ||
+      item.type === MAIL_REVIEW_RESPONSE)
+  );
 }
 
 // ── The structured outcome of one proof run ────────────────────────────────────────────────────────
@@ -591,7 +605,7 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
       subject: 'Brainstorm: scope the SH-1 dry-run toy change',
       body: 'Proposed scope: a single toy file landed through the full loop. OK to lock?',
     });
-    const injected = firstOutstanding(projectId, COORD);
+    const injected = firstDrivableMail(projectId, COORD);
     await driveTurnToIdle(coordPane, injected, clock, qw, 1000);
     return tickP;
   })();
@@ -601,8 +615,8 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     .find((m) => m.type === 'clarify_request' && m.sender === COORD);
   const brainstormDelivered = brainstorm != null;
 
-  // ── Operator answers the brainstorm, LOCKS the spec (the asserted operator gate), then re-kicks the
-  //    coordinator to proceed (the human "go" signal after locking). ────────────────────────────────
+  // ── Operator answers the brainstorm and LOCKS the spec (the asserted operator gate). The
+  //    clarify_response itself is the daemon-drivable wake item for the coordinator's next turn. ─────
   if (brainstorm == null)
     throw new Error('sh1-dry-run: coordinator did not brainstorm the operator');
   mail(projectId).reply(brainstorm, {
@@ -617,13 +631,6 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
   contextHandles.push(operatorCtx);
   await invokeTool(reg, operatorCtx.ctx, 'co_spec_lock', { task_id: TASK_ID });
   const specLocked = specs(projectId).getSpec(TASK_ID)?.state === 'locked';
-  mail(projectId).send({
-    type: 'clarify_request',
-    to: COORD,
-    from: OPERATOR,
-    subject: 'Proceed: sling your lead',
-    body: 'The spec is locked. Sling your lead to drive the toy change to a gated merge.',
-  });
 
   // ── Phase 1a — TICK 2: drive the coordinator's turn; it `co_sling`s the lead (spawn gate hosts it). ──
   const coordClient = await connectScriptedAgent(
@@ -681,7 +688,7 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
 
   // ── Phase 2 — TICK 4: drive the worker's turn; it makes the toy edit + `co_finish` (inside the turn). ──
   // Write the toy change in the worker's worktree (the scripted co_finish commits it). Skip the lead so
-  // the daemon selects the worker this tick (both are warm with outstanding kickoffs).
+  // the daemon selects the worker this tick (both are warm with drivable kickoff mail).
   writeFileSync(join(worktreePath, 'toy.txt'), 'the toy change\n');
   skipped.add(LEAD);
   const workerClient = await connectScriptedAgent(
@@ -722,8 +729,8 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     cfg.close();
   }
   // Drive merge #1 INSIDE a daemon-selected lead turn (mirrors the worker's co_finish tick): un-skip the
-  // lead so the daemon selects it (warm, with the actionable worker_done now outstanding) and run co_merge
-  // DURING the driven turn — so even the merge transitions are daemon-sequenced, never directly invoked.
+  // lead so the daemon selects it (warm, with unread worker_done wake mail) and run co_merge DURING the
+  // driven turn — so even the merge transitions are daemon-sequenced, never directly invoked.
   // Capture the tool JSON via an outer `let` (driveDaemonTurn returns the tick outcome, not the result).
   skipped.delete(LEAD);
   let merge1: { review_pending?: boolean; merged?: boolean } | undefined;
@@ -747,7 +754,7 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     reviews(projectId).getVerdict(INTEGRATION, TOY_BRANCH)?.verdict === 'PASS';
 
   // ── Phase 4 — the lead re-runs co_merge; the recorded PASS lets the gated merge LAND on main. ──────
-  // Daemon-driven too: the lead is still warm (the review_response PASS is now outstanding for it), so the
+  // Daemon-driven too: the lead is still warm (the review_response PASS is now unread wake mail), so the
   // daemon selects + drives it while the scripted co_merge lands the merge DURING the driven turn.
   const integrationHeadBefore = git(repo, 'rev-parse', INTEGRATION);
   await driveDaemonTurn(daemon, clock, qw, projectId, LEAD, agentPanes, 510000, async () => {
@@ -794,8 +801,9 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
 
 /**
  * Drive ONE daemon tick over an already-warm `agent`: start the tick, let `runCycle` select + inject,
- * run the scripted MCP work (`doWork`), then echo the injected item to the agent's pane to settle the
- * turn. Returns the tick outcome. The agent must already be hosted (warm) — its pane is in `agentPanes`.
+ * echo-submit the selected mail so the provider turn is active, run the scripted MCP work (`doWork`),
+ * then settle the agent's pane to idle. Returns the tick outcome. The agent must already be hosted
+ * (warm) — its pane is in `agentPanes`.
  */
 async function driveDaemonTurn(
   daemon: ConductorDaemon,
@@ -809,10 +817,17 @@ async function driveDaemonTurn(
 ): Promise<DaemonTickOutcome> {
   const tickP = daemon.tick();
   await flush(); // let runCycle select the warm agent + injectMail start (awaiting the echo)
-  await doWork();
-  const injected = firstOutstanding(projectId, agent);
+  const injected = firstDrivableMail(projectId, agent);
   const pane = agentPanes.get(agent)!;
-  await driveTurnToIdle(pane, injected, clock, qw, base);
+  await tick(); // injectMail has written the payload and is awaiting the echo
+  pane.emit(defaultMailRenderer(injected)); // composer echoes the injected text → exactly one Enter
+  await tick(); // injectMail submits; observeTurnEnd is now subscribed to MCP tool activity
+  await doWork();
+  clock.set(base);
+  pane.emit('⠋ working…\r\n');
+  await tick();
+  clock.set(base + WEDGE_MS + 1);
+  qw.settle();
   return tickP;
 }
 
@@ -988,13 +1003,13 @@ describe('SH-1 proof harness — PROVES THE FULL LOOP (cold-start → slings →
     expect(result.workerProvisioned).toBe(true);
     expect(result.worktreePath).toBe(worktreePathFor(projectId, TOY_BRANCH));
 
-    // (3) The daemon selected + drove the worker through EXACTLY ONE idle turn (the scripted co_finish
-    //     ran during it). Turn-end is a liveness signal ONLY — NOT "done" (completion stays verb-keyed).
+    // (3) The daemon selected + drove the worker through EXACTLY ONE idle turn. The scripted co_finish
+    //     ran during the observed provider turn, so the MCP sentinel saw the completion verb.
     expect(result.finishTick.selected).toBe(WORKER);
     expect(result.finishTick.candidateCount).toBe(1);
     expect(result.finishTick.cycle?.turn.errored).toBe(false);
     expect(result.finishTick.cycle?.turn.turnEnd?.idle).toBe(true);
-    expect(result.finishTick.cycle?.turn.turnEnd?.sawCompletionVerb).toBe(false);
+    expect(result.finishTick.cycle?.turn.turnEnd?.sawCompletionVerb).toBe(true);
 
     // (4) FINISH: a finish record exists and its commit sha matches the branch head (the merge's
     //     reviewed-ref check depends on this), and worker_done reached the lead's inbox.

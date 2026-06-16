@@ -10,7 +10,7 @@
  * (no agent can call it — Principle 4 + D4). It resolves/validates `projectId` against the registry the
  * same way `runServeConductor` does, then calls the core primitive and prints the launched root.
  *
- * All heavy logic (provision worktree → register roster → seed the actionable `clarify_request`
+ * All heavy logic (provision worktree → seed the actionable `clarify_request` → register roster
  * kickoff, mint NO session) lives in the core primitive; this verb only parses args, reads the spec
  * file when `--spec` is given, and prints the result. The daemon's cold-start (`daemon.ts`) then hosts
  * the registered-but-unhosted root on a tick and drives its first turn.

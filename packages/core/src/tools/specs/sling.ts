@@ -1,7 +1,11 @@
 import { z } from 'zod';
 import { defaultGitExec, slingWorktree } from '../../worktrees/sling.js';
 import type { ToolSpec } from '../registry.js';
-import { MAIL_CLARIFY_REQUEST, type DeliveredMail } from '../../mail/events.js';
+import {
+  MAIL_CLARIFY_REQUEST,
+  turnKickoffCorrelationId,
+  type DeliveredMail,
+} from '../../mail/events.js';
 import type { MailStore } from '../../mail/mail-store.js';
 import { defaultProviderAccounts } from '../../dispatch/balancer.js';
 import { refreshUsageForAccounts, runDispatchPolicy } from '../../dispatch/cli-render.js';
@@ -28,6 +32,7 @@ import {
 } from '../../plans/child-cap.js';
 import { branchMerged, resolveAgentBranch } from '../../plans/worker-branch.js';
 import type { WorktreeStore } from '../../worktrees/worktree-store.js';
+import { rollbackError, throwWithRollbackErrors } from '../../rollback-errors.js';
 
 // Every input field carries a .describe() (Principle 5 — the schemas are the single syntax source).
 // The caller never supplies its own identity; `parent` is the SPAWNER this sandbox is for, a
@@ -285,6 +290,12 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       throw new Error('co_sling: the mount did not inject a roster store (ctx.roster absent).');
     }
     assertToolCallerRole('co_sling', ctx.roster, ctx.agent, ['coordinator', 'lead', 'implementer']);
+    if (ctx.roster.getAgent(input.agent) != null) {
+      throw new Error(
+        `co_sling: child agent '${input.agent}' is already registered in the roster; ` +
+          'refusing to reuse an existing live agent id for a new sandbox.',
+      );
+    }
 
     const role = input.role?.trim().toLowerCase() ?? 'implementer';
     const parsedRole = parseSubRoleId(role);
@@ -439,10 +450,14 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
         body:
           input.kickoff ??
           'Begin your assigned task; your full assignment is in your session context. Report completion via `co_finish`/`worker_done`.',
+        correlationId: turnKickoffCorrelationId(input.agent),
       });
     } catch (cause) {
-      cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd);
-      throw cause;
+      throwWithRollbackErrors(
+        'co_sling: kickoff failed',
+        cause,
+        cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd),
+      );
     }
 
     // Symmetrical to co_merge's reviewer trigger: once the slung child's worktree + kickoff are
@@ -457,9 +472,11 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
         );
         spawned = true;
       } catch (cause) {
-        cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd);
-        retractKickoff(ctx.mail, ctx.agent, kickoff);
-        throw cause;
+        const rollbackErrors = [
+          ...cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd),
+          ...retractKickoff(ctx.mail, ctx.agent, kickoff),
+        ];
+        throwWithRollbackErrors('co_sling: live spawn failed', cause, rollbackErrors);
       }
     }
     // Record a PLACED decision only after the sandbox exists, kickoff is durable, and the live launch
@@ -469,16 +486,19 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     try {
       ctx.dispatch.recordPlacement(ctx.agent, placedPayload);
     } catch (cause) {
+      const rollbackErrors: Error[] = [];
       if (spawned) {
         try {
           await ctx.reviewerSpawnGate?.release?.(ctx.projectId, input.agent);
-        } catch {
-          // Preserve the original placement failure; host recovery can surface any live residue later.
+        } catch (releaseCause) {
+          rollbackErrors.push(
+            rollbackError(`release spawned agent '${input.agent}'`, releaseCause),
+          );
         }
       }
-      cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd);
-      retractKickoff(ctx.mail, ctx.agent, kickoff);
-      throw cause;
+      rollbackErrors.push(...cleanupFailedSlingWorktree(ctx.worktrees, input.branch, ctx.cwd));
+      rollbackErrors.push(...retractKickoff(ctx.mail, ctx.agent, kickoff));
+      throwWithRollbackErrors('co_sling: placement recording failed', cause, rollbackErrors);
     }
 
     return {
@@ -522,25 +542,29 @@ function cleanupFailedSlingWorktree(
   worktrees: WorktreeStore,
   branch: string,
   repoCwd: string,
-): void {
+): Error[] {
+  const errors: Error[] = [];
   try {
     worktrees.removeWorktree(branch, { repoCwd, force: true });
-  } catch {
-    // Preserve the original failure. Orphan detection can surface any cleanup residue later.
+  } catch (cause) {
+    errors.push(rollbackError(`remove worktree '${branch}'`, cause));
   }
   try {
     defaultGitExec(repoCwd, ['branch', '-D', branch]);
-  } catch {
-    // Preserve the original failure. A missing/locked branch can be surfaced by later cleanup.
+  } catch (cause) {
+    errors.push(rollbackError(`git branch -D '${branch}'`, cause));
   }
+  return errors;
 }
 
-function retractKickoff(mail: MailStore, sender: string, kickoff: DeliveredMail): void {
+function retractKickoff(mail: MailStore, sender: string, kickoff: DeliveredMail): Error[] {
+  const errors: Error[] = [];
   try {
     mail.retract(sender, kickoff.seq);
-  } catch {
-    // Preserve the original failure. Orphan detection can surface any cleanup residue later.
+  } catch (cause) {
+    errors.push(rollbackError(`retract kickoff seq ${kickoff.seq}`, cause));
   }
+  return errors;
 }
 
 function withDiagnostics(

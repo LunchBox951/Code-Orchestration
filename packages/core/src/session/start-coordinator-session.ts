@@ -33,7 +33,12 @@
  * via {@link rootCoordinatorId}, so a given project always yields the same root id / branch / pane.
  */
 import { createHash } from 'node:crypto';
-import { MAIL_CLARIFY_REQUEST, OPERATOR, type DeliveredMail } from '../mail/events.js';
+import {
+  MAIL_CLARIFY_REQUEST,
+  OPERATOR,
+  turnKickoffCorrelationId,
+  type DeliveredMail,
+} from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { openRosterStore, type RosterStore } from '../roles/roster-store.js';
 import {
@@ -43,6 +48,7 @@ import {
   type SlingResult,
 } from '../worktrees/sling.js';
 import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
+import { rollbackError, throwWithRollbackErrors } from '../rollback-errors.js';
 
 /** Inputs to {@link startCoordinatorSession}. Exactly one of `prompt` / `specBody` (Principle 9). */
 export interface StartCoordinatorSessionParams {
@@ -156,6 +162,7 @@ export function startCoordinatorSession(
         from: OPERATOR,
         subject: fromPrompt ? 'Operator kickoff' : 'Operator kickoff (draft spec)',
         body: fromPrompt ? prompt : specBody,
+        correlationId: turnKickoffCorrelationId(coordinator),
       });
     } finally {
       mail.close();
@@ -169,9 +176,11 @@ export function startCoordinatorSession(
       roster.close();
     }
   } catch (cause) {
-    cleanupFailedStartWorktree(openWorktrees, projectId, branch, repoCwd);
-    retractStartKickoff(openMail, projectId, kickoff);
-    throw cause;
+    const rollbackErrors = [
+      ...cleanupFailedStartWorktree(openWorktrees, projectId, branch, repoCwd),
+      ...retractStartKickoff(openMail, projectId, kickoff),
+    ];
+    throwWithRollbackErrors('startCoordinatorSession: setup failed', cause, rollbackErrors);
   }
 
   return {
@@ -187,16 +196,18 @@ function retractStartKickoff(
   openMail: (projectId: string) => MailStore,
   projectId: string,
   kickoff: DeliveredMail | undefined,
-): void {
-  if (kickoff == null) return;
+): Error[] {
+  if (kickoff == null) return [];
+  const errors: Error[] = [];
   const mail = openMail(projectId);
   try {
     mail.retract(OPERATOR, kickoff.seq);
-  } catch {
-    // Preserve the original start failure. Orphan detection can surface cleanup residue later.
+  } catch (cause) {
+    errors.push(rollbackError(`retract root kickoff seq ${kickoff.seq}`, cause));
   } finally {
     mail.close();
   }
+  return errors;
 }
 
 function cleanupFailedStartWorktree(
@@ -204,20 +215,22 @@ function cleanupFailedStartWorktree(
   projectId: string,
   branch: string,
   repoCwd: string,
-): void {
+): Error[] {
+  const errors: Error[] = [];
   const worktrees = openWorktrees(projectId);
   try {
     try {
       worktrees.removeWorktree(branch, { repoCwd, force: true });
-    } catch {
-      // Preserve the original start failure. Orphan detection can surface cleanup residue later.
+    } catch (cause) {
+      errors.push(rollbackError(`remove root worktree '${branch}'`, cause));
     }
   } finally {
     worktrees.close();
   }
   try {
     defaultGitExec(repoCwd, ['branch', '-D', branch]);
-  } catch {
-    // Preserve the original start failure. A missing/locked branch can be surfaced by later cleanup.
+  } catch (cause) {
+    errors.push(rollbackError(`git branch -D '${branch}'`, cause));
   }
+  return errors;
 }

@@ -49,8 +49,8 @@ export const OPERATOR_IPC_METHODS = {
   reviewContext: 'reviewContext',
   /**
    * Start a ROOT coordinator session (operator-only — the IPC socket is operator-uid-only by OS
-   * permission; this is NEVER an agent-callable MCP tool). Provisions the worktree, registers the
-   * roster coordinator, and seeds the actionable `clarify_request` kickoff. The running daemon then
+   * permission; this is NEVER an agent-callable MCP tool). Provisions the worktree, seeds the
+   * actionable `clarify_request` kickoff, and registers the roster coordinator. The running daemon then
    * cold-starts the root on its next tick. Exactly one of `prompt` / `specBody` is required.
    */
   startSession: 'startSession',
@@ -157,7 +157,7 @@ export interface OperatorIpcSurface {
   reviewContext(reviewId: string): Promise<ReviewContext>;
   /**
    * Start a ROOT coordinator session (operator-only — IPC socket is operator-uid-only). Provisions
-   * the worktree, registers the roster coordinator, and seeds the `clarify_request` kickoff. The
+   * the worktree, seeds the `clarify_request` kickoff, and registers the roster coordinator. The
    * daemon cold-starts the root on its next tick. Fails loud unless exactly one of `prompt` /
    * `specBody` is supplied (Principle 9).
    */

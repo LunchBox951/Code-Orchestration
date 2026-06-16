@@ -18,10 +18,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  MAIL_APPROVAL_RESPONSE,
+  MAIL_CLARIFY_RESPONSE,
+  MAIL_WORKER_DONE,
   defaultMailRenderer,
   openMailStore,
   openRegistry,
   openRosterStore,
+  openSessionStore,
   WEDGE_MS,
   type DeliveredMail,
   type DetectorEvent,
@@ -292,6 +296,38 @@ describe('selectEligible — a WAITING agent with an outstanding injectable acti
     const idle = makeIdentity({ agent: 'impl-idle', projectId, cwd });
     expect(selectEligible([idle], openMailStore)).toBeUndefined();
   });
+
+  it.each([
+    [MAIL_WORKER_DONE, 'worker finished'],
+    [MAIL_CLARIFY_RESPONSE, 'operator answered'],
+    [MAIL_APPROVAL_RESPONSE, 'operator approved'],
+  ] as const)(
+    'falls back to unread %s wake mail when no actionable item is outstanding',
+    (type, subject) => {
+      const { projectId, cwd } = makeProject();
+      const store = openMailStore(projectId);
+      mailStores.push(store);
+      const wake = store.send({
+        type,
+        to: 'lead-1',
+        from: type === MAIL_WORKER_DONE ? 'impl-x' : '@operator',
+        subject,
+        body: 'continue',
+        ...(type === MAIL_APPROVAL_RESPONSE ? { decision: 'approve' as const } : {}),
+      });
+      const lead = makeIdentity({
+        agent: 'lead-1',
+        role: 'lead',
+        parent: 'coord-1',
+        projectId,
+        cwd,
+      });
+
+      const selected = selectEligible([lead], openMailStore);
+      expect(selected?.identity.agent).toBe('lead-1');
+      expect(selected?.mail.seq).toBe(wake.seq);
+    },
+  );
 });
 
 // ── the keystone single-turn cycle ────────────────────────────────────────────
@@ -390,6 +426,62 @@ describe('ConductorEngine — ensure-hosted → bind → inject → ONE turn →
     expect(await engine.runCycle([identity])).toBeNull();
     expect(pty.panes).toHaveLength(0); // nothing eligible ⇒ nothing spawned
   });
+
+  it.each([
+    [MAIL_WORKER_DONE, 'impl-x', 'worker_done: co/x'],
+    [MAIL_APPROVAL_RESPONSE, '@operator', 'Re: approve action'],
+  ] as const)(
+    'runCycle marks an informational %s wake item read only after the turn performs MCP work',
+    async (type, from, subject) => {
+      const { projectId, cwd } = makeProject();
+      seedParentChain(projectId, 'coord-1');
+      const store = openMailStore(projectId);
+      mailStores.push(store);
+      const wake =
+        type === MAIL_APPROVAL_RESPONSE
+          ? store.send({
+              type,
+              to: 'lead-1',
+              from,
+              subject,
+              body: 'approved',
+              decision: 'approve',
+            })
+          : store.send({
+              type,
+              to: 'lead-1',
+              from,
+              subject,
+              body: 'finished',
+            });
+      const identity = makeIdentity({
+        agent: 'lead-1',
+        role: 'lead',
+        parent: 'coord-1',
+        projectId,
+        cwd,
+      });
+      const { engine, pty, clock, qw } = makeEngine({
+        mcpActivity: (_pane, push) => {
+          push({ kind: 'mcp', at: 1000, verb: 'co_merge' } satisfies DetectorEvent);
+          return () => {};
+        },
+      });
+
+      const cycleP = engine.runCycle([identity]);
+      expect(pty.panes).toHaveLength(1);
+      const pane = pty.panes[0]!;
+      pane.emit(CLAUDE_READY);
+      await flush();
+      await driveTurnToIdle(pane, wake, clock, qw);
+      const outcome = await cycleP;
+
+      expect(outcome?.mail.seq).toBe(wake.seq);
+      expect(outcome?.turn.errored).toBe(false);
+      expect(store.inbox('lead-1').find((item) => item.seq === wake.seq)?.read).toBe(true);
+      expect(selectEligible([identity], openMailStore)).toBeUndefined();
+    },
+  );
 
   it('keeps the permission dialog watcher attached for the full post-submit turn', async () => {
     const { projectId, cwd } = makeProject();
@@ -590,6 +682,15 @@ describe('ConductorEngine — ensureHosted fails loud without leaking the pane',
 
     await expect(ensureP).rejects.toThrow(/exited|ready/i);
     expect(clientCloseCount).toBeGreaterThanOrEqual(1);
+    const sessions = openSessionStore(projectId);
+    const roster = openRosterStore(projectId);
+    try {
+      expect(sessions.getSession('impl-x')).toBeUndefined();
+      expect(roster.getAgent('impl-x')).toBeUndefined();
+    } finally {
+      sessions.close();
+      roster.close();
+    }
   });
 });
 

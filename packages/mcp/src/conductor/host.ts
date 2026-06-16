@@ -29,6 +29,7 @@ import {
   openSpecStore,
   openWorktreeStore,
   queryLiveObservability,
+  waitingItems,
   QUIET_WINDOW_MS,
   type BreakSignal,
   type InjectNudgeFn,
@@ -320,6 +321,15 @@ function hasOutstandingActionable(projectId: ProjectId, agentId: string): boolea
   }
 }
 
+function hasWaitingItems(projectId: ProjectId, agentId: string): boolean {
+  const mail = openMailStore(projectId);
+  try {
+    return waitingItems(mail, agentId).length > 0;
+  } finally {
+    mail.close();
+  }
+}
+
 /** Options for {@link serveConductor}. The genuinely host-live seams carry honest defaults. */
 export interface ServeConductorOptions {
   /** The project whose live set the conductor drives. */
@@ -364,9 +374,10 @@ export interface ServeConductorOptions {
    */
   readonly injectNudge?: InjectNudgeFn;
   /**
-   * Co MCP + CLI binary paths for the `EngineReviewerSpawnGate` (P2 / AC-S10-2 / RG-4). When
-   * provided, a live `EngineReviewerSpawnGate` is wired into every hosted session's ctx so `co_merge`
-   * calls can trigger live reviewer spawns. When absent, no spawn gate is wired (headless path).
+   * Co MCP + CLI binary paths for the `EngineReviewerSpawnGate` placement launcher (P2 / AC-S10-2 /
+   * RG-4). When provided, the live gate is wired into every hosted session's ctx so `co_merge` /
+   * `co_sling` calls can trigger live reviewer or child spawns. When absent, no spawn gate is wired
+   * (headless path).
    *
    * [host-live] The real binary paths bind here at `co-mcp serve` time. For sandbox proofs, inject
    * fixture paths (clone `TEST_MCP_PATHS` from `placement-launch.test.ts`).
@@ -403,7 +414,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   const now = opts.now ?? monotonicNowMs;
   const pty = opts.pty ?? (await NodePtyHost.create());
 
-  // P2 / AC-S10-2 — lazy reviewer-spawn gate: breaks the construction cycle (gate wraps engine).
+  // P2 / AC-S10-2 — lazy placement-spawn gate: breaks the construction cycle (gate wraps engine).
   // [host-live] isolatedHomeDirFor: per-agent isolated home dir under the project data dir.
   let spawnGate: EngineReviewerSpawnGate | undefined;
   let ownedWtStore: ReturnType<typeof openWorktreeStore> | undefined;
@@ -555,6 +566,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       return {
         ...obs,
         pidAlive: pidAliveFor(agent),
+        hasWaitingItems: hasWaitingItems(projectId, agent.agentId),
         hasOutstandingActionable:
           obs.turnStartedAt !== undefined && hasOutstandingActionable(projectId, agent.agentId),
       };

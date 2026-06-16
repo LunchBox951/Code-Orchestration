@@ -19,7 +19,7 @@ import { OPERATOR, mailKind } from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { openRosterStore, type RosterStore } from '../roles/roster-store.js';
 import { openSessionStore } from '../session/session-store.js';
-import { openWorktreeStore } from '../worktrees/worktree-store.js';
+import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
 import { openRegistry } from '../registry/registry.js';
 import type { SlingDeps } from '../worktrees/sling.js';
 import { rootCoordinatorId, startCoordinatorSession } from './start-coordinator-session.js';
@@ -229,6 +229,42 @@ describe('startCoordinatorSession — provisions worktree, registers the root, s
       expect(retriedWt.getWorktree(branch)?.removed).toBe(false);
     } finally {
       retriedWt.close();
+    }
+  });
+
+  it('surfaces cleanup failures when root start rollback leaves residue', () => {
+    const { projectId, repo } = makeProject();
+    let openedWorktrees = 0;
+
+    try {
+      startCoordinatorSession(
+        { projectId, repoCwd: repo, prompt: 'go', base: 'main' },
+        {
+          slingDeps: SLING_DEPS,
+          openWorktrees: (id) => {
+            openedWorktrees += 1;
+            if (openedWorktrees === 1) return openWorktreeStore(id);
+            return {
+              removeWorktree: () => {
+                throw new Error('worktree cleanup failed');
+              },
+              close: () => {},
+            } as unknown as WorktreeStore;
+          },
+          openRoster: () =>
+            ({
+              recordAgent: () => {
+                throw new Error('roster failed');
+              },
+              close: () => {},
+            }) as unknown as RosterStore,
+        },
+      );
+      throw new Error('expected startCoordinatorSession to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error).toHaveProperty('message', expect.stringContaining('roster failed'));
+      expect(error).toHaveProperty('message', expect.stringContaining('worktree cleanup failed'));
     }
   });
 

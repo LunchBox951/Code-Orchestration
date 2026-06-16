@@ -448,6 +448,68 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     await runner.stop();
   });
 
+  it('overlap reconciliation does not classify a yielded ready-composer turn as wedged', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const scheduler = new FakeScheduler();
+
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const stuck: string[] = [];
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 999, // avoid the normal cadence reconcile; this test drives overlap manually.
+      pidAliveFor: () => true,
+      injectNudge: async () => {},
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: (agent) => stuck.push(agent),
+    });
+
+    try {
+      const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+      const reconcile = (runner as unknown as { daemon: { reconcile: ReconcileLoop } }).daemon
+        .reconcile;
+      seedActionableMail(projectId, 'impl-yielded');
+      const pane = await hostPane(engine, pty, makeIdentity('impl-yielded', projectId, cwd));
+      const item = outstandingItem(projectId, 'impl-yielded');
+
+      scheduler.fire();
+      await tick();
+      pane.emit(defaultMailRenderer(item));
+      await tick();
+
+      clock.set(1000);
+      pane.emit('turn output before yielding\r\n');
+      await flush();
+
+      clock.set(1100);
+      pane.emit(CLAUDE_READY);
+      await flush();
+
+      clock.set(1100 + QUIET_WINDOW_MS + 1);
+      qw.settle();
+      await flush();
+
+      clock.set(1100 + WEDGE_MS + 1);
+      await reconcile.tick();
+
+      expect(breaks.map((b) => b.info.kind)).toEqual(['silent_stop']);
+      expect(stuck).toEqual([]);
+    } finally {
+      qw.settle();
+      await runner.stop();
+    }
+  });
+
   it('an idle warm pane with no outstanding actionable mail is NOT detected as silent-stop', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);

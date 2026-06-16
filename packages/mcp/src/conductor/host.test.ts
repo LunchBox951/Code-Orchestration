@@ -25,6 +25,7 @@ import {
   openSessionStore,
   openWorktreeStore,
   WEDGE_MS,
+  type BreakInfo,
   type DeliveredMail,
   type MailStore,
   type ProjectId,
@@ -563,6 +564,62 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     expect(pane.spec.prelaunchFiles?.[0]?.path).toContain(`/isolated/${root}/mcp/co-mcp.json`);
     expect(pane.spec.prelaunchFiles?.[0]?.contents).toContain('"bridge"');
     expect(pane.spec.prelaunchFiles?.[0]?.contents).toContain('/mcp/bridge.sock');
+
+    await runner.stop();
+  });
+
+  it('serveConductor supplies errored_waiting liveness inputs from engine + mail state', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const agent = 'impl-errored-waiting';
+    seedActionableMail(projectId, agent);
+    const mail = openMailStore(projectId);
+    try {
+      mail.send({
+        type: 'clarify_request',
+        to: 'lead-1',
+        from: agent,
+        subject: 'need input',
+        body: 'blocked until lead answers',
+      });
+    } finally {
+      mail.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const scheduler = new FakeScheduler();
+    const pty = new FakePty();
+    const ticks: DaemonTickOutcome[] = [];
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      injectNudge: async () => {},
+      onBreak: (breakAgent, info) => breaks.push({ agent: breakAgent, info }),
+      onTick: (outcome) => ticks.push(outcome),
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const ensureP = engine.ensureHosted(makeIdentity(agent, projectId, cwd));
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await ensureP;
+    (pane as unknown as { write(data: string): void }).write = () => {
+      throw new Error('pane write failed');
+    };
+
+    scheduler.fire();
+    await flush();
+
+    expect(ticks[0]?.selected).toBe(agent);
+    expect(ticks[0]?.cycle?.turn.errored).toBe(true);
+    expect(ticks[0]?.reconcile?.assessed[0]?.verdict.break?.kind).toBe('errored_waiting');
+    expect(breaks.map((b) => b.info.kind)).toContain('errored_waiting');
 
     await runner.stop();
   });

@@ -3,9 +3,10 @@
  * (one per registered project), exactly like the L3 worktree events. Pure ORCHESTRATION state
  * stored in program-data only (Principle 12 — pristine-repo).
  *
- * One stream per agent, keyed by the L0 `agent:<agentId>` scope pattern. The single event type
- * `agent.registered` records which role an agent was dispatched under and who spawned it. The
- * Conductor emits this on spawn (L7 seam); this layer defines the event + projection + store.
+ * One stream per agent, keyed by the L0 `agent:<agentId>` scope pattern. `agent.registered` records
+ * which role an agent was dispatched under and who spawned it. `agent.removed` is reserved for
+ * launch rollback of a leaf agent whose session/worktree never became durable. The Conductor emits
+ * these at the L7 seam; this layer defines the events + projection + store.
  */
 import { z } from 'zod';
 import type { NewEvent } from '../store/types.js';
@@ -19,6 +20,8 @@ export const ROLES_EVENT_V = 1;
 
 /** An agent was registered (spawned) with a role under a parent. */
 export const EVENT_AGENT_REGISTERED = 'agent.registered' as const;
+/** A leaf agent registration was rolled back after a failed launch/durable-write sequence. */
+export const EVENT_AGENT_REMOVED = 'agent.removed' as const;
 
 /** Scope prefix for the per-agent registration stream; suffix is the agent id. */
 export const AGENT_SCOPE_PREFIX = 'agent:';
@@ -40,9 +43,16 @@ export const agentRegisteredSchema = z.object({
 });
 export type AgentRegistered = z.infer<typeof agentRegisteredSchema>;
 
+/** The `agent.removed` payload: the leaf agent id to remove from the roster read model. */
+export const agentRemovedSchema = z.object({
+  agentId: z.string().min(1),
+});
+export type AgentRemoved = z.infer<typeof agentRemovedSchema>;
+
 /** Current-version schema map for roles events — validated on append AND on read (decode). */
 export const rolesSchemas: SchemaMap = new Map<string, z.ZodType>([
   [EVENT_AGENT_REGISTERED, agentRegisteredSchema],
+  [EVENT_AGENT_REMOVED, agentRemovedSchema],
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -61,6 +71,23 @@ export function makeAgentRegisteredEvent(projectId: string, rec: AgentRegistered
     v: ROLES_EVENT_V,
     payload,
     actor: payload.parent,
+  };
+}
+
+/** Build + validate an `agent.removed` NewEvent. */
+export function makeAgentRemovedEvent(
+  projectId: string,
+  rec: AgentRemoved,
+  actor = rec.agentId,
+): NewEvent {
+  const payload = agentRemovedSchema.parse(rec);
+  return {
+    projectId,
+    scope: agentScope(payload.agentId),
+    type: EVENT_AGENT_REMOVED,
+    v: ROLES_EVENT_V,
+    payload,
+    actor,
   };
 }
 

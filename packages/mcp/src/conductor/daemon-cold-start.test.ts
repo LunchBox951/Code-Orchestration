@@ -27,6 +27,7 @@ import {
   WEDGE_MS,
   ReconcileLoop,
   defaultMailRenderer,
+  type DetectorEvent,
   openMailStore,
   openRegistry,
   openRosterStore,
@@ -145,6 +146,7 @@ function makeEngine(
   pty: FakePty,
   clock: ReturnType<typeof makeClock>,
   qw: ReturnType<typeof makeQuietWindow>,
+  opts: { readonly mcpActivity?: (push: (ev: DetectorEvent) => void) => void } = {},
 ): ConductorEngine {
   const engine = new ConductorEngine({
     pty,
@@ -152,6 +154,14 @@ function makeEngine(
     now: clock.now,
     quietWindow: qw.quietWindow,
     injectOptions: { retryDelay: () => new Promise<void>(() => {}) },
+    ...(opts.mcpActivity != null
+      ? {
+          mcpActivity: (_pane, push) => {
+            opts.mcpActivity!(push);
+            return () => {};
+          },
+        }
+      : {}),
   });
   engines.push(engine);
   return engine;
@@ -359,6 +369,62 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
     expect(engine.isHosted(projectId, 'impl-cold')).toBe(false);
     // Exactly one pane was spawned (the root's) — the child was never launched.
     expect(pty.panes).toHaveLength(1);
+  });
+
+  it('does not re-select the consumed root kickoff when later operator work arrives', async () => {
+    const { projectId, repo } = makeProject();
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const engine = makeEngine(pty, clock, qw, {
+      mcpActivity: (push) => {
+        push({ kind: 'mcp_start', at: clock.now(), verb: 'co_spec_draft' });
+        push({ kind: 'mcp_end', at: clock.now(), verb: 'co_spec_draft' });
+      },
+    });
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+    });
+
+    const firstKickoff = kickoffFor(projectId, coordinator);
+    const firstTick = daemon.tick();
+    await tick();
+    const rootPane = pty.panes[pty.panes.length - 1]!;
+    rootPane.emit(CLAUDE_READY);
+    await driveTurnToIdle(rootPane, firstKickoff, clock, qw);
+    await firstTick;
+
+    const mail = openMailStore(projectId);
+    let proceed: DeliveredMail;
+    try {
+      proceed = mail.send({
+        type: 'clarify_request',
+        to: coordinator,
+        from: OPERATOR,
+        subject: 'Proceed',
+        body: 'Spec is locked; continue.',
+      });
+    } finally {
+      mail.close();
+    }
+
+    const secondTickP = daemon.tick();
+    await tick();
+    const injected = kickoffFor(projectId, coordinator);
+    await driveTurnToIdle(rootPane, injected, clock, qw);
+    const secondTick = await secondTickP;
+
+    expect(secondTick.selected).toBe(coordinator);
+    expect(secondTick.cycle?.mail.seq).toBe(proceed.seq);
   });
 
   it('does NOT cold-start a coordinator registered without a provisioned worktree (a roster ancestor)', async () => {

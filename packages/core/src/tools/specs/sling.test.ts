@@ -237,6 +237,29 @@ describe('co_sling — via invokeTool', () => {
     expect(() => git(repo, 'rev-parse', '--verify', 'co/unregistered-caller')).toThrow();
   });
 
+  it('rejects an already-registered child agent before dispatch, worktree, or kickoff side effects', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    ctx.roster!.recordAgent({
+      agentId: 'impl-existing',
+      role: 'implementer',
+      parent: 'lead-7',
+    });
+
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-existing',
+        branch: 'co/duplicate-child',
+      }),
+    ).rejects.toThrow(/already registered in the roster/i);
+
+    expect(ctx.dispatch!.readPlacements('lead-7')).toHaveLength(0);
+    expect(ctx.worktrees?.getWorktree('co/duplicate-child')).toBeUndefined();
+    expect(ctx.mail.outstanding('impl-existing')).toHaveLength(0);
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/duplicate-child')).toThrow();
+  });
+
   it('rejects unknown and illegal child roles before dispatch or worktree creation', async () => {
     const repo = makeMainRepo();
     const unknownCtx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
@@ -952,6 +975,44 @@ describe('co_sling — spawn gate integration (P2 / AC-S10-2)', () => {
     expect(base.worktrees?.getWorktree('co/placement-live-fail')?.removed).toBe(true);
     expect(base.mail.outstanding('impl-placement-live-fail')).toHaveLength(0);
     expect(() => git(repo, 'rev-parse', '--verify', 'co/placement-live-fail')).toThrow();
+  });
+
+  it('placed: surfaces release failures when placement rollback cannot fully clean up', async () => {
+    const repo = makeMainRepo();
+    const base = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const ctx: ToolContext = {
+      ...base,
+      dispatch: {
+        ...base.dispatch,
+        recordPlacement: () => {
+          throw new Error('placement failed');
+        },
+      } as DispatchStore,
+      reviewerSpawnGate: {
+        spawn: async () => {},
+        release: async () => {
+          throw new Error('release failed');
+        },
+      },
+    };
+
+    try {
+      await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-placement-release-fail',
+        branch: 'co/placement-release-fail',
+      });
+      throw new Error('expected co_sling to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error).toHaveProperty('message', expect.stringContaining('placement failed'));
+      expect(error).toHaveProperty('message', expect.stringContaining('release failed'));
+      expect((error as AggregateError).errors).toHaveLength(2);
+    }
+
+    expect(base.worktrees?.getWorktree('co/placement-release-fail')?.removed).toBe(true);
+    expect(base.mail.outstanding('impl-placement-release-fail')).toHaveLength(0);
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/placement-release-fail')).toThrow();
   });
 
   it('headless path (no reviewerSpawnGate): co_sling placed is byte-identical to before — gate never fires', async () => {

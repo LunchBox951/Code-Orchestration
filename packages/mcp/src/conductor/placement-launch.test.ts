@@ -652,6 +652,84 @@ describe('EngineReviewerSpawnGate — launches a reviewer pane from a placed rev
     await expect(gate.spawn(projectId, childPlacement)).resolves.toBeUndefined();
     expect(pty.panes).toHaveLength(1);
   });
+
+  it('release() stops a rollback-spawned slung child and removes its roster row', async () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    seedParentChain(projectId);
+
+    const childAgent = 'impl-rollback-i';
+    recordWorktree(projectId, childAgent, 'co/impl-rollback-i', cwd);
+    const childPlacement = recordPlacement(projectId, childAgent, 'implementer', 'claude');
+
+    const { engine, pty } = makeEngine();
+    const wtStore = worktreeStores[worktreeStores.length - 1]!;
+    const gate = new EngineReviewerSpawnGate(
+      engine,
+      wtStore,
+      (agent) => join(dataDir, 'isolated', agent),
+      TEST_MCP_PATHS,
+    );
+
+    const spawnPromise = gate.spawn(projectId, childPlacement);
+    await flush();
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await spawnPromise;
+
+    expect(engine.isHosted(projectId, childAgent)).toBe(true);
+    await gate.release(projectId, childAgent);
+    expect(engine.isHosted(projectId, childAgent)).toBe(false);
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    expect(roster.getAgent(childAgent)).toBeUndefined();
+
+    const sessions = openSessionStore(projectId);
+    sessionStores.push(sessions);
+    expect(sessions.getSession(childAgent)).toBeUndefined();
+  });
+
+  it('release() removes the roster row when session cleanup completed before close reported an error', async () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    seedParentChain(projectId);
+
+    const childAgent = 'impl-rollback-partial';
+    recordWorktree(projectId, childAgent, 'co/impl-rollback-partial', cwd);
+    const childPlacement = recordPlacement(projectId, childAgent, 'implementer', 'claude');
+
+    const { engine, pty } = makeEngine();
+    const wtStore = worktreeStores[worktreeStores.length - 1]!;
+    const gate = new EngineReviewerSpawnGate(
+      engine,
+      wtStore,
+      (agent) => join(dataDir, 'isolated', agent),
+      TEST_MCP_PATHS,
+    );
+
+    const spawnPromise = gate.spawn(projectId, childPlacement);
+    await flush();
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await spawnPromise;
+    const hosted = engine.getHosted(projectId, childAgent);
+    expect(hosted).toBeDefined();
+    const originalClose = hosted!.session.close.bind(hosted!.session);
+    hosted!.session.close = async () => {
+      await originalClose();
+      throw new Error('session close failed after cleanup');
+    };
+
+    await expect(gate.release(projectId, childAgent)).rejects.toThrow(
+      /session close failed after cleanup/,
+    );
+    expect(engine.isHosted(projectId, childAgent)).toBe(false);
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    expect(roster.getAgent(childAgent)).toBeUndefined();
+
+    const sessions = openSessionStore(projectId);
+    sessionStores.push(sessions);
+    expect(sessions.getSession(childAgent)).toBeUndefined();
+  });
 });
 
 // 7. EngineReviewerSpawnGate — no-worktree fallback (nit-b)
