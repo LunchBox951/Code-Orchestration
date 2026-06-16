@@ -15,6 +15,7 @@ describe('co-mcp binary help', () => {
     expect(help).toContain('co-mcp serve <projectId>');
     expect(help).toContain('co-mcp host-proof <provider> [projectId]');
     expect(help).toContain('co-mcp bridge <socketPath>');
+    expect(help).toContain('co-mcp project-id [repoPath]');
   });
 
   it('routes --help to the help renderer instead of the stdio MCP server', () => {

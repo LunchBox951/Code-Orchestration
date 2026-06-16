@@ -5,6 +5,7 @@ import { runServeConductor } from './conductor/host.js';
 import { runHostProofCommand } from './conductor/host-proof.js';
 import { runSocketBridgeCommand } from './conductor/real-transport.js';
 import { runStartSessionCommand } from './conductor/start-session-command.js';
+import { runProjectIdCommand } from './conductor/project-id-command.js';
 
 /**
  * The `co-mcp` executable. Three modes:
@@ -22,6 +23,9 @@ import { runStartSessionCommand } from './conductor/start-session-command.js';
  *     (`co-mcp start-session`). Launches a ROOT coordinator from a prompt OR a draft spec — registers it
  *     in the roster + provisions its worktree + seeds the actionable kickoff, but mints no session (the
  *     daemon cold-starts it). OPERATOR-ONLY — never agent-callable (Principle 4 + D4).
+ *   - `project-id [repoPath]`: the OPERATOR-only project-id lookup + registration (`co-mcp project-id`).
+ *     Registers the repo path in the project registry (idempotent) and prints ONLY the projectId to
+ *     stdout. The default repoPath is cwd. OPERATOR-ONLY — never agent-callable (Principle 4 + D4).
  *
  * A fatal startup error (missing identity / project id, unregistered worktree, transport failure)
  * fails loud to stderr and exits non-zero — never a silent degrade (Principle 9). stdout is reserved
@@ -40,7 +44,9 @@ if (mode === '--help' || mode === '-h' || mode === 'help') {
           ? runSocketBridgeCommand(rest)
           : mode === 'start-session'
             ? runStartSessionCommand(rest)
-            : serve();
+            : mode === 'project-id'
+              ? runProjectIdCommand(rest)
+              : serve();
   main.catch((err: unknown) => {
     console.error(err);
     process.exitCode = 1;
