@@ -13,6 +13,9 @@ export default tseslint.config(
       '.goals/**',
       '.research/**',
       'apps/desktop/dist/**',
+      // External UI design reference (hand-exported HTML/JS from a design tool, not
+      // first-party source) — tracked for provenance, not linted. See design-prototypes/README.md.
+      'design-prototypes/**',
     ],
   },
   js.configs.recommended,

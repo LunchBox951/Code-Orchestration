@@ -35,3 +35,7 @@ docs/
 
 # GitHub config (issue/PR templates, labels — GitHub's domain, kept as authored)
 .github/
+
+# External UI design reference (hand-exported HTML/JS from a design tool — not first-party
+# source). Tracked for provenance; left in its as-authored shape, not prettier-managed.
+design-prototypes/
