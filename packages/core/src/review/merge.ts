@@ -683,9 +683,11 @@ export class CoReviewGate implements FinishReviewGate {
     // Resolve the spec reference (AC-L5-8): criteria ref when provided, else explicit no-spec marker.
     const rawSpecRef = resolveReviewSpecRef(req.specRef);
     const requestSpecRef = (reviewerKind: 'agent' | 'human'): ReviewSpecRef =>
-      reviewerKind === 'human' && this.deps.specs != null
-        ? resolveReviewSpecRefFromStore(this.deps.specs, req.specRef)
-        : rawSpecRef;
+      reviewerKind !== 'human'
+        ? rawSpecRef
+        : this.deps.specs != null
+          ? resolveReviewSpecRefFromStore(this.deps.specs, req.specRef)
+          : { kind: 'no-locked-spec' };
     const projectId = req.projectId;
     const resolveKind = (): 'agent' | 'human' => {
       if (projectId == null) return 'agent';

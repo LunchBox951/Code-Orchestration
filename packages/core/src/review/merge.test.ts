@@ -11,6 +11,7 @@ import { accountForProvider } from '../dispatch/provider-source.js';
 import { MAIL_ESCALATION, MAIL_REVIEW_REQUEST, OPERATOR } from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { openProjectStore } from '../store/sqlite-store.js';
+import type { SpecStore } from '../specs/specs-store.js';
 import type { GhExec, RepoMode } from '../worktrees/repo-mode.js';
 import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
 import type { ReviewScope } from './ladder.js';
@@ -28,6 +29,20 @@ function fakeConfig(overrides: Record<string, unknown> = {}): ConfigStore {
     close: () => undefined,
   };
 }
+
+const lockedSpecs: Pick<SpecStore, 'getSpec'> = {
+  getSpec: (taskId) => ({
+    taskId,
+    title: 'Locked spec',
+    goal: 'review with locked criteria',
+    criteria: [{ text: 'review evidence is displayable', verify: 'pnpm test' }],
+    body: '',
+    state: 'locked',
+    draftedTs: 1,
+    lockedBy: OPERATOR,
+    lockedTs: 2,
+  }),
+};
 
 // AC-L5-1, AC-L5-3 — the gated merge core (CoReviewGate). The merge refuses unless a PASS verdict is
 // recorded + honest-verification clears it; with a clean PASS it merges in owner/offline. Gating logic
@@ -2033,6 +2048,7 @@ describe('CoReviewGate.triggerReview — agent reviewer placement (AC-L5-11)', (
         reviews,
         worktrees,
         mail,
+        specs: lockedSpecs,
         resolveMode: () => 'offline',
         config: fakeConfig({ 'review.pr_merge.reviewer': 'human' }),
         dispatch,
@@ -2046,6 +2062,7 @@ describe('CoReviewGate.triggerReview — agent reviewer placement (AC-L5-11)', (
         reviews,
         worktrees,
         mail,
+        specs: lockedSpecs,
         resolveMode: () => 'offline',
         config: fakeConfig({ 'review.pr_merge.reviewer': 'agent' }),
         dispatch,
@@ -3036,6 +3053,37 @@ describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
   });
 
+  it('a human review without a spec store fails loud and records nothing', () => {
+    const reviews = openReviewStore('p-human-no-spec-store');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-human-no-spec-store');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-human-no-spec-store');
+    mailStores.push(mail);
+    const config = fakeConfig({ 'review.worker_merge.reviewer': 'human' });
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      resolveMode: () => 'offline',
+      config,
+    });
+
+    expect(() =>
+      gate.triggerReview({
+        reviewId: 'rev-human-no-spec-store',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'worker_merge',
+        projectId: 'p-human-no-spec-store',
+        specRef: 'spec:task-human-no-spec-store#locked',
+      }),
+    ).toThrow(/locked acceptance criteria|spec_ref/i);
+    expect(reviews.getReviewRequest(TARGET, BRANCH)).toBeUndefined();
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
+  });
+
   it('a human review requested WITHOUT a mail store fails loud and records nothing', () => {
     const reviews = openReviewStore('p-135');
     reviewStores.push(reviews);
@@ -3043,7 +3091,13 @@ describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
     worktreeStores.push(worktrees);
     recordPass(reviews, worktrees);
     const config = fakeConfig({ 'review.worker_merge.reviewer': 'human' });
-    const gate = new CoReviewGate({ reviews, worktrees, resolveMode: () => 'offline', config }); // NO mail
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      specs: lockedSpecs,
+      resolveMode: () => 'offline',
+      config,
+    }); // NO mail
     expect(() =>
       gate.triggerReview({
         reviewId: 'rev-135',
@@ -3072,6 +3126,7 @@ describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
       reviews,
       worktrees,
       mail: throwingSendMail(mail),
+      specs: lockedSpecs,
       resolveMode: () => 'offline',
       config,
     });

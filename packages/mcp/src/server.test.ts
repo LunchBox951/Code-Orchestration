@@ -263,7 +263,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     expect(first?.seq).toBe(sent.seq);
   });
 
-  it('round-trips review_response.review_verdict through MCP mail tools', async () => {
+  it('rejects review_response through MCP mail tools because the Review view owns verdict evidence', async () => {
     const leadCtx = makeTestContext('lead-review');
     const projectId = leadCtx.projectId;
     const cwd = leadCtx.cwd;
@@ -310,9 +310,9 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
         review_verdict: 'PASS',
       },
     });
-    expect(sendRes.isError).toBeFalsy();
-    const reply = sendRes.structuredContent as Record<string, unknown>;
-    expect(reply.review_verdict).toBe('PASS');
+    expect(sendRes.isError).toBe(true);
+    const errorContent = sendRes.content as Array<{ text?: string }> | undefined;
+    expect(errorContent?.[0]?.text).toMatch(/Review view|operator IPC|review evidence/i);
 
     const leadClient = await connect({
       contextFactory: () => ({
@@ -326,7 +326,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     });
     const inboxRes = await leadClient.callTool({ name: 'co_mail_inbox', arguments: {} });
     const inbox = inboxRes.structuredContent as { mail: Array<Record<string, unknown>> };
-    expect(inbox.mail.find((m) => m.seq === reply.seq)?.review_verdict).toBe('PASS');
+    expect(inbox.mail.filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
 
   it('co_status returns the calling agent record', async () => {
