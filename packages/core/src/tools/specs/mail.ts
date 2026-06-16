@@ -14,10 +14,14 @@ import { deliveredMailSchema, toWireMail, type WireMail } from './wire.js';
 // the schemas are the single syntax source the MCP surface and the phase-D check read).
 
 // ── co_mail_send ──────────────────────────────────────────────────────────────
-type InternalMailType = typeof MAIL_WORKER_DONE | typeof MAIL_REVIEW_REQUEST;
+type InternalMailType =
+  | typeof MAIL_WORKER_DONE
+  | typeof MAIL_REVIEW_REQUEST
+  | typeof MAIL_REVIEW_RESPONSE;
 type SendableMailType = Exclude<(typeof MAIL_TYPES)[number], InternalMailType>;
 const SENDABLE_MAIL_TYPES = MAIL_TYPES.filter(
-  (type): type is SendableMailType => type !== MAIL_WORKER_DONE && type !== MAIL_REVIEW_REQUEST,
+  (type): type is SendableMailType =>
+    type !== MAIL_WORKER_DONE && type !== MAIL_REVIEW_REQUEST && type !== MAIL_REVIEW_RESPONSE,
 ) as [SendableMailType, ...SendableMailType[]];
 
 const mailSendInput = z.object({
@@ -47,10 +51,6 @@ const mailSendInput = z.object({
     .enum(['approve', 'decline'])
     .optional()
     .describe('Only for an approval_response reply: approve or decline the requested action.'),
-  review_verdict: z
-    .enum(['PASS', 'ISSUES'])
-    .optional()
-    .describe('Only for a review_response reply: the structured human review verdict.'),
 });
 type MailSendInput = z.infer<typeof mailSendInput>;
 
@@ -75,13 +75,6 @@ export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
             `${ctx.agent}'s inbox (you must be its recipient).`,
         );
       }
-      if (input.type === MAIL_REVIEW_RESPONSE) {
-        throw new Error(
-          'co_mail_send: review_response is Review-view only. Submit human review verdicts ' +
-            'through the desktop Review view / operator IPC so the diff, locked criteria, ' +
-            'latest finish, and review evidence fingerprint are validated.',
-        );
-      }
       const replyDraft = {
         type: input.type,
         subject: input.subject,
@@ -89,17 +82,9 @@ export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
         from: ctx.agent,
         ...(input.idempotency_key != null ? { idempotencyKey: input.idempotency_key } : {}),
         ...(input.decision != null ? { decision: input.decision } : {}),
-        ...(input.review_verdict != null ? { reviewVerdict: input.review_verdict } : {}),
       };
       delivered = ctx.mail.reply(answered, replyDraft);
     } else {
-      if (input.type === MAIL_REVIEW_RESPONSE) {
-        throw new Error(
-          'co_mail_send: review_response is Review-view only. Submit human review verdicts ' +
-            'through the desktop Review view / operator IPC so the diff, locked criteria, ' +
-            'latest finish, and review evidence fingerprint are validated.',
-        );
-      }
       if (input.to == null || input.to.length === 0) {
         throw new Error(
           'co_mail_send: `to` is required for a new message (omit it only when replying via in_reply_to).',
@@ -115,7 +100,6 @@ export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
         body: input.body,
         ...(input.idempotency_key != null ? { idempotencyKey: input.idempotency_key } : {}),
         ...(input.decision != null ? { decision: input.decision } : {}),
-        ...(input.review_verdict != null ? { reviewVerdict: input.review_verdict } : {}),
       });
     }
     return toWireMail(delivered);

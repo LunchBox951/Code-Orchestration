@@ -17,6 +17,7 @@ import {
   OPERATOR,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
+  MAIL_WORKER_DONE,
   MAIL_TYPES,
   openSpecStore,
   openPlanStore,
@@ -47,7 +48,8 @@ import type {
 import { readFileSync } from 'node:fs';
 
 const CLI_SENDABLE_MAIL_TYPES = MAIL_TYPES.filter(
-  (type) => type !== MAIL_REVIEW_REQUEST && type !== MAIL_REVIEW_RESPONSE,
+  (type) =>
+    type !== MAIL_WORKER_DONE && type !== MAIL_REVIEW_REQUEST && type !== MAIL_REVIEW_RESPONSE,
 );
 
 export interface RunResult {
@@ -575,6 +577,17 @@ function runMailCommand(projectId: string, argv: string[]): RunResult {
       if (!(CLI_SENDABLE_MAIL_TYPES as readonly string[]).includes(rawType)) {
         const knownMailType = (MAIL_TYPES as readonly string[]).includes(rawType);
         if (knownMailType) {
+          if (rawType === MAIL_WORKER_DONE) {
+            throw new Error(
+              `mail type '${rawType}' is not CLI-sendable; record completion through co_finish.`,
+            );
+          }
+          if (rawType === MAIL_REVIEW_REQUEST) {
+            throw new Error(
+              `mail type '${rawType}' is not CLI-sendable; request human reviews through ` +
+                'the review gate.',
+            );
+          }
           throw new Error(
             `mail type '${rawType}' is not CLI-sendable; submit human review verdicts through ` +
               'the desktop Review view / operator IPC.',

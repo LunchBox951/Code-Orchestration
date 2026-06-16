@@ -155,7 +155,9 @@ describe('createCoMcpServer — tool-list parity', () => {
     const typeSchema = props?.type as { enum?: unknown[] } | undefined;
 
     expect(typeSchema?.enum).toEqual(
-      MAIL_TYPES.filter((type) => type !== 'worker_done' && type !== 'review_request'),
+      MAIL_TYPES.filter(
+        (type) => type !== 'worker_done' && type !== 'review_request' && type !== 'review_response',
+      ),
     );
   });
 
@@ -179,7 +181,7 @@ describe('createCoMcpServer — tool-list parity', () => {
     expect(subjectSchema?.description).toBeUndefined();
   });
 
-  it('publishes co_mail_send.review_verdict over MCP', async () => {
+  it('does not publish Review-view-only verdict fields over MCP co_mail_send', async () => {
     const ctx = makeTestContext('impl-review-verdict-schema');
     const client = await connect({ contextFactory: () => ctx });
 
@@ -187,9 +189,7 @@ describe('createCoMcpServer — tool-list parity', () => {
     const send = tools.find((t) => t.name === 'co_mail_send');
     const props = (send?.inputSchema as { properties?: Record<string, unknown> } | undefined)
       ?.properties;
-    const reviewVerdictSchema = props?.review_verdict as { enum?: unknown[] } | undefined;
-
-    expect(reviewVerdictSchema?.enum).toEqual(['PASS', 'ISSUES']);
+    expect(props).not.toHaveProperty('review_verdict');
   });
 
   it('publishes co_sling without agent-supplied account/cost controls or capacity-only WAITING wording', async () => {
@@ -263,7 +263,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     expect(first?.seq).toBe(sent.seq);
   });
 
-  it('rejects review_response through MCP mail tools because the Review view owns verdict evidence', async () => {
+  it('rejects review_response through MCP mail tools at the schema boundary', async () => {
     const leadCtx = makeTestContext('lead-review');
     const projectId = leadCtx.projectId;
     const cwd = leadCtx.cwd;
@@ -312,7 +312,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     });
     expect(sendRes.isError).toBe(true);
     const errorContent = sendRes.content as Array<{ text?: string }> | undefined;
-    expect(errorContent?.[0]?.text).toMatch(/Review view|operator IPC|review evidence/i);
+    expect(errorContent?.[0]?.text).toMatch(/Input validation error|Invalid option/i);
 
     const leadClient = await connect({
       contextFactory: () => ({

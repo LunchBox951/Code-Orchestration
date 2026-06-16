@@ -582,7 +582,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -650,7 +650,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -706,7 +706,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         review_verdict: 'PASS',
         idempotency_key: 'human-review-response:idem-mismatch',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -751,7 +751,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         review_verdict: 'PASS',
         idempotency_key: 'human-review-response:cross-request',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(`${TARGET}-first`, firstBranch, 'pr_merge')).toBeUndefined();
     expect(reviews.getVerdict(`${TARGET}-second`, secondBranch, 'pr_merge')).toBeUndefined();
@@ -787,7 +787,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         review_verdict: 'ISSUES',
         idempotency_key: 'human-review-response:same-verdict',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -822,7 +822,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         review_verdict: 'PASS',
         idempotency_key: 'human-review-response:exact',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -1325,7 +1325,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -1371,7 +1371,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -1413,7 +1413,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -1454,7 +1454,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
@@ -1488,7 +1488,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });

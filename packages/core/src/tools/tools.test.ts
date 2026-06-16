@@ -287,7 +287,7 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
           body: 'passes',
           review_verdict: 'PASS',
         }),
-      ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+      ).rejects.toThrow(/schema validation/i);
     } finally {
       close();
     }
@@ -324,7 +324,7 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
           body: 'passes',
           review_verdict: 'PASS',
         }),
-      ).rejects.toThrow(/Review view|operator IPC|review evidence/i);
+      ).rejects.toThrow(/schema validation/i);
 
       const inbox = (await invokeTool(reg, ctx('lead'), 'co_mail_inbox', {})) as ListOut;
       expect(inbox.mail.filter((m) => m.type === MAIL_REVIEW_RESPONSE)).toHaveLength(0);
@@ -408,6 +408,19 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
         type: MAIL_REVIEW_REQUEST,
         subject: 'review?',
         body: 'please review',
+      }),
+    ).toThrow();
+  });
+
+  it('co_mail_send schema rejects review_response before the handler', () => {
+    const send = buildCoreRegistry().get('co_mail_send');
+    expect(() =>
+      send?.inputSchema.parse({
+        to: 'lead-1',
+        type: MAIL_REVIEW_RESPONSE,
+        subject: 'Review PASS',
+        body: 'PASS',
+        review_verdict: 'PASS',
       }),
     ).toThrow();
   });

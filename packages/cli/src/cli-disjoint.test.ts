@@ -293,6 +293,27 @@ describe('AC-S9-8 — co mail send dispatches to openMailStore', () => {
     expect(result.output).toMatch(/operator_message/);
   });
 
+  it('rejects worker_done because co_finish owns that durable signal', async () => {
+    const { dir } = makeRegisteredDir();
+    const result = await run(
+      [
+        'mail',
+        'send',
+        '--to',
+        'lead-1',
+        '--type',
+        'worker_done',
+        '--subject',
+        'worker_done: co/feature',
+        '--body',
+        'done',
+      ],
+      dir,
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/worker_done|not CLI-sendable|co_finish/i);
+  });
+
   it('keeps the SH-1 runbook aligned with rejected CLI review_response sends', async () => {
     const runbook = readFileSync(join(process.cwd(), 'docs', 'sh1-runbook.md'), 'utf8');
     expect(runbook).toContain('`co mail send --type review_response …` is rejected');

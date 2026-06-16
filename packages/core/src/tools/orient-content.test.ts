@@ -66,7 +66,6 @@ describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas
         'requested_by',
         'research_id',
         'review_id',
-        'review_verdict',
         'spec_ref',
         'task_criteria',
         'task_id',
