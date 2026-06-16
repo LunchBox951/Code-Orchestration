@@ -64,7 +64,7 @@ describe('ReviewVM — update', () => {
     expect(vm.state.pending[0]?.reviewId).toBe('rev-xyz');
   });
 
-  it('falls back to body reviewId: token when idempotencyKey is absent', () => {
+  it('drops review_request mail without review-request idempotency key even when body has reviewId text', () => {
     const vm = new ReviewVM();
     vm.update([
       makeReviewMail({
@@ -73,7 +73,7 @@ describe('ReviewVM — update', () => {
         body: 'Please review this. reviewId: rev-body-123 scope: pr_merge',
       }),
     ]);
-    expect(vm.state.pending[0]?.reviewId).toBe('rev-body-123');
+    expect(vm.state.pending).toHaveLength(0);
   });
 
   it('drops rows with no extractable reviewId', () => {
@@ -407,6 +407,41 @@ describe('ReviewVM — pending guard', () => {
     resolveFn();
     await submitPromise;
     expect(vm.state.composer.pending).toBe(false);
+  });
+
+  it('does not change selected review or composer while a verdict submit is pending', async () => {
+    let resolveSubmit!: () => void;
+    const pendingSubmit = new Promise<void>((resolve) => {
+      resolveSubmit = resolve;
+    });
+    const vm = new ReviewVM({ onSubmitVerdict: () => pendingSubmit });
+    vm.update([
+      makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-a' }),
+      makeReviewMail({ seq: 2, idempotencyKey: 'review-request:rev-b' }),
+    ]);
+    vm.selectReview('rev-a');
+    vm.setReviewContext('rev-a', { ...RESOLVED_CTX, reviewId: 'rev-a' });
+    vm.beginVerdict('PASS');
+
+    const submitPromise = vm.submitVerdict();
+    expect(vm.state.composer.pending).toBe(true);
+
+    vm.selectReview('rev-b');
+    vm.beginVerdict('ISSUES');
+    vm.updateComposerBody('new draft');
+
+    expect(vm.state.selectedReviewId).toBe('rev-a');
+    expect(vm.state.composer).toMatchObject({
+      active: true,
+      verdict: 'PASS',
+      body: '',
+      pending: true,
+    });
+
+    resolveSubmit();
+    await submitPromise;
+    expect(vm.state.selectedReviewId).toBe('rev-a');
+    expect(vm.state.composer.active).toBe(false);
   });
 });
 

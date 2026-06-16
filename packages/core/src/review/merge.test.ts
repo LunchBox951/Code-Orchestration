@@ -2027,6 +2027,7 @@ describe('CoReviewGate.triggerReview — agent reviewer placement (AC-L5-11)', (
         requestedBy: 'lead-1',
         scope: 'pr_merge' as const,
         projectId: 'p-place-human-route-stable',
+        specRef: 'spec:task-human-route#locked',
       };
       const humanGate = new CoReviewGate({
         reviews,
@@ -3005,6 +3006,36 @@ describe('CoReviewGate.fireSpawn — spawn errors are surfaced, never silent (Pr
 
 // ── #135 nit: the human-path mail guard fails loud (Principle 9) ─────────────────────────────────
 describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
+  it('a human review without locked criteria fails loud and records nothing', () => {
+    const reviews = openReviewStore('p-human-no-spec');
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore('p-human-no-spec');
+    worktreeStores.push(worktrees);
+    const mail = openMailStore('p-human-no-spec');
+    mailStores.push(mail);
+    const config = fakeConfig({ 'review.worker_merge.reviewer': 'human' });
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      resolveMode: () => 'offline',
+      config,
+    });
+
+    expect(() =>
+      gate.triggerReview({
+        reviewId: 'rev-human-no-spec',
+        target: TARGET,
+        branch: BRANCH,
+        requestedBy: 'lead-1',
+        scope: 'worker_merge',
+        projectId: 'p-human-no-spec',
+      }),
+    ).toThrow(/locked acceptance criteria|spec_ref/i);
+    expect(reviews.getReviewRequest(TARGET, BRANCH)).toBeUndefined();
+    expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
+  });
+
   it('a human review requested WITHOUT a mail store fails loud and records nothing', () => {
     const reviews = openReviewStore('p-135');
     reviewStores.push(reviews);
@@ -3021,6 +3052,7 @@ describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
         requestedBy: 'lead-1',
         scope: 'worker_merge',
         projectId: 'p-135',
+        specRef: 'spec:task-mail-guard#locked',
       }),
     ).toThrow(/no mail store is wired/);
     expect(reviews.getReviewRequest(TARGET, BRANCH)).toBeUndefined();
@@ -3052,6 +3084,7 @@ describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
         requestedBy: 'lead-1',
         scope: 'worker_merge',
         projectId: 'p-human-mail-fail',
+        specRef: 'spec:task-mail-fail#locked',
       }),
     ).toThrow(/mail send failed/i);
 

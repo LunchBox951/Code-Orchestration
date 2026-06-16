@@ -13,12 +13,16 @@ import { execFileSync } from 'node:child_process';
  */
 export type GitReader = (cwd: string, args: readonly string[]) => string | null;
 
+/** Intentional cap for raw git stdout; large review diffs degrade instead of hitting Node's hidden default. */
+export const GIT_RAW_READER_MAX_BUFFER = 16 * 1024 * 1024;
+
 /** Raw read-only git stdout, `null` on a non-zero exit. Use this for byte-sensitive reads like diffs. */
 export const defaultGitRawReader: GitReader = (cwd, args) => {
   try {
-    return execFileSync('git', ['--no-optional-locks', ...args], {
+    return execFileSync('git', ['--no-optional-locks', '--no-pager', ...args], {
       cwd,
       encoding: 'utf8',
+      maxBuffer: GIT_RAW_READER_MAX_BUFFER,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch {

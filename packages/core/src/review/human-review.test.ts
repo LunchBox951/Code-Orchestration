@@ -76,6 +76,7 @@ function fakeConfig(overrides: Record<string, unknown> = {}): ConfigStore {
 const TARGET = 'co/l5-review-gate';
 const BRANCH = 'co/l5-phase-e';
 const FAKE_SHA = 'a'.repeat(40);
+const SPEC_REF = 'spec:human-review-task#locked';
 
 /** Seed baseline + finish with clean (all-passing) test data, mirroring merge.test.ts. */
 function recordCleanFinish(worktrees: WorktreeStore): void {
@@ -111,6 +112,8 @@ function recordHumanRequest(
     scope,
     requestedBy,
     reviewerKind: 'human',
+    specRefKind: 'criteria',
+    specRefRef: SPEC_REF,
   });
 }
 
@@ -148,6 +151,8 @@ function requestHumanReviewMail(
       requestedBy,
       scope,
       reviewerKind: 'human',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     },
   ).mail;
 }
@@ -488,6 +493,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       projectId,
+      specRef: SPEC_REF,
     });
 
     const persistedRequest = reviews.getReviewRequest(TARGET, BRANCH);
@@ -538,6 +544,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       projectId,
+      specRef: SPEC_REF,
     });
     const requestMail = mail.inbox(OPERATOR).find((m) => m.type === 'review_request')!;
     const registry = buildCoreRegistry();
@@ -655,6 +662,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       projectId,
+      specRef: SPEC_REF,
     });
     const requestMail = mail.inbox(OPERATOR).find((m) => m.type === 'review_request')!;
     const registry = buildCoreRegistry();
@@ -1017,6 +1025,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       projectId,
+      specRef: SPEC_REF,
     });
 
     expect(() =>
@@ -1027,6 +1036,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         requestedBy: 'lead-1',
         scope: 'pr_merge',
         projectId,
+        specRef: SPEC_REF,
       }),
     ).toThrow(/pending|active review request/i);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
@@ -1514,6 +1524,8 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       reviewerKind: 'human',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     });
     reviews.recordReviewRequested({
       reviewId: 'rev-pr-new',
@@ -1522,6 +1534,8 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       reviewerKind: 'human',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     });
 
     expect(() =>
@@ -1692,6 +1706,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger',
+      specRef: SPEC_REF,
     });
 
     // The review.requested record is written.
@@ -1734,6 +1749,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge' as const,
       projectId: 'p-hr-trigger-dup',
+      specRef: SPEC_REF,
     };
     const first = gate.triggerReview(input);
     const second = gate.triggerReview(input);
@@ -1765,6 +1781,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge' as const,
       projectId: 'p-hr-trigger-dup-repair-slot',
+      specRef: SPEC_REF,
     };
     gate.triggerReview(input);
     releaseMergeSlot(reviews, TARGET, BRANCH);
@@ -1800,6 +1817,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger-serializes-target',
+      specRef: SPEC_REF,
     });
 
     expect(reviews.activeSerialized(TARGET)).toBe(BRANCH);
@@ -1811,6 +1829,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
         requestedBy: 'lead-1',
         scope: 'worker_merge',
         projectId: 'p-hr-trigger-serializes-target',
+        specRef: SPEC_REF,
       }),
     ).toThrow(/active reviewer\/merge|serialize/);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
@@ -1839,6 +1858,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger-release-real-slot',
+      specRef: SPEC_REF,
     });
     expect(reviews.activeSerialized(TARGET)).toBe(BRANCH);
 
@@ -1868,7 +1888,8 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       reviewerKind: 'human',
-      specRefKind: 'no-locked-spec',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     });
 
     const gate = new CoReviewGate({
@@ -1886,6 +1907,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger-repair-mail',
+      specRef: SPEC_REF,
     });
 
     expect(result.reviewId).toBe('rev-repair-human-mail');
@@ -1911,6 +1933,8 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge' as const,
       reviewerKind: 'human' as const,
+      specRefKind: 'criteria' as const,
+      specRefRef: SPEC_REF,
     };
 
     mail.requestHumanReview(envelope, request);
@@ -1947,6 +1971,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger-dup-mismatch',
+      specRef: SPEC_REF,
     });
 
     expect(() =>
@@ -1957,6 +1982,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
         requestedBy: 'lead-2',
         scope: 'worker_merge',
         projectId: 'p-hr-trigger-dup-mismatch',
+        specRef: SPEC_REF,
       }),
     ).toThrow(/duplicate reviewId.*requestedBy/i);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
@@ -1976,6 +2002,9 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       branch: BRANCH,
       requestedBy: 'lead-1',
       scope: 'worker_merge',
+      reviewerKind: 'human',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     });
 
     const gate = new CoReviewGate({
@@ -1994,6 +2023,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
         requestedBy: 'lead-1',
         scope: 'worker_merge',
         projectId: 'p-hr-trigger-dup-cross-target',
+        specRef: SPEC_REF,
       }),
     ).toThrow(/duplicate reviewId.*already belongs/i);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
@@ -2029,6 +2059,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
         requestedBy: 'lead-1',
         scope: 'worker_merge',
         projectId: 'p-hr-trigger-record-fail',
+        specRef: SPEC_REF,
       }),
     ).toThrow(/review request store unavailable/);
 
@@ -2067,6 +2098,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge' as const,
       projectId,
+      specRef: SPEC_REF,
     };
     expect(() => failingGate.triggerReview(input)).toThrow(/review request store unavailable once/);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
@@ -2115,6 +2147,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-no-placement',
+      specRef: SPEC_REF,
     });
 
     // No agent-reviewer placement mail (no worker_done, no clarify, etc. — just the review_request).

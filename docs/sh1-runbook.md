@@ -198,7 +198,7 @@ Collect the following artifacts and record them as the evidence bundle for `SH-1
 |---|---|
 | Locked spec id | Noted in Step 1; also shown by `co spec <taskId>` |
 | Phase and worktree trail | Roster screenshot from Agents Console |
-| Review view PASS | Screenshot of the PASS confirmation in the Review view |
+| Review view evidence | Screenshot of the Review view before submit, showing the diff, locked criteria, and selected PASS verdict; pair it with the recorded verdict / merge evidence below |
 | Gated-merge commit | `git log <integration-branch> --oneline -1` |
 | SH-2 guard green | Terminal output from Step 5 |
 | Live-binary transcript | `co-mcp serve <projectId>` terminal output plus `co-mcp --help` |

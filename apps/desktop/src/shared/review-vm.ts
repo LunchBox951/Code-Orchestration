@@ -52,8 +52,7 @@ function extractReviewId(mail: DeliveredMail): string | null {
   if (mail.idempotencyKey?.startsWith('review-request:')) {
     return mail.idempotencyKey.slice('review-request:'.length);
   }
-  const match = /\breviewId:\s*(\S+)/.exec(mail.body);
-  return match?.[1] ?? null;
+  return null;
 }
 
 function deriveRows(inbox: readonly DeliveredMail[]): readonly ReviewRow[] {
@@ -110,6 +109,7 @@ export class ReviewVM {
   }
 
   selectReview(reviewId: string): void {
+    if (this._state.composer.pending) return;
     this._state = {
       ...this._state,
       selectedReviewId: reviewId,

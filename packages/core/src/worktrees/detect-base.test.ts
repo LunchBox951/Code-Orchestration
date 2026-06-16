@@ -226,4 +226,25 @@ describe('AC-L3-1 — detectBaseRef over REAL repos (default read-only git)', ()
     expect(patch).toContain('+hello  \n');
     expect(patch).not.toContain('+hello\n');
   });
+
+  it('raw git reader returns review diffs larger than Node execFileSync default buffer', () => {
+    const repo = makeRepo('main');
+    git(repo, 'checkout', '-q', '-b', 'feature');
+    const line = `${'x'.repeat(120)}\n`;
+    writeFileSync(join(repo, 'README.md'), line.repeat(12_000));
+    git(repo, 'add', 'README.md');
+    git(repo, 'commit', '-m', 'large review diff');
+
+    const patch = defaultGitRawReader(repo, [
+      'diff',
+      '--no-ext-diff',
+      '--no-color',
+      'main...feature',
+    ]);
+
+    expect(patch).not.toBeNull();
+    expect(patch!.length).toBeGreaterThan(1024 * 1024);
+    expect(patch).toContain('diff --git');
+    expect(patch).toContain(`+${'x'.repeat(120)}`);
+  });
 });

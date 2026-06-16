@@ -222,6 +222,20 @@ function specRefEquals(
   return actual.kind !== 'criteria' || actual.ref === expected.ref;
 }
 
+function assertHumanReviewHasCriteria(
+  reviewerKind: 'agent' | 'human',
+  specRef: ReviewSpecRef,
+  branch: string,
+  target: string,
+): void {
+  if (reviewerKind !== 'human' || specRef.kind === 'criteria') return;
+  throw new Error(
+    `co review: refused — human review of '${branch}' into '${target}' requires locked ` +
+      'acceptance criteria. Pass spec_ref as `spec:<taskId>#locked` so the Review view can ' +
+      'display evidence before PASS or ISSUES.',
+  );
+}
+
 function reviewerSeat(role: string, reviewId: string): string {
   return `${role}@${reviewId}`;
 }
@@ -704,6 +718,7 @@ export class CoReviewGate implements FinishReviewGate {
         );
       }
       const existingReviewerKind = existing.reviewerKind;
+      assertHumanReviewHasCriteria(existingReviewerKind, existing.specRef, req.branch, req.target);
       const existingVerdict = this.deps.reviews.getVerdict(req.target, req.branch, existing.scope);
       if (existingVerdict?.reviewId === existing.reviewId) {
         return reviewTriggerResultFromRecord(existing);
@@ -772,6 +787,7 @@ export class CoReviewGate implements FinishReviewGate {
     // Resolve the reviewer kind before mutating the request row. The human path cannot be requested
     // without mail; failing that precondition must not clear a prior verdict or leave a phantom request.
     const reviewerKind = resolveKind();
+    assertHumanReviewHasCriteria(reviewerKind, specRef, req.branch, req.target);
     const requested: ReviewRequested = {
       reviewId: req.reviewId,
       target: req.target,

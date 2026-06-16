@@ -104,15 +104,21 @@ function resolveCriteria(deps: ReviewContextDeps, specRef: ReviewSpecRef): Revie
 
 /**
  * The diff half. No recorded (or `removed`) worktree ⇒ `worktree-missing`. Else `git diff
- * target...branch` in the recorded sandbox: a non-zero git exit (`gitReader` → null) ⇒ `git-failed`;
- * otherwise the patch text — an empty string is VALID ("no changes"), NOT unavailable.
+ * target...branch` in the recorded sandbox with external diff/color disabled: a non-zero git exit
+ * (`gitReader` → null) ⇒ `git-failed`; otherwise the patch text — an empty string is VALID ("no
+ * changes"), NOT unavailable.
  */
 function resolveDiff(deps: ReviewContextDeps, branch: string, target: string): ReviewDiff {
   const wt = readWorktree(deps, branch);
   if (wt == null || wt.removed === true) {
     return { kind: 'unavailable', reason: 'worktree-missing' };
   }
-  const patch = deps.gitReader(wt.path, ['diff', `${target}...${branch}`]);
+  const patch = deps.gitReader(wt.path, [
+    'diff',
+    '--no-ext-diff',
+    '--no-color',
+    `${target}...${branch}`,
+  ]);
   if (patch == null) return { kind: 'unavailable', reason: 'git-failed' };
   return { kind: 'patch', patch };
 }

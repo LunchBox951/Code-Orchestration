@@ -469,6 +469,20 @@ export class OperatorIpcServer {
             'durable review request.',
         );
       }
+      if (request.specRef.kind !== 'criteria') {
+        throw new Error(
+          `operator IPC review reply: review '${reviewId}' has no locked acceptance criteria ` +
+            'recorded on the durable review request.',
+        );
+      }
+      if (context.kind === 'resolved' && context.criteria.kind === 'criteria') {
+        if (context.criteria.specRef !== request.specRef.ref) {
+          throw new Error(
+            `operator IPC review reply: locked acceptance criteria for '${reviewId}' do not ` +
+              'match the durable review request.',
+          );
+        }
+      }
       return mail.replyWithReviewVerdict(
         requestMail,
         draft,

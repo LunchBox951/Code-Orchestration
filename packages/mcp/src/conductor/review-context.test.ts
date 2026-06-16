@@ -139,7 +139,10 @@ describe('resolveReviewContext — every state surfaces a NAMED result (Principl
     // The taskId was parsed out of `spec:<taskId>#locked`, and the diff ran target...branch in the sandbox.
     expect(spies.taskIdsAsked).toEqual(['task-1']);
     expect(spies.gitCalls).toEqual([
-      { cwd: '/sandbox/co/feature', args: ['diff', 'main...co/feature'] },
+      {
+        cwd: '/sandbox/co/feature',
+        args: ['diff', '--no-ext-diff', '--no-color', 'main...co/feature'],
+      },
     ]);
     // Every opened store was closed (no leaked handles).
     expect(spies.closes).toEqual({ reviews: 1, specs: 1, worktrees: 1 });
