@@ -8,6 +8,7 @@ import {
   needsRebuild,
   restoreInteractionState,
 } from './live-render-helpers.js';
+import { applyTermFeed, createAgentsTerminal, decideTermFeed } from './agents-terminal-helpers.js';
 
 const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'cost'] as const;
 type NavView = (typeof NAV_VIEWS)[number];
@@ -545,15 +546,29 @@ function renderCostView(state: LimitsCostState): void {
 // ── Agents Console rendering ──────────────────────────────────────────────────
 
 let agentsTerm: XtermTerminal | null = null;
+let agentsResizeObserver: ResizeObserver | null = null;
 let lastAgentId: string | null = null;
 let lastTranscript = '';
 let latestAgentsState: AgentsConsoleState | null = null;
 
-function getOrCreateTerm(): XtermTerminal {
+// Construct the xterm lazily, on first render while the Agents pane is active+sized (the
+// isAgentsViewActive() gate in renderAgentsTranscript). The terminal is built WITHOUT convertEol (the
+// stream is raw, cursor-addressed pty bytes — converting \n→\r\n corrupts it), with the fit addon loaded
+// so it sizes to its pane on open and on every resize (GitHub #40). Returns null only when the static
+// transcript element is somehow absent — the caller then skips the feed for this tick.
+function getOrCreateTerm(): XtermTerminal | null {
   if (agentsTerm != null) return agentsTerm;
-  const term = new window.Terminal({ convertEol: true, disableStdin: true });
   const el = document.getElementById('agents-transcript');
-  if (el) term.open(el);
+  if (el == null) return null;
+  const { term } = createAgentsTerminal<XtermTerminal>(el, {
+    createTerminal: (options) => new window.Terminal(options),
+    createFitAddon: () => new window.FitAddon.FitAddon(),
+    observeResize: (target, onResize) => {
+      agentsResizeObserver?.disconnect();
+      agentsResizeObserver = new ResizeObserver(() => onResize());
+      agentsResizeObserver.observe(target);
+    },
+  });
   agentsTerm = term;
   return term;
 }
@@ -625,16 +640,19 @@ function renderAgentsTranscript(state: AgentsConsoleState): void {
   if (!isAgentsViewActive()) return;
 
   const term = getOrCreateTerm();
-  if (state.selectedAgentId !== lastAgentId) {
-    term.reset();
-    if (state.transcript) term.write(state.transcript);
-  } else if (state.transcript.startsWith(lastTranscript)) {
-    const delta = state.transcript.slice(lastTranscript.length);
-    if (delta) term.write(delta);
-  } else {
-    term.reset();
-    if (state.transcript) term.write(state.transcript);
-  }
+  if (term == null) return;
+  // Feed xterm the RAW bytes verbatim: append the new delta while the transcript only grows, reset +
+  // rewrite on agent-switch or a non-prefix change. No EOL conversion, no sanitization — xterm's emulator
+  // reproduces the final screen from the intact control bytes.
+  applyTermFeed(
+    term,
+    decideTermFeed({
+      selectedAgentId: state.selectedAgentId,
+      lastAgentId,
+      transcript: state.transcript,
+      lastTranscript,
+    }),
+  );
   lastAgentId = state.selectedAgentId;
   lastTranscript = state.transcript;
 }

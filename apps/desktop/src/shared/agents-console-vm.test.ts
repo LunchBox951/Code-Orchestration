@@ -448,6 +448,68 @@ describe('AgentsConsoleVM — appendChunk', () => {
   });
 });
 
+describe('AgentsConsoleVM — truncation never splits an escape sequence (GitHub #40)', () => {
+  // ANSI/ESC bytes are built from a char code — never pasted raw into source.
+  const ESC = String.fromCharCode(0x1b);
+
+  it('advances the head cut past a CSI sequence the 64 KB boundary would split mid-`ESC[31m`', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    // Lay out the transcript so the head-trim boundary (length − MAX) falls INSIDE the red SGR:
+    //   indices 0..9  : 'A' × 10          (dropped head)
+    //   indices 10..14: ESC [ 3 1 m       (the straddled SGR — its ESC is dropped)
+    //   indices 15..  : the body (kept)   (sized so the raw cut lands at index 12, i.e. the '3')
+    // A complete SGR (`ESC[0m`) sits inside the body to prove complete sequences survive.
+    const prefix = 'A'.repeat(10);
+    const splitSgr = `${ESC}[31m`; // ESC [ 3 1 m  → 5 chars
+    const completeSgr = `${ESC}[0m`; // ESC [ 0 m   → 4 chars
+    const bodyLen = CONSOLE_TRANSCRIPT_MAX_CHARS - 3; // makes rawCut = 12 (2 chars into splitSgr)
+    const fillLen = bodyLen - 1000 - completeSgr.length;
+    const body = 'B'.repeat(1000) + completeSgr + 'B'.repeat(fillLen);
+    const full = prefix + splitSgr + body;
+    expect(full.length).toBe(CONSOLE_TRANSCRIPT_MAX_CHARS + 12); // rawCut = 12 lands at the '3'
+
+    vm.setTranscriptTail(tail('a1', full));
+    const transcript = vm.state.transcript;
+
+    // The retained tail must NOT begin with a dangling/partial escape remnant.
+    expect(transcript.startsWith('B')).toBe(true);
+    expect(transcript.startsWith('31m')).toBe(false);
+    expect(transcript.startsWith('1m')).toBe(false);
+    expect(transcript.startsWith('m')).toBe(false);
+    expect(transcript.startsWith(`${ESC}[31m`)).toBe(false);
+    // The split sequence was fully dropped (ESC was in the dropped head; the remnant is gone).
+    expect(transcript.includes(`${ESC}[31m`)).toBe(false);
+    // Complete sequences elsewhere are preserved.
+    expect(transcript.includes(`${ESC}[0m`)).toBe(true);
+    // Escape-safety only drops a few extra leading bytes; still within the bound.
+    expect(transcript.length).toBeLessThanOrEqual(CONSOLE_TRANSCRIPT_MAX_CHARS);
+    expect(transcript.length).toBe(bodyLen); // exactly the body — the 3-char remnant advanced away
+  });
+
+  it('does NOT over-trim when the boundary lands exactly on a complete sequence start', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    // Boundary at index 12, exactly on the ESC of a complete `ESC[0m` — the cut is already clean, so it
+    // must be left intact (no advance) and the full MAX-length tail kept.
+    const prefix = 'A'.repeat(12);
+    const completeSgr = `${ESC}[0m`; // 4 chars, occupies indices 12..15
+    const body = 'B'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS - 4);
+    const full = prefix + completeSgr + body;
+    expect(full.length).toBe(CONSOLE_TRANSCRIPT_MAX_CHARS + 12);
+
+    vm.setTranscriptTail(tail('a1', full));
+    const transcript = vm.state.transcript;
+
+    expect(transcript.startsWith(`${ESC}[0m`)).toBe(true); // complete sequence preserved at the start
+    expect(transcript.length).toBe(CONSOLE_TRANSCRIPT_MAX_CHARS); // clean boundary → exact bound kept
+  });
+});
+
 describe('AgentsConsoleVM — subscribe / emit / unsubscribe', () => {
   it('notifies subscriber on update', () => {
     const vm = new AgentsConsoleVM();
