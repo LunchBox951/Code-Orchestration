@@ -53,6 +53,14 @@ const mergeInput = z
           'integration branch).',
       ),
     intent: mergeIntentInput,
+    spec_ref: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Optional locked-spec reference for the review request, e.g. `spec:<taskId>#locked`. ' +
+          'When supplied, the in-app Review view can render that spec’s acceptance criteria.',
+      ),
     operator_override: z
       .boolean()
       .optional()
@@ -278,6 +286,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         const triggerGate = new CoReviewGate({
           reviews: ctx.reviews,
           worktrees,
+          ...(ctx.specs != null ? { specs: ctx.specs } : {}),
           mail: ctx.mail,
           agentId: ctx.agent,
           parentResolver: roleParentResolver(ctx.roster),
@@ -294,6 +303,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
           requestedBy: ctx.agent,
           scope: 'worker_merge',
           projectId: ctx.projectId,
+          ...(input.spec_ref != null ? { specRef: input.spec_ref } : {}),
         });
         await triggerGate.drainSpawns();
         return {

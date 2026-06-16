@@ -1,6 +1,8 @@
 // Renderer entry: wires DOM nav switching, connection-state, and dashboard
 // to the coShell bridge exposed by the preload via contextBridge.
 
+import { reviewDetailNeedsRebuild, reviewDetailSignature } from './review-render-helpers.js';
+
 const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'cost'] as const;
 type NavView = (typeof NAV_VIEWS)[number];
 
@@ -16,9 +18,10 @@ function esc(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
+let latestReviewState: ReviewState | null = null;
+
 const OPERATOR_BUS = '@operator';
 const MAIL_REVIEW_REQUEST = 'review_request';
-const MAIL_REVIEW_RESPONSE = 'review_response';
 const knownMailBuses = new Set<string>([OPERATOR_BUS]);
 let latestMailState: MailState | null = null;
 
@@ -39,11 +42,20 @@ function rememberMailBuses(state: DashboardState): void {
 }
 
 function replyTypeFor(mailType: string): string {
-  return mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE : 'clarify_response';
+  if (mailType === MAIL_REVIEW_REQUEST) return 'review';
+  return 'clarify_response';
 }
 
 function replyLabelFor(mailType: string): string {
-  return mailType === MAIL_REVIEW_REQUEST ? 'Submit verdict' : 'Reply';
+  return mailType === MAIL_REVIEW_REQUEST ? 'Open in Reviews' : 'Reply';
+}
+
+function reviewIdFromMailRow(row: MailRow): string | null {
+  const key = row.idempotencyKey;
+  if (key?.startsWith('review-request:') === true) {
+    return key.slice('review-request:'.length);
+  }
+  return null;
 }
 
 function activateView(view: NavView): void {
@@ -55,6 +67,9 @@ function activateView(view: NavView): void {
   }
   if (view === 'agents' && latestAgentsState != null) {
     renderAgentsTranscript(latestAgentsState);
+  }
+  if (view === 'review' && latestReviewState != null) {
+    renderReview(latestReviewState);
   }
 }
 
@@ -250,7 +265,6 @@ function renderMailDetail(state: MailState): void {
 
   const isActionable = selected.kind === 'actionable';
   const isApproval = selected.type === 'approval';
-  const isReviewComposer = composer.type === MAIL_REVIEW_RESPONSE;
   const pendingAttr = composer.pending ? ' disabled' : '';
 
   let actionButtons = '';
@@ -262,6 +276,14 @@ function renderMailDetail(state: MailState): void {
       `<button class="btn btn-reply btn-secondary" data-action="open-composer"`,
       ` data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}"`,
       ` data-type="approval_response" data-subject="${esc(`Re: ${selected.subject}`)}"${pendingAttr}>Add note</button>`,
+      `</div>`,
+    ].join('');
+  } else if (selected.type === MAIL_REVIEW_REQUEST) {
+    const reviewId = reviewIdFromMailRow(selected);
+    const reviewIdAttr = reviewId != null ? ` data-review-id="${esc(reviewId)}"` : '';
+    actionButtons = [
+      `<div class="mail-card-actions">`,
+      `<button class="btn btn-reply" data-action="open-review-view"${reviewIdAttr}${pendingAttr}>${replyLabelFor(selected.type)}</button>`,
       `</div>`,
     ].join('');
   } else if (isActionable) {
@@ -284,15 +306,11 @@ function renderMailDetail(state: MailState): void {
       ].join('')
     : [
         `<button class="btn btn-secondary" data-action="close-composer"${pendingAttr}>Cancel</button>`,
-        `<button class="btn btn-reply" data-action="submit-reply"${pendingAttr}>${isReviewComposer ? 'Submit verdict' : 'Send'}</button>`,
+        `<button class="btn btn-reply" data-action="submit-reply"${pendingAttr}>Send</button>`,
       ].join('');
 
-  const composerTitle = isApproval
-    ? 'Decision note'
-    : isReviewComposer
-      ? 'Review verdict'
-      : 'Reply';
-  const composerPlaceholder = isReviewComposer ? 'PASS or ISSUES' : 'Type your reply…';
+  const composerTitle = isApproval ? 'Decision note' : 'Reply';
+  const composerPlaceholder = 'Type your reply…';
   const composerHtml = composer.active
     ? [
         `<div class="mail-composer">`,
@@ -569,6 +587,188 @@ function renderAgentsTranscript(state: AgentsConsoleState): void {
   lastTranscript = state.transcript;
 }
 
+// ── Review rendering ──────────────────────────────────────────────────────────
+
+function reviewAgeStr(ts: number): string {
+  const age = Math.floor((Date.now() - ts) / 60000);
+  if (age < 60) return `${age}m`;
+  if (age < 1440) return `${Math.floor(age / 60)}h`;
+  return `${Math.floor(age / 1440)}d`;
+}
+
+function renderDiffLines(patch: string): string {
+  if (!patch) return '<span class="diff-hunk">(no changes)</span>';
+  return patch
+    .split('\n')
+    .map((line) => {
+      if (line.startsWith('+')) return `<span class="diff-add">${esc(line)}</span>`;
+      if (line.startsWith('-')) return `<span class="diff-remove">${esc(line)}</span>`;
+      if (line.startsWith('@@')) return `<span class="diff-hunk">${esc(line)}</span>`;
+      return esc(line);
+    })
+    .join('\n');
+}
+
+function renderReviewDetail(context: SelectedContext, composer: VerdictComposer): string {
+  if (context == null) {
+    return `<div class="empty-state">Select a review to inspect it</div>`;
+  }
+  if (context.status === 'loading') {
+    return `<div class="empty-state">Loading review context…</div>`;
+  }
+
+  const { value } = context;
+
+  if (value.kind === 'not-found') {
+    return `<div class="empty-state">Review not found: ${esc(value.reviewId)}</div>`;
+  }
+  if (value.kind === 'conductor-down') {
+    return `<div class="empty-state">Conductor not running — start \`co-mcp serve <projectId>\` to load review context.</div>`;
+  }
+
+  // kind === 'resolved'
+  const { diff, criteria } = value;
+  const canSubmitVerdict = diff.kind === 'patch' && criteria.kind === 'criteria';
+
+  let diffHtml: string;
+  if (diff.kind === 'unavailable') {
+    const reason =
+      diff.reason === 'worktree-missing'
+        ? 'Worktree not found — the branch may have been cleaned up.'
+        : 'Git diff failed — check the conductor logs.';
+    diffHtml = `<div class="empty-state">${esc(reason)}</div>`;
+  } else {
+    diffHtml = `<pre class="review-diff-pre">${renderDiffLines(diff.patch)}</pre>`;
+  }
+
+  let criteriaHtml: string;
+  if (criteria.kind === 'no-locked-spec') {
+    criteriaHtml = `<div class="empty-state">No locked spec — acceptance criteria not available.</div>`;
+  } else {
+    criteriaHtml = criteria.criteria
+      .map(
+        (c) =>
+          `<div class="review-criterion">
+            <div>· ${esc(c.text)}</div>
+            ${c.verify != null ? `<div class="review-criterion-verify">$ ${esc(c.verify)}</div>` : ''}
+          </div>`,
+      )
+      .join('');
+  }
+
+  const pendingAttr = composer.pending ? ' disabled' : '';
+
+  let verdictBody = '';
+  if (composer.active && canSubmitVerdict) {
+    verdictBody = [
+      `<div class="review-verdict-body">`,
+      `<textarea class="review-body-textarea" id="review-composer-body"`,
+      ` aria-label="Review verdict notes"${pendingAttr}`,
+      ` placeholder="${composer.verdict === 'ISSUES' ? 'Describe the issues…' : 'Optional notes…'}">${esc(composer.body)}</textarea>`,
+      `</div>`,
+      `<div class="review-verdict-footer">`,
+      `<button class="btn btn-secondary" data-review-action="cancel-verdict"${pendingAttr}>Cancel</button>`,
+      `<button class="btn ${composer.verdict === 'PASS' ? 'btn-pass' : 'btn-issues'}"`,
+      ` data-review-action="submit-verdict"${pendingAttr}>`,
+      `Submit ${esc(composer.verdict)}</button>`,
+      `</div>`,
+    ].join('');
+  }
+
+  const verdictActions =
+    !composer.active && canSubmitVerdict
+      ? [
+          `<div class="review-verdict-actions">`,
+          `<button class="btn btn-pass" data-review-action="begin-pass"`,
+          ` aria-label="Submit PASS verdict"${pendingAttr}>PASS</button>`,
+          `<button class="btn btn-issues" data-review-action="begin-issues"`,
+          ` aria-label="Submit ISSUES verdict"${pendingAttr}>ISSUES</button>`,
+          `</div>`,
+        ].join('')
+      : '';
+  const verdictUnavailable = !canSubmitVerdict
+    ? `<div class="empty-state">Verdict unavailable until diff and locked criteria load.</div>`
+    : '';
+
+  return [
+    `<div class="review-diff-block">`,
+    `<div class="review-diff-header">Diff · ${esc(value.branch)} → ${esc(value.target)}</div>`,
+    diffHtml,
+    `</div>`,
+    `<div class="review-criteria-block">`,
+    `<div class="review-criteria-header">Acceptance Criteria`,
+    criteria.kind === 'criteria' ? ` · ${esc(criteria.specRef)}` : '',
+    `</div>`,
+    `<div class="review-criteria-list" aria-label="Acceptance criteria">${criteriaHtml}</div>`,
+    `</div>`,
+    `<div class="review-verdict-block">`,
+    `<div class="review-verdict-header">Verdict</div>`,
+    verdictActions,
+    verdictUnavailable,
+    verdictBody,
+    `</div>`,
+  ].join('');
+}
+
+function renderReview(state: ReviewState): void {
+  const prevState = latestReviewState;
+  latestReviewState = state;
+
+  // Update pending list
+  const reviewList = document.getElementById('review-list');
+  if (reviewList) {
+    if (state.pending.length === 0) {
+      reviewList.innerHTML = `<div class="empty-state">No pending reviews</div>`;
+    } else {
+      reviewList.innerHTML = state.pending
+        .map((row) => {
+          const isSelected = row.reviewId === state.selectedReviewId;
+          return [
+            `<div class="review-row${isSelected ? ' selected' : ''}"`,
+            ` data-review-id="${esc(row.reviewId)}"`,
+            ` role="option"`,
+            ` aria-selected="${isSelected ? 'true' : 'false'}"`,
+            ` tabindex="0">`,
+            `<div class="review-row-subject">${esc(row.subject)}</div>`,
+            `<div class="review-row-meta">`,
+            `<span class="review-row-sender">${esc(row.sender)}</span>`,
+            `<span class="review-row-age">${esc(reviewAgeStr(row.ts))}</span>`,
+            `</div>`,
+            `</div>`,
+          ].join('');
+        })
+        .join('');
+    }
+  }
+
+  // Update detail pane — but PRESERVE the caret while typing in the verdict composer (review #316
+  // follow-up): when the ONLY change is composer.body and that textarea is focused, skip the rebuild
+  // (the live textarea already holds the typed value). The list + badge still update.
+  const detailPane = document.getElementById('review-detail-pane');
+  if (detailPane) {
+    const composerFocused = document.activeElement?.id === 'review-composer-body';
+    const needsRebuild = reviewDetailNeedsRebuild(
+      prevState != null ? reviewDetailSignature(prevState) : null,
+      reviewDetailSignature(state),
+      composerFocused,
+    );
+    if (needsRebuild) {
+      detailPane.innerHTML = renderReviewDetail(state.context, state.composer);
+    }
+  }
+
+  // Update nav badge with pending count
+  const badge = document.getElementById('review-badge');
+  if (badge) {
+    if (state.pending.length > 0) {
+      badge.textContent = String(state.pending.length);
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -660,6 +860,76 @@ document.addEventListener('DOMContentLoaded', () => {
       limitsPopover.setAttribute('hidden', '');
       limitsBtn?.classList.remove('open');
       limitsBtn?.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  // ── Review ─────────────────────────────────────────────────────────────────
+
+  bridge.onReviewState((state) => {
+    renderReview(state);
+  });
+
+  bridge.onReviewError((message) => {
+    showAppError(message);
+  });
+
+  void bridge.reviewRefresh();
+
+  document.getElementById('view-review')?.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+
+    const row = target.closest<HTMLElement>('.review-row');
+    if (row?.dataset['reviewId'] != null) {
+      void bridge.reviewSelect(row.dataset['reviewId']).then((s) => {
+        if (s != null) renderReview(s);
+      });
+      return;
+    }
+
+    const btn = target.closest<HTMLElement>('[data-review-action]');
+    if (!btn) return;
+    const action = btn.dataset['reviewAction'];
+
+    switch (action) {
+      case 'begin-pass':
+        void bridge.reviewBeginVerdict('PASS').then((s) => {
+          if (s != null) renderReview(s);
+        });
+        break;
+      case 'begin-issues':
+        void bridge.reviewBeginVerdict('ISSUES').then((s) => {
+          if (s != null) renderReview(s);
+        });
+        break;
+      case 'cancel-verdict':
+        void bridge.reviewCancelVerdict().then((s) => {
+          if (s != null) renderReview(s);
+        });
+        break;
+      case 'submit-verdict':
+        void bridge.reviewSubmitVerdict().then((s) => {
+          if (s != null) renderReview(s);
+        });
+        break;
+    }
+  });
+
+  document.getElementById('view-review')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const row = (e.target as HTMLElement).closest<HTMLElement>('.review-row');
+    if (row?.dataset['reviewId'] == null) return;
+    e.preventDefault();
+    void bridge.reviewSelect(row.dataset['reviewId']).then((s) => {
+      if (s != null) renderReview(s);
+    });
+  });
+
+  document.getElementById('view-review')?.addEventListener('input', (e) => {
+    const textarea = (e.target as HTMLElement).closest<HTMLTextAreaElement>(
+      '#review-composer-body',
+    );
+    if (textarea) {
+      void bridge.reviewUpdateComposerBody(textarea.value);
     }
   });
 
@@ -773,6 +1043,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         break;
       }
+      case 'open-review-view':
+        activateView('review');
+        bridge.navigate('review');
+        {
+          const reviewId = btn.dataset['reviewId'];
+          if (reviewId != null && reviewId.length > 0) {
+            void bridge.reviewSelect(reviewId).then((s) => {
+              if (s != null) renderReview(s);
+            });
+          } else {
+            void bridge.reviewRefresh().then((s) => {
+              if (s != null) renderReview(s);
+            });
+          }
+        }
+        break;
       case 'close-composer':
         void bridge.mailCloseComposer();
         break;

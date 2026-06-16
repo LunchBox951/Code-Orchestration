@@ -16,23 +16,29 @@
  *   - MNR #3 — a down→up daemon degrades to a clear state and a reconnect RESUMES the push stream.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createServer } from 'node:net';
+import { execFileSync } from 'node:child_process';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   approvalOutcome,
   buildCoreRegistry,
   checkToolCompleteness,
+  defaultGitRawReader,
   FakePty,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
+  OPERATOR,
   openMailStore,
   openRegistry,
   openReviewStore,
   openRosterStore,
   openSessionStore,
+  openSpecStore,
+  openWorktreeStore,
   outwardApprovalEnvelope,
   queryLiveObservability,
   queryObservability,
@@ -42,6 +48,7 @@ import {
   type OperatorIpcTranscript,
   type ProjectId,
   type ProjectRegistry,
+  type ReviewContext,
   type ReviewStore,
   type RosterStore,
   type SessionStore,
@@ -58,6 +65,7 @@ import {
 } from '../conductor/host.js';
 import { SocketClientTransport } from '../conductor/real-transport.js';
 import type { HostedIdentity } from '../live-session-host.js';
+import { resolveReviewContext } from '../conductor/review-context.js';
 import { OperatorIpcServer } from './server.js';
 import { ConductorUnavailableError, OperatorIpcClient, OperatorIpcConnection } from './client.js';
 import { classifyIncoming, makeRequest, WIRE_ERROR } from './wire.js';
@@ -270,10 +278,14 @@ async function hostPane(
   return { hosted, pane };
 }
 
-/** Build the operator control surface `co serve` wires (the daemon-backed router + live-observe). */
+/** Build the operator control surface `co-mcp serve` wires (the daemon-backed router + live-observe). */
 function makeControl(
   engine: ConductorEngine,
   projectId: ProjectId,
+  // Stage 13 R-A — the reviewContext accessor is injectable so the agreement proof can wire the REAL
+  // resolver over seeded stores; other tests get a harmless not-found stub (they never exercise it).
+  reviewContext: ConductorControlSurface['reviewContext'] = (reviewId) =>
+    Promise.resolve({ kind: 'not-found', reviewId }),
 ): { router: DaemonBackedAgentRouter; control: ConductorControlSurface } {
   const router = new DaemonBackedAgentRouter({ engine, projectId });
   const provider = new EngineLiveStateProvider({ engine, projectId, router });
@@ -288,8 +300,33 @@ function makeControl(
       engine.onTranscript((pid, agent, chunk, offset) => {
         if (pid === projectId) listener(agent, chunk, offset);
       }),
+    reviewContext,
   };
   return { router, control };
+}
+
+const EVIDENCE_SPEC_REF = 'spec:review-task#locked';
+const EVIDENCE_FINGERPRINT = 'sha256:review-context-evidence';
+
+function evidenceReviewContext(
+  reviewId: string,
+  overrides: Partial<Extract<ReviewContext, { kind: 'resolved' }>> = {},
+): ReviewContext {
+  return {
+    kind: 'resolved',
+    reviewId,
+    branch: 'co/feature',
+    target: 'main',
+    scope: 'pr_merge',
+    evidenceFingerprint: EVIDENCE_FINGERPRINT,
+    diff: { kind: 'patch', patch: '@@ -1 +1 @@\n-old\n+new' },
+    criteria: {
+      kind: 'criteria',
+      specRef: EVIDENCE_SPEC_REF,
+      criteria: [{ text: 'change is reviewed', verify: 'pnpm test' }],
+    },
+    ...overrides,
+  };
 }
 
 /**
@@ -694,6 +731,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
       transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -739,6 +778,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
       transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -1280,6 +1321,8 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
           scope: 'pr_merge',
           requestedBy: 'lead-review',
           reviewerKind: 'human',
+          specRefKind: 'criteria',
+          specRefRef: EVIDENCE_SPEC_REF,
         },
       ).mail;
     } finally {
@@ -1289,7 +1332,9 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     const clock = makeClock();
     const qw = makeQuietWindow();
     const { engine } = makeEngine(clock, qw);
-    const { control } = makeControl(engine, projectId);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(evidenceReviewContext(reviewId)),
+    );
     await startServer(control, projectId, socketPath);
     const client = makeClient(projectId, socketPath);
 
@@ -1300,6 +1345,7 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
         subject: 're: review requested',
         body: 'passes',
         reviewVerdict: 'PASS',
+        reviewContextFingerprint: EVIDENCE_FINGERPRINT,
         idempotencyKey: 'operator-ipc-review-response:exact',
       },
     );
@@ -1311,6 +1357,282 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
       (m) => m.type === MAIL_REVIEW_RESPONSE && m.causationId === String(request.seq),
     );
     expect(response?.reviewVerdict).toBe('PASS');
+  });
+
+  it('reply rejects review_response when locked criteria are unavailable', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const seedStore = openMailStore(projectId);
+    let request: DeliveredMail;
+    try {
+      request = seedStore.requestHumanReview(
+        {
+          type: 'review_request',
+          to: '@operator',
+          from: 'lead-review',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-opipc-review-no-spec',
+        },
+        {
+          reviewId: 'rev-opipc-review-no-spec',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead-review',
+          reviewerKind: 'human',
+          specRefKind: 'criteria',
+          specRefRef: EVIDENCE_SPEC_REF,
+        },
+      ).mail;
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(
+        evidenceReviewContext(reviewId, {
+          criteria: { kind: 'no-locked-spec' },
+        }),
+      ),
+    );
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.reply(
+        { seq: request.seq, recipient: '@operator' },
+        {
+          type: MAIL_REVIEW_RESPONSE,
+          subject: 're: review requested',
+          body: 'passes',
+          reviewVerdict: 'PASS',
+          reviewContextFingerprint: EVIDENCE_FINGERPRINT,
+          idempotencyKey: 'operator-ipc-review-response:no-spec',
+        },
+      ),
+    ).rejects.toThrow(/locked acceptance criteria|review evidence/i);
+
+    expect(reviews.getVerdict('main', 'co/feature', 'pr_merge')).toBeUndefined();
+    const responses = inboxOf(projectId, 'lead-review').filter(
+      (m) => m.type === MAIL_REVIEW_RESPONSE,
+    );
+    expect(responses).toHaveLength(0);
+  });
+
+  it('reply rejects review_response when context criteria do not match the durable review request', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const seedStore = openMailStore(projectId);
+    let request: DeliveredMail;
+    try {
+      request = seedStore.requestHumanReview(
+        {
+          type: 'review_request',
+          to: '@operator',
+          from: 'lead-review',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-opipc-review-wrong-spec',
+        },
+        {
+          reviewId: 'rev-opipc-review-wrong-spec',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead-review',
+          reviewerKind: 'human',
+          specRefKind: 'criteria',
+          specRefRef: EVIDENCE_SPEC_REF,
+        },
+      ).mail;
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(
+        evidenceReviewContext(reviewId, {
+          criteria: {
+            kind: 'criteria',
+            specRef: 'spec:other-task#locked',
+            criteria: [{ text: 'wrong task', verify: 'pnpm test' }],
+          },
+        }),
+      ),
+    );
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.reply(
+        { seq: request.seq, recipient: '@operator' },
+        {
+          type: MAIL_REVIEW_RESPONSE,
+          subject: 're: review requested',
+          body: 'passes',
+          reviewVerdict: 'PASS',
+          reviewContextFingerprint: EVIDENCE_FINGERPRINT,
+          idempotencyKey: 'operator-ipc-review-response:wrong-spec',
+        },
+      ),
+    ).rejects.toThrow(/acceptance criteria|specRef|review evidence/i);
+
+    expect(reviews.getVerdict('main', 'co/feature', 'pr_merge')).toBeUndefined();
+    const responses = inboxOf(projectId, 'lead-review').filter(
+      (m) => m.type === MAIL_REVIEW_RESPONSE,
+    );
+    expect(responses).toHaveLength(0);
+  });
+
+  it('reply rejects review_response when submitted review evidence fingerprint is stale', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const seedStore = openMailStore(projectId);
+    let request: DeliveredMail;
+    try {
+      request = seedStore.requestHumanReview(
+        {
+          type: 'review_request',
+          to: '@operator',
+          from: 'lead-review',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-opipc-review-stale-context',
+        },
+        {
+          reviewId: 'rev-opipc-review-stale-context',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead-review',
+          reviewerKind: 'human',
+          specRefKind: 'criteria',
+          specRefRef: EVIDENCE_SPEC_REF,
+        },
+      ).mail;
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(evidenceReviewContext(reviewId, { evidenceFingerprint: 'sha256:newer' })),
+    );
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.reply(
+        { seq: request.seq, recipient: '@operator' },
+        {
+          type: MAIL_REVIEW_RESPONSE,
+          subject: 're: review requested',
+          body: 'passes',
+          reviewVerdict: 'PASS',
+          reviewContextFingerprint: 'sha256:stale',
+          idempotencyKey: 'operator-ipc-review-response:stale-context',
+        },
+      ),
+    ).rejects.toThrow(/review evidence|fingerprint|stale/i);
+
+    expect(reviews.getVerdict('main', 'co/feature', 'pr_merge')).toBeUndefined();
+    const responses = inboxOf(projectId, 'lead-review').filter(
+      (m) => m.type === MAIL_REVIEW_RESPONSE,
+    );
+    expect(responses).toHaveLength(0);
+  });
+
+  it('reply rejects review_response when the review diff is unavailable', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const seedStore = openMailStore(projectId);
+    let request: DeliveredMail;
+    try {
+      request = seedStore.requestHumanReview(
+        {
+          type: 'review_request',
+          to: '@operator',
+          from: 'lead-review',
+          subject: 'review requested',
+          body: 'please review',
+          idempotencyKey: 'review-request:rev-opipc-review-no-diff',
+        },
+        {
+          reviewId: 'rev-opipc-review-no-diff',
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'pr_merge',
+          requestedBy: 'lead-review',
+          reviewerKind: 'human',
+          specRefKind: 'criteria',
+          specRefRef: EVIDENCE_SPEC_REF,
+        },
+      ).mail;
+    } finally {
+      seedStore.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(
+        evidenceReviewContext(reviewId, {
+          diff: { kind: 'unavailable', reason: 'worktree-missing' },
+        }),
+      ),
+    );
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.reply(
+        { seq: request.seq, recipient: '@operator' },
+        {
+          type: MAIL_REVIEW_RESPONSE,
+          subject: 're: review requested',
+          body: 'passes',
+          reviewVerdict: 'PASS',
+          reviewContextFingerprint: EVIDENCE_FINGERPRINT,
+          idempotencyKey: 'operator-ipc-review-response:no-diff',
+        },
+      ),
+    ).rejects.toThrow(/diff|review evidence/i);
+
+    expect(reviews.getVerdict('main', 'co/feature', 'pr_merge')).toBeUndefined();
+    const responses = inboxOf(projectId, 'lead-review').filter(
+      (m) => m.type === MAIL_REVIEW_RESPONSE,
+    );
+    expect(responses).toHaveLength(0);
   });
 
   it('reply treats exact review_response retries as idempotent and rejects changed verdicts', async () => {
@@ -1340,6 +1662,8 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
           scope: 'pr_merge',
           requestedBy: 'lead-review',
           reviewerKind: 'human',
+          specRefKind: 'criteria',
+          specRefRef: EVIDENCE_SPEC_REF,
         },
       ).mail;
     } finally {
@@ -1349,7 +1673,9 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     const clock = makeClock();
     const qw = makeQuietWindow();
     const { engine } = makeEngine(clock, qw);
-    const { control } = makeControl(engine, projectId);
+    const { control } = makeControl(engine, projectId, (reviewId) =>
+      Promise.resolve(evidenceReviewContext(reviewId)),
+    );
     await startServer(control, projectId, socketPath);
     const client = makeClient(projectId, socketPath);
     const draft = {
@@ -1357,6 +1683,7 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
       subject: 're: review requested',
       body: 'passes',
       reviewVerdict: 'PASS' as const,
+      reviewContextFingerprint: EVIDENCE_FINGERPRINT,
       idempotencyKey: 'operator-ipc-review-response:retry',
     };
 
@@ -1493,7 +1820,7 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
 
     // Use the injectable `connect` seam for two roles:
     //   1. Capture the live OperatorIpcConnection so the test can close the client side without
-    //      touching the server (simulates the app process exiting while `co serve` keeps running).
+    //      touching the server (simulates the app process exiting while `co-mcp serve` keeps running).
     //   2. Gate reconnection attempts via `allowReconnect` so that observe() degrades to static
     //      during the "dropped but server still up" window — proving the degraded-read path before
     //      re-enabling the seam for the explicit reconnect.
@@ -1584,7 +1911,7 @@ describe('MNR #3 — the per-tick push stream; a down→up daemon reconnects and
   });
 });
 
-// ── serveConductor wiring — `co serve` starts the IPC server alongside the runner ─
+// ── serveConductor wiring — `co-mcp serve` starts the IPC server alongside the runner ─
 describe('serveConductor wiring — the IPC server rides the cadence runner (push on tick, close on stop)', () => {
   it('a daemon beat pushes a snapshot to a connected app; runner.stop() closes the socket', async () => {
     const { projectId } = makeProject();
@@ -1627,7 +1954,7 @@ describe('serveConductor wiring — the IPC server rides the cadence runner (pus
 
     await runner.stop(); // the onStop seam closes the IPC server (socket torn down)
     await flush();
-    expect((await client.observe()).kind).toBe('static'); // the app degrades cleanly once co serve stops
+    expect((await client.observe()).kind).toBe('static'); // the app degrades cleanly once co-mcp serve stops
   });
 
   it('still pushes an IPC tick when the caller onTick hook throws', async () => {
@@ -1772,6 +2099,7 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       },
       transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
+      reviewContext: (reviewId) => Promise.resolve({ kind: 'not-found', reviewId }),
     };
     await startServer(control, projectId, socketPath);
 
@@ -1867,5 +2195,191 @@ describe('operator-IPC wire — JSON-RPC envelope compatibility + unknown-method
     } finally {
       await transport.close();
     }
+  });
+});
+
+// ── Stage 13 R-A — reviewContext across the PRODUCTION wire ─────────────────────────────────────
+//
+// The default-path agreement proof (memory: "Test the default path, not just seams"): the REAL
+// OperatorIpcServer + a REAL client facade over a REAL Unix socket, the control surface's
+// reviewContext running the REAL resolveReviewContext over REAL seeded stores + a REAL temp git repo.
+// This exercises the production serialization + wire that seam-only tests miss.
+
+/** Deterministic git in a throwaway repo (no global identity / signing needed; stderr silenced). */
+function reviewRepoGit(cwd: string, ...args: string[]): string {
+  return execFileSync(
+    'git',
+    [
+      '-c',
+      'user.email=t@example.com',
+      '-c',
+      'user.name=Test',
+      '-c',
+      'commit.gpgsign=false',
+      ...args,
+    ],
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+  ).trim();
+}
+
+/** A real temp git repo: a base commit on `main`, a MARKED change committed on `co/feature`. */
+function makeReviewRepo(): { dir: string; branch: string; target: string; baseSha: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'co-rc-repo-'));
+  dataDirs.push(dir); // cleaned in afterEach (rmSync)
+  execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'ignore' });
+  writeFileSync(join(dir, 'file.txt'), 'base\n');
+  reviewRepoGit(dir, 'add', '.');
+  reviewRepoGit(dir, 'commit', '-m', 'base');
+  const baseSha = reviewRepoGit(dir, 'rev-parse', 'HEAD');
+  reviewRepoGit(dir, 'checkout', '-b', 'co/feature');
+  writeFileSync(join(dir, 'file.txt'), 'base\nREVIEW_CONTEXT_MARKER\n');
+  reviewRepoGit(dir, 'add', '.');
+  reviewRepoGit(dir, 'commit', '-m', 'feature change');
+  return { dir, branch: 'co/feature', target: 'main', baseSha };
+}
+
+const REVIEW_CRITERIA = [
+  { text: 'expired tokens rejected (401)', verify: 'pnpm vitest run packages/core/x' },
+  { text: 'no silent failures' },
+] as const;
+
+/** Seed a locked spec, the recorded worktree, and a human review request (criteria spec-ref). */
+function seedReviewContext(
+  projectId: ProjectId,
+  opts: {
+    readonly reviewId: string;
+    readonly taskId: string;
+    readonly repoDir: string;
+    readonly branch: string;
+    readonly target: string;
+    readonly baseSha: string;
+  },
+): void {
+  const specs = openSpecStore(projectId);
+  try {
+    specs.recordDraft({
+      taskId: opts.taskId,
+      title: 'Stage 13 R-A',
+      goal: 'ship reviewContext',
+      criteria: [...REVIEW_CRITERIA],
+      body: '',
+      actor: 'lead-1',
+    });
+    specs.recordLock(opts.taskId, OPERATOR);
+  } finally {
+    specs.close();
+  }
+
+  const worktrees = openWorktreeStore(projectId);
+  try {
+    worktrees.recordWorktree({
+      branch: opts.branch,
+      baseRef: opts.target,
+      baseSha: opts.baseSha,
+      path: opts.repoDir,
+      parent: 'lead-1',
+    });
+  } finally {
+    worktrees.close();
+  }
+
+  const mail = openMailStore(projectId);
+  try {
+    // The production recorder: review.requested + actionable mail commit atomically (single writer).
+    mail.requestHumanReview(
+      {
+        type: MAIL_REVIEW_REQUEST,
+        to: OPERATOR,
+        from: 'lead-1',
+        subject: `review requested: '${opts.branch}' into '${opts.target}'`,
+        body: `Please review. (scope: pr_merge, reviewId: ${opts.reviewId})`,
+        idempotencyKey: `review-request:${opts.reviewId}`,
+      },
+      {
+        reviewId: opts.reviewId,
+        target: opts.target,
+        branch: opts.branch,
+        requestedBy: 'lead-1',
+        scope: 'pr_merge',
+        reviewerKind: 'human',
+        specRefKind: 'criteria',
+        specRefRef: `spec:${opts.taskId}#locked`,
+      },
+    );
+  } finally {
+    mail.close();
+  }
+}
+
+/** The production daemon-side accessor: resolveReviewContext over real per-call stores + real git. */
+function realReviewContext(projectId: ProjectId): ConductorControlSurface['reviewContext'] {
+  return (reviewId) =>
+    resolveReviewContext(
+      {
+        openReviews: () => openReviewStore(projectId),
+        openSpecs: () => openSpecStore(projectId),
+        openWorktrees: () => openWorktreeStore(projectId),
+        gitReader: defaultGitRawReader,
+      },
+      reviewId,
+    );
+}
+
+describe('Stage 13 R-A — reviewContext over the default socket (client↔server agreement)', () => {
+  it('resolved: the real diff + criteria + branch/target/scope round-trip across the production wire', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const repo = makeReviewRepo();
+    const reviewId = 'rev-s13-ra';
+    const taskId = 'task-s13-ra';
+    seedReviewContext(projectId, {
+      reviewId,
+      taskId,
+      repoDir: repo.dir,
+      branch: repo.branch,
+      target: repo.target,
+      baseSha: repo.baseSha,
+    });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId, realReviewContext(projectId));
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const result = await client.reviewContext(reviewId);
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind !== 'resolved') throw new Error(`expected resolved, got ${result.kind}`);
+    expect(result.reviewId).toBe(reviewId);
+    expect(result.branch).toBe(repo.branch);
+    expect(result.target).toBe(repo.target);
+    expect(result.scope).toBe('pr_merge');
+    // The REAL unified diff — computed `git diff main...co/feature` in the seeded sandbox.
+    expect(result.diff.kind).toBe('patch');
+    if (result.diff.kind === 'patch') {
+      expect(result.diff.patch).toContain('REVIEW_CONTEXT_MARKER');
+      expect(result.diff.patch).toContain('diff --git');
+    }
+    // The REAL acceptance criteria, sourced from the locked spec record, serialized intact.
+    expect(result.criteria).toEqual({
+      kind: 'criteria',
+      specRef: `spec:${taskId}#locked`,
+      criteria: [...REVIEW_CRITERIA],
+    });
+  });
+
+  it('degrade: a client with NO server returns the named conductor-down state (never hangs/throws)', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath(); // nothing is listening here
+    const client = makeClient(projectId, socketPath);
+
+    expect(await client.reviewContext('rev-absent')).toEqual({
+      kind: 'conductor-down',
+      reviewId: 'rev-absent',
+    });
   });
 });

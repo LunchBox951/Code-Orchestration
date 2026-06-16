@@ -18,6 +18,7 @@ import {
   MAIL_CLARIFY_REQUEST,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
+  OPERATOR,
   openDispatchStore,
   openMailStore,
   projectDataDir,
@@ -29,12 +30,14 @@ import { DashboardVM } from '../shared/dashboard-vm.js';
 import { LimitsCostVM } from '../shared/limits-cost-vm.js';
 import { MailVM } from '../shared/mail-vm.js';
 import { AgentsConsoleVM } from '../shared/agents-console-vm.js';
+import { ReviewVM } from '../shared/review-vm.js';
 import type { ConnectionState } from '../shared/connection-vm.js';
 import type { NavState } from '../shared/nav-vm.js';
 import type { DashboardState } from '../shared/dashboard-vm.js';
 import type { LimitsCostState } from '../shared/limits-cost-vm.js';
 import type { MailState } from '../shared/mail-vm.js';
 import type { AgentsConsoleState } from '../shared/agents-console-vm.js';
+import type { ReviewState } from '../shared/review-vm.js';
 
 /**
  * The canonical socket path the server listens on for a given project.
@@ -72,6 +75,8 @@ export interface AppShellDeps {
   readonly onMailError?: (message: string) => void;
   readonly onLimitsCostState?: (state: LimitsCostState) => void;
   readonly onAgentsConsoleState?: (state: AgentsConsoleState) => void;
+  readonly onReviewState?: (state: ReviewState) => void;
+  readonly onReviewError?: (message: string) => void;
 }
 
 export interface AppShell {
@@ -87,6 +92,12 @@ export interface AppShell {
   refreshMail(busId?: string): void;
   refreshLimitsCost(): void;
   selectAgent(agentId: string | null): void;
+  reviewSelect(reviewId: string): ReviewState;
+  reviewBeginVerdict(verdict: 'PASS' | 'ISSUES'): ReviewState;
+  reviewUpdateComposerBody(text: string): ReviewState;
+  reviewCancelVerdict(): ReviewState;
+  reviewSubmitVerdict(): Promise<ReviewState>;
+  reviewRefresh(): ReviewState;
 }
 
 function buildRegistry(override?: RendererRegistry): RendererRegistry {
@@ -105,7 +116,7 @@ function buildRegistry(override?: RendererRegistry): RendererRegistry {
   registry.register(
     MAIL_REVIEW_REQUEST,
     (m) =>
-      `### Review Request\n\n**Subject:** ${m.subject}\n\n${m.body}\n\n> Submit PASS or ISSUES.`,
+      `### Review Request\n\n**Subject:** ${m.subject}\n\n${m.body}\n\n> Open the Reviews view to inspect the diff and submit PASS or ISSUES.`,
   );
   registry.register(MAIL_REVIEW_RESPONSE, (m) => {
     const verdict = m.reviewVerdict ?? 'UNKNOWN';
@@ -236,7 +247,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       } catch (e: unknown) {
         deps.onMailError?.(
           e instanceof ConductorUnavailableError
-            ? 'Conductor not running — start `co serve` to send mail.'
+            ? 'Conductor not running — start `co-mcp serve <projectId>` to send mail.'
             : safeError(e),
         );
         throw e;
@@ -251,7 +262,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       } catch (e: unknown) {
         deps.onMailError?.(
           e instanceof ConductorUnavailableError
-            ? 'Conductor not running — start `co serve` to approve/decline.'
+            ? 'Conductor not running — start `co-mcp serve <projectId>` to approve/decline.'
             : safeError(e),
         );
         throw e;
@@ -271,6 +282,39 @@ export function createAppShell(deps: AppShellDeps): AppShell {
 
   mailVm.subscribe((state) => deps.onMailState?.(state));
 
+  let reviewContextRequestSeq = 0;
+  const reviewVm = new ReviewVM({
+    onFetchReviewContext: (reviewId) => {
+      const seq = ++reviewContextRequestSeq;
+      void client
+        .reviewContext(reviewId)
+        .then((ctx) => {
+          if (seq === reviewContextRequestSeq) reviewVm.setReviewContext(reviewId, ctx);
+        })
+        .catch(() => {});
+    },
+    onSubmitVerdict: async (target, draft) => {
+      try {
+        await client.reply(target, draft);
+        doRefreshReviews();
+        void connVmRef.current?.refresh();
+      } catch (e) {
+        deps.onReviewError?.(
+          e instanceof ConductorUnavailableError
+            ? 'Conductor not running — start `co-mcp serve <projectId>` to submit a verdict.'
+            : safeError(e),
+        );
+        throw e;
+      }
+    },
+  });
+
+  function doRefreshReviews(): void {
+    reviewVm.update(readInbox(OPERATOR));
+  }
+
+  reviewVm.subscribe((state) => deps.onReviewState?.(state));
+
   const nav = new NavVM();
   if (deps.onNavState) nav.subscribe(deps.onNavState);
 
@@ -282,6 +326,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       deps.onDashboardState?.(dash.state);
       updateAgentsConsole(state.observation, 'live');
       doRefreshMail();
+      doRefreshReviews();
       doRefreshLimitsCost();
     },
     onTick: (tick: OperatorIpcTick) => {
@@ -290,10 +335,13 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       deps.onDashboardState?.(dash.state);
       updateAgentsConsole(liveObs, 'live-transition');
       doRefreshMail();
+      doRefreshReviews();
       doRefreshLimitsCost();
     },
   });
   connVmRef.current = connVm;
+
+  doRefreshReviews();
 
   return {
     nav,
@@ -308,6 +356,34 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     selectAgent(agentId: string | null): void {
       agentsConsoleVm.selectAgent(agentId);
       refreshSelectedTranscript();
+    },
+    reviewSelect(reviewId: string): ReviewState {
+      reviewVm.selectReview(reviewId);
+      return reviewVm.state;
+    },
+    reviewBeginVerdict(verdict: 'PASS' | 'ISSUES'): ReviewState {
+      reviewVm.beginVerdict(verdict);
+      return reviewVm.state;
+    },
+    reviewUpdateComposerBody(text: string): ReviewState {
+      reviewVm.updateComposerBody(text);
+      return reviewVm.state;
+    },
+    reviewCancelVerdict(): ReviewState {
+      reviewVm.cancelVerdict();
+      return reviewVm.state;
+    },
+    async reviewSubmitVerdict(): Promise<ReviewState> {
+      try {
+        await reviewVm.submitVerdict();
+      } catch {
+        // onReviewError already fired from onSubmitVerdict; return current state.
+      }
+      return reviewVm.state;
+    },
+    reviewRefresh(): ReviewState {
+      doRefreshReviews();
+      return reviewVm.state;
     },
     async start() {
       await connVm.start();

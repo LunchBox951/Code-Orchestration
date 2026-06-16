@@ -29,6 +29,7 @@ import type {
 import type { FinishRecord } from '../worktrees/events.js';
 import type { GitExec } from '../worktrees/sling.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
+import type { SpecStore } from '../specs/specs-store.js';
 import { findSubRole, parseSubRoleId } from '../roles/sub-roles.js';
 import { classifyPass, honestVerify } from './honest-verify.js';
 import { resolveReviewerKind, reviewRequestEnvelope } from './human-review.js';
@@ -36,7 +37,11 @@ import type { ReviewRequestRecord, ReviewRequested, ReviewVerdictRecord } from '
 import type { ReviewScope } from './ladder.js';
 import type { ReviewStore } from './review-store.js';
 import { acquireMergeSlot, releaseMergeSlot, type MergeSlotResult } from './serialize.js';
-import { resolveReviewSpecRef, type ReviewSpecRef } from './spec-ref.js';
+import {
+  resolveReviewSpecRef,
+  resolveReviewSpecRefFromStore,
+  type ReviewSpecRef,
+} from './spec-ref.js';
 
 /**
  * Injectable seams for {@link CoReviewGate}. `reviews` + `worktrees` are REQUIRED (the gate uses
@@ -53,6 +58,8 @@ export interface ReviewGateDeps {
    * is refused loud (Principle 9 — never paper over a missing input).
    */
   readonly worktrees: WorktreeStore;
+  /** Optional spec store used to prove human reviews reference a displayable locked spec. */
+  readonly specs?: Pick<SpecStore, 'getSpec'>;
   /** The repo-mode enactment gate (default {@link CoRepoModeGate}); does the actual git merge. */
   readonly repoModeGate?: RepoModeGate;
   /** Resolve the effective repo mode (default {@link resolveRepoMode}); injectable for headless tests. */
@@ -220,6 +227,20 @@ function specRefEquals(
 ): boolean {
   if (actual.kind !== expected.kind) return false;
   return actual.kind !== 'criteria' || actual.ref === expected.ref;
+}
+
+function assertHumanReviewHasCriteria(
+  reviewerKind: 'agent' | 'human',
+  specRef: ReviewSpecRef,
+  branch: string,
+  target: string,
+): void {
+  if (reviewerKind !== 'human' || specRef.kind === 'criteria') return;
+  throw new Error(
+    `co review: refused — human review of '${branch}' into '${target}' requires locked ` +
+      'acceptance criteria. Pass spec_ref as `spec:<taskId>#locked` so the Review view can ' +
+      'display evidence before PASS or ISSUES.',
+  );
 }
 
 function reviewerSeat(role: string, reviewId: string): string {
@@ -660,7 +681,13 @@ export class CoReviewGate implements FinishReviewGate {
   triggerReview(req: ReviewTriggerRequest): ReviewTriggerResult {
     const scope = req.scope ?? 'worker_merge';
     // Resolve the spec reference (AC-L5-8): criteria ref when provided, else explicit no-spec marker.
-    const specRef = resolveReviewSpecRef(req.specRef);
+    const rawSpecRef = resolveReviewSpecRef(req.specRef);
+    const requestSpecRef = (reviewerKind: 'agent' | 'human'): ReviewSpecRef =>
+      reviewerKind !== 'human'
+        ? rawSpecRef
+        : this.deps.specs != null
+          ? resolveReviewSpecRefFromStore(this.deps.specs, req.specRef)
+          : { kind: 'no-locked-spec' };
     const projectId = req.projectId;
     const resolveKind = (): 'agent' | 'human' => {
       if (projectId == null) return 'agent';
@@ -687,6 +714,8 @@ export class CoReviewGate implements FinishReviewGate {
             `requested '${req.requestedBy}'.`,
         );
       }
+      const existingReviewerKind = existing.reviewerKind;
+      const specRef = requestSpecRef(existingReviewerKind);
       if (
         !specRefEquals(existing.specRef, {
           kind: specRef.kind,
@@ -703,7 +732,7 @@ export class CoReviewGate implements FinishReviewGate {
             `'${req.target}' conflicts on specRef: stored '${stored}', requested '${incoming}'.`,
         );
       }
-      const existingReviewerKind = existing.reviewerKind;
+      assertHumanReviewHasCriteria(existingReviewerKind, existing.specRef, req.branch, req.target);
       const existingVerdict = this.deps.reviews.getVerdict(req.target, req.branch, existing.scope);
       if (existingVerdict?.reviewId === existing.reviewId) {
         return reviewTriggerResultFromRecord(existing);
@@ -732,8 +761,9 @@ export class CoReviewGate implements FinishReviewGate {
           subject: `review requested: '${req.branch}' into '${req.target}'`,
           body:
             `A human review has been requested for '${req.branch}' into '${req.target}' ` +
-            `(scope: ${scope}, reviewId: ${req.reviewId}). Reply with a review_response ` +
-            `(review_verdict: PASS or ISSUES) to re-enter the gate.`,
+            `(scope: ${scope}, reviewId: ${req.reviewId}). Open the Reviews view to inspect ` +
+            `the diff and locked acceptance criteria, then submit PASS or ISSUES to re-enter ` +
+            `the gate.`,
           idempotencyKey: `review-request:${req.reviewId}`,
         });
         const rec = this.deps.mail.requestHumanReview(envelope, requested).request;
@@ -771,6 +801,8 @@ export class CoReviewGate implements FinishReviewGate {
     // Resolve the reviewer kind before mutating the request row. The human path cannot be requested
     // without mail; failing that precondition must not clear a prior verdict or leave a phantom request.
     const reviewerKind = resolveKind();
+    const specRef = requestSpecRef(reviewerKind);
+    assertHumanReviewHasCriteria(reviewerKind, specRef, req.branch, req.target);
     const requested: ReviewRequested = {
       reviewId: req.reviewId,
       target: req.target,
@@ -797,8 +829,9 @@ export class CoReviewGate implements FinishReviewGate {
         subject: `review requested: '${req.branch}' into '${req.target}'`,
         body:
           `A human review has been requested for '${req.branch}' into '${req.target}' ` +
-          `(scope: ${scope}, reviewId: ${req.reviewId}). Reply with a review_response ` +
-          `(review_verdict: PASS or ISSUES) to re-enter the gate.`,
+          `(scope: ${scope}, reviewId: ${req.reviewId}). Open the Reviews view to inspect ` +
+          `the diff and locked acceptance criteria, then submit PASS or ISSUES to re-enter ` +
+          `the gate.`,
         idempotencyKey: `review-request:${req.reviewId}`,
       });
       const rec = this.deps.mail!.requestHumanReview(envelope, requested).request;

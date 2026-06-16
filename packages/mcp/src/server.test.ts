@@ -155,7 +155,9 @@ describe('createCoMcpServer — tool-list parity', () => {
     const typeSchema = props?.type as { enum?: unknown[] } | undefined;
 
     expect(typeSchema?.enum).toEqual(
-      MAIL_TYPES.filter((type) => type !== 'worker_done' && type !== 'review_request'),
+      MAIL_TYPES.filter(
+        (type) => type !== 'worker_done' && type !== 'review_request' && type !== 'review_response',
+      ),
     );
   });
 
@@ -179,7 +181,7 @@ describe('createCoMcpServer — tool-list parity', () => {
     expect(subjectSchema?.description).toBeUndefined();
   });
 
-  it('publishes co_mail_send.review_verdict over MCP', async () => {
+  it('does not publish Review-view-only verdict fields over MCP co_mail_send', async () => {
     const ctx = makeTestContext('impl-review-verdict-schema');
     const client = await connect({ contextFactory: () => ctx });
 
@@ -187,9 +189,7 @@ describe('createCoMcpServer — tool-list parity', () => {
     const send = tools.find((t) => t.name === 'co_mail_send');
     const props = (send?.inputSchema as { properties?: Record<string, unknown> } | undefined)
       ?.properties;
-    const reviewVerdictSchema = props?.review_verdict as { enum?: unknown[] } | undefined;
-
-    expect(reviewVerdictSchema?.enum).toEqual(['PASS', 'ISSUES']);
+    expect(props).not.toHaveProperty('review_verdict');
   });
 
   it('publishes co_sling without agent-supplied account/cost controls or capacity-only WAITING wording', async () => {
@@ -216,16 +216,25 @@ describe('createCoMcpServer — tool-list parity', () => {
     const defaultClient = await connect({ contextFactory: () => ctx });
 
     const defaultSling = (await defaultClient.listTools()).tools.find((t) => t.name === 'co_sling');
+    const defaultSend = (await defaultClient.listTools()).tools.find(
+      (t) => t.name === 'co_mail_send',
+    );
     expect(defaultSling?.outputSchema).toBeUndefined();
+    expect(defaultSend?.outputSchema).toBeUndefined();
 
     const outputClient = await connect({
       contextFactory: () => ctx,
       advertiseOutputSchema: true,
     });
-    const sling = (await outputClient.listTools()).tools.find((t) => t.name === 'co_sling');
+    const outputTools = (await outputClient.listTools()).tools;
+    const sling = outputTools.find((t) => t.name === 'co_sling');
+    const send = outputTools.find((t) => t.name === 'co_mail_send');
 
     const outputProps = (
       sling?.outputSchema as { properties?: Record<string, unknown> } | undefined
+    )?.properties;
+    const sendOutputProps = (
+      send?.outputSchema as { properties?: Record<string, unknown> } | undefined
     )?.properties;
     const placementProps = (
       outputProps?.placement as { properties?: Record<string, unknown> } | undefined
@@ -233,6 +242,7 @@ describe('createCoMcpServer — tool-list parity', () => {
     const waitingProps = (
       outputProps?.waiting as { properties?: Record<string, unknown> } | undefined
     )?.properties;
+    expect(sendOutputProps).not.toHaveProperty('review_verdict');
     expect(placementProps).not.toHaveProperty('account');
     expect(waitingProps).not.toHaveProperty('maxed_accounts');
     expect(waitingProps).not.toHaveProperty('unavailable_accounts');
@@ -263,7 +273,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     expect(first?.seq).toBe(sent.seq);
   });
 
-  it('round-trips review_response.review_verdict through MCP mail tools', async () => {
+  it('rejects review_response through MCP mail tools at the schema boundary', async () => {
     const leadCtx = makeTestContext('lead-review');
     const projectId = leadCtx.projectId;
     const cwd = leadCtx.cwd;
@@ -310,9 +320,9 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
         review_verdict: 'PASS',
       },
     });
-    expect(sendRes.isError).toBeFalsy();
-    const reply = sendRes.structuredContent as Record<string, unknown>;
-    expect(reply.review_verdict).toBe('PASS');
+    expect(sendRes.isError).toBe(true);
+    const errorContent = sendRes.content as Array<{ text?: string }> | undefined;
+    expect(errorContent?.[0]?.text).toMatch(/Input validation error|Invalid option/i);
 
     const leadClient = await connect({
       contextFactory: () => ({
@@ -326,7 +336,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     });
     const inboxRes = await leadClient.callTool({ name: 'co_mail_inbox', arguments: {} });
     const inbox = inboxRes.structuredContent as { mail: Array<Record<string, unknown>> };
-    expect(inbox.mail.find((m) => m.seq === reply.seq)?.review_verdict).toBe('PASS');
+    expect(inbox.mail.filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
 
   it('co_status returns the calling agent record', async () => {

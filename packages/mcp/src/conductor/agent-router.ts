@@ -19,7 +19,7 @@
  *                     the daemon re-reads the live set each tick).
  *   - plus operator `steer` (NOT part of the void seam) → delegate to {@link ConductorEngine.steer}.
  *
- * This class is project-scoped (one per `co serve` project). It registers ZERO agent MCP tools — it is a
+ * This class is project-scoped (one per `co-mcp serve` project). It registers ZERO agent MCP tools — it is a
  * class of OPERATOR methods, never agent-callable (Principle 4 + D4). The STUCK set is the host-side
  * `markStuck`/`revertStuck` owner: `serveConductor` wires {@link markStuck} into the `ReconcileLoop`.
  */

@@ -219,55 +219,46 @@ export function buildHumanReviewVerdict(
   };
 }
 
-// ── L9 stub: operator-facing review presentation seam ────────────────────────────────────────────
+// ── Legacy stub: pre-operator-IPC review presentation seam ───────────────────────────────────────
 
 /**
- * The L9 operator-facing review presentation seam — the diff viewer / gate UI the human reviewer
- * uses to inspect work and submit a verdict. At v1, the headless path (actionable `review_request`
- * mail + `recordHumanVerdict` for verdict acceptance) is all that is needed to test AC-L5-5; the
- * rich UI is L9.
+ * Legacy operator-facing review presentation seam from the pre-operator-IPC design. Stage 13 routes
+ * human verdicts through the desktop Review view and the daemon-side operator-IPC `reviewContext` /
+ * `reply(review_response)` path; that current path does not call this interface.
  *
  * This is a TYPED stub marking that seam — copied from {@link import('../worktrees/cleanup-gate.js').CleanupGateStub}'s
  * pattern: it fails loud (Principle 9) rather than being a silent no-op, because a silent stub is
- * exactly the fallback that hides prototype gaps. Nothing in L5 calls it — it exists so the L9
- * plug-point is a real, typed boundary rather than an absence (Principle 7 — gated-by-default).
+ * exactly the fallback that hides prototype gaps. Nothing in the current review path calls it — it
+ * remains only so older imports fail explicitly instead of pretending to record a verdict.
  */
 export interface HumanReviewGate {
   /**
-   * Present the diff and review context for a branch to the operator. Returns `never`: L9 owns the
-   * rendering + the interactive verdict submission; this signature marks the seam only.
+   * Legacy placeholder only. Current rendering lives in the desktop Review view via operator IPC.
    */
   presentReview(branch: string, target: string): never;
   /**
-   * Accept a verdict from the operator and re-enter the gate. Returns `never`: the full acceptance
-   * flow (parsing, validation, mail-send, recordHumanVerdict) is L9; v1 tests the headless path via
-   * {@link reviewRequestOutcome} + {@link recordHumanVerdict} directly.
+   * Legacy placeholder only. Current verdict acceptance lives in the daemon-side operator-IPC reply
+   * handler, which validates displayed evidence before recording the review verdict.
    */
   acceptVerdict(branch: string, verdict: Verdict): never;
 }
 
 /**
- * The L9 STUB gate. Every method fails loud (Principle 9) until L9 owns the operator review UI —
- * never a silent no-op.
+ * Fail-loud legacy gate. The production Review path is operator IPC + desktop Review view; this
+ * class must never silently accept a verdict.
  */
 export class HumanReviewGateStub implements HumanReviewGate {
-  // L9 PLUG-POINT (operator review presentation). The production gate must, per method:
-  //  (1) presentReview — render the diff + review facts (branch, scope, blockers) in the operator UI;
-  //  (2) acceptVerdict — parse the operator's verdict, validate it, send a `review_response` mail,
-  //      and call recordHumanVerdict to re-enter the gate.
-  // Until then every method fails loud (Principle 9).
+  // Legacy plug-point: current production verdicts are recorded through the operator-IPC Review path.
   presentReview(): never {
     throw new Error(
-      'HumanReviewGate.presentReview: the operator-facing review UI is not implemented ' +
-        '(deferred to L9): present the diff, branch facts, and review context for interactive ' +
-        'verdict submission. The headless seam (review_request mail + recordHumanVerdict) covers v1.',
+      'HumanReviewGate.presentReview: legacy stub is not wired; use the desktop Review view through ' +
+        'operator IPC to inspect the diff, locked criteria, and review context.',
     );
   }
   acceptVerdict(): never {
     throw new Error(
-      'HumanReviewGate.acceptVerdict: the interactive verdict-acceptance flow is not implemented ' +
-        '(deferred to L9): parse the operator verdict, send a review_response mail, and call ' +
-        'recordHumanVerdict to re-enter the gate. The headless path drives this at v1.',
+      'HumanReviewGate.acceptVerdict: legacy stub is not wired; record human verdicts through the ' +
+        'operator-IPC Review path so diff and locked-criteria evidence are validated first.',
     );
   }
 }

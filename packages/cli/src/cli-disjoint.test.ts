@@ -12,7 +12,7 @@
  *   3. The CLI dispatches each operator verb (run() does NOT return "unknown command").
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildCoreRegistry, toolsForRole, BASE_ROLES, matchBlock, openRegistry } from '@co/core';
@@ -291,6 +291,52 @@ describe('AC-S9-8 — co mail send dispatches to openMailStore', () => {
     expect(result.exitCode).toBe(0);
     expect(result.output).toMatch(/sent/i);
     expect(result.output).toMatch(/operator_message/);
+  });
+
+  it('rejects worker_done because co_finish owns that durable signal', async () => {
+    const { dir } = makeRegisteredDir();
+    const result = await run(
+      [
+        'mail',
+        'send',
+        '--to',
+        'lead-1',
+        '--type',
+        'worker_done',
+        '--subject',
+        'worker_done: co/feature',
+        '--body',
+        'done',
+      ],
+      dir,
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/worker_done|not CLI-sendable|co_finish/i);
+  });
+
+  it('keeps the SH-1 runbook aligned with rejected CLI review_response sends', async () => {
+    const runbook = readFileSync(join(process.cwd(), 'docs', 'sh1-runbook.md'), 'utf8');
+    expect(runbook).toContain('`co mail send --type review_response …` is rejected');
+    expect(runbook).not.toContain('stores a mail but does not record');
+
+    const { dir } = makeRegisteredDir();
+    const result = await run(
+      [
+        'mail',
+        'send',
+        '--to',
+        'lead-1',
+        '--type',
+        'review_response',
+        '--subject',
+        'review verdict',
+        '--body',
+        'PASS',
+      ],
+      dir,
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/not CLI-sendable|review_response|Review view/i);
   });
 });
 

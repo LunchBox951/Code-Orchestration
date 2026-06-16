@@ -287,13 +287,13 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
           body: 'passes',
           review_verdict: 'PASS',
         }),
-      ).rejects.toThrow(/review_request/i);
+      ).rejects.toThrow(/schema validation/i);
     } finally {
       close();
     }
   });
 
-  it('a review_response carries review_verdict through send, inbox, get, and thread', async () => {
+  it('rejects review_response replies because the Review view owns verdict evidence', async () => {
     const { reg, ctx, close } = setup();
     try {
       const leadCtx = ctx('lead');
@@ -316,28 +316,18 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
         },
       ).mail;
 
-      const reply = (await invokeTool(reg, ctx(OPERATOR), 'co_mail_send', {
-        type: MAIL_REVIEW_RESPONSE,
-        in_reply_to: req.seq,
-        subject: 're: review requested',
-        body: 'passes',
-        review_verdict: 'PASS',
-      })) as WireMail;
-
-      expect(reply.review_verdict).toBe('PASS');
+      await expect(
+        invokeTool(reg, ctx(OPERATOR), 'co_mail_send', {
+          type: MAIL_REVIEW_RESPONSE,
+          in_reply_to: req.seq,
+          subject: 're: review requested',
+          body: 'passes',
+          review_verdict: 'PASS',
+        }),
+      ).rejects.toThrow(/schema validation/i);
 
       const inbox = (await invokeTool(reg, ctx('lead'), 'co_mail_inbox', {})) as ListOut;
-      expect(inbox.mail.find((m) => m.seq === reply.seq)?.review_verdict).toBe('PASS');
-
-      const byGet = (await invokeTool(reg, ctx('lead'), 'co_mail_get', {
-        id: reply.seq,
-      })) as OneOut;
-      expect(byGet.mail.review_verdict).toBe('PASS');
-
-      const thread = (await invokeTool(reg, ctx('lead'), 'co_mail_thread', {
-        thread_id: String(req.seq),
-      })) as ListOut;
-      expect(thread.mail.find((m) => m.seq === reply.seq)?.review_verdict).toBe('PASS');
+      expect(inbox.mail.filter((m) => m.type === MAIL_REVIEW_RESPONSE)).toHaveLength(0);
     } finally {
       close();
     }
@@ -418,6 +408,32 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
         type: MAIL_REVIEW_REQUEST,
         subject: 'review?',
         body: 'please review',
+      }),
+    ).toThrow();
+  });
+
+  it('co_mail_send schema rejects review_response before the handler', () => {
+    const send = buildCoreRegistry().get('co_mail_send');
+    expect(() =>
+      send?.inputSchema.parse({
+        to: 'lead-1',
+        type: MAIL_REVIEW_RESPONSE,
+        subject: 'Review PASS',
+        body: 'PASS',
+        review_verdict: 'PASS',
+      }),
+    ).toThrow();
+  });
+
+  it('co_mail_send schema rejects stray review_verdict on otherwise sendable mail', () => {
+    const send = buildCoreRegistry().get('co_mail_send');
+    expect(() =>
+      send?.inputSchema.parse({
+        to: 'lead-1',
+        type: MAIL_CHAT,
+        subject: 'hello',
+        body: 'world',
+        review_verdict: 'PASS',
       }),
     ).toThrow();
   });

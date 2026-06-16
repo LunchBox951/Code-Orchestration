@@ -28,6 +28,8 @@ export interface ProjectRegistry {
   relink(projectId: ProjectId, newAbsPath: string): void;
   /** Path → id, or undefined if unmapped. */
   resolve(absPath: string): ProjectId | undefined;
+  /** Id → current path, or undefined if the project id is unknown. */
+  pathFor(projectId: ProjectId): string | undefined;
   /** Per-project data dir for an id (pure path; never created here). */
   dataDirFor(projectId: ProjectId): string;
   /** Close the underlying global store (lifecycle helper; not part of the C.3 contract). */
@@ -113,6 +115,14 @@ export function openRegistry(): ProjectRegistry {
         const db = tx.raw as DatabaseSync;
         ensureProjectsTable(db);
         return selectIdByPath(db, path);
+      });
+    },
+
+    pathFor(projectId: ProjectId): string | undefined {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureProjectsTable(db);
+        return selectPathById(db, projectId);
       });
     },
 

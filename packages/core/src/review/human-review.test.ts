@@ -17,6 +17,7 @@ import { InProcessDelivery } from '../mail/delivery.js';
 import { MailProjector } from '../mail/mail-projector.js';
 import { openProjectStore } from '../store/sqlite-store.js';
 import type { ConfigStore } from '../config/config-store.js';
+import type { SpecStore } from '../specs/specs-store.js';
 import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
 import { buildCoreRegistry } from '../tools/core-registry.js';
 import { invokeTool } from '../tools/invoke.js';
@@ -76,6 +77,20 @@ function fakeConfig(overrides: Record<string, unknown> = {}): ConfigStore {
 const TARGET = 'co/l5-review-gate';
 const BRANCH = 'co/l5-phase-e';
 const FAKE_SHA = 'a'.repeat(40);
+const SPEC_REF = 'spec:human-review-task#locked';
+const lockedSpecs: Pick<SpecStore, 'getSpec'> = {
+  getSpec: (taskId) => ({
+    taskId,
+    title: 'Locked human review spec',
+    goal: 'exercise human review',
+    criteria: [{ text: 'human review has displayable criteria', verify: 'pnpm test' }],
+    body: '',
+    state: 'locked',
+    draftedTs: 1,
+    lockedBy: OPERATOR,
+    lockedTs: 2,
+  }),
+};
 
 /** Seed baseline + finish with clean (all-passing) test data, mirroring merge.test.ts. */
 function recordCleanFinish(worktrees: WorktreeStore): void {
@@ -111,6 +126,8 @@ function recordHumanRequest(
     scope,
     requestedBy,
     reviewerKind: 'human',
+    specRefKind: 'criteria',
+    specRefRef: SPEC_REF,
   });
 }
 
@@ -148,6 +165,8 @@ function requestHumanReviewMail(
       requestedBy,
       scope,
       reviewerKind: 'human',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     },
   ).mail;
 }
@@ -478,6 +497,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       reviews,
       worktrees,
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.pr_merge.reviewer': 'human' }),
       resolveMode: () => 'offline',
     });
@@ -488,6 +508,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       projectId,
+      specRef: SPEC_REF,
     });
 
     const persistedRequest = reviews.getReviewRequest(TARGET, BRANCH);
@@ -514,7 +535,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
     expect(git.calls).toEqual([['push', 'origin', TARGET]]);
   });
 
-  it('co_mail_send review_response records the human verdict and unblocks push', async () => {
+  it('co_mail_send review_response is refused and cannot unblock push', async () => {
     const projectId = 'p-hr-mail-send-reentry';
     const reviews = openReviewStore(projectId);
     reviewStores.push(reviews);
@@ -528,6 +549,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       reviews,
       worktrees,
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.pr_merge.reviewer': 'human' }),
       resolveMode: () => 'offline',
     });
@@ -538,6 +560,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       projectId,
+      specRef: SPEC_REF,
     });
     const requestMail = mail.inbox(OPERATOR).find((m) => m.type === 'review_request')!;
     const registry = buildCoreRegistry();
@@ -551,15 +574,19 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       worktrees,
     };
 
-    await invokeTool(registry, ctx, 'co_mail_send', {
-      type: 'review_response',
-      in_reply_to: requestMail.seq,
-      subject: 're: review requested',
-      body: 'passes',
-      review_verdict: 'PASS',
-    });
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: requestMail.seq,
+        subject: 're: review requested',
+        body: 'passes',
+        review_verdict: 'PASS',
+      }),
+    ).rejects.toThrow(/schema validation/i);
 
-    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
+    expect(mail.inbox(OPERATOR).find((m) => m.seq === requestMail.seq)?.resolved).toBe(false);
     const git = recordingGitExec();
     const publishGate = new CoReviewGate({
       reviews,
@@ -567,10 +594,10 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       resolveMode: () => 'owner',
       gitExec: git.exec,
     });
-    expect(
-      publishGate.push({ branch: BRANCH, into: TARGET, projectId, repoCwd: '/repo' }).pushed,
-    ).toBe(true);
-    expect(git.calls).toEqual([['push', 'origin', TARGET]]);
+    expect(() =>
+      publishGate.push({ branch: BRANCH, into: TARGET, projectId, repoCwd: '/repo' }),
+    ).toThrow(/no review verdict is recorded|PASS/i);
+    expect(git.calls).toEqual([]);
   });
 
   it('co_mail_send review_response does not reply if atomic review verdict validation fails', async () => {
@@ -623,7 +650,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/no matching review\.requested row/);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -631,7 +658,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
     expect(mail.outstandingCount(OPERATOR)).toBe(1);
   });
 
-  it('co_mail_send review_response rejects same-key retries that change the verdict', async () => {
+  it('co_mail_send review_response rejects idempotency-keyed replies before recording verdicts', async () => {
     const projectId = 'p-hr-mail-send-idem-mismatch';
     const reviews = openReviewStore(projectId);
     reviewStores.push(reviews);
@@ -645,6 +672,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       reviews,
       worktrees,
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.pr_merge.reviewer': 'human' }),
       resolveMode: () => 'offline',
     });
@@ -655,6 +683,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       projectId,
+      specRef: SPEC_REF,
     });
     const requestMail = mail.inbox(OPERATOR).find((m) => m.type === 'review_request')!;
     const registry = buildCoreRegistry();
@@ -668,30 +697,22 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       worktrees,
     };
 
-    await invokeTool(registry, ctx, 'co_mail_send', {
-      type: 'review_response',
-      in_reply_to: requestMail.seq,
-      subject: 're: review requested',
-      body: 'passes',
-      review_verdict: 'PASS',
-      idempotency_key: 'human-review-response:idem-mismatch',
-    });
     await expect(
       invokeTool(registry, ctx, 'co_mail_send', {
         type: 'review_response',
         in_reply_to: requestMail.seq,
         subject: 're: review requested',
-        body: 'actually issues',
-        review_verdict: 'ISSUES',
+        body: 'passes',
+        review_verdict: 'PASS',
         idempotency_key: 'human-review-response:idem-mismatch',
       }),
-    ).rejects.toThrow(/idempotent review_response retry.*changes review_verdict/i);
+    ).rejects.toThrow(/schema validation/i);
 
-    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
-    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(1);
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
 
-  it('co_mail_send review_response rejects idempotency key reuse across review requests', async () => {
+  it('co_mail_send review_response refuses cross-request idempotency attempts before side effects', async () => {
     const projectId = 'p-hr-mail-send-idem-cross-request';
     const reviews = openReviewStore(projectId);
     reviewStores.push(reviews);
@@ -705,7 +726,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       branch: firstBranch,
       requestedBy: 'lead-1',
     });
-    const secondMail = requestHumanReviewMail(mail, reviews, {
+    requestHumanReviewMail(mail, reviews, {
       reviewId: 'rev-human-idem-second',
       target: `${TARGET}-second`,
       branch: secondBranch,
@@ -721,30 +742,23 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       reviews,
     };
 
-    await invokeTool(registry, ctx, 'co_mail_send', {
-      type: 'review_response',
-      in_reply_to: firstMail.seq,
-      subject: 're: first',
-      body: 'passes',
-      review_verdict: 'PASS',
-      idempotency_key: 'human-review-response:cross-request',
-    });
     await expect(
       invokeTool(registry, ctx, 'co_mail_send', {
         type: 'review_response',
-        in_reply_to: secondMail.seq,
-        subject: 're: second',
+        in_reply_to: firstMail.seq,
+        subject: 're: first',
         body: 'passes',
         review_verdict: 'PASS',
         idempotency_key: 'human-review-response:cross-request',
       }),
-    ).rejects.toThrow(/idempotency_key.*already belongs/i);
+    ).rejects.toThrow(/schema validation/i);
 
+    expect(reviews.getVerdict(`${TARGET}-first`, firstBranch, 'pr_merge')).toBeUndefined();
     expect(reviews.getVerdict(`${TARGET}-second`, secondBranch, 'pr_merge')).toBeUndefined();
-    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(1);
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
 
-  it('co_mail_send review_response rejects same-key same-verdict retries that change body', async () => {
+  it('co_mail_send review_response refuses body-changing idempotency attempts before side effects', async () => {
     const projectId = 'p-hr-mail-send-idem-same-verdict';
     const reviews = openReviewStore(projectId);
     reviewStores.push(reviews);
@@ -764,32 +778,22 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       reviews,
     };
 
-    await invokeTool(registry, ctx, 'co_mail_send', {
-      type: 'review_response',
-      in_reply_to: requestMail.seq,
-      subject: 're: review requested',
-      body: 'first blocker',
-      review_verdict: 'ISSUES',
-      idempotency_key: 'human-review-response:same-verdict',
-    });
     await expect(
       invokeTool(registry, ctx, 'co_mail_send', {
         type: 'review_response',
         in_reply_to: requestMail.seq,
         subject: 're: review requested',
-        body: 'different blocker should not overwrite',
+        body: 'first blocker',
         review_verdict: 'ISSUES',
         idempotency_key: 'human-review-response:same-verdict',
       }),
-    ).rejects.toThrow(/idempotent review_response retry.*subject\/body/i);
+    ).rejects.toThrow(/schema validation/i);
 
-    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.blockers[0]?.summary).toBe(
-      'first blocker',
-    );
-    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(1);
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
 
-  it('co_mail_send review_response treats exact same-key same-verdict retries as no-ops', async () => {
+  it('co_mail_send review_response refuses exact idempotency retries before side effects', async () => {
     const projectId = 'p-hr-mail-send-idem-exact';
     const reviews = openReviewStore(projectId);
     reviewStores.push(reviews);
@@ -809,26 +813,19 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       reviews,
     };
 
-    const first = await invokeTool(registry, ctx, 'co_mail_send', {
-      type: 'review_response',
-      in_reply_to: requestMail.seq,
-      subject: 're: review requested',
-      body: 'passes',
-      review_verdict: 'PASS',
-      idempotency_key: 'human-review-response:exact',
-    });
-    const second = await invokeTool(registry, ctx, 'co_mail_send', {
-      type: 'review_response',
-      in_reply_to: requestMail.seq,
-      subject: 're: review requested',
-      body: 'passes',
-      review_verdict: 'PASS',
-      idempotency_key: 'human-review-response:exact',
-    });
+    await expect(
+      invokeTool(registry, ctx, 'co_mail_send', {
+        type: 'review_response',
+        in_reply_to: requestMail.seq,
+        subject: 're: review requested',
+        body: 'passes',
+        review_verdict: 'PASS',
+        idempotency_key: 'human-review-response:exact',
+      }),
+    ).rejects.toThrow(/schema validation/i);
 
-    expect(second).toEqual(first);
-    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
-    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(1);
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
 
   it('mail-store review verdict replies treat exact same-key retries as no-ops after resolution', () => {
@@ -1006,6 +1003,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       reviews,
       worktrees,
       mail,
+      specs: lockedSpecs,
       resolveMode: () => 'offline',
       config: fakeConfig({ 'review.pr_merge.reviewer': 'human' }),
     });
@@ -1017,6 +1015,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       projectId,
+      specRef: SPEC_REF,
     });
 
     expect(() =>
@@ -1027,6 +1026,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         requestedBy: 'lead-1',
         scope: 'pr_merge',
         projectId,
+        specRef: SPEC_REF,
       }),
     ).toThrow(/pending|active review request/i);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
@@ -1297,7 +1297,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
   });
 
-  it('co_mail_send review_response refuses a new verdict after the request is resolved', async () => {
+  it('co_mail_send review_response refuses verdicts before resolving review requests', async () => {
     const projectId = 'p-hr-mail-send-resolved-request';
     const reviews = openReviewStore(projectId);
     reviewStores.push(reviews);
@@ -1317,24 +1317,18 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       reviews,
     };
 
-    await invokeTool(registry, ctx, 'co_mail_send', {
-      type: 'review_response',
-      in_reply_to: requestMail.seq,
-      subject: 're: review requested',
-      body: 'passes',
-      review_verdict: 'PASS',
-    });
     await expect(
       invokeTool(registry, ctx, 'co_mail_send', {
         type: 'review_response',
         in_reply_to: requestMail.seq,
         subject: 're: review requested',
-        body: 'actually issues',
-        review_verdict: 'ISSUES',
+        body: 'passes',
+        review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/already resolved/i);
+    ).rejects.toThrow(/schema validation/i);
 
-    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')?.verdict).toBe('PASS');
+    expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
+    expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
 
   it('co_mail_send review_response refuses a durable agent-routed request', async () => {
@@ -1377,7 +1371,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/not a human review_request/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -1419,7 +1413,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/matching review\.requested/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(reviews.getVerdict(TARGET, BRANCH, 'pr_merge')).toBeUndefined();
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
@@ -1460,7 +1454,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/malformed review_request/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
@@ -1494,7 +1488,7 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
         body: 'passes',
         review_verdict: 'PASS',
       }),
-    ).rejects.toThrow(/review store/i);
+    ).rejects.toThrow(/schema validation/i);
 
     expect(mail.inbox('lead-1').filter((m) => m.type === 'review_response')).toHaveLength(0);
   });
@@ -1514,6 +1508,8 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       reviewerKind: 'human',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     });
     reviews.recordReviewRequested({
       reviewId: 'rev-pr-new',
@@ -1522,6 +1518,8 @@ describe('recordHumanVerdict — verdict is found by reviews.getVerdict (same as
       requestedBy: 'lead-1',
       scope: 'pr_merge',
       reviewerKind: 'human',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     });
 
     expect(() =>
@@ -1682,6 +1680,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config,
     });
 
@@ -1692,6 +1691,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger',
+      specRef: SPEC_REF,
     });
 
     // The review.requested record is written.
@@ -1704,8 +1704,8 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
     expect(reviewReq).toBeDefined();
     expect(reviewReq!.recipient).toBe(OPERATOR);
     expect(reviewReq!.sender).toBe('lead-1');
-    expect(reviewReq!.body).toContain('review_verdict');
-    expect(reviewReq!.body).not.toContain('reviewVerdict');
+    expect(reviewReq!.body).toContain('Open the Reviews view');
+    expect(reviewReq!.body).not.toContain('Reply with a review_response');
     expect(reviewReq!.kind).toBe('actionable');
     expect(reviewReq!.resolved).toBe(false);
     expect(mail.outstandingCount(OPERATOR)).toBe(1);
@@ -1724,6 +1724,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
 
@@ -1734,6 +1735,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge' as const,
       projectId: 'p-hr-trigger-dup',
+      specRef: SPEC_REF,
     };
     const first = gate.triggerReview(input);
     const second = gate.triggerReview(input);
@@ -1756,6 +1758,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
     const input = {
@@ -1765,6 +1768,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge' as const,
       projectId: 'p-hr-trigger-dup-repair-slot',
+      specRef: SPEC_REF,
     };
     gate.triggerReview(input);
     releaseMergeSlot(reviews, TARGET, BRANCH);
@@ -1790,6 +1794,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
 
@@ -1800,6 +1805,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger-serializes-target',
+      specRef: SPEC_REF,
     });
 
     expect(reviews.activeSerialized(TARGET)).toBe(BRANCH);
@@ -1811,6 +1817,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
         requestedBy: 'lead-1',
         scope: 'worker_merge',
         projectId: 'p-hr-trigger-serializes-target',
+        specRef: SPEC_REF,
       }),
     ).toThrow(/active reviewer\/merge|serialize/);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
@@ -1829,6 +1836,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
 
@@ -1839,6 +1847,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger-release-real-slot',
+      specRef: SPEC_REF,
     });
     expect(reviews.activeSerialized(TARGET)).toBe(BRANCH);
 
@@ -1868,7 +1877,8 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       reviewerKind: 'human',
-      specRefKind: 'no-locked-spec',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     });
 
     const gate = new CoReviewGate({
@@ -1876,6 +1886,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
 
@@ -1886,6 +1897,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger-repair-mail',
+      specRef: SPEC_REF,
     });
 
     expect(result.reviewId).toBe('rev-repair-human-mail');
@@ -1911,6 +1923,8 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge' as const,
       reviewerKind: 'human' as const,
+      specRefKind: 'criteria' as const,
+      specRefRef: SPEC_REF,
     };
 
     mail.requestHumanReview(envelope, request);
@@ -1937,6 +1951,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
 
@@ -1947,6 +1962,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-trigger-dup-mismatch',
+      specRef: SPEC_REF,
     });
 
     expect(() =>
@@ -1957,6 +1973,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
         requestedBy: 'lead-2',
         scope: 'worker_merge',
         projectId: 'p-hr-trigger-dup-mismatch',
+        specRef: SPEC_REF,
       }),
     ).toThrow(/duplicate reviewId.*requestedBy/i);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(1);
@@ -1976,6 +1993,9 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       branch: BRANCH,
       requestedBy: 'lead-1',
       scope: 'worker_merge',
+      reviewerKind: 'human',
+      specRefKind: 'criteria',
+      specRefRef: SPEC_REF,
     });
 
     const gate = new CoReviewGate({
@@ -1983,6 +2003,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
 
@@ -1994,6 +2015,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
         requestedBy: 'lead-1',
         scope: 'worker_merge',
         projectId: 'p-hr-trigger-dup-cross-target',
+        specRef: SPEC_REF,
       }),
     ).toThrow(/duplicate reviewId.*already belongs/i);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
@@ -2018,6 +2040,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail: failingMail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
 
@@ -2029,6 +2052,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
         requestedBy: 'lead-1',
         scope: 'worker_merge',
         projectId: 'p-hr-trigger-record-fail',
+        specRef: SPEC_REF,
       }),
     ).toThrow(/review request store unavailable/);
 
@@ -2058,6 +2082,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail: failingMail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
     const input = {
@@ -2067,6 +2092,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge' as const,
       projectId,
+      specRef: SPEC_REF,
     };
     expect(() => failingGate.triggerReview(input)).toThrow(/review request store unavailable once/);
     expect(mail.inbox(OPERATOR).filter((m) => m.type === MAIL_REVIEW_REQUEST)).toHaveLength(0);
@@ -2079,6 +2105,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config: fakeConfig({ 'review.worker_merge.reviewer': 'human' }),
     });
     retryGate.triggerReview(input);
@@ -2105,6 +2132,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       worktrees,
       resolveMode: () => 'offline',
       mail,
+      specs: lockedSpecs,
       config,
     });
 
@@ -2115,6 +2143,7 @@ describe('CoReviewGate.triggerReview — human reviewer path (AC-L5-5)', () => {
       requestedBy: 'lead-1',
       scope: 'worker_merge',
       projectId: 'p-hr-no-placement',
+      specRef: SPEC_REF,
     });
 
     // No agent-reviewer placement mail (no worker_done, no clarify, etc. — just the review_request).

@@ -4,7 +4,7 @@
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  * A JSON-RPC server over a Unix-domain socket that wraps an already-built `ConductorControlSurface`
  * (the daemon-backed router + the live-observe query) plus a {@link MailStore} for the two write
- * verbs, and forwards each daemon tick as a `tick` server-push notification. Started by `co serve`
+ * verbs, and forwards each daemon tick as a `tick` server-push notification. Started by `co-mcp serve`
  * alongside the cadence runner (host.ts wires it through {@link ConductorHostRunnerDeps.onTick} /
  * `onStop`).
  *
@@ -41,6 +41,7 @@ import {
   type MailType,
   type OperatorIpcMethod,
   type ProjectId,
+  type ReviewContext,
   type ReviewStore,
   type ReviewVerdictValue,
   type ReplyDraft,
@@ -159,6 +160,22 @@ function requireReviewVerdict(obj: WirePayload, key: string): ReviewVerdictValue
   return verdict;
 }
 
+function assertReviewEvidenceReady(context: ReviewContext): void {
+  if (context.kind !== 'resolved') {
+    throw new Error(
+      `operator IPC review reply: review evidence is unavailable for '${context.reviewId}'.`,
+    );
+  }
+  if (context.diff.kind !== 'patch') {
+    throw new Error(
+      `operator IPC review reply: review diff is unavailable (${context.diff.reason}).`,
+    );
+  }
+  if (context.criteria.kind !== 'criteria') {
+    throw new Error('operator IPC review reply: locked acceptance criteria are unavailable.');
+  }
+}
+
 /**
  * The operator-IPC server. Owns one {@link SocketServerTransport}, routes inbound JSON-RPC requests to
  * the control surface / mail store, and forwards per-tick snapshots via {@link pushTick}. Lifecycle:
@@ -223,7 +240,7 @@ export class OperatorIpcServer {
   /**
    * Stage 12 C-P1 (TRANSCRIPT-SEAM) — forward one chunk of a hosted agent's live pane output as the
    * `transcript:push` notification (mirrors {@link pushTick}). Event-driven, NOT on the tick cadence:
-   * `co serve` subscribes this to the engine's transcript stream. A no-op when no app is attached; a
+   * `co-mcp serve` subscribes this to the engine's transcript stream. A no-op when no app is attached; a
    * push that races a disconnect is reported, never thrown (must not crash the daemon — Principle 9).
    */
   pushTranscript(agentId: string, chunk: string, offset: number): void {
@@ -302,6 +319,12 @@ export class OperatorIpcServer {
         return this.control.transcriptTail(
           requireString(params, 'agentId'),
         ) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.reviewContext:
+        // Stage 13 R-A — the on-demand Review-view context (diff + criteria + refs). A daemon-side READ
+        // off the control surface; degrades to a named state, never throws to the view (Principle 9).
+        return (await this.control.reviewContext(
+          requireString(params, 'reviewId'),
+        )) as unknown as WirePayload;
       default:
         return assertNever(method);
     }
@@ -327,6 +350,9 @@ export class OperatorIpcServer {
       ...(typeof draftIn.reviewVerdict === 'string'
         ? { reviewVerdict: requireReviewVerdict(draftIn, 'reviewVerdict') }
         : {}),
+      ...(typeof draftIn.reviewContextFingerprint === 'string'
+        ? { reviewContextFingerprint: requireString(draftIn, 'reviewContextFingerprint') }
+        : {}),
     };
     const mail = this.openMail(this.projectId);
     try {
@@ -340,7 +366,7 @@ export class OperatorIpcServer {
         );
       }
       if (draft.type === MAIL_REVIEW_RESPONSE) {
-        return this.handleReviewResponse(mail, found, draft);
+        return await this.handleReviewResponse(mail, found, draft);
       }
       const existing = this.existingIdempotentReply(mail, found, draft);
       if (existing != null) return existing;
@@ -381,11 +407,26 @@ export class OperatorIpcServer {
     return existing;
   }
 
-  private handleReviewResponse(
+  private existingIdempotentReviewReply(
+    mail: MailStore,
+    answered: DeliveredMail,
+    draft: ReplyDraft,
+  ): DeliveredMail | undefined {
+    const existing = this.existingIdempotentReply(mail, answered, draft);
+    if (existing == null) return undefined;
+    if (existing.reviewVerdict !== draft.reviewVerdict) {
+      throw new Error(
+        `operator IPC reply: idempotent retry for mail seq=${answered.seq} changes review verdict.`,
+      );
+    }
+    return existing;
+  }
+
+  private async handleReviewResponse(
     mail: MailStore,
     requestMail: DeliveredMail,
     draft: ReplyDraft,
-  ): DeliveredMail {
+  ): Promise<DeliveredMail> {
     if (requestMail.type !== MAIL_REVIEW_REQUEST) {
       throw new Error(
         `operator IPC review reply: mail seq=${requestMail.seq} is '${requestMail.type}', ` +
@@ -405,6 +446,12 @@ export class OperatorIpcServer {
         `operator IPC review reply: malformed review_request mail seq=${requestMail.seq}.`,
       );
     }
+    const existing = this.existingIdempotentReviewReply(mail, requestMail, draft);
+    if (existing != null) return existing;
+
+    const context = await this.control.reviewContext(reviewId);
+    assertReviewEvidenceReady(context);
+
     const reviews = this.openReview(this.projectId);
     try {
       const request = reviews.getReviewRequestById(reviewId);
@@ -413,6 +460,40 @@ export class OperatorIpcServer {
           `operator IPC review reply: review_request mail seq=${requestMail.seq} has no ` +
             'matching review.requested row.',
         );
+      }
+      if (
+        context.kind === 'resolved' &&
+        (context.target !== request.target ||
+          context.branch !== request.branch ||
+          context.scope !== request.scope)
+      ) {
+        throw new Error(
+          `operator IPC review reply: review evidence for '${reviewId}' does not match the ` +
+            'durable review request.',
+        );
+      }
+      if (
+        context.kind === 'resolved' &&
+        draft.reviewContextFingerprint !== context.evidenceFingerprint
+      ) {
+        throw new Error(
+          `operator IPC review reply: review evidence fingerprint for '${reviewId}' is stale ` +
+            'or missing; reload the Review view before submitting a verdict.',
+        );
+      }
+      if (request.specRef.kind !== 'criteria') {
+        throw new Error(
+          `operator IPC review reply: review '${reviewId}' has no locked acceptance criteria ` +
+            'recorded on the durable review request.',
+        );
+      }
+      if (context.kind === 'resolved' && context.criteria.kind === 'criteria') {
+        if (context.criteria.specRef !== request.specRef.ref) {
+          throw new Error(
+            `operator IPC review reply: locked acceptance criteria for '${reviewId}' do not ` +
+              'match the durable review request.',
+          );
+        }
       }
       return mail.replyWithReviewVerdict(
         requestMail,

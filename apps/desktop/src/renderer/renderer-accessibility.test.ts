@@ -6,6 +6,62 @@ import { describe, expect, it } from 'vitest';
 const here = dirname(fileURLToPath(import.meta.url));
 const rendererSource = readFileSync(join(here, 'renderer.ts'), 'utf8');
 const htmlSource = readFileSync(join(here, 'index.html'), 'utf8');
+const appShellSource = readFileSync(join(here, '../main/app-shell.ts'), 'utf8');
+
+describe('review view', () => {
+  it('review view markup has required structural elements', () => {
+    expect(htmlSource).toContain('id="view-review"');
+    expect(htmlSource).toContain('aria-label="Pending reviews"');
+    expect(htmlSource).toContain('aria-label="Review diff"');
+    expect(htmlSource).toContain('id="review-badge"');
+  });
+
+  it('renderer wires review bridge methods', () => {
+    expect(rendererSource).toContain('bridge.reviewSelect(');
+    expect(rendererSource).toContain('bridge.reviewSubmitVerdict(');
+    expect(rendererSource).toContain('bridge.reviewBeginVerdict(');
+    expect(rendererSource).toContain('bridge.reviewUpdateComposerBody(');
+    expect(rendererSource).toContain('bridge.reviewCancelVerdict(');
+    expect(rendererSource).toContain('bridge.reviewRefresh(');
+  });
+
+  it('review list rows use ARIA option roles', () => {
+    expect(rendererSource).toContain('role="option"');
+    expect(rendererSource).toContain("aria-selected=\"${isSelected ? 'true' : 'false'}\"");
+  });
+
+  it('review view has activate hook', () => {
+    expect(rendererSource).toContain("if (view === 'review' && latestReviewState != null)");
+    expect(rendererSource).toContain('renderReview(latestReviewState)');
+  });
+
+  it('verdict buttons have aria-labels', () => {
+    expect(rendererSource).toContain('aria-label="Submit PASS verdict"');
+    expect(rendererSource).toContain('aria-label="Submit ISSUES verdict"');
+  });
+
+  it('gates the verdict-composer detail rebuild to preserve the caret while typing (review #316)', () => {
+    // The detail pane must NOT be unconditionally rebuilt: typing in #review-composer-body would
+    // recreate the focused textarea and drop the caret. renderReview gates the rebuild on the pure
+    // reviewDetailNeedsRebuild helper, keyed on whether that textarea is focused.
+    expect(rendererSource).toContain('reviewDetailNeedsRebuild(');
+    expect(rendererSource).toContain("document.activeElement?.id === 'review-composer-body'");
+  });
+
+  it('points operator-facing conductor guidance at the shipped co-mcp binary', () => {
+    expect(rendererSource).toContain('start \\`co-mcp serve <projectId>\\`');
+    expect(appShellSource).toContain('start `co-mcp serve <projectId>`');
+    expect(rendererSource).not.toContain('start \\`co serve\\`');
+    expect(appShellSource).not.toContain('start `co serve`');
+  });
+
+  it('only exposes verdict actions when the Review view has diff and locked criteria evidence', () => {
+    expect(rendererSource).toContain(
+      "const canSubmitVerdict = diff.kind === 'patch' && criteria.kind === 'criteria';",
+    );
+    expect(rendererSource).toContain('!composer.active && canSubmitVerdict');
+  });
+});
 
 describe('agents console', () => {
   it('agents view markup has required structural elements', () => {
@@ -68,10 +124,13 @@ describe('renderer accessibility states', () => {
     expect(nonApprovalBranch).not.toContain('data-recipient="${esc(selected.sender)}"');
   });
 
-  it('opens review requests as structured review responses', () => {
-    expect(rendererSource).toContain('mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE');
-    expect(rendererSource).toContain('data-type="${replyType}"');
-    expect(rendererSource).toContain("'Submit verdict'");
+  it('keeps review_request verdicts out of the Mail composer', () => {
+    expect(rendererSource).toContain("if (mailType === MAIL_REVIEW_REQUEST) return 'review'");
+    expect(rendererSource).not.toContain('mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE');
+    expect(rendererSource).not.toContain("'Submit verdict'");
+    expect(rendererSource).toContain('Open in Reviews');
+    expect(rendererSource).toContain('data-review-id="${esc(reviewId)}"');
+    expect(rendererSource).toContain('bridge.reviewSelect(reviewId)');
   });
 
   it('populates the agent-bus selector from dashboard agents', () => {

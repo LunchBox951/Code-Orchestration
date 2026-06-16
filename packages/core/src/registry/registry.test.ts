@@ -72,6 +72,8 @@ describe('ProjectRegistry — register (AC-L0-1)', () => {
       expect(id).toMatch(UUID_RE);
       expect(reg.dataDirFor(id)).toBe(projectDataDir(id));
       expect(reg.resolve('/repos/alpha')).toBe(id);
+      expect(reg.pathFor(id)).toBe('/repos/alpha');
+      expect(reg.pathFor('unknown-project')).toBeUndefined();
     } finally {
       reg.close();
     }

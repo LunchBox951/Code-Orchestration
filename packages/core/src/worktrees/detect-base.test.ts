@@ -8,6 +8,7 @@ import {
   detectBaseRef,
   detectCurrentBranchTarget,
   detectIntegrationTarget,
+  defaultGitRawReader,
   resolveRefSha,
   type GitReader,
 } from './detect-base.js';
@@ -210,5 +211,40 @@ describe('AC-L3-1 — detectBaseRef over REAL repos (default read-only git)', ()
       detectBaseRef(repo);
       resolveRefSha(repo, 'main');
     });
+  });
+
+  it('raw git reader preserves trailing whitespace in diff output for Review rendering', () => {
+    const repo = makeRepo('main');
+    git(repo, 'checkout', '-q', '-b', 'feature');
+    writeFileSync(join(repo, 'README.md'), 'hello  \n');
+    git(repo, 'add', 'README.md');
+    git(repo, 'commit', '-m', 'change with trailing spaces');
+
+    const patch = defaultGitRawReader(repo, ['diff', 'main...feature']);
+
+    expect(patch).not.toBeNull();
+    expect(patch).toContain('+hello  \n');
+    expect(patch).not.toContain('+hello\n');
+  });
+
+  it('raw git reader returns review diffs larger than Node execFileSync default buffer', () => {
+    const repo = makeRepo('main');
+    git(repo, 'checkout', '-q', '-b', 'feature');
+    const line = `${'x'.repeat(120)}\n`;
+    writeFileSync(join(repo, 'README.md'), line.repeat(12_000));
+    git(repo, 'add', 'README.md');
+    git(repo, 'commit', '-m', 'large review diff');
+
+    const patch = defaultGitRawReader(repo, [
+      'diff',
+      '--no-ext-diff',
+      '--no-color',
+      'main...feature',
+    ]);
+
+    expect(patch).not.toBeNull();
+    expect(patch!.length).toBeGreaterThan(1024 * 1024);
+    expect(patch).toContain('diff --git');
+    expect(patch).toContain(`+${'x'.repeat(120)}`);
   });
 });

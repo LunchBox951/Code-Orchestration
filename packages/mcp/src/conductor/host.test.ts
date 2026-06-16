@@ -1,5 +1,5 @@
 /**
- * [sandbox] coverage for the `[host-live]` cadence runner + the `co serve` wiring (host.ts). Over
+ * [sandbox] coverage for the `[host-live]` cadence runner + the `co-mcp serve` wiring (host.ts). Over
  * `FakePty` + a CONTROLLABLE scheduler (NOT real timers, NEVER a real provider binary), this proves:
  *   - `ConductorHostRunner.start()` recovers + arms the cadence and returns the live set;
  *   - each scheduler beat drives exactly one `daemon.tick()` and reports its outcome;
@@ -637,7 +637,7 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     scheduler.fire();
     await flush();
 
-    expect(spy).toHaveBeenCalledWith('[co serve] tick error:', expect.any(Error));
+    expect(spy).toHaveBeenCalledWith('[co-mcp serve] tick error:', expect.any(Error));
     spy.mockRestore();
     await runner.stop();
   });
@@ -709,5 +709,9 @@ describe('serveConductor — wires the full stack over injected seams (no real b
 
   it('runServeConductor fails loud on a missing project id', async () => {
     await expect(runServeConductor([])).rejects.toThrow(/project id is required/i);
+  });
+
+  it('runServeConductor fails loud on an unknown project id', async () => {
+    await expect(runServeConductor(['missing-project-id'])).rejects.toThrow(/unknown project id/i);
   });
 });

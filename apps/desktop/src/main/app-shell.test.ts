@@ -12,7 +12,7 @@ import type {
   TranscriptTail,
 } from '@co/core';
 import type { ProjectId } from '@co/core';
-import { projectDataDir } from '@co/core';
+import { MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE, OPERATOR, projectDataDir } from '@co/core';
 import { operatorIpcSocketPath } from '@co/mcp';
 import type { OperatorIpcClient } from '@co/mcp';
 
@@ -402,7 +402,7 @@ describe('createAppShell — mail VM bridge wiring', () => {
     );
   });
 
-  it('submits review_request replies with a structured review verdict', async () => {
+  it('does not submit review_request replies through the Mail view', async () => {
     const reviewRequest = {
       ...ACTION_MAIL,
       type: 'review_request',
@@ -429,16 +429,29 @@ describe('createAppShell — mail VM bridge wiring', () => {
     shell.mail.updateComposerField('body', 'ISSUES\nneeds tests');
     await shell.mail.submitReply();
 
-    await vi.waitFor(() => {
-      expect(client.reply).toHaveBeenCalledWith(
-        { seq: reviewRequest.seq, recipient: '@operator' },
-        expect.objectContaining({
-          type: 'review_response',
-          reviewVerdict: 'ISSUES',
-          body: 'ISSUES\nneeds tests',
-        }),
-      );
+    expect(client.reply).not.toHaveBeenCalled();
+  });
+
+  it('renders review_request mail as a route to the Review view', () => {
+    const reviewRequest = {
+      ...ACTION_MAIL,
+      type: MAIL_REVIEW_REQUEST,
+      subject: 'Review merge',
+    } as DeliveredMail;
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+      inboxReader: () => [reviewRequest],
+      outboxReader: () => [],
     });
+
+    shell.refreshMail();
+    shell.mail.selectMail(reviewRequest.seq);
+
+    expect(shell.mail.state.selected?.renderedBody).toContain('Open the Reviews view');
+    expect(shell.mail.state.selected?.renderedBody).not.toContain('> Submit PASS or ISSUES.');
   });
 
   it('refreshes mail after informational markRead succeeds', async () => {
@@ -476,6 +489,86 @@ describe('createAppShell — mail VM bridge wiring', () => {
         }),
       );
     });
+  });
+});
+
+describe('createAppShell — review VM bridge wiring', () => {
+  const REVIEW_MAIL = {
+    seq: 77,
+    recipient: OPERATOR,
+    sender: 'lead-1',
+    type: MAIL_REVIEW_REQUEST,
+    subject: 'Review merge',
+    body: 'Please review this branch.',
+    ts: 1700000000000,
+    idempotencyKey: 'review-request:rev-shell',
+    resolved: false,
+  } as DeliveredMail;
+
+  const REVIEW_CONTEXT = {
+    kind: 'resolved',
+    reviewId: 'rev-shell',
+    branch: 'co/review-shell',
+    target: 'main',
+    scope: 'merge',
+    evidenceFingerprint: 'sha256:review-shell',
+    diff: { kind: 'patch', patch: '@@ -1 +1 @@\n-old\n+new' },
+    criteria: {
+      kind: 'criteria',
+      specRef: 'spec:task-review-shell#locked',
+      criteria: [{ text: 'change is reviewable', verify: 'pnpm test' }],
+    },
+  } as const;
+
+  it('selects a review, fetches context, and submits PASS through operator IPC', async () => {
+    let inbox: readonly DeliveredMail[] = [REVIEW_MAIL];
+    const client = {
+      ...makeClient(),
+      reviewContext: vi.fn().mockResolvedValue(REVIEW_CONTEXT),
+      reply: vi.fn().mockImplementation(async () => {
+        inbox = [{ ...REVIEW_MAIL, resolved: true } as DeliveredMail];
+      }),
+    } as unknown as OperatorIpcClient;
+    const onReviewState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => inbox,
+      outboxReader: () => [],
+      onReviewState,
+    });
+
+    expect(shell.reviewRefresh().pending).toEqual([
+      expect.objectContaining({ reviewId: 'rev-shell', seq: REVIEW_MAIL.seq }),
+    ]);
+    expect(shell.reviewSelect('rev-shell').context).toEqual({ status: 'loading' });
+    expect(client.reviewContext).toHaveBeenCalledWith('rev-shell');
+
+    await vi.waitFor(() => {
+      expect(onReviewState.mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({
+          context: { status: 'loaded', value: REVIEW_CONTEXT },
+        }),
+      );
+    });
+
+    shell.reviewBeginVerdict('PASS');
+    shell.reviewUpdateComposerBody('looks good');
+    const state = await shell.reviewSubmitVerdict();
+
+    expect(client.reply).toHaveBeenCalledWith(
+      { seq: REVIEW_MAIL.seq, recipient: OPERATOR },
+      expect.objectContaining({
+        type: MAIL_REVIEW_RESPONSE,
+        reviewVerdict: 'PASS',
+        reviewContextFingerprint: 'sha256:review-shell',
+        body: 'PASS\nlooks good',
+      }),
+    );
+    expect(state.pending).toEqual([]);
+    expect(state.composer.active).toBe(false);
   });
 });
 

@@ -165,8 +165,8 @@ function resolvePrMergeBaseSha(repoCwd: string, into: string, branch: string): s
  * requires a non-empty reason. Renders the four-section house-style PR description from the structured
  * intent via `renderPrMessage` (provider-deterministic — Principle 3). Enacts per repo mode:
  * contributor and owner create a PR via `gh pr create`; offline refuses loud (Principle 9).
- * Contributor additionally probes host conventions (minimal Phase C probe — the rich parse is
- * deferred to L9).
+ * Contributor additionally probes host conventions (minimal Phase C probe; a richer host-convention
+ * parser remains future work).
  *
  * All `gh`/git I/O is behind injected seams — `pnpm test` performs NO real network operations.
  * The handler loud-fails if the mount did not inject the review or worktree store (Principle 9).

@@ -11,6 +11,7 @@ import {
   requireMailType,
   requireNavView,
   requireNonEmptyString,
+  requireReviewVerdict,
   requireSteer,
 } from './ipc-guards.js';
 
@@ -71,6 +72,8 @@ async function createWindow(): Promise<void> {
     onMailError: (message) => sendToRenderer('mail:error', message),
     onLimitsCostState: (state) => sendToRenderer('limitsCost:state', state),
     onAgentsConsoleState: (state) => sendToRenderer('agentsConsole:state', state),
+    onReviewState: (state) => sendToRenderer('review:state', state),
+    onReviewError: (message) => sendToRenderer('review:error', message),
   });
 
   mainWindow = new BrowserWindow({
@@ -136,6 +139,9 @@ function requireReplyDraft(value: unknown): ReplyDraft {
       : {}),
     ...(draft['reviewVerdict'] === 'PASS' || draft['reviewVerdict'] === 'ISSUES'
       ? { reviewVerdict: draft['reviewVerdict'] }
+      : {}),
+    ...(typeof draft['reviewContextFingerprint'] === 'string'
+      ? { reviewContextFingerprint: draft['reviewContextFingerprint'] }
       : {}),
   };
 }
@@ -330,6 +336,32 @@ ipcMain.handle('agents:steer', async (_event, agentId: unknown, steer: unknown) 
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, error: msg };
   }
+});
+
+// ── Review IPC channels ─────────────────────────────────────────────────────
+
+ipcMain.handle('review:select', (_event, reviewId: unknown) => {
+  return shell?.reviewSelect(requireNonEmptyString(reviewId, 'reviewId')) ?? null;
+});
+
+ipcMain.handle('review:beginVerdict', (_event, verdict: unknown) => {
+  return shell?.reviewBeginVerdict(requireReviewVerdict(verdict)) ?? null;
+});
+
+ipcMain.handle('review:updateComposerBody', (_event, text: unknown) => {
+  return shell?.reviewUpdateComposerBody(requireString(text, 'composer body')) ?? null;
+});
+
+ipcMain.handle('review:cancelVerdict', () => {
+  return shell?.reviewCancelVerdict() ?? null;
+});
+
+ipcMain.handle('review:submitVerdict', async () => {
+  return (await shell?.reviewSubmitVerdict()) ?? null;
+});
+
+ipcMain.handle('review:refresh', () => {
+  return shell?.reviewRefresh() ?? null;
 });
 
 app.whenReady().then(openWindow).catch(handleStartupFailure);

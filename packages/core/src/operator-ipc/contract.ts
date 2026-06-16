@@ -16,6 +16,7 @@ import type { ApprovalDecision, DeliveredMail } from '../mail/events.js';
 import type { ReplyDraft } from '../mail/mail-store.js';
 import type { Steer } from '../pty/steer.js';
 import type { LiveObservabilitySnapshot, ObservabilitySnapshot } from '../doctor/observability.js';
+import type { Criterion } from '../specs/criteria-schema.js';
 
 /**
  * The JSON-RPC method names the operator-IPC wire speaks. Server + client agree on these — a single
@@ -44,6 +45,8 @@ export const OPERATOR_IPC_METHODS = {
   markRead: 'markRead',
   /** Fetch a hosted agent's bounded transcript tail (most-recent pane bytes) on demand. */
   transcript: 'transcript',
+  /** Fetch everything the in-app Review view needs for a pending human review (diff + criteria + refs). */
+  reviewContext: 'reviewContext',
 } as const;
 
 /** The set of operator-IPC request method names. */
@@ -117,6 +120,8 @@ export interface OperatorIpcSurface {
   markRead(recipient: string, seq: number): Promise<DeliveredMail>;
   /** Fetch `agentId`'s bounded transcript tail (most-recent pane bytes; `''` if none/not hosted). */
   transcript(agentId: string): Promise<TranscriptTail>;
+  /** Resolve `reviewId`'s review context (diff + criteria + branch/target/scope). DEGRADES EXPLICITLY. */
+  reviewContext(reviewId: string): Promise<ReviewContext>;
 }
 
 /**
@@ -153,6 +158,46 @@ export interface TranscriptTail {
   readonly offset: number;
   readonly tail: string;
 }
+
+/**
+ * The on-demand `reviewContext` ({@link OPERATOR_IPC_METHODS.reviewContext}) result — everything the
+ * in-app Review view needs for a pending HUMAN review. DEGRADES EXPLICITLY (never blank — Principle 9):
+ * a missing review, a missing worktree, an unresolved spec, and a down conductor each surface a NAMED
+ * state the view renders. PINNED public shape — ReviewVM (R-B) and the renderer (R-C) consume it; do
+ * not rename fields.
+ */
+export type ReviewContext =
+  | ReviewContextResolved
+  | { readonly kind: 'not-found'; readonly reviewId: string }
+  | { readonly kind: 'conductor-down'; readonly reviewId: string };
+
+/** The fully-resolved context: the request's branch/target/scope ⊕ a diff half ⊕ a criteria half. */
+export interface ReviewContextResolved {
+  readonly kind: 'resolved';
+  readonly reviewId: string;
+  /** Fingerprint of the exact diff/criteria/finish evidence the operator reviewed. */
+  readonly evidenceFingerprint: string;
+  /** The source branch under review. */
+  readonly branch: string;
+  /** The merge target the diff is computed against (`git diff target...branch`). */
+  readonly target: string;
+  /** The review scope label (e.g. `'pr_merge'`). */
+  readonly scope: string;
+  /** The unified diff, or an explicit unavailable marker (never a silent `''` on failure). */
+  readonly diff: ReviewDiff;
+  /** The source's acceptance criteria, or the explicit no-locked-spec marker. */
+  readonly criteria: ReviewCriteria;
+}
+
+/** The diff half: the patch text (possibly `''` = no changes), or a NAMED reason it is unavailable. */
+export type ReviewDiff =
+  | { readonly kind: 'patch'; readonly patch: string }
+  | { readonly kind: 'unavailable'; readonly reason: 'worktree-missing' | 'git-failed' };
+
+/** The criteria half: the resolved AC ref + criteria, or the explicit no-locked-spec marker. */
+export type ReviewCriteria =
+  | { readonly kind: 'criteria'; readonly specRef: string; readonly criteria: readonly Criterion[] }
+  | { readonly kind: 'no-locked-spec' };
 
 /** Why the live overlay is unavailable in a degraded (static) read. One reason for v1. */
 export type OperatorUnavailableReason = 'conductor-not-running';

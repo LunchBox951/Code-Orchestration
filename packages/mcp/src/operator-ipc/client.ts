@@ -32,6 +32,7 @@ import {
   type OperatorUnavailableReason,
   type ProjectId,
   type ReplyDraft,
+  type ReviewContext,
   type Steer,
   type TranscriptTail,
 } from '@co/core';
@@ -147,6 +148,13 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     return (await this.call(OPERATOR_IPC_METHODS.transcript, {
       agentId,
     })) as unknown as TranscriptTail;
+  }
+
+  /** Stage 13 R-A — resolve `reviewId`'s review context on demand (mirrors {@link transcript}). */
+  async reviewContext(reviewId: string): Promise<ReviewContext> {
+    return (await this.call(OPERATOR_IPC_METHODS.reviewContext, {
+      reviewId,
+    })) as unknown as ReviewContext;
   }
 
   /** Subscribe to the per-tick `tick` push; returns an unsubscribe fn. */
@@ -281,7 +289,7 @@ export class ConductorUnavailableError extends Error {
 export interface OperatorIpcClientDeps {
   /** The project whose static rollup backs a degraded read. */
   readonly projectId: ProjectId;
-  /** The operator-IPC socket path (where `co serve` listens). */
+  /** The operator-IPC socket path (where `co-mcp serve <projectId>` listens). */
   readonly socketPath: string;
   /** Connect seam (default: {@link OperatorIpcConnection.connect}). Injectable for tests. */
   readonly connect?: (socketPath: string) => Promise<OperatorIpcConnection>;
@@ -416,6 +424,24 @@ export class OperatorIpcClient {
     return { agentId, offset: 0, tail: '' };
   }
 
+  /**
+   * Stage 13 R-A — resolve `reviewId`'s review context for the in-app Review view. DEGRADES EXACTLY
+   * like {@link transcript} (Principle 9 / MNR #3): with NO socket / on a connection drop it returns
+   * the explicit `{ kind: 'conductor-down', reviewId }` state (never hangs, never throws); an
+   * UNEXPECTED daemon fault is surfaced to `onError` (not masked as "down") while STILL degrading.
+   */
+  async reviewContext(reviewId: string): Promise<ReviewContext> {
+    const connection = await this.ensureConnection();
+    if (connection != null) {
+      try {
+        return await connection.reviewContext(reviewId);
+      } catch (error) {
+        if (this.connection != null) this.report(error);
+      }
+    }
+    return { kind: 'conductor-down', reviewId };
+  }
+
   /** Subscribe to the per-tick push; survives reconnects. Returns an unsubscribe fn. */
   onTick(listener: (tick: OperatorIpcTick) => void): () => void {
     this.tickListeners.add(listener);
@@ -446,7 +472,7 @@ export class OperatorIpcClient {
     const connection = await this.ensureConnection();
     if (connection == null) {
       throw new ConductorUnavailableError(
-        'operator IPC: the Conductor is not running — control and mail writes need `co serve`.',
+        'operator IPC: the Conductor is not running — control and mail writes need `co-mcp serve <projectId>`.',
       );
     }
     try {

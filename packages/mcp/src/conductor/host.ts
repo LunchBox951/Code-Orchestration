@@ -1,6 +1,6 @@
 /**
- * L7-LOOP (Stage 10 · P1) — the `[host-live]` runner + the `co serve` operator launch (the thin glue
- * over the deterministic {@link ConductorDaemon}).
+ * L7-LOOP (Stage 10 · P1) — the `[host-live]` runner + the `co-mcp serve` operator launch (the thin
+ * glue over the deterministic {@link ConductorDaemon}).
  *
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  * THIS IS THE ONLY `[host-live]` CODE IN THE PHASE. The daemon core (daemon.ts) is the HARD,
@@ -11,8 +11,8 @@
  * scoped provider MCP paths; direct `serveConductor` callers must inject `makeTransport` or hit the
  * fail-loud default seam.
  *
- * REGISTERS ZERO AGENT MCP TOOLS (Principle 4 + D4). `co serve` is an OPERATOR-only launch (blessed
- * name, D6); it is exposed from the `@co/mcp` package (the daemon needs the MCP SDK, and `@co/cli`
+ * REGISTERS ZERO AGENT MCP TOOLS (Principle 4 + D4). `co-mcp serve` is an OPERATOR-only launch; it is
+ * exposed from the `@co/mcp` package (the daemon needs the MCP SDK, and `@co/cli`
  * depends only on `@co/core`), via the `co-mcp serve` bin mode — NOT by adding a `@co/mcp` dependency
  * to `@co/cli`.
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -21,8 +21,11 @@ import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
 import {
   NodePtyHost,
+  defaultGitRawReader,
   openRegistry,
+  openReviewStore,
   openSessionStore,
+  openSpecStore,
   openWorktreeStore,
   queryLiveObservability,
   QUIET_WINDOW_MS,
@@ -31,6 +34,7 @@ import {
   type MarkStuck,
   type ProjectId,
   type PtyHost,
+  type ReviewContext,
   type RunningAgent,
   type TranscriptTail,
 } from '@co/core';
@@ -44,6 +48,7 @@ import { EngineReviewerSpawnGate } from './reviewer-gate.js';
 import { type CoMcpPaths } from './placement-launch.js';
 import { createSocketBridgeTransportPair } from './real-transport.js';
 import { defaultCoMcpPaths, type HostLaunchPathOptions } from './host-launch-paths.js';
+import { resolveReviewContext } from './review-context.js';
 import { OperatorIpcServer, operatorIpcSocketPath } from '../operator-ipc/server.js';
 
 // ── The cadence scheduler seam (injected so the loop is FakePty-unit-testable) ──────────────────────
@@ -92,6 +97,12 @@ export interface ConductorControlSurface {
   readonly onTranscript: (
     listener: (agentId: string, chunk: string, offset: number) => void,
   ) => () => void;
+  /**
+   * Stage 13 R-A (reviewContext) — resolve `reviewId`'s review context (diff + criteria + refs) for the
+   * in-app Review view. Async (it shells `git diff`); a READ — opens no long-lived handles, records NO
+   * events. DEGRADES EXPLICITLY (Principle 9) — every failure mode is a named state, never a throw.
+   */
+  readonly reviewContext: (reviewId: string) => Promise<ReviewContext>;
 }
 
 // ── The cadence runner ──────────────────────────────────────────────────────────────────────────────
@@ -202,12 +213,12 @@ export class ConductorHostRunner {
       this.onTick?.(outcome);
     } catch (error) {
       if (this.onError != null) this.onError(error);
-      else console.error('[co serve] tick error:', error);
+      else console.error('[co-mcp serve] tick error:', error);
     }
   }
 }
 
-// ── The real host-live seams (`co serve`) ───────────────────────────────────────────────────────────
+// ── The real host-live seams (`co-mcp serve`) ───────────────────────────────────────────────────────
 
 /** A real monotonic ms clock for the engine/reconcile/daemon time seams (never the wall clock). */
 export const monotonicNowMs = (): number => performance.now();
@@ -239,7 +250,7 @@ function reportServeControlDiagnostic(
   if (onError != null) {
     onError(error);
   } else {
-    console.error('[co serve] control error:', error);
+    console.error('[co-mcp serve] control error:', error);
   }
 }
 
@@ -250,7 +261,7 @@ function reportServeControlDiagnostic(
  */
 export const hostLiveTransportRequired: (identity?: HostedIdentity) => TransportPair = () => {
   throw new Error(
-    '[host-live] co serve: binding the co MCP surface to a real pty-bound provider transport is the ' +
+    '[host-live] co-mcp serve: binding the co MCP surface to a real pty-bound provider transport is the ' +
       'operator handoff — inject `makeTransport` with the live pty transport pair. The deterministic ' +
       'daemon core + its sandbox tests are complete; this is the only un-wired host-live seam.',
   );
@@ -308,12 +319,12 @@ export interface ServeConductorOptions {
    * provided, a live `EngineReviewerSpawnGate` is wired into every hosted session's ctx so `co_merge`
    * calls can trigger live reviewer spawns. When absent, no spawn gate is wired (headless path).
    *
-   * [host-live] The real binary paths bind here at `co serve` time. For sandbox proofs, inject
+   * [host-live] The real binary paths bind here at `co-mcp serve` time. For sandbox proofs, inject
    * fixture paths (clone `TEST_MCP_PATHS` from `placement-launch.test.ts`).
    */
   readonly coMcpPaths?: CoMcpPaths;
   /**
-   * Stage 11 P1 (OP-IPC) — when set, `co serve` also starts the cross-process operator-IPC server
+   * Stage 11 P1 (OP-IPC) — when set, `co-mcp serve` also starts the cross-process operator-IPC server
    * (the desktop-app binding) on a Unix socket under the project data dir: it forwards a fresh
    * snapshot to a connected app each tick and is closed on runner stop. Absent ⇒ no IPC server (every
    * existing caller/test is unchanged). The socket is operator-uid-only by OS permission; the server
@@ -322,7 +333,7 @@ export interface ServeConductorOptions {
   readonly operatorIpc?: OperatorIpcServeConfig;
 }
 
-/** Stage 11 P1 (OP-IPC) — configuration for the operator-IPC server `co serve` starts (see above). */
+/** Stage 11 P1 (OP-IPC) — configuration for the operator-IPC server `co-mcp serve` starts. */
 export interface OperatorIpcServeConfig {
   /** Override the socket path. Default: {@link operatorIpcSocketPath} under the project data dir. */
   readonly socketPath?: string;
@@ -335,7 +346,7 @@ export interface OperatorIpcServeConfig {
  * panes + cadence), the watchdog {@link ReconcileLoop} (running set = the agents this process hosts;
  * the live OS liveness probe is the `[host-live]` handoff, so it skips), the deterministic
  * {@link ConductorDaemon}, and the {@link ConductorHostRunner}. Every genuinely host-live seam is
- * injectable; the defaults let `co serve` recover + idle-tick and fail loud ONLY when it must bind a
+ * injectable; the defaults let `co-mcp serve` recover + idle-tick and fail loud ONLY when it must bind a
  * real provider transport. Returns the (started) runner.
  */
 export async function serveConductor(opts: ServeConductorOptions): Promise<ConductorHostRunner> {
@@ -368,7 +379,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       const socketPath = opts.coMcpPaths.coMcpBridgeSocketPath?.(isolatedHomeDir, identity.agent);
       if (socketPath == null) {
         throw new Error(
-          '[host-live] co serve: coMcpPaths.coMcpBridgeSocketPath is required when co serve owns ' +
+          '[host-live] co-mcp serve: coMcpPaths.coMcpBridgeSocketPath is required when co-mcp serve owns ' +
             'the real provider MCP bridge transport.',
         );
       }
@@ -398,12 +409,12 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     onStopUnhosted: (agent) =>
       reportServeControlDiagnostic(
         opts.onError,
-        new Error(`co serve: stop requested for '${agent}' but it is not hosted.`),
+        new Error(`co-mcp serve: stop requested for '${agent}' but it is not hosted.`),
       ),
     onStopError: (agent, error) =>
       reportServeControlDiagnostic(
         opts.onError,
-        new Error(`co serve: stop teardown for '${agent}' failed: ${errorMessage(error)}`),
+        new Error(`co-mcp serve: stop teardown for '${agent}' failed: ${errorMessage(error)}`),
       ),
   });
   const liveProvider = new EngineLiveStateProvider({ engine, projectId, router });
@@ -418,6 +429,19 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       engine.onTranscript((pid, agent, chunk, offset) => {
         if (pid === projectId) listener(agent, chunk, offset);
       }),
+    // Stage 13 R-A (reviewContext) — resolve the in-app Review view's context daemon-side: a pure READ
+    // off the project's durable stores ⊕ a real `git diff`. Each store is opened PER CALL and closed by
+    // the resolver (mirrors the operator-IPC server's openMail per-write pattern — no leaked handles).
+    reviewContext: (reviewId) =>
+      resolveReviewContext(
+        {
+          openReviews: () => openReviewStore(projectId),
+          openSpecs: () => openSpecStore(projectId),
+          openWorktrees: () => openWorktreeStore(projectId),
+          gitReader: defaultGitRawReader,
+        },
+        reviewId,
+      ),
   };
 
   // Stage 11 P1 (OP-IPC) — the cross-process operator-IPC server, started alongside the cadence
@@ -480,7 +504,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
           } catch (error) {
             reportServeControlDiagnostic(
               opts.onError,
-              new Error(`co serve: onTick hook failed: ${errorMessage(error)}`),
+              new Error(`co-mcp serve: onTick hook failed: ${errorMessage(error)}`),
             );
           }
           if (ipcServer != null) ipcServer.pushTick(control.observe());
@@ -514,7 +538,9 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       } catch (cleanupError) {
         reportServeControlDiagnostic(
           opts.onError,
-          new Error(`co serve: cleanup after failed startup failed: ${errorMessage(cleanupError)}`),
+          new Error(
+            `co-mcp serve: cleanup after failed startup failed: ${errorMessage(cleanupError)}`,
+          ),
         );
       }
       throw error;
@@ -523,7 +549,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   return runner;
 }
 
-/** Default host-live MCP path resolution for `co serve`, including provider auth materialization. */
+/** Default host-live MCP path resolution for `co-mcp serve`, including provider auth materialization. */
 export function defaultServeCoMcpPaths(
   opts: Omit<HostLaunchPathOptions, 'includeProviderAuth'> = {},
 ): CoMcpPaths {
@@ -539,9 +565,19 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   const projectId = argv[0];
   if (projectId == null || projectId.trim().length === 0) {
     throw new Error(
-      'co serve: a project id is required (usage: `co-mcp serve <projectId>`). The Conductor drives ' +
+      'co-mcp serve: a project id is required (usage: `co-mcp serve <projectId>`). The Conductor drives ' +
         'one project’s live set.',
     );
+  }
+  const registry = openRegistry();
+  try {
+    if (registry.pathFor(projectId) == null) {
+      throw new Error(
+        `co-mcp serve: unknown project id '${projectId}'. Pass the registered project id for this repo.`,
+      );
+    }
+  } finally {
+    registry.close();
   }
   const runner = await serveConductor({
     projectId,
@@ -549,14 +585,14 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
     // Stage 11 P1 (OP-IPC) — start the cross-process operator-IPC server so the desktop app can
     // observe + control + write over the Unix socket (operator-uid-only). Errors go to stderr.
     operatorIpc: {
-      onError: (err) => console.error('[co serve] operator-ipc error:', err),
+      onError: (err) => console.error('[co-mcp serve] operator-ipc error:', err),
     },
     onTick: (o) =>
       console.error(
-        `[co serve] tick ${o.tick} candidates=${o.candidateCount} ` +
+        `[co-mcp serve] tick ${o.tick} candidates=${o.candidateCount} ` +
           `cold=${o.coldCandidates.length} selected=${o.selected ?? '-'} cadence=${o.cadenceFired}`,
       ),
-    onError: (err) => console.error('[co serve] tick error:', err),
+    onError: (err) => console.error('[co-mcp serve] tick error:', err),
   });
   const shutdown = (): void => {
     void runner
@@ -565,7 +601,7 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
         process.exitCode = 0;
       })
       .catch((error) => {
-        console.error('[co serve] shutdown error:', error);
+        console.error('[co-mcp serve] shutdown error:', error);
         process.exitCode = 1;
       });
   };
