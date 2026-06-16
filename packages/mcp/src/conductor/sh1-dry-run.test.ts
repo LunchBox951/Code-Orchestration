@@ -721,12 +721,21 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
   } finally {
     cfg.close();
   }
-  const merge1 = (await callToolJson(leadClient, 'co_merge', {
-    branch: TOY_BRANCH,
-    into: INTEGRATION,
-    intent: { summary: 'land the SH-1 dry-run toy change' },
-    spec_ref: `spec:${TASK_ID}#locked`,
-  })) as { review_pending?: boolean; merged?: boolean };
+  // Drive merge #1 INSIDE a daemon-selected lead turn (mirrors the worker's co_finish tick): un-skip the
+  // lead so the daemon selects it (warm, with the actionable worker_done now outstanding) and run co_merge
+  // DURING the driven turn — so even the merge transitions are daemon-sequenced, never directly invoked.
+  // Capture the tool JSON via an outer `let` (driveDaemonTurn returns the tick outcome, not the result).
+  skipped.delete(LEAD);
+  let merge1: { review_pending?: boolean; merged?: boolean } | undefined;
+  await driveDaemonTurn(daemon, clock, qw, projectId, LEAD, agentPanes, 410000, async () => {
+    merge1 = (await callToolJson(leadClient, 'co_merge', {
+      branch: TOY_BRANCH,
+      into: INTEGRATION,
+      intent: { summary: 'land the SH-1 dry-run toy change' },
+      spec_ref: `spec:${TASK_ID}#locked`,
+    })) as { review_pending?: boolean; merged?: boolean };
+  });
+  if (merge1 == null) throw new Error('sh1-dry-run: co_merge (#1) returned no result');
   const mergePending = merge1.review_pending === true && merge1.merged !== true;
   const reviewRequest = reviews(projectId).getReviewRequest(INTEGRATION, TOY_BRANCH);
   const reviewRequested = reviewRequest != null;
@@ -738,12 +747,16 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     reviews(projectId).getVerdict(INTEGRATION, TOY_BRANCH)?.verdict === 'PASS';
 
   // ── Phase 4 — the lead re-runs co_merge; the recorded PASS lets the gated merge LAND on main. ──────
+  // Daemon-driven too: the lead is still warm (the review_response PASS is now outstanding for it), so the
+  // daemon selects + drives it while the scripted co_merge lands the merge DURING the driven turn.
   const integrationHeadBefore = git(repo, 'rev-parse', INTEGRATION);
-  await callToolOrThrow(leadClient, 'co_merge', {
-    branch: TOY_BRANCH,
-    into: INTEGRATION,
-    intent: { summary: 'land the SH-1 dry-run toy change' },
-    spec_ref: `spec:${TASK_ID}#locked`,
+  await driveDaemonTurn(daemon, clock, qw, projectId, LEAD, agentPanes, 510000, async () => {
+    await callToolOrThrow(leadClient, 'co_merge', {
+      branch: TOY_BRANCH,
+      into: INTEGRATION,
+      intent: { summary: 'land the SH-1 dry-run toy change' },
+      spec_ref: `spec:${TASK_ID}#locked`,
+    });
   });
   const mergeCommitSha = git(repo, 'rev-parse', INTEGRATION);
   const merged = mergeCommitSha !== integrationHeadBefore;
@@ -849,6 +862,10 @@ async function operatorPassViaIpc(projectId: ProjectId, reviewId: string): Promi
     },
     transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
     onTranscript: () => () => {},
+    // These store factories need no afterEach tracking: resolveReviewContext OWNS each store's lifecycle —
+    // it opens one per read and closes it in a `finally` before the next read (open→read→close, see
+    // review-context.ts), so no handle leaks past the call. This mirrors how host.ts wires the production
+    // openers; routing through the tracked reviews()/specs()/worktrees() openers here would double-close.
     reviewContext: (rid) =>
       resolveReviewContext(
         {
@@ -999,7 +1016,8 @@ describe('SH-1 proof harness — PROVES THE FULL LOOP (cold-start → slings →
 
     // (6) The final tick deterministically reconstructs the post-merge live set: every agent was released,
     //     so nothing remains to drive (no spurious turn), and it cold-starts nothing (the root is done).
-    expect(result.finalTick.tick).toBe(5);
+    //     It is tick 7: cold-start, 2 slings, finish, + the 2 now-daemon-driven merges, then this one.
+    expect(result.finalTick.tick).toBe(7);
     expect(result.finalTick.selected).toBeNull();
     expect(result.finalTick.candidateCount).toBe(0);
     expect(result.finalTick.coldStarted).toEqual([]);
