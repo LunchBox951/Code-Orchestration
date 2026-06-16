@@ -425,6 +425,19 @@ describe('co_mail_send / co_mail_inbox — send round-trips into the recipient i
     ).toThrow();
   });
 
+  it('co_mail_send schema rejects stray review_verdict on otherwise sendable mail', () => {
+    const send = buildCoreRegistry().get('co_mail_send');
+    expect(() =>
+      send?.inputSchema.parse({
+        to: 'lead-1',
+        type: MAIL_CHAT,
+        subject: 'hello',
+        body: 'world',
+        review_verdict: 'PASS',
+      }),
+    ).toThrow();
+  });
+
   it('a reply to a mail NOT in the caller inbox fails loud', async () => {
     const { reg, ctx, close } = setup();
     try {

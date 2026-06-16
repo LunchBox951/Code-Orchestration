@@ -216,16 +216,25 @@ describe('createCoMcpServer — tool-list parity', () => {
     const defaultClient = await connect({ contextFactory: () => ctx });
 
     const defaultSling = (await defaultClient.listTools()).tools.find((t) => t.name === 'co_sling');
+    const defaultSend = (await defaultClient.listTools()).tools.find(
+      (t) => t.name === 'co_mail_send',
+    );
     expect(defaultSling?.outputSchema).toBeUndefined();
+    expect(defaultSend?.outputSchema).toBeUndefined();
 
     const outputClient = await connect({
       contextFactory: () => ctx,
       advertiseOutputSchema: true,
     });
-    const sling = (await outputClient.listTools()).tools.find((t) => t.name === 'co_sling');
+    const outputTools = (await outputClient.listTools()).tools;
+    const sling = outputTools.find((t) => t.name === 'co_sling');
+    const send = outputTools.find((t) => t.name === 'co_mail_send');
 
     const outputProps = (
       sling?.outputSchema as { properties?: Record<string, unknown> } | undefined
+    )?.properties;
+    const sendOutputProps = (
+      send?.outputSchema as { properties?: Record<string, unknown> } | undefined
     )?.properties;
     const placementProps = (
       outputProps?.placement as { properties?: Record<string, unknown> } | undefined
@@ -233,6 +242,7 @@ describe('createCoMcpServer — tool-list parity', () => {
     const waitingProps = (
       outputProps?.waiting as { properties?: Record<string, unknown> } | undefined
     )?.properties;
+    expect(sendOutputProps).not.toHaveProperty('review_verdict');
     expect(placementProps).not.toHaveProperty('account');
     expect(waitingProps).not.toHaveProperty('maxed_accounts');
     expect(waitingProps).not.toHaveProperty('unavailable_accounts');

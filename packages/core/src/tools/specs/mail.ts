@@ -7,7 +7,7 @@ import {
   type DeliveredMail,
 } from '../../mail/events.js';
 import type { ToolSpec } from '../registry.js';
-import { deliveredMailSchema, toWireMail, type WireMail } from './wire.js';
+import { deliveredMailSchema, toWireMail } from './wire.js';
 
 // The caller's identity is ALWAYS `ctx.agent` — a tool never takes `from`/`sender` as input
 // (an agent can only act as itself). Every input field carries a .describe() (Principle 5 —
@@ -24,45 +24,49 @@ const SENDABLE_MAIL_TYPES = MAIL_TYPES.filter(
     type !== MAIL_WORKER_DONE && type !== MAIL_REVIEW_REQUEST && type !== MAIL_REVIEW_RESPONSE,
 ) as [SendableMailType, ...SendableMailType[]];
 
-const mailSendInput = z.object({
-  to: z
-    .string()
-    .optional()
-    .describe(
-      'Recipient agent id (or @operator). Required for a NEW message; ignored when replying ' +
-        '(the recipient is derived from the answered mail).',
-    ),
-  type: z
-    .enum(SENDABLE_MAIL_TYPES)
-    .describe('The mail type (a registered MailType, e.g. clarify_request, escalation, chat).'),
-  subject: z.string().describe('Short subject line for the message.'),
-  body: z.string().describe('The message body (free-form prose).'),
-  in_reply_to: z
-    .number()
-    .int()
-    .nonnegative()
-    .optional()
-    .describe('The seq of a mail in YOUR inbox to thread this reply onto; omit to start anew.'),
-  idempotency_key: z
-    .string()
-    .optional()
-    .describe('Optional dedupe key; a repeat send with the same key collapses to the first.'),
-  decision: z
-    .enum(['approve', 'decline'])
-    .optional()
-    .describe('Only for an approval_response reply: approve or decline the requested action.'),
-});
+const mailSendInput = z
+  .object({
+    to: z
+      .string()
+      .optional()
+      .describe(
+        'Recipient agent id (or @operator). Required for a NEW message; ignored when replying ' +
+          '(the recipient is derived from the answered mail).',
+      ),
+    type: z
+      .enum(SENDABLE_MAIL_TYPES)
+      .describe('The mail type (a registered MailType, e.g. clarify_request, escalation, chat).'),
+    subject: z.string().describe('Short subject line for the message.'),
+    body: z.string().describe('The message body (free-form prose).'),
+    in_reply_to: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('The seq of a mail in YOUR inbox to thread this reply onto; omit to start anew.'),
+    idempotency_key: z
+      .string()
+      .optional()
+      .describe('Optional dedupe key; a repeat send with the same key collapses to the first.'),
+    decision: z
+      .enum(['approve', 'decline'])
+      .optional()
+      .describe('Only for an approval_response reply: approve or decline the requested action.'),
+  })
+  .strict();
 type MailSendInput = z.infer<typeof mailSendInput>;
+const mailSendOutput = deliveredMailSchema.omit({ review_verdict: true });
+type MailSendOutput = z.infer<typeof mailSendOutput>;
 
-export const mailSendTool: ToolSpec<MailSendInput, WireMail> = {
+export const mailSendTool: ToolSpec<MailSendInput, MailSendOutput> = {
   name: 'co_mail_send',
   title: 'Send mail',
   description:
     'Send a new typed message to another agent, or thread a reply onto a mail in your inbox. ' +
     'You always send as yourself; replies derive recipient and threading from the answered mail.',
   inputSchema: mailSendInput,
-  outputSchema: deliveredMailSchema,
-  handler: (ctx, input): WireMail => {
+  outputSchema: mailSendOutput,
+  handler: (ctx, input): MailSendOutput => {
     let delivered: DeliveredMail;
     if (input.in_reply_to != null) {
       // Reply: load the answered mail from the CALLER's inbox (the caller must be its
