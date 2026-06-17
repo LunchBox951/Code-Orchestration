@@ -218,6 +218,7 @@ export class DaemonSupervisor {
     this.projectId = projectId;
     this.socketPath = this.socketPathFor(projectId);
     this.retries = 0;
+    this._detail = null;
     const generation = ++this.generation;
     const run = this.doStart(generation).finally(() => {
       if (this.starting === run) this.starting = null;
@@ -238,6 +239,7 @@ export class DaemonSupervisor {
     const child = this.child;
     this.child = null;
     if (child != null) this.killChild(child);
+    this._detail = null;
     this.setStatus('stopped');
     await Promise.resolve();
   }
@@ -249,6 +251,7 @@ export class DaemonSupervisor {
   }
 
   private async doStart(generation: number): Promise<DaemonStatus> {
+    this._detail = null;
     this.setStatus('starting');
     const child = this.spawnChild(generation);
     const healthy = await this.waitForHealth(child, generation);

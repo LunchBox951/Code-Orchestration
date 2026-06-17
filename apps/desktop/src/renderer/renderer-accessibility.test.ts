@@ -231,6 +231,7 @@ describe('source read surface (P-ON4) + demo-spec launch (P-ON3)', () => {
     // Source is pulled on view activation (no push channel) and via the Refresh/Retry controls. The
     // activation hook lives in module-scope activateView, so it calls the bridge via window.coShell.
     expect(rendererSource).toContain("if (view === 'source')");
+    expect(rendererSource).toContain("if (isViewActive('source')) refreshSource();");
     expect(rendererSource).toContain('.sourceRefresh(');
     expect(rendererSource).toContain("getElementById('view-source')");
     expect(rendererSource).toContain('data-source-action="retry"');
@@ -238,6 +239,7 @@ describe('source read surface (P-ON4) + demo-spec launch (P-ON3)', () => {
 
   it('renderer renders explicit no-project + error states for Source (Principle 9)', () => {
     expect(rendererSource).toContain("state.kind === 'no-project'");
+    expect(rendererSource).toContain("state.kind === 'path-missing'");
     expect(rendererSource).toContain("state.kind === 'error'");
     expect(rendererSource).toContain('No project open');
     expect(rendererSource).toContain('aria-label="Retry loading branches"');
@@ -255,6 +257,7 @@ describe('source read surface (P-ON4) + demo-spec launch (P-ON3)', () => {
   it('bridge + IPC expose sourceRefresh + startFromDemoSpec end-to-end', () => {
     expect(preloadSource).toContain('sourceRefresh(');
     expect(preloadSource).toContain("'source:refresh'");
+    expect(preloadSource).toContain("'path-missing'");
     expect(preloadSource).toContain('startFromDemoSpec(');
     expect(preloadSource).toContain("'session:startFromDemoSpec'");
     expect(mainSource).toContain("ipcMain.handle('source:refresh'");

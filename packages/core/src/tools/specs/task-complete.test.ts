@@ -98,9 +98,11 @@ describe('co_task_complete — records task.completed when every phase has merge
       task_id: 'task-tc-1',
     })) as Record<string, unknown>;
     expect(result['task_id']).toBe('task-tc-1');
+    expect(result['completed_ts']).toEqual(expect.any(Number));
 
     const stored = ctx.plans!.getPlan('task-tc-1');
     expect(stored?.completedTs).toBeGreaterThan(0);
+    expect(result['completed_ts']).toBe(stored?.completedTs);
   });
 });
 

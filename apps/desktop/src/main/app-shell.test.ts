@@ -173,6 +173,29 @@ describe('createAppShell — view-model bridge wiring', () => {
     expect(client.close).toHaveBeenCalledOnce();
   });
 
+  it('close() marks the shell closed and unsubscribes even when client.close rejects', async () => {
+    const unsubscribeTranscript = vi.fn();
+    const client = {
+      ...makeClient(),
+      onTranscript: vi.fn().mockReturnValue(unsubscribeTranscript),
+      close: vi.fn().mockRejectedValue(new Error('close failed')),
+    } as unknown as OperatorIpcClient;
+    const onNavState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onNavState,
+    });
+
+    await expect(shell.close()).rejects.toThrow('close failed');
+
+    expect(unsubscribeTranscript).toHaveBeenCalledOnce();
+    shell.nav.navigate('mail');
+    expect(onNavState).not.toHaveBeenCalled();
+    await expect(shell.close()).resolves.toBeUndefined();
+  });
+
   it('transitions to live when conductor is up', async () => {
     const client = makeClient(liveObs);
     const shell = createAppShell({ projectId: FAKE_PROJECT_ID, socketPath: FAKE_SOCKET, client });

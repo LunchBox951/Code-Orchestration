@@ -467,7 +467,7 @@ ipcMain.handle('session:startFromDemoSpec', () =>
 // (no daemon, no operator-IPC verb) that consumes `@co/core`'s `listBranches`. `currentProject?.path`
 // is the open repo's absolute path; `null` ⇒ the visible "no project open" state.
 ipcMain.handle('source:refresh', () =>
-  resolveSourceState({ currentProjectPath: () => controller.currentProject?.path ?? null }),
+  resolveSourceState({ currentProject: () => controller.currentProject }),
 );
 
 // ── Project + Daemon IPC channels ────────────────────────────────────────────

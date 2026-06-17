@@ -130,13 +130,19 @@ export function restoreInteractionState(
 // and exported makes it directly unit-testable, exactly like `reviewDetailSignature`.
 
 /** Minimal structural view of the MailRow fields `renderMailDetail` reads. */
+export interface MailCardView {
+  readonly title: string;
+  readonly fields: readonly { readonly label: string; readonly value: string }[];
+  readonly body: string;
+}
+
 export interface MailRowView {
   readonly seq: number;
   readonly type: string;
   readonly subject: string;
   readonly sender: string;
   readonly recipient: string;
-  readonly renderedBody: string;
+  readonly card: MailCardView;
   readonly kind: string;
   /** Drives the "Open in Reviews" review-id link, so a change must rebuild. */
   readonly idempotencyKey?: string;
@@ -159,6 +165,14 @@ export interface MailStateView {
  */
 export type MailDetailSignature = RenderSignature;
 
+function cardSignature(card: MailCardView): string {
+  return JSON.stringify({
+    title: card.title,
+    fields: card.fields.map((field) => [field.label, field.value]),
+    body: card.body,
+  });
+}
+
 export function mailDetailSignature(state: MailStateView): MailDetailSignature {
   const { selected, composer } = state;
   return {
@@ -167,7 +181,7 @@ export function mailDetailSignature(state: MailStateView): MailDetailSignature {
     subject: selected?.subject ?? '',
     sender: selected?.sender ?? '',
     recipient: selected?.recipient ?? '',
-    renderedBody: selected?.renderedBody ?? '',
+    card: selected != null ? cardSignature(selected.card) : '',
     kind: selected?.kind ?? '',
     idempotencyKey: selected?.idempotencyKey ?? '',
     composerActive: composer.active,

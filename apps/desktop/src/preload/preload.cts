@@ -29,6 +29,7 @@ interface BranchInfo {
 type SourceState =
   | { kind: 'branches'; branches: readonly BranchInfo[] }
   | { kind: 'no-project' }
+  | { kind: 'path-missing'; projectId: string; message: string }
   | { kind: 'error'; message: string };
 
 interface ContextBridgeLike {

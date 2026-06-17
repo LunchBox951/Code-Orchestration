@@ -10,30 +10,46 @@ import { listBranches as defaultListBranches } from '@co/core';
  * source of truth rather than re-implementing a git read in the adapter.
  *
  * Every effect is an injectable seam (the current-project path lookup + the branch reader) so the whole
- * resolve path is exercised HEADLESSLY — no real Electron, no real git. The three outcomes are NAMED,
- * visible states (Principle 9 — no-silent-failures): a branch list, "no project open", or a surfaced
- * error (not a repo / git unavailable). The renderer renders each explicitly.
+ * resolve path is exercised HEADLESSLY — no real Electron, no real git. The outcomes are NAMED,
+ * visible states (Principle 9 — no-silent-failures): a branch list, "no project open", open-project
+ * path-missing, or a surfaced error (not a repo / git unavailable). The renderer renders each
+ * explicitly.
  */
 export type SourceState =
   | { readonly kind: 'branches'; readonly branches: readonly BranchInfo[] }
   | { readonly kind: 'no-project' }
+  | { readonly kind: 'path-missing'; readonly projectId: string; readonly message: string }
   | { readonly kind: 'error'; readonly message: string };
 
+export type SourceProjectState = {
+  readonly projectId: string;
+  readonly path: string | null;
+} | null;
+
 export interface SourceIpcDeps {
-  /** The absolute path of the open repo, or `null` when no project is open. Production: `controller.currentProject?.path`. */
-  readonly currentProjectPath: () => string | null;
+  /** The open project identity/path, or `null` when no project is open. Production: `controller.currentProject`. */
+  readonly currentProject: () => SourceProjectState;
   /** Read a repo's local branches. Injectable for tests; production: `@co/core` {@link listBranches}. */
   readonly listBranches?: (repoCwd: string) => readonly BranchInfo[];
 }
 
 /**
- * Resolve the Source view state for `source:refresh`. No project open ⇒ `no-project` (the reader is
- * never called); otherwise read the branches, mapping a thrown reader error (not a git repo / git
- * unavailable) to a visible `error` state instead of letting it escape as an unhandled rejection.
+ * Resolve the Source view state for `source:refresh`. No project open ⇒ `no-project`; an open project
+ * without a path ⇒ `path-missing` (the reader is never called in either case); otherwise read the
+ * branches, mapping a thrown reader error (not a git repo / git unavailable) to a visible `error`
+ * state instead of letting it escape as an unhandled rejection.
  */
 export function resolveSourceState(deps: SourceIpcDeps): SourceState {
-  const repoCwd = deps.currentProjectPath();
-  if (repoCwd == null) return { kind: 'no-project' };
+  const project = deps.currentProject();
+  if (project == null) return { kind: 'no-project' };
+  const repoCwd = project.path;
+  if (repoCwd == null) {
+    return {
+      kind: 'path-missing',
+      projectId: project.projectId,
+      message: `Project ${project.projectId} is open, but its repository path is unavailable.`,
+    };
+  }
   const read = deps.listBranches ?? defaultListBranches;
   try {
     return { kind: 'branches', branches: read(repoCwd) };

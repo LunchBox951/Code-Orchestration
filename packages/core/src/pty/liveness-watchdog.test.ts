@@ -192,6 +192,24 @@ describe('classifyLiveness — silent-stop (must-not-regress: NOT a reap, NOT mi
     expect(v.break).toBeUndefined(); // saw the completion verb ⇒ no silent-stop
   });
 
+  it('a yielded turn with a failed co_finish call is still silent-stop', () => {
+    const pane = new FakePty().spawn(SPEC);
+    const rec = record(pane);
+    for (let t = 0; t <= 1000; t += 250) rec.emitAt(t, SPINNER);
+    rec.trace.push({ kind: 'mcp_start', at: 800, verb: 'co_finish' });
+    rec.trace.push({ kind: 'mcp_end', at: 900, verb: 'co_finish', ok: false });
+
+    const v = classifyLiveness(
+      { trace: rec.trace, exited: rec.exited(), pidAlive: true, turnActive: false },
+      1000 + QUIET_WINDOW_MS + 1,
+      { provider: 'claude' },
+    );
+
+    expect(v.liveness).toBe('alive');
+    expect(v.break?.kind).toBe('silent_stop');
+    expect(v.break?.triggerId).toBe(SILENT_STOP_TRIGGER);
+  });
+
   it("a previous turn's co_finish does not mask a later yielded turn with no completion", () => {
     const trace: DetectorEvent[] = [
       { kind: 'bytes', at: 0, bytes: 12 },

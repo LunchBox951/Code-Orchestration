@@ -37,14 +37,14 @@ These are the top-level conditions that, all met, *are* v1.
 
 - `SH-1` ◐ `co` runs a real multi-phase change on the **`co` repo itself** start to finish
   (spec-lock → phases → worktrees → review gate → gated merge) with zero prototype involvement.
-  **In-sandbox autonomy is proven:** the Stage 14 `sh1-dry-run` harness
+  **In-sandbox autonomy is proven:** the Stage 15 `sh1-dry-run` harness
   (`packages/mcp/src/conductor/sh1-dry-run.test.ts`) drives the FULL loop — operator-start → daemon
-  cold-start → draft/brainstorm/lock → slings → finish → gated review-merge round-trip → land — over
-  `FakePty` with **zero hand-stitched transitions**; Stage 13 landed the operator
-  [`sh1-runbook.md`](sh1-runbook.md) + the desktop Review view the live gate uses. A green `FakePty`
-  run is **not** host-live evidence (Principle 9), so `☑` stays gated on the operator's live
-  host-run against the real `claude`/`codex` binaries (deferral catalogued in
-  [`v1-handoff.md`](v1-handoff.md)).
+  cold-start → draft/brainstorm/lock → `co_phase_update` / `co_task_complete` multi-phase advance →
+  slings → finish → gated review-merge round-trip → land — over `FakePty` with **zero hand-stitched
+  transitions** after lock; Stage 13 landed the operator [`sh1-runbook.md`](sh1-runbook.md) + the
+  desktop Review view the live gate uses. A green `FakePty` run is **not** host-live evidence
+  (Principle 9), and the current operator-only `co_spec_lock` manual gap means a rehearsal can collect
+  evidence but cannot flip `SH-1` to `☑` until the lock path is app/public-CLI driven.
 - `SH-2` ☐ `co` reads all of its own state/specs/plans from its **own program-data** — no `.co/`
   dependency remains (Principle 12 — `pristine-repo`; Principle 14 — `recoverable`). L6b lands the
   **records half**: specs (`draft→locked→archived`, queryable via `co_spec_get`) and plans
@@ -57,8 +57,10 @@ These are the top-level conditions that, all met, *are* v1.
   (Offline-mode)** repo with no remote — proving Principle 5 (`self-describing`) and that GitHub is
   never a hard dependency.
 - `SH-5` ☐ Every hard gate holds under self-hosting: no raw `git push` / `gh pr create` /
-  `gh pr merge` path exists; only gated `co merge` / `co push` / `co pr-merge` reach
-  `master`/remote/PR (Principle 7 — `gated-by-default`).
+  `gh pr merge` path exists; only gated MCP tools (`co_merge`, `co_push`, `co_pr_merge`) reach
+  `master`/remote/PR (Principle 7 — `gated-by-default`). Stage 15 adds the widened static source /
+  scripts / workflow guard and the live deny step in [`host-proof.md`](host-proof.md); `☑` still
+  requires a real provider-pane denial artifact.
 
 ## B. The two surfaces (P1, P2, P3, P15)
 
@@ -201,7 +203,9 @@ These are the top-level conditions that, all met, *are* v1.
 - `MC-2` ◐ **One core, thin adapters** — the CLI, MCP server, and app import the same core; logic
   cannot drift (Principle 4, `MCP-TOOLS`). L2 ships the public core tool surface plus a mechanical
   lint guard that prevents `cli`/`mcp` from deep-importing core internals or opening stores directly.
-  Remaining: carry the same rule through the app once it leaves its parked stub.
+  Stage 15 carries the same adapter shape through the desktop app: main-process reads and IPC routes
+  use `@co/core` / `@co/mcp` instead of duplicating domain logic. Remaining: host-live enforcement
+  that every real provider session reaches the same MCP surface with no raw fallback.
 - `MC-3` ◐ The protocol is **self-describing**: `orient` teaches workflow, schemas teach syntax,
   native project memory teaches the repo, the locator maps unfamiliar code (Principle 5). L2 ships
   workflow-only, role-scoped `co_orient` and schema-publication through MCP, with drift tests

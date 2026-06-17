@@ -187,6 +187,36 @@ describe('daemon-supervisor — start() health-wait', () => {
     expect(spawn.current().kill).toHaveBeenCalled(); // the unhealthy child is reaped
     expect(supervisor.detail).toMatch(/did not become healthy/i);
   });
+
+  it('clears stale failure detail before a retry emits "starting"', async () => {
+    const spawn = recordingSpawn();
+    const details: Array<{ status: DaemonStatus; detail: string | null }> = [];
+    const probeHealth = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const supervisor = createDaemonSupervisor({
+      spawn: spawn.seam,
+      probeHealth,
+      delay: immediateDelay,
+      healthTimeoutMs: 10,
+      healthIntervalMs: 10,
+      onStatus: (status) => details.push({ status, detail: supervisor.detail }),
+    });
+
+    await supervisor.start(PROJECT_ID);
+    expect(supervisor.status).toBe('failed');
+    expect(supervisor.detail).toMatch(/did not become healthy/i);
+
+    await supervisor.start(PROJECT_ID);
+
+    expect(details).toEqual([
+      { status: 'starting', detail: null },
+      {
+        status: 'failed',
+        detail: 'Conductor daemon did not become healthy within 10ms.',
+      },
+      { status: 'starting', detail: null },
+      { status: 'healthy', detail: null },
+    ]);
+  });
 });
 
 // ── Bounded restart on unexpected crash ──────────────────────────────────────────────────────────────
@@ -313,6 +343,28 @@ describe('daemon-supervisor — stop()', () => {
 
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     expect(supervisor.status).toBe('stopped');
+  });
+
+  it('clears stale failure detail before reporting "stopped"', async () => {
+    const spawn = recordingSpawn();
+    const details: Array<{ status: DaemonStatus; detail: string | null }> = [];
+    const supervisor = createDaemonSupervisor({
+      spawn: spawn.seam,
+      probeHealth: vi.fn().mockResolvedValue(false),
+      delay: immediateDelay,
+      healthTimeoutMs: 10,
+      healthIntervalMs: 10,
+      onStatus: (status) => details.push({ status, detail: supervisor.detail }),
+    });
+
+    await supervisor.start(PROJECT_ID);
+    expect(supervisor.status).toBe('failed');
+    expect(supervisor.detail).toMatch(/did not become healthy/i);
+
+    await supervisor.stop();
+
+    expect(details.at(-1)).toEqual({ status: 'stopped', detail: null });
+    expect(supervisor.detail).toBeNull();
   });
 
   it('prevents a restart — a subsequent exit after stop() does NOT respawn', async () => {

@@ -145,6 +145,29 @@ the durable audit trail, but the live session projection is cleaned up when the 
 engine. The proof does not reuse a stable agent id because stale mail from prior runs must never
 satisfy the current nonce.
 
+## SH-5 companion check — blocked raw publish deny
+
+The `host-proof` command proves host-live routing/steer/recovery. `SH-5` also needs a real-provider
+permission-hook capture because a green sandbox block-list is not host-live evidence. Run this
+companion check once per provider during the same live session:
+
+1. Open a real hosted Claude/Codex pane in the Agents Console.
+2. Ask the agent to attempt an inert raw publish command and **do not approve any permission prompt**:
+
+   ```sh
+   git push --dry-run origin HEAD:refs/heads/co-sh5-deny-proof
+   ```
+
+3. Capture the pane transcript showing the command was denied before execution by the hosted
+   permission hook / nudge path.
+4. Confirm the remote has no `co-sh5-deny-proof` ref and attach both artifacts to the acceptance
+   evidence.
+
+Pass condition: the raw command fails closed in the provider pane before any git network mutation.
+Failure condition: the command reaches git execution, asks for human approval instead of being
+blocked, or mutates a remote ref. Repeat with a `gh pr create` / `gh pr merge` shape if the run's
+scope specifically exercises PR publication.
+
 ## Running `co-mcp serve <projectId>` and observing the daemon
 
 For a longer-running proof:

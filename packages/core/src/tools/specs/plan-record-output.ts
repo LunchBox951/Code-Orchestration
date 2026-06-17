@@ -30,6 +30,11 @@ export const planRecordOutputSchema = z.object({
   phases: z.array(phaseRecordOutputSchema).describe('The phase DAG nodes.'),
   drafted_ts: z.number().int().describe('The event timestamp when this plan was drafted.'),
   replan_count: z.number().int().describe('Number of plan.replanned events applied.'),
+  completed_ts: z
+    .number()
+    .int()
+    .optional()
+    .describe('The event timestamp when this task was completed, if closed.'),
 });
 export type PlanRecordOutput = z.infer<typeof planRecordOutputSchema>;
 
@@ -57,5 +62,6 @@ export function planRecordToOutput(rec: PlanRecord): PlanRecordOutput {
     })),
     drafted_ts: rec.draftedTs,
     replan_count: rec.replanCount,
+    ...(rec.completedTs != null ? { completed_ts: rec.completedTs } : {}),
   };
 }

@@ -924,6 +924,30 @@ describe('ConductorEngine — P1b classifies post-turn liveness and yields warm'
     expect(outcome.liveness?.liveness).toBe('alive');
     expect(outcome.liveness?.break).toBeUndefined(); // a finished turn carries no break
   });
+
+  it('a turn with a failed completion verb remains silent-stop eligible', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty, clock, qw } = makeEngine({
+      mcpActivity: (_pane, push) => {
+        push({ kind: 'mcp_start', at: 900, verb: 'co_finish' } satisfies DetectorEvent);
+        push({ kind: 'mcp_end', at: 1000, verb: 'co_finish', ok: false } satisfies DetectorEvent);
+        return () => {};
+      },
+    });
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    const item = outstandingItem(projectId, 'impl-x');
+    const turnP = engine.runOneTurn(hosted, item);
+    await driveTurnToIdle(pane, item, clock, qw);
+    const outcome = await turnP;
+
+    expect(outcome.turnEnd?.sawCompletionVerb).toBe(false);
+    expect(outcome.liveness?.liveness).toBe('alive');
+    expect(outcome.liveness?.break?.kind).toBe('silent_stop');
+  });
 });
 
 // ── P1b: clarify-timeout tick (forwardOnTimeout on expiry) ──────────────────────────────────────

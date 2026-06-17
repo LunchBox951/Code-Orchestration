@@ -31,7 +31,7 @@ describe('resolveSourceState (P-ON4 Source read surface)', () => {
   it('returns the reader branches verbatim and passes the open repo path through', () => {
     const cwdCalls: string[] = [];
     const state = resolveSourceState({
-      currentProjectPath: () => '/repo/co',
+      currentProject: () => ({ projectId: 'pid-source', path: '/repo/co' }),
       listBranches: (repoCwd) => {
         cwdCalls.push(repoCwd);
         return FAKE_BRANCHES;
@@ -45,7 +45,7 @@ describe('resolveSourceState (P-ON4 Source read surface)', () => {
   it('returns no-project when no project is open and never calls the reader', () => {
     let readerCalled = false;
     const state = resolveSourceState({
-      currentProjectPath: () => null,
+      currentProject: () => null,
       listBranches: () => {
         readerCalled = true;
         return [];
@@ -55,9 +55,26 @@ describe('resolveSourceState (P-ON4 Source read surface)', () => {
     expect(readerCalled).toBe(false);
   });
 
+  it('returns path-missing when a project is open but its repo path is unavailable', () => {
+    let readerCalled = false;
+    const state = resolveSourceState({
+      currentProject: () => ({ projectId: 'pid-missing-path', path: null }),
+      listBranches: () => {
+        readerCalled = true;
+        return [];
+      },
+    });
+    expect(state).toEqual({
+      kind: 'path-missing',
+      projectId: 'pid-missing-path',
+      message: 'Project pid-missing-path is open, but its repository path is unavailable.',
+    });
+    expect(readerCalled).toBe(false);
+  });
+
   it('surfaces a thrown reader error as a visible error state (Principle 9)', () => {
     const state = resolveSourceState({
-      currentProjectPath: () => '/not-a-repo',
+      currentProject: () => ({ projectId: 'pid-not-repo', path: '/not-a-repo' }),
       listBranches: () => {
         throw new Error('co listBranches: not a repository or git is unavailable.');
       },
@@ -70,7 +87,7 @@ describe('resolveSourceState (P-ON4 Source read surface)', () => {
 
   it('returns an empty branch list (not an error) for a repo with zero branches', () => {
     const state = resolveSourceState({
-      currentProjectPath: () => '/empty-repo',
+      currentProject: () => ({ projectId: 'pid-empty', path: '/empty-repo' }),
       listBranches: () => [],
     });
     expect(state).toEqual({ kind: 'branches', branches: [] });

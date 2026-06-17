@@ -501,9 +501,12 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       for (const timer of reviewContextTimers) clearTimeout(timer);
       reviewContextTimers.clear();
       connVm.close();
-      await client.close();
-      ownedStore?.close();
-      ownedDispatchStore?.close();
+      try {
+        await client.close();
+      } finally {
+        ownedStore?.close();
+        ownedDispatchStore?.close();
+      }
     },
   };
 }

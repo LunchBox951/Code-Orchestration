@@ -833,6 +833,7 @@ export class ConductorEngine {
       kind: activity.phase === 'start' ? 'mcp_start' : 'mcp_end',
       at: this.deps.now(),
       verb: activity.tool,
+      ...(activity.phase === 'end' ? { ok: activity.ok } : {}),
     };
     for (const listener of [...listeners]) listener(ev);
   }
@@ -1133,11 +1134,11 @@ function latestByteAt(trace: readonly DetectorEvent[]): number | undefined {
 }
 
 function traceSawCompletionVerb(trace: readonly DetectorEvent[]): boolean {
-  return trace.some(
-    (ev) =>
-      (ev.kind === 'mcp' || ev.kind === 'mcp_start' || ev.kind === 'mcp_end') &&
-      COMPLETION_VERBS.includes(ev.verb),
-  );
+  return trace.some((ev) => {
+    if (ev.kind === 'mcp') return COMPLETION_VERBS.includes(ev.verb);
+    if (ev.kind === 'mcp_end') return COMPLETION_VERBS.includes(ev.verb) && ev.ok !== false;
+    return false;
+  });
 }
 
 function isMcpEvent(ev: DetectorEvent): boolean {

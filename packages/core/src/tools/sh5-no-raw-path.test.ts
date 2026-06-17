@@ -4,9 +4,10 @@
 // `co_merge` / `co_push` / `co_pr_merge` tools reach `master` / the remote / a PR. The RUNTIME
 // block-list (`packages/core/src/permissions/block-list.ts`) blocks such a command if a hosted agent
 // types it; THIS guard is the STATIC complement — a "no fallback exists" proof. It walks product
-// source and fails loud on any raw publish-command CONSTRUCTION outside the sanctioned chokepoint,
-// so a new un-gated `git push` / `gh pr create|merge` cannot be planted in `cli` / `mcp` / a tool /
-// the conductor / the app without turning this test red.
+// command-construction surfaces and fails loud on any raw publish-command CONSTRUCTION outside the
+// sanctioned chokepoints, so a new un-gated `git push` / `gh pr create|merge` cannot be planted in
+// `cli` / `mcp` / a tool / the conductor / the app / package scripts / workflows without turning
+// this test red.
 //
 // Sanctioned (allow-listed) sites — the ONLY product files permitted to construct these commands:
 //   - worktrees/repo-mode.ts          — `CoRepoModeGate.enactPush` / `enactPrMerge` / `enactPublish`,
@@ -17,6 +18,8 @@
 //   - permissions/pane-launch-config.ts — the hosted-pane permission DENY patterns
 //                                        (`Bash(git push*)`, `Bash(gh pr merge*)`, …) — the
 //                                        block-list's deny config.
+//   - .github/workflows/release.yml      — release-tag publishing by the repository's release
+//                                        workflow, outside the self-hosted agent gate.
 //
 // Mirrors the shape of `sh2-no-co-read.test.ts`: a pure comment-stripped detector + a non-vacuous
 // GREEN scan + RED unit tests proving the detector fires on real invocation shapes.
@@ -30,6 +33,7 @@ const here = dirname(fileURLToPath(import.meta.url)); // packages/core/src/tools
 const repoRoot = resolve(here, '../../../../'); // tools → src → core → packages → root
 const packagesRoot = join(repoRoot, 'packages');
 const appsRoot = join(repoRoot, 'apps');
+const githubWorkflowsRoot = join(repoRoot, '.github', 'workflows');
 
 /**
  * The ONLY product source files allowed to construct a raw `git push` / `gh pr create|merge`
@@ -40,16 +44,19 @@ const SANCTIONED: readonly string[] = [
   'packages/core/src/worktrees/repo-mode.ts',
   'packages/core/src/permissions/block-list.ts',
   'packages/core/src/permissions/pane-launch-config.ts',
+  '.github/workflows/release.yml',
 ];
 
-/** Walk a directory recursively, returning every TypeScript-family source path. */
-function walkSource(root: string): string[] {
+const COMMAND_SURFACE_FILE_RE = /\.(?:[cm]?ts|[cm]?js|json|ya?ml)$/u;
+
+/** Walk a directory recursively, returning every file whose basename passes `include`. */
+function walkFiles(root: string, include: (name: string) => boolean): string[] {
   const out: string[] = [];
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (/\.(c|m)?ts$/u.test(entry.name)) out.push(full);
+      else if (include(entry.name)) out.push(full);
     }
   };
   walk(root);
@@ -102,25 +109,48 @@ function sourceRoots(): string[] {
   return roots;
 }
 
-/** Every product (non-test) source file under the packages and apps `src` trees. */
-function productSourceFiles(): string[] {
+/** Every product command-construction surface SH-5 must statically guard. */
+function productCommandSurfaceFiles(): string[] {
   const files: string[] = [];
   for (const srcDir of sourceRoots()) {
-    for (const file of walkSource(srcDir)) {
-      if (!file.endsWith('.test.ts')) files.push(file);
+    for (const file of walkFiles(srcDir, (name) => COMMAND_SURFACE_FILE_RE.test(name))) {
+      if (!/\.test\.[cm]?ts$/u.test(file) && !/\.test\.[cm]?js$/u.test(file)) files.push(file);
     }
   }
-  return files;
+  for (const base of [repoRoot, packagesRoot, appsRoot]) {
+    if (!existsSync(base)) continue;
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
+      if (
+        entry.isFile() &&
+        /^(package\.json|pnpm-workspace\.yaml|eslint\.config\.js)$/u.test(entry.name)
+      ) {
+        files.push(join(base, entry.name));
+      }
+      if (!entry.isDirectory()) continue;
+      const packageJson = join(base, entry.name, 'package.json');
+      if (existsSync(packageJson)) files.push(packageJson);
+      const scriptsDir = join(base, entry.name, 'scripts');
+      if (existsSync(scriptsDir)) {
+        files.push(...walkFiles(scriptsDir, (name) => COMMAND_SURFACE_FILE_RE.test(name)));
+      }
+    }
+  }
+  if (existsSync(githubWorkflowsRoot)) {
+    for (const file of walkFiles(githubWorkflowsRoot, (name) => /\.ya?ml$/u.test(name))) {
+      files.push(file);
+    }
+  }
+  return [...new Set(files)].sort();
 }
 
 // ── GREEN over the real production sources ────────────────────────────────────────────────────────
 
 describe('SH-5 — no un-gated raw git push / gh pr create|merge path in production source', () => {
-  it('is GREEN over all packages/*/src and apps/*/src product files except the sanctioned chokepoint', () => {
+  it('is GREEN over product command surfaces except sanctioned chokepoints', () => {
     const violations: string[] = [];
     let filesScanned = 0;
 
-    for (const file of productSourceFiles()) {
+    for (const file of productCommandSurfaceFiles()) {
       filesScanned += 1;
       if (SANCTIONED.includes(relPosix(file))) continue; // sanctioned gate / block-list rules
       const source = readFileSync(file, 'utf8');
@@ -133,6 +163,15 @@ describe('SH-5 — no un-gated raw git push / gh pr create|merge path in product
     expect(filesScanned).toBeGreaterThan(0);
     // The guard: no raw publish path exists outside the sanctioned chokepoint.
     expect(violations).toEqual([]);
+  });
+
+  it('guards scripts, manifests, and workflows, not just TypeScript source', () => {
+    const rels = productCommandSurfaceFiles().map(relPosix);
+
+    expect(rels).toContain('package.json');
+    expect(rels).toContain('apps/desktop/package.json');
+    expect(rels).toContain('apps/desktop/scripts/copy-renderer-assets.mjs');
+    expect(rels).toContain('.github/workflows/release.yml');
   });
 
   it('keeps the allow-list load-bearing: every sanctioned file exists AND still constructs a raw publish command', () => {

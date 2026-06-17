@@ -2,10 +2,10 @@
 
 ## Goal
 
-Write `docs/cli-reference.md` — a concise operator cheat-sheet for the product `co` CLI. The
-current docs mention individual commands in passing but offer no single place where an operator can
-scan what verbs exist and what each one does. This spec closes that gap with a single small,
-self-contained file.
+Write `docs/architecture/cli-reference.md` — a concise operator cheat-sheet for the product `co`
+CLI. The current docs mention individual commands in passing but offer no complete reference where
+an operator can scan what verbs exist and what each one does. This spec replaces the current
+placeholder with a single small, self-contained file.
 
 ## Context
 
@@ -18,10 +18,10 @@ inline; this file is the companion reference, not a replacement.
 
 ## Scope
 
-**New file only:** `docs/cli-reference.md`
+**Single file only:** `docs/architecture/cli-reference.md`
 
-Do not modify any other file. The CLI reference is additive; nothing else needs to change to satisfy
-this spec.
+Do not modify any other file. The CLI reference replaces the existing placeholder; nothing else
+needs to change to satisfy this spec.
 
 ## What the file must contain
 
@@ -40,14 +40,14 @@ here.
 
 ## Acceptance criteria
 
-- `docs/cli-reference.md` exists and is committed.
+- `docs/architecture/cli-reference.md` exists, is no longer a placeholder, and is committed.
 - Every verb listed in `co help` / `run.ts` HELP_TEXT appears in the reference; no extra verbs are
   invented.
 - Every verb listed in `co-mcp --help` appears in the reference; no extras.
 - The preamble links to `docs/alpha-quickstart.md`.
 - `pnpm format:check` passes for the tracked product tree. Because `docs/` is currently
-  prettier-ignored, the reviewer must also inspect `docs/cli-reference.md` directly for readable
-  Markdown formatting.
+  prettier-ignored, the reviewer must also inspect `docs/architecture/cli-reference.md` directly for
+  readable Markdown formatting.
 - Full 5-command gate green (`pnpm test · pnpm lint · pnpm typecheck · pnpm build ·
   pnpm format:check`).
 

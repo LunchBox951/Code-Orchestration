@@ -63,7 +63,11 @@ const BASE_ROW: MailRowView = {
   subject: 'Re: host proof',
   sender: 'lead-s15',
   recipient: 'impl-s15',
-  renderedBody: 'please run host proof',
+  card: {
+    title: 'Re: host proof',
+    fields: [{ label: 'From', value: 'lead-s15' }],
+    body: 'please run host proof',
+  },
   kind: 'actionable',
 };
 
@@ -96,7 +100,9 @@ describe('mailDetailSignature', () => {
     expect(sig['subject']).toBe('Re: host proof');
     expect(sig['sender']).toBe('lead-s15');
     expect(sig['recipient']).toBe('impl-s15');
-    expect(sig['renderedBody']).toBe('please run host proof');
+    expect(sig['card']).toBe(
+      '{"title":"Re: host proof","fields":[["From","lead-s15"]],"body":"please run host proof"}',
+    );
     expect(sig['kind']).toBe('actionable');
     expect(sig['composerActive']).toBe(true);
     expect(sig['composerPending']).toBe(false);
@@ -136,8 +142,17 @@ describe('multi-tick: typing in the mail composer (GitHub #39)', () => {
     const subjectChanged = mailDetailSignature(
       mailView({ body: 'run', selected: { subject: 'Re: different' } }),
     );
+    const cardChanged = mailDetailSignature(
+      mailView({
+        body: 'run',
+        selected: {
+          card: { ...BASE_ROW.card, body: 'changed card body' },
+        },
+      }),
+    );
     expect(needsRebuild(before, pendingFlipped, true)).toBe(true);
     expect(needsRebuild(before, subjectChanged, true)).toBe(true);
+    expect(needsRebuild(before, cardChanged, true)).toBe(true);
   });
 
   it('DOES rebuild when the composer is not focused, and on first render', () => {

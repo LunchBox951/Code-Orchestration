@@ -51,14 +51,14 @@ already proved.
 
 | v1 `☑` | The live proof (operator-only) | Driver / where | Sandbox already proves |
 |---|---|---|---|
-| **`SH-1`** | The autonomous **multi-phase** change self-drives end to end against real `claude`/`codex` (start → lock → sling → finish → merge → review → PASS → advance → … → land), no manual tool calls. | [`sh1-runbook.md`](sh1-runbook.md) + app on-ramp + §7 PR checklist | `sh1-dry-run` ≥2-phase loop over `FakePty`, zero hand-stitched transitions |
+| **`SH-1`** | The autonomous **multi-phase** change self-drives end to end against real `claude`/`codex` (start → lock → sling → finish → merge → review → PASS → advance → … → land), no ad-hoc operator tool calls. The current `co_spec_lock` manual gap may collect evidence, but it does not flip `SH-1` to `☑`. | [`sh1-runbook.md`](sh1-runbook.md) + app on-ramp + §7 PR checklist | `sh1-dry-run` ≥2-phase loop over `FakePty`, zero hand-stitched transitions |
 | **`SF-1`** | Real `claude`/`codex` reach an authenticated `ready` prompt in a real node-pty; the in-app terminal is legible at the live geometry (#40 PTY width-agreement). | `co-mcp host-proof claude\|codex`; the app console | FakePty startup classify; xterm FitAddon + raw-stream render |
 | **`SF-2`** | A real mid-turn **interrupt actually halts** a live turn (per-provider key verified). | host-proof steer step; app steer controls | byte-written-before-settle (`steerMidTurn`) |
 | **`PV-2`** / `PV-1` | Interactive **subscription auth works for BOTH providers**, and both run real worker turns (**Codex parity** — the load-bearing unknown). | `co doctor --live`; host-proof per provider | spawn/transport seam, provider-neutral dispatch |
 | **`ST-2`** | Crash/restart **recovery against the real daemon** (host-side handoff); zombies reconciled to WAITING. | host-proof SIGKILL → recover; app-supervised daemon restart | `recoverProjectStore` replay; reconcile loop |
 | **`ST-3`** | **Live-stream monitoring** catches a real silent-stop; no silent failures under real traffic. | host-proof; watchdog under live load | watchdog seam-injected silent-stop test |
 | **`SH-4`** | `co` operates on **a real stranger repo**, including a **local-only Offline** one (no remote). | app: choose any repo; [Offline runbook](offline-runbook.md) | offline path in `sh1-dry-run` |
-| **`SH-5`** | A blocked raw command (`git push` / `gh pr create\|merge`) **fails closed in a real provider pane** (`AC-L7-6 [host-live]`). | host-proof; run a blocked cmd in a pane | static source guard + runtime block-list |
+| **`SH-5`** | A blocked raw command (`git push` / `gh pr create\|merge`) **fails closed in a real provider pane** (`AC-L7-6 [host-live]`). | [`host-proof.md`](host-proof.md#sh-5-companion-check--blocked-raw-publish-deny) + app pane capture | static source guard + runtime block-list |
 
 **Also deferred (not a `☑`, but host-only):** the **#40 live PTY width-agreement** — the in-app
 terminal width and the hosted pty width must agree so cursor-addressed redraws land. The renderer
@@ -85,10 +85,13 @@ gap remains: spec lock uses the operator-only `co_spec_lock` MCP path until the 
 
 ## 4. Where `co` (self-hosting) PICKS UP after the live run — the continuation roadmap
 
-Once the live run passes and the operator flips the `§A` markers to `☑` with evidence:
+Once the live run passes and the operator records evidence:
 
-1. **Flip `§A` `SH-1` / `SH-4` / `SH-5` `☑`** (and the `§B–H` `[host-live]` halves) in
-   [`v1-acceptance-criteria.md`](v1-acceptance-criteria.md), linking the captured evidence.
+1. **Flip only the criteria actually discharged by the evidence.** With the current temporary
+   operator `co_spec_lock` gap, keep `SH-1` at `◐` and record the useful host-live evidence as a
+   partial run. Flip `SH-1` to `☑` only after the lock path is in-app or public-CLI driven and the
+   run has no ad-hoc operator tool calls. `SH-4` / `SH-5` may be flipped independently if their live
+   evidence is complete and linked in [`v1-acceptance-criteria.md`](v1-acceptance-criteria.md).
 2. **Gated `dev → main` promotion** — a `release/*` → `main` PR through the review gate (`origin/main`
    is 103 commits behind `dev`).
 3. **`SH-3` prototype-footprint teardown** (the `migration` issue, [`migration.md`](migration.md)) —

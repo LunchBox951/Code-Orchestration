@@ -3,20 +3,26 @@
 The operator-facing **Cockpit** desktop shell. Shell decision: **Electron** (resolved Stage 11;
 see [`docs/research/language-and-stack.md`](../../docs/research/language-and-stack.md)).
 
-## What is built (Stage 12)
+## What is built (Stage 15)
 
 - **6-view nav shell** — header + 224px left rail + main panel, dark oklch palette.
   Nav views: **Dashboard**, **Agents**, **Mail**, **Review**, **Source**, **Cost**.
+- **Project on-ramp** — open a repository/directory from the app; the app registers the project,
+  owns the `co-mcp serve` daemon lifecycle, and surfaces daemon health with Retry.
 - **Dashboard** — live/degraded conductor status, fleet stats, tree, and outstanding actions.
 - **Mail** — operator inbox/outbox, actionable approvals/replies, read-state refresh, and
   daemon-routed writes.
 - **Agents** — live roster, selected-agent transcript tail/backfill, event-driven transcript
-  streaming, and mid-turn steer controls over the daemon-owned IPC path.
+  streaming, mid-turn steer controls, Stop/Unstick controls, and coordinator launch from the bundled
+  demo spec.
 - **Cost** — usage headroom popover and cost rollups from the dispatch store.
-- **Review** and **Source** remain nav stubs this stage.
+- **Review** — pending review requests with diff + locked criteria and PASS/ISSUES verdict
+  submission through operator IPC.
+- **Source** — read-only local branches plus an honest deferred-PR panel.
 - **Main process** (`src/main/`) — Node/Electron context. Imports `@co/core` (static
-  reads) and the P1 `OperatorIpcClient` from `@co/mcp` (live conductor IPC). Creates
-  the `BrowserWindow` and exposes the typed view-model bridge over `ipcMain`.
+  reads), supervises the app-owned `co-mcp serve` child, and uses the P1 `OperatorIpcClient` from
+  `@co/mcp` (live conductor IPC). Creates the `BrowserWindow` and exposes the typed view-model bridge
+  over `ipcMain`.
 - **Preload** (`src/preload/preload.cts`) — `contextBridge` exposes `window.coShell`
   (`CoShellBridge`) to the renderer; `contextIsolation: true`, `nodeIntegration: false`,
   `sandbox: true`.
@@ -30,9 +36,12 @@ see [`docs/research/language-and-stack.md`](../../docs/research/language-and-sta
 # From the repo root
 pnpm install
 pnpm build                        # compile all packages including @co/desktop
-pnpm --filter @co/mcp exec co-mcp serve <project-id>  # live conductor, separate terminal
-CO_PROJECT_ID=<project-id> pnpm --filter @co/desktop start
+pnpm --filter @co/desktop start   # pick/open a project in the app
 ```
+
+The app starts/stops `co-mcp serve <project-id>` itself after a project is opened. `CO_PROJECT_ID`
+remains useful only for legacy startup/testing paths; ordinary operator flow is the in-app Open
+Project button.
 
 ## Packaging (Linux)
 

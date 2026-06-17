@@ -7,6 +7,10 @@ import { renderCoMcpHelp } from './bin-help.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const runbook = readFileSync(join(process.cwd(), 'docs', 'sh1-runbook.md'), 'utf8');
 const hostProof = readFileSync(join(process.cwd(), 'docs', 'host-proof.md'), 'utf8');
+const demoSpec = readFileSync(
+  join(process.cwd(), 'docs', 'demo-spec-co-improves-its-docs.md'),
+  'utf8',
+);
 const hostSource = readFileSync(join(here, 'conductor', 'host.ts'), 'utf8');
 
 describe('co-mcp binary help', () => {
@@ -46,10 +50,17 @@ describe('co-mcp binary help', () => {
 
   it('keeps host-live docs and runtime prefixes aligned with the co-mcp binary', () => {
     expect(hostProof).toContain('## Running `co-mcp serve <projectId>` and observing the daemon');
+    expect(hostProof).toContain('## SH-5 companion check — blocked raw publish deny');
+    expect(hostProof).toContain('git push --dry-run origin HEAD:refs/heads/co-sh5-deny-proof');
     expect(hostProof).toContain('[co-mcp serve] tick 1');
     expect(hostProof).not.toContain('[co serve]');
     expect(hostSource).not.toContain("console.error('[co serve]");
     expect(hostSource).not.toContain('`[co serve] tick');
     expect(hostSource).not.toContain("'co serve: a project id is required");
+  });
+
+  it('keeps the bundled demo spec pointed at the existing CLI reference doc', () => {
+    expect(demoSpec).toContain('docs/architecture/cli-reference.md');
+    expect(demoSpec).not.toContain('docs/cli-reference.md');
   });
 });

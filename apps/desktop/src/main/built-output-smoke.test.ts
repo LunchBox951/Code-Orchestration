@@ -26,11 +26,14 @@ describe('desktop built-output script modes', () => {
     const html = distFile('renderer', 'index.html');
     const xtermJs = distFile('renderer', 'vendor', 'xterm.js');
     const xtermCss = distFile('renderer', 'vendor', 'xterm.css');
+    const fitAddonJs = distFile('renderer', 'vendor', 'addon-fit.js');
 
     expect(html).toContain('<link rel="stylesheet" href="./vendor/xterm.css" />');
     expect(html).toContain('<script src="./vendor/xterm.js"></script>');
+    expect(html).toContain('<script src="./vendor/addon-fit.js"></script>');
     expect(xtermJs).toContain('Terminal');
     expect(xtermCss).toContain('.xterm');
+    expect(fitAddonJs).toContain('FitAddon');
   });
 
   it('bundles the predesigned demo spec into dist/renderer for session:startFromDemoSpec (P-ON3)', () => {

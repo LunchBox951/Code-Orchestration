@@ -87,6 +87,10 @@ function activateView(view: NavView): void {
   }
 }
 
+function isViewActive(view: NavView): boolean {
+  return document.getElementById(`view-${view}`)?.classList.contains('active') === true;
+}
+
 function setLiveStatus(status: string): void {
   const dot = document.getElementById('live-dot');
   const label = document.getElementById('live-label');
@@ -978,6 +982,17 @@ function renderSource(state: SourceState): void {
     return;
   }
 
+  if (state.kind === 'path-missing') {
+    container.innerHTML = [
+      `<div class="source-error" role="alert">`,
+      `<span class="source-error-msg">${esc(state.message)}</span>`,
+      `<button class="btn btn-secondary" data-source-action="retry" type="button"`,
+      ` aria-label="Retry loading branches">Retry</button>`,
+      `</div>`,
+    ].join('');
+    return;
+  }
+
   if (state.kind === 'error') {
     container.innerHTML = [
       `<div class="source-error" role="alert">`,
@@ -1101,6 +1116,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // The current-project pill + the "No project open" overlay both reflect this state.
   bridge.onCurrentProject((payload) => {
     setCurrentProject(payload);
+    if (isViewActive('source')) refreshSource();
   });
 
   // A main-process register/open failure surfaces here as a toast (Principle 9 — never swallowed).
