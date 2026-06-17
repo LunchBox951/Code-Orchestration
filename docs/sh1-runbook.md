@@ -236,12 +236,12 @@ marked met in `docs/v1-acceptance-criteria.md`:
 
 | Symptom | Likely cause / fix |
 |---|---|
-| "Conductor not running" shown in Reviews | Start the daemon: `co-mcp serve <projectId>` |
+| "Conductor unavailable" shown in Reviews | The desktop app supervises the daemon — check the **daemon status badge** in the header and click **Retry** if it shows `failed` (no need to run `co-mcp serve` by hand). |
 | No agents appear in the Agents Console | Daemon did not tick, the spec is not yet locked, or the next transition still needs an explicit operator/coordinator tool call; run `co status` and `co spec <taskId>` to confirm |
 | Reviews view empty / no pending review | The gated merge was not queued yet; confirm or rerun the Lead/coordinator `co_merge` transition for the finished worktree and check the operator inbox for `review_request` |
 | "No locked spec" error from coordinator | Run `co spec <taskId>` and lock via operator-only `co_spec_lock` before planning/merge review |
 | SH-2 guard fails | A `.co/` literal was introduced in production source; grep `packages/*/src` for the offending path and remove it |
-| Clicking PASS has no effect | Desktop app lost connection to the IPC server; restart `co-mcp serve <projectId>` and reload the app |
+| Clicking PASS has no effect | The desktop app lost its connection to the daemon it supervises — check the header **daemon status badge**: wait if it shows `restarting`, or click **Retry** if it shows `failed`, then resubmit the verdict |
 | Gated merge blocked after PASS | Confirm the `review_response` was recorded, then rerun/resume the Lead's `co_merge` for the same branch/target |
 
 ---

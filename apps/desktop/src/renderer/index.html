@@ -104,6 +104,163 @@
         animation: pulse 2s ease-in-out infinite;
       }
 
+      .daemon-pill {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 99px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        -webkit-app-region: no-drag;
+      }
+
+      .daemon-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--border);
+        flex-shrink: 0;
+        transition: background 0.3s;
+      }
+
+      .daemon-dot.daemon-starting,
+      .daemon-dot.daemon-restarting {
+        background: var(--accent);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      .daemon-dot.daemon-healthy {
+        background: var(--live);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      .daemon-dot.daemon-failed {
+        background: var(--stuck);
+      }
+
+      .daemon-dot.daemon-stopped {
+        background: var(--paused);
+      }
+
+      .daemon-retry {
+        -webkit-app-region: no-drag;
+        cursor: pointer;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--stuck);
+        color: var(--bg);
+        font-family: inherit;
+        font-size: 10px;
+        padding: 1px 7px;
+      }
+
+      .daemon-retry[hidden] {
+        display: none;
+      }
+
+      /* ── Current project pill + Open project control (P-ON2 on-ramp) ───── */
+      .project-pill {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 99px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        -webkit-app-region: no-drag;
+        max-width: 320px;
+        min-width: 0;
+      }
+
+      .project-pill-glyph {
+        color: var(--accent);
+        flex-shrink: 0;
+      }
+
+      #current-project-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .open-project-btn {
+        -webkit-app-region: no-drag;
+        cursor: pointer;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--accent);
+        color: #fff;
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 4px 12px;
+        flex-shrink: 0;
+      }
+
+      .open-project-btn:hover {
+        opacity: 0.85;
+      }
+
+      /* ── "No project open" empty state (the on-ramp landing) ───────────── */
+      .no-project-overlay {
+        position: fixed;
+        top: var(--header-h);
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 500;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg);
+      }
+
+      .no-project-overlay[hidden] {
+        display: none;
+      }
+
+      .no-project-card {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        text-align: center;
+        padding: 40px;
+        max-width: 440px;
+      }
+
+      .no-project-glyph {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 44px;
+        color: var(--accent);
+        line-height: 1;
+      }
+
+      .no-project-title {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--heading);
+      }
+
+      .no-project-subtitle {
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .no-project-open-btn {
+        margin-top: 8px;
+        padding: 10px 24px;
+        font-size: 13px;
+      }
+
       @keyframes pulse {
         0%,
         100% {
@@ -1582,6 +1739,135 @@
         justify-content: flex-end;
       }
 
+      /* ── Source view (read-only Branches; P-ON4) ──────────── */
+      .source-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .source-refresh-btn {
+        flex-shrink: 0;
+      }
+
+      .source-branches {
+        padding: 4px 0;
+        max-height: 420px;
+        overflow-y: auto;
+      }
+
+      .source-branch-row {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .source-branch-row:last-child {
+        border-bottom: none;
+      }
+
+      .source-branch-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .source-branch-current {
+        color: var(--live);
+        font-size: 9px;
+        flex-shrink: 0;
+      }
+
+      .source-branch-current-spacer {
+        width: 9px;
+        flex-shrink: 0;
+      }
+
+      .source-branch-name {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 13px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .source-branch-name.current {
+        color: var(--heading);
+        font-weight: 600;
+      }
+
+      .source-branch-upstream {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+
+      .source-branch-subject {
+        font-size: 12px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding-left: 17px;
+      }
+
+      .source-branch-meta {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        padding-left: 17px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        color: var(--muted);
+      }
+
+      .source-meta-sep {
+        opacity: 0.5;
+      }
+
+      .source-pr-deferred {
+        padding: 16px 14px;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .source-pr-deferred code {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--text);
+        background: var(--surface);
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+
+      /* In-pane Source error + Retry (Principle 9 — not a git repo / git unavailable). */
+      .source-error {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 12px 14px;
+        padding: 12px 14px;
+        border: 1px solid oklch(0.45 0.15 25);
+        border-radius: var(--radius);
+        background: oklch(0.25 0.07 25);
+        color: oklch(0.88 0.18 25);
+        font-size: 12px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .source-error-msg {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
       /* ── Agents roster row actions ────────────────────────── */
       .agents-roster-row {
         flex-wrap: wrap;
@@ -1605,10 +1891,35 @@
     <!-- Header -->
     <header>
       <span class="logo-tile">co</span>
+      <div class="project-pill" id="project-pill" title="Currently open project">
+        <span class="project-pill-glyph" aria-hidden="true">⊞</span>
+        <span id="current-project-label">No project open</span>
+      </div>
+      <button
+        type="button"
+        class="open-project-btn"
+        id="open-project-btn"
+        aria-label="Open project"
+      >
+        Open project
+      </button>
       <span class="header-title">Code Orchestration · Conductor</span>
       <div class="live-pill">
         <span class="live-dot" id="live-dot"></span>
         <span id="live-label">offline</span>
+      </div>
+      <div class="daemon-pill" title="Conductor daemon (app-owned) lifecycle status">
+        <span class="daemon-dot daemon-starting" id="daemon-dot"></span>
+        <span id="daemon-label">daemon: starting…</span>
+        <button
+          type="button"
+          class="daemon-retry"
+          id="daemon-retry"
+          aria-label="Retry starting the Conductor daemon"
+          hidden
+        >
+          Retry
+        </button>
       </div>
       <div class="limits-wrapper" id="limits-wrapper">
         <button
@@ -1815,8 +2126,29 @@
           </div>
         </div>
         <div class="view" id="view-source">
-          <div class="view-heading">Source</div>
-          <div class="stub-card">Coming in a later stage.</div>
+          <div class="source-header">
+            <div class="view-heading">Source</div>
+            <button
+              type="button"
+              class="btn btn-secondary source-refresh-btn"
+              id="source-refresh-btn"
+              aria-label="Refresh branches"
+            >
+              Refresh
+            </button>
+          </div>
+          <div class="section-card">
+            <div class="section-heading">Branches</div>
+            <div id="source-branches" class="source-branches" aria-label="Branches">
+              <div class="empty-state">Open the Source view to load branches.</div>
+            </div>
+          </div>
+          <div class="section-card">
+            <div class="section-heading">Pull requests</div>
+            <div class="source-pr-deferred" aria-label="Pull requests">
+              Pull requests — requires <code>gh</code> + network; deferred.
+            </div>
+          </div>
         </div>
         <div class="view" id="view-cost">
           <div class="view-heading">Cost</div>
@@ -1826,6 +2158,33 @@
         </div>
       </main>
     </div>
+
+    <!-- "No project open" on-ramp landing (P-ON2): shown until a project is opened. Visible by default
+         because the app genuinely has no project until one is opened (env CO_PROJECT_ID or the picker). -->
+    <div
+      class="no-project-overlay"
+      id="no-project-overlay"
+      role="region"
+      aria-label="No project open"
+    >
+      <div class="no-project-card">
+        <div class="no-project-glyph" aria-hidden="true">⊞</div>
+        <div class="no-project-title">No project open</div>
+        <div class="no-project-subtitle">
+          Open a repository or directory to start orchestrating. The app will register it and start
+          the Conductor for you.
+        </div>
+        <button
+          type="button"
+          class="btn btn-reply no-project-open-btn"
+          id="no-project-open-btn"
+          aria-label="Open project"
+        >
+          Open project
+        </button>
+      </div>
+    </div>
+
     <script src="./vendor/xterm.js"></script>
     <script src="./vendor/addon-fit.js"></script>
     <script type="module" src="./renderer.js"></script>

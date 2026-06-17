@@ -4,6 +4,35 @@
 type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'cost';
 type ConnectionStatus = 'connecting' | 'live' | 'degraded';
 type AgentStatus = 'warm' | 'waiting' | 'stuck' | 'paused' | 'unknown';
+type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
+
+interface DaemonStatusPayload {
+  status: DaemonStatus;
+  detail: string | null;
+}
+
+// Which project the app currently has open (surfaced in the top bar); null = no project open (the on-ramp).
+type CurrentProjectPayload = { projectId: string; path: string | null } | null;
+
+// ── Source view (read-only Branches; P-ON4) ──────────────────────────────────
+// Mirrors @co/core's BranchInfo (renderer is isolated from Node — inline, like MailCardView/MailRow).
+interface BranchInfo {
+  name: string;
+  isCurrent: boolean;
+  upstream?: string;
+  lastCommit: {
+    sha: string;
+    subject: string;
+    committedAt?: string;
+    author?: string;
+  };
+}
+
+// The read-only Source view state: a branch list, "no project open", or a visible error (Principle 9).
+type SourceState =
+  | { kind: 'branches'; branches: readonly BranchInfo[] }
+  | { kind: 'no-project' }
+  | { kind: 'error'; message: string };
 
 interface ConnectionObservation {
   kind: 'live' | 'static';
@@ -279,6 +308,16 @@ interface CoShellBridge {
     prompt: string | null,
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
+  startFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
+  // ── Source (read-only Branches; P-ON4) ──────────────────────────────────────
+  sourceRefresh(): Promise<SourceState>;
+  // ── Daemon ────────────────────────────────────────────────────────────────
+  onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;
+  daemonRetry(): Promise<{ ok: boolean; error?: string }>;
+  // ── Project (the in-app "Open project" on-ramp) ─────────────────────────────
+  openProject(): Promise<void>;
+  onCurrentProject(listener: (payload: CurrentProjectPayload) => void): () => void;
+  onAppError(listener: (message: string) => void): () => void;
 }
 
 interface Window {

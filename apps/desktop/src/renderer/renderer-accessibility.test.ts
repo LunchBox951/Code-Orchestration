@@ -49,11 +49,20 @@ describe('review view', () => {
     expect(rendererSource).toContain("document.activeElement?.id === 'review-composer-body'");
   });
 
-  it('points operator-facing conductor guidance at the shipped co-mcp binary', () => {
-    expect(rendererSource).toContain('start \\`co-mcp serve <projectId>\\`');
-    expect(appShellSource).toContain('start `co-mcp serve <projectId>`');
-    expect(rendererSource).not.toContain('start \\`co serve\\`');
-    expect(appShellSource).not.toContain('start `co serve`');
+  it('points operator-facing conductor guidance at the app-owned daemon status badge + Retry', () => {
+    // P-ON1: the app OWNS the Conductor daemon, so guidance must NOT tell the operator to run it by
+    // hand. The old "start `co-mcp serve <projectId>`" (and the older `co serve`) copy is gone from
+    // both the renderer and the main-process shell.
+    expect(rendererSource).not.toContain('co-mcp serve');
+    expect(appShellSource).not.toContain('co-mcp serve');
+    expect(rendererSource).not.toContain('co serve');
+    expect(appShellSource).not.toContain('co serve');
+    // Instead it points at the app-owned lifecycle UX: the header status badge + the Retry action.
+    expect(appShellSource).toContain('the app manages the daemon');
+    expect(appShellSource).toContain('status badge in the header');
+    expect(appShellSource).toContain('Retry');
+    expect(rendererSource).toContain('the app manages the daemon');
+    expect(rendererSource).toContain('status badge in the header');
   });
 
   it('only exposes verdict actions when the Review view has diff and locked criteria evidence', () => {
@@ -202,6 +211,60 @@ describe('session start (P4)', () => {
   });
 });
 
+describe('source read surface (P-ON4) + demo-spec launch (P-ON3)', () => {
+  const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+
+  it('replaces the Source stub with a labelled Branches container + a deferred-PR panel', () => {
+    expect(htmlSource).toContain('id="view-source"');
+    expect(htmlSource).not.toContain('Coming in a later stage.');
+    // Read-only Branches list + an HONEST, clearly-labelled deferred-PR panel (not a fake/empty PR list).
+    expect(htmlSource).toContain('id="source-branches"');
+    expect(htmlSource).toContain('aria-label="Branches"');
+    expect(htmlSource).toContain('aria-label="Pull requests"');
+    expect(htmlSource).toContain('deferred');
+    expect(htmlSource).toContain('id="source-refresh-btn"');
+    expect(htmlSource).toContain('aria-label="Refresh branches"');
+  });
+
+  it('renderer renders the branch list read-only and wires sourceRefresh on activation + Refresh', () => {
+    expect(rendererSource).toContain('function renderSource(state: SourceState)');
+    // Source is pulled on view activation (no push channel) and via the Refresh/Retry controls. The
+    // activation hook lives in module-scope activateView, so it calls the bridge via window.coShell.
+    expect(rendererSource).toContain("if (view === 'source')");
+    expect(rendererSource).toContain('.sourceRefresh(');
+    expect(rendererSource).toContain("getElementById('view-source')");
+    expect(rendererSource).toContain('data-source-action="retry"');
+  });
+
+  it('renderer renders explicit no-project + error states for Source (Principle 9)', () => {
+    expect(rendererSource).toContain("state.kind === 'no-project'");
+    expect(rendererSource).toContain("state.kind === 'error'");
+    expect(rendererSource).toContain('No project open');
+    expect(rendererSource).toContain('aria-label="Retry loading branches"');
+  });
+
+  it('exposes the "Start from demo spec" button wired to the bridge alongside Start session', () => {
+    expect(rendererSource).toContain('id="session-start-demo-btn"');
+    expect(rendererSource).toContain('aria-label="Start coordinator session from demo spec"');
+    expect(rendererSource).toContain('bridge.startFromDemoSpec(');
+    // The existing free-form Start session button stays wired + unchanged.
+    expect(rendererSource).toContain('id="session-start-btn"');
+    expect(rendererSource).toContain('bridge.sessionStart(');
+  });
+
+  it('bridge + IPC expose sourceRefresh + startFromDemoSpec end-to-end', () => {
+    expect(preloadSource).toContain('sourceRefresh(');
+    expect(preloadSource).toContain("'source:refresh'");
+    expect(preloadSource).toContain('startFromDemoSpec(');
+    expect(preloadSource).toContain("'session:startFromDemoSpec'");
+    expect(mainSource).toContain("ipcMain.handle('source:refresh'");
+    expect(mainSource).toContain("ipcMain.handle('session:startFromDemoSpec'");
+    // Source consumes @co/core's listBranches via the helper — the adapter does not re-read git itself.
+    expect(mainSource).toContain('resolveSourceState(');
+    expect(mainSource).toContain('startFromDemoSpec(');
+  });
+});
+
 describe('agents stop / unstick (P4)', () => {
   it('per-agent Stop and Unstick buttons render in agents roster with correct aria-labels', () => {
     expect(rendererSource).toContain('data-agent-action="stop"');
@@ -274,5 +337,55 @@ describe('no silent failures (AC-S15-11 [ST-3], Principle 9)', () => {
     expect(rendererSource).not.toMatch(/void bridge\.mailRefresh\(\);/);
     expect(rendererSource).not.toMatch(/void bridge\.refreshLimitsCost\(\);/);
     expect(rendererSource).not.toMatch(/void bridge\.reviewRefresh\(\);/);
+  });
+});
+
+describe('open project on-ramp (P-ON2)', () => {
+  const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+
+  it('header exposes the current-project pill + an Open project control', () => {
+    expect(htmlSource).toContain('id="current-project-label"');
+    expect(htmlSource).toContain('id="open-project-btn"');
+    expect(htmlSource).toContain('aria-label="Open project"');
+  });
+
+  it('a "no project open" empty state is present and offers Open project', () => {
+    expect(htmlSource).toContain('id="no-project-overlay"');
+    expect(htmlSource).toContain('id="no-project-open-btn"');
+    expect(htmlSource).toContain('aria-label="No project open"');
+  });
+
+  it('renderer wires both Open project buttons to the bridge and reflects current-project state', () => {
+    expect(rendererSource).toContain('bridge.openProject(');
+    expect(rendererSource).toContain('bridge.onCurrentProject(');
+    expect(rendererSource).toContain("getElementById('open-project-btn')");
+    expect(rendererSource).toContain("getElementById('no-project-open-btn')");
+    // The overlay reveals when there is no project (payload == null) and hides once one is open.
+    expect(rendererSource).toContain("getElementById('no-project-overlay')");
+    expect(rendererSource).toContain('overlay.hidden = payload != null');
+  });
+
+  it('register/open failures surface as a visible toast (Principle 9)', () => {
+    expect(rendererSource).toContain('bridge.onAppError(');
+  });
+
+  it('bridge + IPC expose the openProject + current-project + app-error channels end-to-end', () => {
+    expect(preloadSource).toContain('openProject(');
+    expect(preloadSource).toContain("'project:open'");
+    expect(preloadSource).toContain("'project:current'");
+    expect(preloadSource).toContain("'app:error'");
+    expect(mainSource).toContain("ipcMain.handle('project:open'");
+    expect(mainSource).toContain('controller.pickAndOpenProject(');
+  });
+
+  it('main replaces the CO_PROJECT_ID-required throw with the no-project on-ramp', () => {
+    // The old hard requirement is gone: a missing env now shows the empty state instead of throwing.
+    expect(mainSource).not.toContain('CO_PROJECT_ID environment variable is required');
+    expect(mainSource).toContain('controller.showNoProject(');
+  });
+
+  it('the directory picker requests an OS directory selection (openDirectory)', () => {
+    expect(mainSource).toContain('showOpenDialog');
+    expect(mainSource).toContain("'openDirectory'");
   });
 });

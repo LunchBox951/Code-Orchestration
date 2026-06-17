@@ -133,7 +133,7 @@ function safeError(e: unknown): string {
 /** Map a fetch failure to operator-facing copy: the conductor-down guidance, else the raw message. */
 function conductorOrError(e: unknown): string {
   return e instanceof ConductorUnavailableError
-    ? 'Conductor not running — start `co-mcp serve <projectId>` to load review context.'
+    ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to load review context.'
     : safeError(e);
 }
 
@@ -271,7 +271,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       } catch (e: unknown) {
         deps.onMailError?.(
           e instanceof ConductorUnavailableError
-            ? 'Conductor not running — start `co-mcp serve <projectId>` to send mail.'
+            ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to send mail.'
             : safeError(e),
         );
         throw e;
@@ -286,7 +286,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       } catch (e: unknown) {
         deps.onMailError?.(
           e instanceof ConductorUnavailableError
-            ? 'Conductor not running — start `co-mcp serve <projectId>` to approve/decline.'
+            ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to approve or decline.'
             : safeError(e),
         );
         throw e;
@@ -346,7 +346,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       } catch (e) {
         deps.onReviewError?.(
           e instanceof ConductorUnavailableError
-            ? 'Conductor not running — start `co-mcp serve <projectId>` to submit a verdict.'
+            ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to submit a verdict.'
             : safeError(e),
         );
         throw e;

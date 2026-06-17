@@ -1209,7 +1209,7 @@ describe('createAppShell — review-context fetch failures surface (Sites 2 & 4)
     expect(onReviewError).toHaveBeenCalledWith('ctx boom');
   });
 
-  it('maps a ConductorUnavailableError to the start-the-daemon guidance', async () => {
+  it('maps a ConductorUnavailableError to the app-owned daemon badge/Retry guidance', async () => {
     const client = reviewClient(vi.fn().mockRejectedValue(new ConductorUnavailableError('down')));
     const onReviewState = vi.fn();
     const shell = createAppShell({
@@ -1228,7 +1228,9 @@ describe('createAppShell — review-context fetch failures surface (Sites 2 & 4)
     await vi.waitFor(() => {
       const ctx = onReviewState.mock.calls.at(-1)?.[0].context;
       expect(ctx?.status).toBe('error');
-      expect(ctx?.message).toContain('co-mcp serve <projectId>');
+      expect(ctx?.message).toContain('the app manages the daemon');
+      expect(ctx?.message).toContain('to load review context');
+      expect(ctx?.message).not.toContain('co-mcp serve');
     });
   });
 
