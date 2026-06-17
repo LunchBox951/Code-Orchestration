@@ -120,6 +120,20 @@ describe('resolveSourceState (P-ON4 Source read surface)', () => {
     });
   });
 
+  it('surfaces a thrown pull-request reader error as a visible error state (Principle 9)', () => {
+    const state = resolveSourceState({
+      currentProject: () => ({ projectId: 'pid-pr-not-repo', path: '/not-a-repo' }),
+      listBranches: () => [],
+      listPullRequests: () => {
+        throw new Error('co listPullRequests: not a repository or git is unavailable.');
+      },
+    });
+    expect(state).toEqual({
+      kind: 'error',
+      message: 'co listPullRequests: not a repository or git is unavailable.',
+    });
+  });
+
   it('returns an empty branch list (not an error) for a repo with zero branches', () => {
     const state = resolveSourceState({
       currentProject: () => ({ projectId: 'pid-empty', path: '/empty-repo' }),
