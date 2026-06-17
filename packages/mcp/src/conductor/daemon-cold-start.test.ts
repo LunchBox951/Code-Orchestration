@@ -35,10 +35,12 @@ import {
   startCoordinatorSession,
   type DeliveredMail,
   type ProjectId,
+  type Role,
   type SlingDeps,
 } from '@co/core';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
 import { ConductorEngine } from './engine.js';
+import type { HostedIdentity } from '../live-session-host.js';
 
 // ── Scripted startup fixture. ESC via fromCharCode so the SOURCE holds no raw control byte. ──
 const ESC = String.fromCharCode(0x1b);
@@ -286,6 +288,7 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
 
     // The daemon cold-started the root + drove its first turn (kickoff clarify selected + injected).
     expect(run.out.coldStarted).toEqual([run.coordinator]);
+    expect(run.out.reWarmed).toEqual([]); // cold-start is NOT re-warm — the root path is unchanged (P-E)
     expect(run.out.selected).toBe(run.coordinator);
     expect(run.out.coldCandidates).toEqual([]);
     expect(run.out.candidateCount).toBe(1);
@@ -299,76 +302,6 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
     expect(run.sessionExists).toBe(true);
     expect(run.rosterRole).toBe('coordinator');
     expect(run.rosterParent).toBe(OPERATOR);
-  });
-
-  it('does NOT cold-launch a recovered CHILD session, even alongside a root that IS cold-started', async () => {
-    const { projectId, repo } = makeProject();
-    const { coordinator } = startCoordinatorSession(
-      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
-      { slingDeps: SLING_DEPS },
-    );
-
-    // A recovered child chain under the root: lead-1 (lead) → impl-cold (implementer) with a session.
-    const roster = openRosterStore(projectId);
-    try {
-      roster.recordAgent({ agentId: 'lead-1', role: 'lead', parent: coordinator });
-      roster.recordAgent({ agentId: 'impl-cold', role: 'implementer', parent: 'lead-1' });
-    } finally {
-      roster.close();
-    }
-    const sessions = openSessionStore(projectId);
-    try {
-      sessions.recordSession({
-        agentId: 'impl-cold',
-        pane: 'pane-impl-cold',
-        cwd: repo,
-        provider: 'claude',
-        resume: { provider: 'claude', sessionId: 'session-impl-cold' },
-      });
-    } finally {
-      sessions.close();
-    }
-    const seed = openMailStore(projectId);
-    try {
-      seed.send({
-        type: 'clarify_request',
-        to: 'impl-cold',
-        from: 'lead-1',
-        subject: 'do the thing',
-        body: 'please act',
-      });
-    } finally {
-      seed.close();
-    }
-
-    const clock = makeClock();
-    const qw = makeQuietWindow();
-    const pty = new FakePty();
-    const engine = makeEngine(pty, clock, qw);
-    const daemon = new ConductorDaemon({
-      engine,
-      reconcile: makeReconcile(clock),
-      projectId,
-      now: clock.now,
-      reconcileEvery: 1,
-    });
-
-    const kickoff = kickoffFor(projectId, coordinator);
-    const tickP = daemon.tick();
-    await tick();
-    const rootPane = pty.panes[pty.panes.length - 1]!;
-    rootPane.emit(CLAUDE_READY);
-    await driveTurnToIdle(rootPane, kickoff, clock, qw);
-    const out = await tickP;
-
-    // ONLY the root was cold-started + driven; the child stays a cold candidate (never launched).
-    expect(out.coldStarted).toEqual([coordinator]);
-    expect(out.selected).toBe(coordinator);
-    expect(out.coldCandidates).toEqual(['impl-cold']);
-    expect(out.coldStarted).not.toContain('impl-cold');
-    expect(engine.isHosted(projectId, 'impl-cold')).toBe(false);
-    // Exactly one pane was spawned (the root's) — the child was never launched.
-    expect(pty.panes).toHaveLength(1);
   });
 
   it('does not re-select the consumed root kickoff when later operator work arrives', async () => {
@@ -504,6 +437,7 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
       selectedRoot: r.out.selected === r.coordinator,
       candidateCount: r.out.candidateCount,
       coldCandidates: r.out.coldCandidates,
+      reWarmed: r.out.reWarmed,
       idle: r.out.cycle?.turn.turnEnd?.idle ?? null,
       errored: r.out.cycle?.turn.errored ?? null,
       sawCompletionVerb: r.out.cycle?.turn.turnEnd?.sawCompletionVerb ?? null,
@@ -523,5 +457,215 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
     expect(fingerprint(run2)).toEqual(fingerprint(run1));
     expect(run1.out.coldStarted).toEqual([run1.coordinator]);
     expect(run2.out.coldStarted).toEqual([run2.coordinator]);
+  });
+});
+
+// ── Stage 15 · P-E (AC-S15-2 / ST-2) — RE-WARM recovered NON-root agents ─────────────────────────────
+//
+// GENERALIZES the root cold-start to the recovered live set: after a daemon restart the RUNNING set is
+// reconstructed but the NON-root agents (implementers/leads) are COLD in this fresh engine process and
+// today are only REPORTED (`coldCandidates`), never driven. The daemon now SELECTS them and re-warms each
+// through the SAME single launch authority (`engine.ensureHosted`, MNR-5) — no second launcher.
+//
+// SELECTION-ONLY harness: a recovered agent ALREADY has an active session, so the real
+// `ensureHosted → hostSession → recordSession` REFUSES to re-record it ("already has an active session")
+// — re-spawning the crashed provider + reconciling its session row is `[host-live]` glue (host.ts), not
+// in-sandbox. So these prove the in-sandbox SELECTION against a SPY launch authority (exactly what the
+// brief calls for): the spy records each `ensureHosted` identity and marks the agent hosted, so the
+// `isHosted` no-double-dispatch gate is exercised against real daemon code + real recovery stores.
+
+/** A spy standing in for the engine's launch authority: records every `ensureHosted` identity + the
+ *  `drivable` set each `runCycle` saw, and tracks hosted state so `isHosted` reflects a re-warm. The
+ *  `ensureHosted` MNR-5 guard is mirrored so a buggy double-dispatch fails loud. */
+function makeSpyEngine(): {
+  engine: ConductorEngine;
+  ensureHostedCalls: HostedIdentity[];
+  drivableSeen: HostedIdentity[][];
+} {
+  const hosted = new Set<string>();
+  const ensureHostedCalls: HostedIdentity[] = [];
+  const drivableSeen: HostedIdentity[][] = [];
+  const key = (id: HostedIdentity): string => `${id.projectId}:${id.agent}`;
+  const fake = {
+    isHosted: (projectId: ProjectId, agent: string): boolean => hosted.has(`${projectId}:${agent}`),
+    ensureHosted: async (identity: HostedIdentity): Promise<void> => {
+      if (hosted.has(key(identity))) {
+        throw new Error(
+          `spy ensureHosted: '${identity.agent}' already hosted — MNR-5 backstop (no double-dispatch).`,
+        );
+      }
+      ensureHostedCalls.push(identity);
+      hosted.add(key(identity));
+    },
+    runCycle: async (drivable: readonly HostedIdentity[]): Promise<null> => {
+      drivableSeen.push([...drivable]);
+      return null; // selection-only: drive nothing (the SELECTION is what these prove)
+    },
+    tickClarifyTimeouts: async (): Promise<readonly DeliveredMail[]> => [],
+  };
+  return { engine: fake as unknown as ConductorEngine, ensureHostedCalls, drivableSeen };
+}
+
+/** Register the coord-1 → lead-1 parent chain a real spawn would have recorded (the roster REFUSES an
+ *  agent whose parent is unregistered). coord-1 has NO provisioned worktree, so it is never a cold-start
+ *  root — it stays inert (no session ⇒ not a candidate; no worktree ⇒ not cold-started). */
+function seedLeadChain(projectId: ProjectId): void {
+  const roster = openRosterStore(projectId);
+  try {
+    roster.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: OPERATOR });
+    roster.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
+  } finally {
+    roster.close();
+  }
+}
+
+/** Seed a recovered agent the daemon will rebuild into the RUNNING set: a roster row + an ACTIVE session
+ *  (so it is cold-in-this-engine but durable), mirroring what a real spawn would have persisted. */
+function recordRecoveredAgent(
+  projectId: ProjectId,
+  cwd: string,
+  agentId: string,
+  role: Role,
+  parent: string,
+): void {
+  const roster = openRosterStore(projectId);
+  try {
+    roster.recordAgent({ agentId, role, parent });
+  } finally {
+    roster.close();
+  }
+  const sessions = openSessionStore(projectId);
+  try {
+    sessions.recordSession({
+      agentId,
+      pane: `pane-${agentId}`,
+      cwd,
+      provider: 'claude',
+      resume: { provider: 'claude', sessionId: `session-${agentId}` },
+    });
+  } finally {
+    sessions.close();
+  }
+}
+
+function makeReWarmDaemon(
+  projectId: ProjectId,
+  engine: ConductorEngine,
+  clock: ReturnType<typeof makeClock>,
+): ConductorDaemon {
+  return new ConductorDaemon({
+    engine,
+    reconcile: makeReconcile(clock),
+    projectId,
+    now: clock.now,
+    reconcileEvery: 1,
+  });
+}
+
+describe('ConductorDaemon — Stage 15 P-E re-warm recovered NON-root agents (AC-S15-2 / ST-2)', () => {
+  it('re-warms a cold recovered NON-root agent via the single launch authority (becomes hosted, joins drivable)', async () => {
+    const { projectId, repo } = makeProject();
+    seedLeadChain(projectId);
+    recordRecoveredAgent(projectId, repo, 'impl-cold', 'implementer', 'lead-1');
+
+    const clock = makeClock();
+    const spy = makeSpyEngine();
+    const out = await makeReWarmDaemon(projectId, spy.engine, clock).tick();
+
+    // SELECTED + re-warmed through the SAME launch authority, now hosted — distinct from a cold-start.
+    expect(out.reWarmed).toEqual(['impl-cold']);
+    expect(out.coldStarted).toEqual([]); // it had a recovered session ⇒ not a cold-start
+    expect(spy.engine.isHosted(projectId, 'impl-cold')).toBe(true);
+    expect(out.coldCandidates).toEqual([]); // re-warmed ⇒ no longer reported as cold
+
+    // Re-warm ran BEFORE the cycle: the re-warmed agent joined the drivable set THIS tick (mirrors step 0).
+    expect(spy.drivableSeen.at(-1)?.map((i) => i.agent)).toEqual(['impl-cold']);
+
+    // The launch authority was invoked ONCE, with impl-cold's RECOVERED identity (pane/cwd/provider) —
+    // assert the AGENT + recovered fields, not merely the call count.
+    expect(spy.ensureHostedCalls).toHaveLength(1);
+    expect(spy.ensureHostedCalls[0]).toMatchObject({
+      agent: 'impl-cold',
+      role: 'implementer',
+      pane: 'pane-impl-cold',
+      provider: 'claude',
+      cwd: repo,
+    });
+  });
+
+  it('no double-dispatch: a re-warmed agent is NOT re-warmed again on the next tick (ensureHosted called exactly once for it)', async () => {
+    const { projectId, repo } = makeProject();
+    seedLeadChain(projectId);
+    recordRecoveredAgent(projectId, repo, 'impl-cold', 'implementer', 'lead-1');
+
+    const clock = makeClock();
+    const spy = makeSpyEngine();
+    const daemon = makeReWarmDaemon(projectId, spy.engine, clock);
+
+    const t1 = await daemon.tick();
+    expect(t1.reWarmed).toEqual(['impl-cold']);
+
+    const t2 = await daemon.tick();
+    expect(t2.reWarmed).toEqual([]); // now warm ⇒ never re-warmed again
+    expect(t2.coldCandidates).toEqual([]); // warm, so not a cold candidate either
+
+    // EXACTLY ONE launch for impl-cold across BOTH ticks — the isHosted gate prevents a second dispatch.
+    expect(spy.ensureHostedCalls.map((i) => i.agent)).toEqual(['impl-cold']);
+  });
+
+  it('cold-starts the root AND re-warms a recovered child in ONE tick — the dispatch split (cold-start root-only, re-warm non-root)', async () => {
+    const { projectId, repo } = makeProject();
+    // A registered-but-unhosted ROOT (worktree provisioned, NO session) → cold-start target (step 0).
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+    // A recovered CHILD under it (active session, cold in this engine) → re-warm target (step 1a).
+    recordRecoveredAgent(projectId, repo, 'impl-cold', 'implementer', coordinator);
+
+    const clock = makeClock();
+    const spy = makeSpyEngine();
+    const out = await makeReWarmDaemon(projectId, spy.engine, clock).tick();
+
+    // The SPLIT: cold-start stays ROOT-only; re-warm handles the NON-root recovered child.
+    expect(out.coldStarted).toEqual([coordinator]);
+    expect(out.reWarmed).toEqual(['impl-cold']);
+    expect(out.coldStarted).not.toContain('impl-cold');
+    expect(out.reWarmed).not.toContain(coordinator);
+    // BOTH went through the SAME single launch authority — root first (step 0), then child (step 1a).
+    expect(spy.ensureHostedCalls.map((i) => i.agent)).toEqual([coordinator, 'impl-cold']);
+  });
+
+  it('does NOT re-warm a recovered ROOT-with-session (re-warm is non-root-gated; root handling unchanged)', async () => {
+    const { projectId, repo } = makeProject();
+    // A recovered ROOT coordinator WITH an active session, cold in this engine (e.g. a previously
+    // cold-started root after a daemon restart). It is neither cold-started (it already has a session)
+    // nor re-warmed (re-warm is NON-root) — it stays a cold candidate, exactly as root handling was.
+    recordRecoveredAgent(projectId, repo, 'coord-recovered', 'coordinator', OPERATOR);
+
+    const clock = makeClock();
+    const spy = makeSpyEngine();
+    const out = await makeReWarmDaemon(projectId, spy.engine, clock).tick();
+
+    expect(out.reWarmed).toEqual([]); // NON-root gate: the recovered root is not re-warmed
+    expect(out.coldStarted).toEqual([]); // not cold-started either (it already has a session)
+    expect(out.coldCandidates).toEqual(['coord-recovered']); // stays a cold candidate (unchanged)
+    expect(spy.ensureHostedCalls).toEqual([]); // the launch authority was never invoked
+  });
+
+  it('is deterministic: the same recovered state ⇒ the same re-warm selection (session creation order)', async () => {
+    async function reWarmSelection(): Promise<readonly string[]> {
+      const { projectId, repo } = makeProject();
+      seedLeadChain(projectId);
+      recordRecoveredAgent(projectId, repo, 'impl-a', 'implementer', 'lead-1');
+      recordRecoveredAgent(projectId, repo, 'impl-b', 'implementer', 'lead-1');
+      const clock = makeClock();
+      return (await makeReWarmDaemon(projectId, makeSpyEngine().engine, clock).tick()).reWarmed;
+    }
+
+    const run1 = await reWarmSelection();
+    const run2 = await reWarmSelection();
+    expect(run2).toEqual(run1); // replay-stable: no wall clock in the selection
+    expect(run1).toEqual(['impl-a', 'impl-b']); // candidates order = session creation order
   });
 });

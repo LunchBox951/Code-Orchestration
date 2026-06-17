@@ -122,7 +122,20 @@ export interface DaemonTickOutcome {
    * drivable. Empty on every tick that launches no root (the common case).
    */
   readonly coldStarted: readonly string[];
-  /** Recovered RUNNING sessions that are cold in this engine process and therefore not driven. */
+  /**
+   * Stage 15 P-E (AC-S15-2 / ST-2) — cold recovered NON-root agents RE-WARMED this tick: agents whose
+   * recovered session was COLD in this engine process and that the daemon drove back through the single
+   * launch authority ({@link ConductorEngine.ensureHosted}). Symmetric to {@link coldStarted} (which is
+   * roots); each id appears at most ONCE across the daemon's lifetime (a warm agent is never re-warmed).
+   * Empty on every tick that re-warms nothing (the common case once the recovered set is warm).
+   */
+  readonly reWarmed: readonly string[];
+  /**
+   * Recovered RUNNING sessions STILL cold in this engine process after this tick's re-warm — therefore
+   * not driven. Post-{@link reWarmed}: a re-warmed non-root agent has left this set (it is now warm); a
+   * recovered ROOT-with-session remains here (re-warm is non-root — root handling is the cold-start
+   * path's, unchanged).
+   */
   readonly coldCandidates: readonly string[];
   /** The engine's ≤1-turn outcome, or `null` when no candidate was eligible. */
   readonly cycle: CycleOutcome | null;
@@ -259,6 +272,10 @@ export class ConductorDaemon {
    *      session) and LAUNCH it via the engine's single launch authority — which MINTS its session, so
    *      the rebuilt live set below includes it and `runCycle` drives its FIRST turn THIS tick;
    *   1. reconstruct the live set ({@link buildCandidates});
+   *   1a. RE-WARM ({@link reWarmRecoveredAgents}, Stage 15 P-E / AC-S15-2): drive every COLD recovered
+   *      NON-root agent back through the SAME single launch authority — generalizing step 0's cold-start
+   *      to the recovered non-root set — so a re-warmed agent joins `drivable` and can take its first
+   *      turn THIS tick;
    *   2. `engine.runCycle(drivable)` — select a WAITING+actionable WARM agent, reuse its pane,
    *      inject, drive EXACTLY ONE turn, yield (the pane stays warm);
    *   3. on cadence (every `reconcileEvery` ticks): `engine.tickClarifyTimeouts(candidates)` AND
@@ -280,8 +297,16 @@ export class ConductorDaemon {
     const coldStarted = await this.coldStartRootCoordinators();
 
     const candidates = this.buildCandidates();
+    // Step 1a (AC-S15-2 / ST-2): RE-WARM the cold recovered NON-root agents through the SAME single
+    // launch authority (engine.ensureHosted) BEFORE building `drivable`, so a re-warmed agent joins it
+    // THIS tick — mirroring step 0's root cold-start. Selection only (the real binary relaunch stays
+    // host glue); the isHosted gate + ensureHosted's MNR-5 throw + the sequential await re-warm a cold
+    // agent AT MOST ONCE.
+    const reWarmed = await this.reWarmRecoveredAgents(candidates);
+
     // Recovered sessions are durable inputs, not launch authority. A fresh daemon can reconstruct them
-    // for reconcile/reattach handoff, but only panes already warm in THIS engine process are drivable.
+    // for reconcile/reattach handoff; panes warm in THIS engine process (INCLUDING any just re-warmed
+    // above) are drivable. What stays cold is a recovered ROOT-with-session (re-warm is non-root).
     const drivable = candidates.filter((identity) =>
       this.engine.isHosted(identity.projectId, identity.agent),
     );
@@ -303,6 +328,7 @@ export class ConductorDaemon {
       tick: this.tickCount,
       candidateCount: candidates.length,
       coldStarted,
+      reWarmed,
       coldCandidates,
       cycle,
       selected: cycle?.hosted.identity.agent ?? null,
@@ -337,6 +363,61 @@ export class ConductorDaemon {
       started.push(identity.agent);
     }
     return started;
+  }
+
+  /**
+   * Stage 15 P-E (AC-S15-2 / ST-2) — RE-WARM the cold recovered NON-root agents. GENERALIZES the root
+   * cold-start ({@link coldStartRootCoordinators}) to the recovered live set: after a daemon restart the
+   * RUNNING set is reconstructed (each agent's durable {@link HostedIdentity} — pane/cwd/provider/resume
+   * recovered from its session record) but the NON-root agents (implementers/leads) are COLD in this
+   * fresh engine process — today only reported in {@link DaemonTickOutcome.coldCandidates}, never driven.
+   * This drives each back through the engine's SINGLE launch authority ({@link ConductorEngine.ensureHosted},
+   * MNR-5) — the SAME authority the root cold-start and the reviewer spawn-gate use, NEVER a second
+   * launcher (a second dispatch path would reintroduce the prototype's duplicate-dispatch worktree race).
+   * Called BEFORE `runCycle`, so a re-warmed agent joins the drivable set and can take its first turn
+   * THIS tick (mirroring step 0).
+   *
+   * GATES (each upholds a HARD constraint), applied per candidate in {@link buildCandidates} order:
+   *   - ALREADY WARM ({@link ConductorEngine.isHosted}) ⇒ skip: never re-launch a warm pane (single
+   *     launch authority). This also excludes a root just cold-started in step 0. The `isHosted` gate
+   *     keeps `ensureHosted`'s MNR-5 already-hosted throw unreached on the happy path.
+   *   - ROOT ({@link isRootIdentity}) ⇒ skip: a root with no session is cold-started in step 0; a
+   *     recovered root WITH a session stays a cold candidate — re-warm is NON-root, so root handling is
+   *     left exactly as-is.
+   *   - SKIPPED: a paused/STUCK agent is already filtered out of `candidates` by {@link buildCandidates}
+   *     (the {@link ConductorDaemonDeps.isSkipped} seam), so it never reaches this loop.
+   *
+   * NO DOUBLE-DISPATCH: the loop is sequential and `ensureHosted` marks the agent hosted, so once
+   * re-warmed an agent is `isHosted` on the next tick and is skipped — re-warmed AT MOST ONCE, never
+   * twice in one tick (the candidates are distinct agents) nor again on a later tick. NO wall clock —
+   * selection is the pure `candidates` order ({@link buildCandidates} → session creation order); the
+   * same injected `now()` + same recovered state ⇒ the same re-warm selection (replay-stable).
+   *
+   * SELECTION ONLY: the real binary relaunch (re-spawning the crashed provider, reconciling its existing
+   * session row) stays `[host-live]` glue, exactly as this module's docstring notes — this is the
+   * in-sandbox SELECTION that drives that handoff. Returns the ids re-warmed this tick (for the
+   * {@link DaemonTickOutcome.reWarmed} mirror + host log).
+   */
+  private async reWarmRecoveredAgents(
+    candidates: readonly HostedIdentity[],
+  ): Promise<readonly string[]> {
+    const reWarmed: string[] = [];
+    for (const identity of candidates) {
+      if (this.engine.isHosted(identity.projectId, identity.agent)) continue; // warm — single launch authority
+      if (this.isRootIdentity(identity)) continue; // roots stay with the cold-start path (re-warm is non-root)
+      await this.engine.ensureHosted(identity);
+      reWarmed.push(identity.agent);
+    }
+    return reWarmed;
+  }
+
+  /**
+   * A ROOT coordinator: `role === 'coordinator'` parented at the {@link OPERATOR} — the same predicate
+   * {@link discoverColdStartRoots} gates the cold-start on. Re-warm excludes roots (root handling is the
+   * cold-start path's, left unchanged); a recovered root-with-session is therefore never re-warmed.
+   */
+  private isRootIdentity(identity: HostedIdentity): boolean {
+    return identity.role === 'coordinator' && identity.parent === OPERATOR;
   }
 
   /**
