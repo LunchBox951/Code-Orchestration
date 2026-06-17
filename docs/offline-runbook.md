@@ -66,7 +66,9 @@ reachable remote you can push to).
 
 ## Operator procedure — run `co` on a local-only repo
 
-The app-driven on-ramp makes this the same flow as any other run (the CLI is the power-user path):
+The app-first on-ramp makes this the same flow as any other run (the CLI is the power-user path).
+Spec lock is the same temporary manual gap as SH-1: use the operator-only `co_spec_lock` MCP path
+until the app exposes it.
 
 1. `pnpm install && pnpm build`.
 2. `co doctor --live` → confirm `[ok] provider-compatibility` for the provider(s) you will use.
@@ -75,8 +77,8 @@ The app-driven on-ramp makes this the same flow as any other run (the CLI is the
    **Offline** automatically. The current desktop surface does not yet render the repo mode directly;
    confirm with `co status`.
 5. **Launch a coordinator from a predesigned spec**; watch it cold-start in the Agents Console.
-6. Plan-with-operator → `/lock` → autonomous drive → **PASS in the Review view** → confirm the gated
-   **local** merge lands on the integration branch.
+6. Plan-with-operator → operator `co_spec_lock` (record this manual gap) → autonomous drive →
+   **PASS in the Review view** → confirm the gated **local** merge lands on the integration branch.
 7. Confirm the publishing surface is genuinely closed: attempt a `co_push` / `co_pr_merge` and verify
    each **fails loud** (not a silent no-op).
 

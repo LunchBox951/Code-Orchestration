@@ -146,6 +146,7 @@ const REVIEW_CONTEXT_TIMEOUT_MS = 10_000;
 
 export function createAppShell(deps: AppShellDeps): AppShell {
   const socketPath = deps.socketPath ?? defaultOperatorSocketPath(deps.projectId);
+  let closed = false;
 
   // Open the mail store for the app's lifetime (D5 hybrid: static reads go direct,
   // daemon-down-safe). Only opened in production mode. Tests commonly inject only
@@ -180,9 +181,12 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   const limitsCostVm = new LimitsCostVM();
   const agentsConsoleVm = new AgentsConsoleVM();
   let transcriptRequestSeq = 0;
-  agentsConsoleVm.subscribe((state) => deps.onAgentsConsoleState?.(state));
+  agentsConsoleVm.subscribe((state) => {
+    if (!closed) deps.onAgentsConsoleState?.(state);
+  });
 
   function refreshSelectedTranscript(opts: { resetGeneration?: boolean } = {}): void {
+    if (closed) return;
     const agentId = agentsConsoleVm.state.selectedAgentId;
     if (agentId == null) return;
     if (opts.resetGeneration === true) agentsConsoleVm.clearSelectedTranscript();
@@ -191,6 +195,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       .transcript(agentId)
       .then((tail) => {
         if (
+          !closed &&
           requestSeq === transcriptRequestSeq &&
           agentsConsoleVm.state.selectedAgentId === agentId
         ) {
@@ -201,6 +206,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
         // Never swallow (Principle 9): surface a persistent in-pane error + Retry. Guard on the
         // request-seq + selected agent so a stale or again-switched request cannot clobber a newer pane.
         if (
+          !closed &&
           requestSeq === transcriptRequestSeq &&
           agentsConsoleVm.state.selectedAgentId === agentId
         ) {
@@ -224,6 +230,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   }
 
   function doRefreshLimitsCost(): void {
+    if (closed) return;
     limitsCostVm.update({
       buckets: readBuckets(),
       accountStatuses: readAccountStatuses(),
@@ -242,16 +249,20 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       projectId: deps.projectId,
       socketPath,
       onState: (s) => {
+        if (closed) return;
         if (s === 'disconnected') {
           void connVmRef.current?.refresh();
         }
       },
       onError: (e) => {
+        if (closed) return;
         deps.onConnectionError?.(`operator IPC connection error: ${safeError(e)}`);
       },
     });
 
-  client.onTranscript((t) => agentsConsoleVm.appendChunk(t));
+  const unsubscribeTranscript = client.onTranscript((t) => {
+    if (!closed) agentsConsoleVm.appendChunk(t);
+  });
 
   const mailVm = new MailVM({
     registry: buildRegistry(deps.registry),
@@ -259,11 +270,12 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       void client
         .markRead(recipient, seq)
         .then(() => {
+          if (closed) return;
           doRefreshMail();
         })
         .catch((e: unknown) => {
           // Conductor down or gone mid-call — show a clear message, never crash.
-          if (!(e instanceof ConductorUnavailableError)) {
+          if (!closed && !(e instanceof ConductorUnavailableError)) {
             deps.onMailError?.(safeError(e));
           }
         });
@@ -271,28 +283,34 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     onReply: async (target: OperatorMailRef, draft: ReplyDraft) => {
       try {
         await client.reply(target, draft);
+        if (closed) return;
         doRefreshMail();
       } catch (e: unknown) {
-        deps.onMailError?.(
-          e instanceof ConductorUnavailableError
-            ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to send mail.'
-            : safeError(e),
-        );
+        if (!closed) {
+          deps.onMailError?.(
+            e instanceof ConductorUnavailableError
+              ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to send mail.'
+              : safeError(e),
+          );
+        }
         throw e;
       }
     },
     onApprove: async (approvalSeq: number, reply: ApprovalReply) => {
       try {
         await client.approve(approvalSeq, reply);
+        if (closed) return;
         doRefreshMail();
         // Refresh dashboard to update outstandingCount after actionable clears.
         void connVmRef.current?.refresh();
       } catch (e: unknown) {
-        deps.onMailError?.(
-          e instanceof ConductorUnavailableError
-            ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to approve or decline.'
-            : safeError(e),
-        );
+        if (!closed) {
+          deps.onMailError?.(
+            e instanceof ConductorUnavailableError
+              ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to approve or decline.'
+              : safeError(e),
+          );
+        }
         throw e;
       }
     },
@@ -302,37 +320,49 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   });
 
   function doRefreshMail(busId?: string): void {
+    if (closed) return;
     const bus = busId ?? mailVm.state.activeBus;
     const inbox = readInbox(bus);
     const outbox = readOutbox(bus);
     mailVm.update(inbox, outbox);
   }
 
-  mailVm.subscribe((state) => deps.onMailState?.(state));
+  mailVm.subscribe((state) => {
+    if (!closed) deps.onMailState?.(state);
+  });
 
   let reviewContextRequestSeq = 0;
+  const reviewContextTimers = new Set<ReturnType<typeof setTimeout>>();
   const reviewVm = new ReviewVM({
     onFetchReviewContext: (reviewId) => {
+      if (closed) return;
       const seq = ++reviewContextRequestSeq;
       // Race the fetch against a timeout so a hung conductor cannot leave the pane on "Loading…" forever
       // (Site 4). The timer only acts while this request is still the latest AND still loading; it is
       // always cleared once the fetch settles, so no dangling timer survives.
       const timer = setTimeout(() => {
-        if (seq === reviewContextRequestSeq && reviewVm.state.context?.status === 'loading') {
+        if (
+          !closed &&
+          seq === reviewContextRequestSeq &&
+          reviewVm.state.context?.status === 'loading'
+        ) {
           reviewVm.setReviewContextError(
             reviewId,
             'Timed out loading review context — the conductor may be busy or unreachable.',
           );
         }
       }, REVIEW_CONTEXT_TIMEOUT_MS);
+      reviewContextTimers.add(timer);
       void client
         .reviewContext(reviewId)
         .then((ctx) => {
-          if (seq === reviewContextRequestSeq) reviewVm.setReviewContext(reviewId, ctx);
+          if (!closed && seq === reviewContextRequestSeq) {
+            reviewVm.setReviewContext(reviewId, ctx);
+          }
         })
         .catch((e: unknown) => {
           // Never swallow (Principle 9): surface BOTH the in-pane error state AND the existing toast.
-          if (seq === reviewContextRequestSeq) {
+          if (!closed && seq === reviewContextRequestSeq) {
             const message = conductorOrError(e);
             reviewVm.setReviewContextError(reviewId, message);
             deps.onReviewError?.(message);
@@ -340,36 +370,48 @@ export function createAppShell(deps: AppShellDeps): AppShell {
         })
         .finally(() => {
           clearTimeout(timer);
+          reviewContextTimers.delete(timer);
         });
     },
     onSubmitVerdict: async (target, draft) => {
       try {
         await client.reply(target, draft);
+        if (closed) return;
         doRefreshReviews();
         void connVmRef.current?.refresh();
       } catch (e) {
-        deps.onReviewError?.(
-          e instanceof ConductorUnavailableError
-            ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to submit a verdict.'
-            : safeError(e),
-        );
+        if (!closed) {
+          deps.onReviewError?.(
+            e instanceof ConductorUnavailableError
+              ? 'Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to submit a verdict.'
+              : safeError(e),
+          );
+        }
         throw e;
       }
     },
   });
 
   function doRefreshReviews(): void {
+    if (closed) return;
     reviewVm.update(readInbox(OPERATOR));
   }
 
-  reviewVm.subscribe((state) => deps.onReviewState?.(state));
+  reviewVm.subscribe((state) => {
+    if (!closed) deps.onReviewState?.(state);
+  });
 
   const nav = new NavVM();
-  if (deps.onNavState) nav.subscribe(deps.onNavState);
+  if (deps.onNavState) {
+    nav.subscribe((state) => {
+      if (!closed) deps.onNavState?.(state);
+    });
+  }
 
   const connVm = new ConnectionVM({
     client,
     onState: (state: ConnectionState) => {
+      if (closed) return;
       deps.onConnectionState?.(state);
       dash.update(state.observation, readActionables());
       deps.onDashboardState?.(dash.state);
@@ -379,6 +421,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       doRefreshLimitsCost();
     },
     onTick: (tick: OperatorIpcTick) => {
+      if (closed) return;
       const liveObs: OperatorObservation = { kind: 'live', snapshot: tick.snapshot };
       dash.update(liveObs, readActionables());
       deps.onDashboardState?.(dash.state);
@@ -403,6 +446,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     refreshMail: doRefreshMail,
     refreshLimitsCost: doRefreshLimitsCost,
     selectAgent(agentId: string | null): void {
+      if (closed) return;
       agentsConsoleVm.selectAgent(agentId);
       refreshSelectedTranscript();
     },
@@ -412,22 +456,27 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       refreshSelectedTranscript();
     },
     reviewSelect(reviewId: string): ReviewState {
+      if (closed) return reviewVm.state;
       reviewVm.selectReview(reviewId);
       return reviewVm.state;
     },
     reviewBeginVerdict(verdict: 'PASS' | 'ISSUES'): ReviewState {
+      if (closed) return reviewVm.state;
       reviewVm.beginVerdict(verdict);
       return reviewVm.state;
     },
     reviewUpdateComposerBody(text: string): ReviewState {
+      if (closed) return reviewVm.state;
       reviewVm.updateComposerBody(text);
       return reviewVm.state;
     },
     reviewCancelVerdict(): ReviewState {
+      if (closed) return reviewVm.state;
       reviewVm.cancelVerdict();
       return reviewVm.state;
     },
     async reviewSubmitVerdict(): Promise<ReviewState> {
+      if (closed) return reviewVm.state;
       try {
         await reviewVm.submitVerdict();
       } catch {
@@ -436,6 +485,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       return reviewVm.state;
     },
     reviewRefresh(): ReviewState {
+      if (closed) return reviewVm.state;
       doRefreshReviews();
       return reviewVm.state;
     },
@@ -443,6 +493,13 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       await connVm.start();
     },
     async close() {
+      if (closed) return;
+      closed = true;
+      transcriptRequestSeq++;
+      reviewContextRequestSeq++;
+      unsubscribeTranscript();
+      for (const timer of reviewContextTimers) clearTimeout(timer);
+      reviewContextTimers.clear();
       connVm.close();
       await client.close();
       ownedStore?.close();

@@ -66,8 +66,8 @@ terminal width and the hosted pty width must agree so cursor-addressed redraws l
 
 ## 3. How the operator runs the deferred live host-run
 
-The on-ramp Stage 15 builds makes this **simple, app-driven, no-terminal** (the CLI is the
-power-user path):
+The on-ramp Stage 15 builds makes this **app-first** (the CLI is the power-user path). One temporary
+gap remains: spec lock uses the operator-only `co_spec_lock` MCP path until the app exposes it.
 
 1. `pnpm install && pnpm build` (dev install — a packaged installer is the `⊘` post-v1 non-goal).
 2. `co doctor --live` → `[ok] provider-compatibility` for the provider(s) used.
@@ -75,8 +75,8 @@ power-user path):
 4. **Choose a repo/directory** in the app (registers + targets it).
 5. **Launch a coordinator from the predesigned spec** in the app; watch it cold-start in the Agents
    Console.
-6. Plan-with-operator → `/lock` → **autonomous multi-phase drive** → PASS in the Review view →
-   confirm the gated merge.
+6. Plan-with-operator → operator `co_spec_lock` (record this manual gap) → **autonomous multi-phase
+   drive** → PASS in the Review view → confirm the gated merge.
 7. Repeat on a local-only repo (`SH-4`); confirm a blocked raw command fails closed (`SH-5`).
 8. Capture any step that still needed a manual tool call, and any Codex-parity gap.
 

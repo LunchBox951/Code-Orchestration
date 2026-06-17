@@ -9,6 +9,7 @@ import type {
   OperatorIpcTick,
   OperatorIpcTranscript,
   CostRollup,
+  ReviewContext,
   TranscriptTail,
 } from '@co/core';
 import type { ProjectId } from '@co/core';
@@ -1068,6 +1069,80 @@ describe('createAppShell — agentsConsole VM wiring', () => {
       transcript: 'fresh tail\n',
     });
   });
+
+  it('close invalidates a pending transcript backfill callback', async () => {
+    let resolveTranscript!: (tail: TranscriptTail) => void;
+    const transcriptP = new Promise<TranscriptTail>((resolve) => {
+      resolveTranscript = resolve;
+    });
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript: vi.fn().mockReturnValue(transcriptP),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    const callsBeforeClose = onAgentsConsoleState.mock.calls.length;
+    await shell.close();
+
+    resolveTranscript(transcriptTail('impl-x', 'stale tail\n'));
+    await flushPromises();
+
+    expect(onAgentsConsoleState).toHaveBeenCalledTimes(callsBeforeClose);
+    expect(shell.agentsConsole.state.transcript).toBe('');
+  });
+
+  it('close unsubscribes and suppresses live transcript chunks', async () => {
+    let transcriptListener!: (t: OperatorIpcTranscript) => void;
+    const unsubscribeTranscript = vi.fn();
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockImplementation((cb: (t: OperatorIpcTranscript) => void) => {
+        transcriptListener = cb;
+        return unsubscribeTranscript;
+      }),
+      transcript: vi.fn().mockResolvedValue(transcriptTail('impl-x', 'base')),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+    shell.selectAgent('impl-x');
+    await vi.waitFor(() => {
+      expect(shell.agentsConsole.state.transcript).toBe('base');
+    });
+
+    onAgentsConsoleState.mockClear();
+    await shell.close();
+    expect(unsubscribeTranscript).toHaveBeenCalledOnce();
+
+    transcriptListener(transcriptPush('impl-x', ' stale', 'base'.length));
+
+    expect(onAgentsConsoleState).not.toHaveBeenCalled();
+    expect(shell.agentsConsole.state.transcript).toBe('base');
+  });
 });
 
 // ── No silent failures (AC-S15-11 [ST-3], Principle 9) ────────────────────────
@@ -1311,6 +1386,37 @@ describe('createAppShell — review-context fetch failures surface (Sites 2 & 4)
       status: 'loaded',
       value: RESOLVED_CTX_B,
     });
+    expect(onReviewError).not.toHaveBeenCalled();
+  });
+
+  it('close invalidates a pending reviewContext callback', async () => {
+    let resolveContext!: (ctx: ReviewContext) => void;
+    const contextP = new Promise<ReviewContext>((resolve) => {
+      resolveContext = resolve;
+    });
+    const client = reviewClient(vi.fn().mockReturnValue(contextP));
+    const onReviewState = vi.fn();
+    const onReviewError = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => [REVIEW_MAIL_A],
+      outboxReader: () => [],
+      onReviewState,
+      onReviewError,
+    });
+
+    shell.reviewRefresh();
+    expect(shell.reviewSelect('rev-a').context).toEqual({ status: 'loading' });
+    const callsBeforeClose = onReviewState.mock.calls.length;
+    await shell.close();
+
+    resolveContext(RESOLVED_CTX_B);
+    await flushPromises();
+
+    expect(onReviewState).toHaveBeenCalledTimes(callsBeforeClose);
     expect(onReviewError).not.toHaveBeenCalled();
   });
 });

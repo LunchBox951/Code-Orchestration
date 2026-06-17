@@ -234,6 +234,22 @@ async function driveTurnToIdle(
   qw.settle();
 }
 
+function emitToolActivity(
+  engine: ConductorEngine,
+  projectId: ProjectId,
+  agent: string,
+  activity: { phase: 'start' | 'end'; tool: string; ok?: boolean },
+): void {
+  (
+    engine as unknown as {
+      emitToolActivity: (
+        agentKey: string,
+        activity: { phase: 'start' | 'end'; tool: string; ok?: boolean },
+      ) => void;
+    }
+  ).emitToolActivity(`${projectId}:${agent}`, activity);
+}
+
 // ── AC-S14-6 — the main proof ────────────────────────────────────────────────────────────────────────
 
 describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-backed livenessInputFor', () => {
@@ -408,6 +424,143 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
         info: { kind: 'silent_stop', triggerId: SILENT_STOP_TRIGGER },
       });
       expect(stuck).toEqual([]);
+    } finally {
+      qw.settle();
+      await runner.stop();
+    }
+  });
+
+  it('a successful out-of-band co_finish after the nudge clears silent-stop before STUCK', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const scheduler = new FakeScheduler();
+
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const stuck: string[] = [];
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      autoStart: false,
+      pidAliveFor: () => true,
+      injectNudge: async () => {},
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: (agent) => stuck.push(agent),
+    });
+
+    try {
+      const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+      const reconcile = (runner as unknown as { daemon: { reconcile: ReconcileLoop } }).daemon
+        .reconcile;
+
+      seedActionableMail(projectId, 'impl-nudged');
+      const pane = await hostPane(engine, pty, makeIdentity('impl-nudged', projectId, cwd));
+      const hosted = engine.getHosted(projectId, 'impl-nudged')!;
+      const item = outstandingItem(projectId, 'impl-nudged');
+
+      clock.set(0);
+      const turnP = engine.runOneTurn(hosted, item);
+      await driveTurnToIdle(pane, item, clock, qw);
+      await turnP;
+
+      const mail = openMailStore(projectId);
+      try {
+        mail.retract(item.sender, item.seq);
+      } finally {
+        mail.close();
+      }
+
+      await reconcile.tick();
+      expect(breaks.map((b) => b.info.kind)).toEqual(['silent_stop']);
+
+      emitToolActivity(engine, projectId, 'impl-nudged', {
+        phase: 'end',
+        tool: 'co_finish',
+        ok: true,
+      });
+
+      clock.set(1000 + WEDGE_MS + 1 + 4000);
+      await reconcile.tick();
+
+      expect(stuck).toEqual([]);
+      expect(breaks.map((b) => b.info.kind)).toEqual(['silent_stop']);
+    } finally {
+      qw.settle();
+      await runner.stop();
+    }
+  });
+
+  it('a failed out-of-band co_finish attempt does not clear silent-stop', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const scheduler = new FakeScheduler();
+
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const stuck: string[] = [];
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      autoStart: false,
+      pidAliveFor: () => true,
+      injectNudge: async () => {},
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: (agent) => stuck.push(agent),
+    });
+
+    try {
+      const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+      const reconcile = (runner as unknown as { daemon: { reconcile: ReconcileLoop } }).daemon
+        .reconcile;
+
+      seedActionableMail(projectId, 'impl-failed-finish');
+      const pane = await hostPane(engine, pty, makeIdentity('impl-failed-finish', projectId, cwd));
+      const hosted = engine.getHosted(projectId, 'impl-failed-finish')!;
+      const item = outstandingItem(projectId, 'impl-failed-finish');
+
+      clock.set(0);
+      const turnP = engine.runOneTurn(hosted, item);
+      await driveTurnToIdle(pane, item, clock, qw);
+      await turnP;
+
+      const mail = openMailStore(projectId);
+      try {
+        mail.retract(item.sender, item.seq);
+      } finally {
+        mail.close();
+      }
+
+      await reconcile.tick();
+      expect(breaks.map((b) => b.info.kind)).toEqual(['silent_stop']);
+
+      emitToolActivity(engine, projectId, 'impl-failed-finish', {
+        phase: 'end',
+        tool: 'co_finish',
+        ok: false,
+      });
+
+      clock.set(1000 + WEDGE_MS + 1 + 4000);
+      await reconcile.tick();
+
+      expect(stuck).toEqual(['impl-failed-finish']);
     } finally {
       qw.settle();
       await runner.stop();

@@ -820,6 +820,13 @@ export class ConductorEngine {
   }
 
   private emitToolActivity(agentKey: string, activity: ToolActivityEvent): void {
+    if (
+      activity.phase === 'end' &&
+      activity.ok === true &&
+      COMPLETION_VERBS.includes(activity.tool)
+    ) {
+      this.turnStartedAt.delete(agentKey);
+    }
     const listeners = this.toolActivityListeners.get(agentKey);
     if (listeners == null || listeners.size === 0) return;
     const ev: DetectorEvent = {

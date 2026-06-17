@@ -367,6 +367,34 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     });
     expect(res.isError).toBe(true);
   });
+
+  it('reports tool end activity with success/failure status', async () => {
+    const ctx = makeTestContext('impl-activity');
+    const events: Array<{ phase: 'start' | 'end'; tool: string; ok?: boolean }> = [];
+    const client = await connect({
+      contextFactory: () => ctx,
+      onToolActivity: (event) => events.push(event),
+    });
+
+    const ok = await client.callTool({
+      name: 'co_mail_send',
+      arguments: { to: 'impl-activity', type: 'chat', subject: 'ok', body: 'done' },
+    });
+    expect(ok.isError).toBeFalsy();
+
+    const failed = await client.callTool({
+      name: 'co_mail_send',
+      arguments: { type: 'chat', subject: 'bad', body: 'missing recipient' },
+    });
+    expect(failed.isError).toBe(true);
+
+    expect(events).toEqual([
+      { phase: 'start', tool: 'co_mail_send' },
+      { phase: 'end', tool: 'co_mail_send', ok: true },
+      { phase: 'start', tool: 'co_mail_send' },
+      { phase: 'end', tool: 'co_mail_send', ok: false },
+    ]);
+  });
 });
 
 describe('createCoMcpServer — per-role tool-scoping (AC-L2-5: the server scopes the offered toolset per role)', () => {
