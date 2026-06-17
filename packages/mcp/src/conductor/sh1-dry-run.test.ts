@@ -1,15 +1,27 @@
 /**
- * SH-1 PROOF HARNESS (Stage 14 · P3 KEYSTONE) — a deterministic sandbox proof of the FULL self-host
- * lifecycle, driven end to end by the REAL daemon + mail bus + real co tools, with ZERO hand-stitched
- * inter-agent transitions. The lifecycle proven (each arrow a loop-driven transition asserted via the
- * program-data stores + the tmp repo's git log — NEVER a scripted agent's claim):
+ * SH-1 PROOF HARNESS (Stage 14 · P3 KEYSTONE, extended in Stage 15 · P-D to MULTI-PHASE) — a
+ * deterministic sandbox proof of the FULL self-host lifecycle across ≥2 plan phases, driven end to end
+ * by the REAL daemon + mail bus + real co tools, with ZERO hand-stitched inter-agent transitions. The
+ * lifecycle proven (each arrow a loop-driven transition asserted via the program-data stores + the tmp
+ * repo's git log — NEVER a scripted agent's claim):
  *
  *   operator start  →  daemon COLD-STARTS the root coordinator  →  coordinator (driven turn) drafts a
  *   spec (`co_spec_draft`) + brainstorms the operator (`co_mail_send` clarify_request)  →  operator
- *   answers + `co_spec_lock`  →  coordinator (driven turn) `co_sling`s the lead  →  lead (driven turn)
- *   `co_sling`s the worker  →  worker (driven turn) `co_finish`  →  worker_done → lead  →  lead
- *   `co_merge` (#1) → review_request → operator PASS via the operator-IPC review path → review_response
- *   → lead  →  lead `co_merge` (#2) → the merge LANDS on the integration branch.
+ *   answers + `co_spec_lock`  →  coordinator (driven turn) `co_plan_ingest`s a 2-PHASE plan + `co_sling`s
+ *   phase 1's lead + records phase1 → building (`co_phase_update`)  →  lead (driven turn) `co_finish`
+ *   → worker_done → coordinator  →  coordinator `co_merge` (#1, lead→integration) → review_request →
+ *   operator PASS via the operator-IPC review path → review_response → coordinator  →  coordinator
+ *   `co_merge` (#2) LANDS phase 1 on the integration branch, and IN THAT SAME LANDING TURN records
+ *   `phase.verified(phase1, pass)` + phase1 → merged, confirms phase1 ready (`co_phase_status`), then
+ *   ADVANCES — `co_sling`s phase 2's lead (causally gated on phase 1's merge landing).  →  phase 2
+ *   repeats the same shape  →  on the LAST phase the coordinator `co_task_complete`s the task.
+ *
+ * THE ADVANCE IS THE KEYSTONE TRANSITION (Stage 15 P-D): the DAEMON is UNCHANGED — it only WAKES the
+ * coordinator (the PASS `review_response` to the `co_merge` caller is an actionable turn-wake). The
+ * COORDINATOR advances (records verified+merged, slings the next phase, or completes) — orchestration
+ * lives in the agent via MCP tools (Principle 4), never in the daemon. The gated lead→integration
+ * review IS the phase verification (Principle 10 / RG-4): `phase.verified(pass)` is recorded at the
+ * point the gated merge lands, NOT via a separate phase-tester run.
  *
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  * CRITICAL — THIS TEST PROVES THE LOOP **PLUMBING + WIRING** ONLY.
@@ -83,6 +95,7 @@ import {
   openConfigStore,
   openDispatchStore,
   openMailStore,
+  openPlanStore,
   openRegistry,
   openReviewStore,
   openSpecStore,
@@ -95,11 +108,11 @@ import {
   resolveRepoMode,
   reviewReviewerKey,
   startCoordinatorSession,
-  worktreePathFor,
   type DeliveredMail,
   type DispatchStore,
   type MailStore,
   type PlacementRecord,
+  type PlanStore,
   type ProjectId,
   type ProjectRegistry,
   type ReviewStore,
@@ -126,11 +139,21 @@ const CLAUDE_READY = ESC + '[2J' + ESC + '[H' + '╭─ Welcome ─╮\r\n❯ \r
 
 // ── Fixed identities / ids / branches (deterministic — no randomness in the harness) ─────────────────
 const TASK_ID = '2026-06-15-sh1-dry-run-toy';
-const TOY_BRANCH = 'co/sh1-dry-run-toy'; // the worker's branch.
-const LEAD_BRANCH = 'co/sh1-dry-run-lead'; // the lead's branch.
 const INTEGRATION = 'main';
-const LEAD = 'lead-sh1-toy';
-const WORKER = 'impl-sh1-toy';
+// One lead per phase. The lead's OWN branch carries the phase change (it does the phase work itself +
+// co_finish); the COORDINATOR merges the lead→integration branch and advances. With no sub-worker under
+// a lead, the readiness fold's `workersComplete` is vacuously true (readiness rests on `verifiedPass`).
+const LEAD1 = 'lead-sh1-pd-1';
+const LEAD1_BRANCH = 'co/sh1-pd-lead1';
+const LEAD2 = 'lead-sh1-pd-2';
+const LEAD2_BRANCH = 'co/sh1-pd-lead2';
+// The locked spec's single acceptance criterion — task_criteria MUST match it exactly at ingestion.
+const SPEC_CRITERIA = [
+  {
+    text: 'the toy change merges cleanly into the integration branch',
+    verify: 'pnpm vitest run packages/mcp/src/conductor/sh1-dry-run.test.ts',
+  },
+];
 
 // A far-future, healthy usage snapshot. Recorded into the dispatch cache so `co_sling`'s usage refresh
 // is served from program-data (`readProviderUsageCached`) and never performs a live read — making L4
@@ -157,6 +180,7 @@ let mailStores: MailStore[] = [];
 let reviewStores: ReviewStore[] = [];
 let worktreeStores: WorktreeStore[] = [];
 let specStores: SpecStore[] = [];
+let planStores: PlanStore[] = [];
 let dispatchStores: DispatchStore[] = [];
 let contextHandles: Array<{ close: () => void }> = [];
 let ipcServers: OperatorIpcServer[] = [];
@@ -173,6 +197,7 @@ beforeEach(() => {
   reviewStores = [];
   worktreeStores = [];
   specStores = [];
+  planStores = [];
   dispatchStores = [];
   contextHandles = [];
   ipcServers = [];
@@ -213,6 +238,7 @@ afterEach(async () => {
     ...reviewStores,
     ...worktreeStores,
     ...specStores,
+    ...planStores,
     ...dispatchStores,
     ...contextHandles,
     ...registries,
@@ -331,6 +357,11 @@ function worktrees(projectId: ProjectId): WorktreeStore {
 function specs(projectId: ProjectId): SpecStore {
   const store = openSpecStore(projectId);
   specStores.push(store);
+  return store;
+}
+function plans(projectId: ProjectId): PlanStore {
+  const store = openPlanStore(projectId);
+  planStores.push(store);
   return store;
 }
 function dispatch(projectId: ProjectId): DispatchStore {
@@ -515,6 +546,33 @@ function isUnreadTurnWakeMail(item: DeliveredMail): boolean {
 }
 
 // ── The structured outcome of one proof run ────────────────────────────────────────────────────────
+/** The loop-driven facts of ONE plan phase: lead finish → coordinator gated merge → land → verified. */
+interface PhaseRunFacts {
+  readonly leadProvisioned: boolean;
+  readonly finishTick: DaemonTickOutcome;
+  readonly finishRecorded: boolean;
+  readonly workerDonePersisted: boolean;
+  /** co_merge (#1) returned review_pending (the gated review was triggered, no merge yet). */
+  readonly mergePending: boolean;
+  /** The repo mode co_merge resolved (merge.ts → resolveRepoMode); 'offline' for the no-remote harness repo (SH-4). */
+  readonly mergeMode: string;
+  readonly reviewRequested: boolean;
+  readonly passVerdictRecorded: boolean;
+  /** The coordinator turn that LANDED the merge AND advanced (verified+merged, then sling/complete). */
+  readonly landTick: DaemonTickOutcome;
+  readonly merged: boolean;
+  readonly mergeCommitSha: string;
+  readonly mergedFileOnIntegration: boolean;
+  /** `merge.serialized` was recorded for (integration, lead branch) — the ADVANCE evidence. */
+  readonly serialized: boolean;
+  /** A green `phase.verified` was recorded for the phase (verifiedPass === true). */
+  readonly verifiedPass: boolean;
+  /** The phase's status after landing (`merged`). */
+  readonly statusAfterLand: string;
+  /** co_phase_status reports THIS phase ready (verifiedPass ∧ workersComplete) at the advance point. */
+  readonly phaseReadyAfterLand: boolean;
+}
+
 interface Sh1DryRunResult {
   readonly coordinator: string;
   readonly coldStartTick: DaemonTickOutcome;
@@ -522,29 +580,30 @@ interface Sh1DryRunResult {
   readonly brainstormDelivered: boolean;
   readonly brainstormAnswered: boolean;
   readonly specLocked: boolean;
-  readonly leadSlingTick: DaemonTickOutcome;
-  readonly leadProvisioned: boolean;
-  readonly workerSlingTick: DaemonTickOutcome;
-  readonly workerProvisioned: boolean;
-  readonly worktreePath: string;
-  readonly finishTick: DaemonTickOutcome;
-  readonly finishRecorded: boolean;
-  readonly finishCommitSha: string;
-  readonly workerDonePersisted: boolean;
-  readonly reviewRequested: boolean;
-  readonly mergePending: boolean;
-  readonly passVerdictRecorded: boolean;
-  readonly merged: boolean;
-  readonly mergeCommitSha: string;
-  readonly mergeMode: string;
-  readonly mergedFileOnIntegration: boolean;
+  readonly planIngested: boolean;
+  /** Phase statuses straight out of co_plan_ingest — every phase starts 'planned'. */
+  readonly statusesAtIngest: readonly string[];
+  /** TICK 2 — the coordinator turn that ingested the plan + slung phase 1's lead + recorded building. */
+  readonly phase1SlingTick: DaemonTickOutcome;
+  /** phase 1 status after its lead is slung ('building'). */
+  readonly phase1StatusAfterSling: string;
+  readonly phase1: PhaseRunFacts;
+  /** phase 2 status after the ADVANCE slung its lead ('building') — captured in phase 1's landing turn. */
+  readonly phase2StatusAfterAdvance: string;
+  readonly phase2: PhaseRunFacts;
+  /** The two integration merge commits (one per phase) are distinct (git log). */
+  readonly twoDistinctMergeCommits: boolean;
+  /** task.completed was recorded in the plan store (the LAST-phase close). */
+  readonly taskCompleted: boolean;
   readonly finalTick: DaemonTickOutcome;
 }
 
 /**
- * Drive the full toy change through the loop. Returns the structured transition facts (read from the
+ * Drive a 2-PHASE plan through the loop. Returns the structured transition facts (read from the
  * program-data stores + the tmp repo's git log) so the test asserts the PLUMBING, not the scripted
- * agent's claims.
+ * agent's claims. The KEYSTONE is the ADVANCE: after phase 1's gated merge lands, the COORDINATOR
+ * (woken by the PASS review_response — the daemon is unchanged) records verified+merged, confirms the
+ * phase ready, then slings phase 2; after phase 2 lands it completes the task.
  */
 async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1DryRunResult> {
   const reg = buildCoreRegistry();
@@ -556,7 +615,7 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     {
       projectId,
       repoCwd: repo,
-      prompt: 'Orchestrate the SH-1 dry-run toy change with the operator.',
+      prompt: 'Orchestrate the SH-1 dry-run multi-phase change with the operator.',
       base: INTEGRATION,
     },
     { slingDeps: SLING_DEPS },
@@ -568,6 +627,25 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
   const pty = new FakePty();
   const agentPanes = new Map<string, FakePty['panes'][number]>();
   const skipped = new Set<string>();
+  // Force deterministic single-candidate selection: skip every known agent EXCEPT `target`. Skipping a
+  // not-yet-slung lead is harmless (no session ⇒ not a candidate); skipping the warm root keeps it out
+  // of the candidate set WITHOUT releasing it (a released root would be re-cold-started, then hang on a
+  // startup byte we never feed). The COORDINATOR is the workhorse here (it merges + advances), so it is
+  // un-skipped on its turns and skipped only while a lead is driven.
+  const ALL_AGENTS = [COORD, LEAD1, LEAD2];
+  const only = (target: string): void => {
+    skipped.clear();
+    for (const a of ALL_AGENTS) if (a !== target) skipped.add(a);
+  };
+
+  // The gated merges require a HUMAN review (the runbook's operator-IPC PASS path).
+  const cfg = openConfigStore();
+  try {
+    cfg.setProjectOverride(projectId, reviewReviewerKey('worker_merge'), 'human');
+  } finally {
+    cfg.close();
+  }
+
   // A const holder breaks the construction cycle (the gate wraps the engine; the engine's lazy factory
   // reads the gate) without a reassigned `let`.
   const gateBox: { gate: ReviewerSpawnGate | undefined } = { gate: undefined };
@@ -583,6 +661,9 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
   });
 
   // ── Phase 0b — TICK 1: the daemon COLD-STARTS the root + drives its first turn (draft + brainstorm). ──
+  only(COORD);
+  // Connected ONCE here and reused across every coordinator turn — the pane stays warm (never released).
+  let coordClient!: Client;
   const coldStartTick = await (async (): Promise<DaemonTickOutcome> => {
     const tickP = daemon.tick();
     await tick(); // let coldStartRootCoordinators → ensureHosted spawn the root pane + start the MCP bind
@@ -591,25 +672,20 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     coordPane.emit(CLAUDE_READY); // drive startup to ready ⇒ ensureHosted resolves; runCycle selects it
     await flush(); // let ensureHosted resolve fully (session minted; getHosted populated; runCycle injecting)
     const coordHosted = engine.getHosted(projectId, COORD)!;
-    const coordClient = await connectScriptedAgent(coordHosted.clientTransport);
+    coordClient = await connectScriptedAgent(coordHosted.clientTransport);
     // DURING the driven turn, the scripted coordinator drafts the toy spec and brainstorms the operator.
     await callToolOrThrow(coordClient, 'co_spec_draft', {
       task_id: TASK_ID,
-      title: 'SH-1 dry-run toy change',
-      goal: 'Exercise the orchestration loop end to end.',
-      criteria: [
-        {
-          text: 'the toy change merges cleanly into the integration branch',
-          verify: 'pnpm vitest run packages/mcp/src/conductor/sh1-dry-run.test.ts',
-        },
-      ],
-      body: 'A minimal toy change used to rehearse the SH-1 runbook flow in-sandbox.',
+      title: 'SH-1 dry-run multi-phase change',
+      goal: 'Exercise the multi-phase autonomous loop end to end.',
+      criteria: SPEC_CRITERIA,
+      body: 'A minimal multi-phase change used to rehearse the SH-1 runbook flow in-sandbox.',
     });
     await callToolOrThrow(coordClient, 'co_mail_send', {
       to: OPERATOR,
       type: 'clarify_request',
-      subject: 'Brainstorm: scope the SH-1 dry-run toy change',
-      body: 'Proposed scope: a single toy file landed through the full loop. OK to lock?',
+      subject: 'Brainstorm: scope the SH-1 dry-run multi-phase change',
+      body: 'Proposed scope: two toy phases landed through the full loop. OK to lock?',
     });
     const injected = firstDrivableMail(projectId, COORD);
     await driveTurnToIdle(coordPane, injected, clock, qw, 1000);
@@ -627,8 +703,8 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     throw new Error('sh1-dry-run: coordinator did not brainstorm the operator');
   mail(projectId).reply(brainstorm, {
     type: MAIL_CLARIFY_RESPONSE,
-    subject: 'Re: scope the SH-1 dry-run toy change',
-    body: 'Approved — lock it and sling your lead.',
+    subject: 'Re: scope the SH-1 dry-run multi-phase change',
+    body: 'Approved — lock it, plan the phases, and sling phase 1.',
   });
   const brainstormAnswered = mail(projectId)
     .inbox(COORD)
@@ -638,11 +714,33 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
   await invokeTool(reg, operatorCtx.ctx, 'co_spec_lock', { task_id: TASK_ID });
   const specLocked = specs(projectId).getSpec(TASK_ID)?.state === 'locked';
 
-  // ── Phase 1a — TICK 2: drive the coordinator's turn; it `co_sling`s the lead (spawn gate hosts it). ──
-  const coordClient = await connectScriptedAgent(
-    engine.getHosted(projectId, COORD)!.clientTransport,
-  );
-  const leadSlingTick = await driveDaemonTurn(
+  // The plan the coordinator ingests: 2 phases, phase2 gated on phase1, each with a wired criterion.
+  // task_criteria MUST equal the locked spec criteria exactly (the ingest gate enforces it).
+  const PLAN_PHASES = [
+    {
+      phase_id: 'phase1',
+      name: 'Phase one',
+      owner: LEAD1,
+      deps: [] as string[],
+      criteria: [
+        { text: 'phase 1 change lands on integration', verify: 'pnpm vitest run packages/mcp' },
+      ],
+    },
+    {
+      phase_id: 'phase2',
+      name: 'Phase two',
+      owner: LEAD2,
+      deps: ['phase1'],
+      criteria: [
+        { text: 'phase 2 change lands on integration', verify: 'pnpm vitest run packages/mcp' },
+      ],
+    },
+  ];
+
+  // ── TICK 2 — coordinator turn: INGEST the 2-phase plan, sling phase 1's lead, record phase1 → building. ──
+  only(COORD); // the clarify_response is the wake; LEAD1/LEAD2 are not yet slung.
+  let statusesAtIngest: string[] = [];
+  const phase1SlingTick = await driveDaemonTurn(
     daemon,
     clock,
     qw,
@@ -651,135 +749,85 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     agentPanes,
     110000,
     async () => {
+      const ingest = await callToolJson(coordClient, 'co_plan_ingest', {
+        task_id: TASK_ID,
+        goal: 'Exercise the multi-phase autonomous loop end to end.',
+        task_criteria: SPEC_CRITERIA,
+        phases: PLAN_PHASES,
+      });
+      statusesAtIngest = (ingest['phases'] as Array<{ status: string }>).map((p) => p.status);
       await callToolOrThrow(coordClient, 'co_sling', {
         parent: COORD,
-        agent: LEAD,
+        agent: LEAD1,
         role: 'lead',
-        branch: LEAD_BRANCH,
+        branch: LEAD1_BRANCH,
         base: INTEGRATION,
-        kickoff: 'Coordinate the toy change: sling a worker, integrate its reviewed branch.',
+        kickoff: 'Make the phase-1 change in your worktree and finish through the gate.',
+      });
+      await callToolOrThrow(coordClient, 'co_phase_update', {
+        task_id: TASK_ID,
+        phase_id: 'phase1',
+        status: 'building',
       });
     },
   );
-  const leadProvisioned = worktrees(projectId).getWorktree(LEAD_BRANCH)?.removed === false;
-  // The coordinator has dispatched its lead. SKIP it (don't release): a released root would be re-
-  // cold-started by the next tick (it stays a registered root with a provisioned worktree + no session),
-  // hanging on a startup byte we never feed. Skipping keeps it warm but out of the candidate set.
-  skipped.add(COORD);
+  const planIngested = plans(projectId).getPlan(TASK_ID) != null;
+  const phase1StatusAfterSling =
+    plans(projectId)
+      .getPlan(TASK_ID)
+      ?.phases.find((p) => p.phaseId === 'phase1')?.status ?? '<none>';
 
-  // ── Phase 1b — TICK 3: drive the lead's turn; it `co_sling`s the worker (spawn gate hosts it). ──────
-  const leadClient = await connectScriptedAgent(engine.getHosted(projectId, LEAD)!.clientTransport);
-  const workerSlingTick = await driveDaemonTurn(
-    daemon,
-    clock,
-    qw,
-    projectId,
-    LEAD,
-    agentPanes,
-    210000,
-    async () => {
-      await callToolOrThrow(leadClient, 'co_sling', {
-        parent: LEAD,
-        agent: WORKER,
-        role: 'implementer',
-        branch: TOY_BRANCH,
+  // ── PHASE 1 (ticks 3–5): lead finish → coordinator gated merge → LAND + ADVANCE (sling phase 2). ──
+  const phase1 = await drivePhaseToMerged({
+    phaseId: 'phase1',
+    lead: LEAD1,
+    leadBranch: LEAD1_BRANCH,
+    bases: { finish: 210000, merge1: 310000, land: 410000 },
+    // The ADVANCE — runs INSIDE phase 1's landing turn, ONLY after phase 1 is confirmed ready: the
+    // coordinator slings phase 2's lead (causally gated on phase 1's merge landing) + records building.
+    advanceInLandingTurn: async () => {
+      await callToolOrThrow(coordClient, 'co_sling', {
+        parent: COORD,
+        agent: LEAD2,
+        role: 'lead',
+        branch: LEAD2_BRANCH,
         base: INTEGRATION,
-        kickoff: 'Make the toy change in your worktree and finish through the gate.',
+        kickoff: 'Make the phase-2 change in your worktree and finish through the gate.',
+      });
+      await callToolOrThrow(coordClient, 'co_phase_update', {
+        task_id: TASK_ID,
+        phase_id: 'phase2',
+        status: 'building',
       });
     },
-  );
-  const workerWorktree = worktrees(projectId).getWorktree(TOY_BRANCH);
-  const workerProvisioned = workerWorktree?.removed === false;
-  const worktreePath = workerWorktree?.path ?? '';
+  });
+  const phase2StatusAfterAdvance =
+    plans(projectId)
+      .getPlan(TASK_ID)
+      ?.phases.find((p) => p.phaseId === 'phase2')?.status ?? '<none>';
+  await engine.release(projectId, LEAD1); // phase 1 done — release its warm pane (session ends).
 
-  // ── Phase 2 — TICK 4: drive the worker's turn; it makes the toy edit + `co_finish` (inside the turn). ──
-  // Write the toy change in the worker's worktree (the scripted co_finish commits it). Skip the lead so
-  // the daemon selects the worker this tick (both are warm with drivable kickoff mail).
-  writeFileSync(join(worktreePath, 'toy.txt'), 'the toy change\n');
-  skipped.add(LEAD);
-  const workerClient = await connectScriptedAgent(
-    engine.getHosted(projectId, WORKER)!.clientTransport,
-  );
-  const finishTick = await driveDaemonTurn(
-    daemon,
-    clock,
-    qw,
-    projectId,
-    WORKER,
-    agentPanes,
-    310000,
-    async () => {
-      await callToolOrThrow(workerClient, 'co_finish', {
-        intent: { type: 'feat', scope: 'toy', summary: 'add the toy change' },
-        tests: [{ name: 'toy-suite', passed: true }],
-        notes: 'sh1 dry-run',
-      });
+  // ── PHASE 2 (ticks 6–8): same shape; on the LAST phase the coordinator COMPLETES the task. ─────────
+  const phase2 = await drivePhaseToMerged({
+    phaseId: 'phase2',
+    lead: LEAD2,
+    leadBranch: LEAD2_BRANCH,
+    bases: { finish: 510000, merge1: 610000, land: 710000 },
+    // The COMPLETE — runs INSIDE phase 2's landing turn (last phase): the coordinator closes the task.
+    advanceInLandingTurn: async () => {
+      await callToolOrThrow(coordClient, 'co_task_complete', { task_id: TASK_ID });
     },
-  );
-  const finishRecord = worktrees(projectId).getFinish(TOY_BRANCH);
-  const finishCommitSha = finishRecord?.commitSha ?? '';
-  const finishRecorded =
-    finishRecord != null && finishCommitSha === git(repo, 'rev-parse', TOY_BRANCH);
-  const workerDonePersisted = mail(projectId)
-    .inbox(LEAD)
-    .some((m) => m.type === 'worker_done' && m.sender === WORKER);
-  await engine.release(projectId, WORKER); // the worker is done — release its warm pane.
-
-  // ── Phase 3 — the gated merge round-trip: co_merge (#1) → review_request → operator PASS via IPC. ──
-  // Configure the worker_merge scope to require a HUMAN review (the runbook's operator path). The lead's
-  // co_merge then arises the review_request via its engine-wired spawn gate (returns review_pending).
-  const cfg = openConfigStore();
-  try {
-    cfg.setProjectOverride(projectId, reviewReviewerKey('worker_merge'), 'human');
-  } finally {
-    cfg.close();
-  }
-  // Drive merge #1 INSIDE a daemon-selected lead turn (mirrors the worker's co_finish tick): un-skip the
-  // lead so the daemon selects it (warm, with unread worker_done wake mail) and run co_merge DURING the
-  // driven turn — so even the merge transitions are daemon-sequenced, never directly invoked.
-  // Capture the tool JSON via an outer `let` (driveDaemonTurn returns the tick outcome, not the result).
-  skipped.delete(LEAD);
-  let merge1: { review_pending?: boolean; merged?: boolean; mode?: string } | undefined;
-  await driveDaemonTurn(daemon, clock, qw, projectId, LEAD, agentPanes, 410000, async () => {
-    merge1 = (await callToolJson(leadClient, 'co_merge', {
-      branch: TOY_BRANCH,
-      into: INTEGRATION,
-      intent: { summary: 'land the SH-1 dry-run toy change' },
-      spec_ref: `spec:${TASK_ID}#locked`,
-    })) as { review_pending?: boolean; merged?: boolean };
   });
-  if (merge1 == null) throw new Error('sh1-dry-run: co_merge (#1) returned no result');
-  const mergePending = merge1.review_pending === true && merge1.merged !== true;
-  // The repo mode co_merge itself resolved (merge.ts → resolveRepoMode). For the no-remote harness
-  // repo this is 'offline' — direct evidence the gated round-trip below ran in Offline mode (SH-4).
-  const mergeMode = merge1.mode ?? '';
-  const reviewRequest = reviews(projectId).getReviewRequest(INTEGRATION, TOY_BRANCH);
-  const reviewRequested = reviewRequest != null;
-  if (reviewRequest == null) throw new Error('sh1-dry-run: co_merge did not request a review');
+  await engine.release(projectId, LEAD2); // phase 2 done — release its warm pane.
 
-  // OPERATOR PASS through the REAL operator-IPC review path (reviewContext fingerprint → reply PASS).
-  await operatorPassViaIpc(projectId, reviewRequest.reviewId);
-  const passVerdictRecorded =
-    reviews(projectId).getVerdict(INTEGRATION, TOY_BRANCH)?.verdict === 'PASS';
+  const twoDistinctMergeCommits =
+    phase1.mergeCommitSha !== phase2.mergeCommitSha &&
+    /^[0-9a-f]{40}$/.test(phase1.mergeCommitSha) &&
+    /^[0-9a-f]{40}$/.test(phase2.mergeCommitSha);
+  const taskCompleted = plans(projectId).getPlan(TASK_ID)?.completedTs != null;
 
-  // ── Phase 4 — the lead re-runs co_merge; the recorded PASS lets the gated merge LAND on main. ──────
-  // Daemon-driven too: the lead is still warm (the review_response PASS is now unread wake mail), so the
-  // daemon selects + drives it while the scripted co_merge lands the merge DURING the driven turn.
-  const integrationHeadBefore = git(repo, 'rev-parse', INTEGRATION);
-  await driveDaemonTurn(daemon, clock, qw, projectId, LEAD, agentPanes, 510000, async () => {
-    await callToolOrThrow(leadClient, 'co_merge', {
-      branch: TOY_BRANCH,
-      into: INTEGRATION,
-      intent: { summary: 'land the SH-1 dry-run toy change' },
-      spec_ref: `spec:${TASK_ID}#locked`,
-    });
-  });
-  const mergeCommitSha = git(repo, 'rev-parse', INTEGRATION);
-  const merged = mergeCommitSha !== integrationHeadBefore;
-  const mergedFileOnIntegration = git(repo, 'cat-file', '-t', `${INTEGRATION}:toy.txt`) === 'blob';
-  await engine.release(projectId, LEAD); // the lead has landed the merge — release its warm pane.
-
-  // ── Phase 5 — a final tick proves the daemon deterministically reconstructs the post-merge live set. ──
+  // ── A final tick proves the daemon deterministically reconstructs the post-completion live set. ────
+  only('<none>'); // skip the still-warm root; both leads are released (sessions ended).
   const finalTick = await daemon.tick();
 
   return {
@@ -789,24 +837,186 @@ async function driveSh1DryRun(projectId: ProjectId, repo: string): Promise<Sh1Dr
     brainstormDelivered,
     brainstormAnswered,
     specLocked,
-    leadSlingTick,
-    leadProvisioned,
-    workerSlingTick,
-    workerProvisioned,
-    worktreePath,
-    finishTick,
-    finishRecorded,
-    finishCommitSha,
-    workerDonePersisted,
-    reviewRequested,
-    mergePending,
-    passVerdictRecorded,
-    merged,
-    mergeCommitSha,
-    mergeMode,
-    mergedFileOnIntegration,
+    planIngested,
+    statusesAtIngest,
+    phase1SlingTick,
+    phase1StatusAfterSling,
+    phase1,
+    phase2StatusAfterAdvance,
+    phase2,
+    twoDistinctMergeCommits,
+    taskCompleted,
     finalTick,
   };
+
+  // ── Per-phase driver (closure over the engine/daemon/clock/skip state) ────────────────────────────
+  /**
+   * Drive ONE phase to merged: (1) write the phase change into the lead's worktree + drive the lead's
+   * `co_finish` turn (worker_done → coordinator); (2) drive the coordinator's `co_merge` (#1) turn
+   * (gated review triggered → review_pending); (3) operator PASS via the real IPC path; (4) drive the
+   * coordinator's `co_merge` (#2) LANDING turn, which IN THE SAME TURN records phase.verified + the
+   * phase status `verified`→`merged`, confirms the phase ready via `co_phase_status`, and ADVANCES
+   * (`advanceInLandingTurn`). Returns the loop-driven facts read from the stores + git.
+   */
+  async function drivePhaseToMerged(opts: {
+    phaseId: string;
+    lead: string;
+    leadBranch: string;
+    bases: { finish: number; merge1: number; land: number };
+    advanceInLandingTurn: () => Promise<void>;
+  }): Promise<PhaseRunFacts> {
+    const { phaseId, lead, leadBranch, bases, advanceInLandingTurn } = opts;
+    // The lead was hosted by the coordinator's sling (prior turn); connect a client to its warm pane.
+    const leadClient = await connectScriptedAgent(
+      engine.getHosted(projectId, lead)!.clientTransport,
+    );
+    const leadWorktree = worktrees(projectId).getWorktree(leadBranch);
+    const leadProvisioned = leadWorktree?.removed === false;
+    // The lead does the phase work itself: write the change into its worktree; the scripted co_finish
+    // commits it onto the lead's branch (the branch the coordinator then merges).
+    writeFileSync(join(leadWorktree?.path ?? '', `${phaseId}.txt`), `the ${phaseId} change\n`);
+
+    // (1) LEAD FINISH turn.
+    only(lead);
+    const finishTick = await driveDaemonTurn(
+      daemon,
+      clock,
+      qw,
+      projectId,
+      lead,
+      agentPanes,
+      bases.finish,
+      async () => {
+        await callToolOrThrow(leadClient, 'co_finish', {
+          intent: { type: 'feat', scope: phaseId, summary: `add the ${phaseId} change` },
+          tests: [{ name: 'phase-suite', passed: true }],
+          notes: `sh1 dry-run ${phaseId}`,
+        });
+      },
+    );
+    const finishRecord = worktrees(projectId).getFinish(leadBranch);
+    const finishRecorded =
+      finishRecord != null && finishRecord.commitSha === git(repo, 'rev-parse', leadBranch);
+    const workerDonePersisted = mail(projectId)
+      .inbox(COORD)
+      .some((m) => m.type === 'worker_done' && m.sender === lead);
+
+    // (2) COORDINATOR co_merge (#1) turn — the gated review is triggered (no merge yet). The coordinator
+    //     is the worktree parent of the lead's branch, so co_merge accepts it (worktree.parent === caller).
+    only(COORD);
+    let merge1: { review_pending?: boolean; merged?: boolean; mode?: string } | undefined;
+    await driveDaemonTurn(
+      daemon,
+      clock,
+      qw,
+      projectId,
+      COORD,
+      agentPanes,
+      bases.merge1,
+      async () => {
+        merge1 = (await callToolJson(coordClient, 'co_merge', {
+          branch: leadBranch,
+          into: INTEGRATION,
+          intent: { summary: `land the SH-1 dry-run ${phaseId} change` },
+          spec_ref: `spec:${TASK_ID}#locked`,
+        })) as { review_pending?: boolean; merged?: boolean; mode?: string };
+      },
+    );
+    if (merge1 == null)
+      throw new Error(`sh1-dry-run: co_merge (#1) for ${phaseId} returned no result`);
+    const mergePending = merge1.review_pending === true && merge1.merged !== true;
+    // The repo mode co_merge itself resolved (merge.ts → resolveRepoMode). For the no-remote harness
+    // repo this is 'offline' — direct evidence the gated round-trip ran in Offline mode (SH-4).
+    const mergeMode = merge1.mode ?? '';
+    const reviewRequest = reviews(projectId).getReviewRequest(INTEGRATION, leadBranch);
+    const reviewRequested = reviewRequest != null;
+    if (reviewRequest == null)
+      throw new Error(`sh1-dry-run: co_merge (#1) for ${phaseId} did not request a review`);
+
+    // (3) OPERATOR PASS through the REAL operator-IPC path → records PASS + review_response → coordinator.
+    await operatorPassViaIpc(projectId, reviewRequest.reviewId, leadBranch);
+    const passVerdictRecorded =
+      reviews(projectId).getVerdict(INTEGRATION, leadBranch)?.verdict === 'PASS';
+
+    // (4) COORDINATOR co_merge (#2) LANDING turn + the ADVANCE. The PASS review_response is the unread
+    //     wake mail that selects the coordinator; in this ONE turn it lands the merge, records
+    //     phase.verified + merged (the gated review IS the verification), confirms the phase ready, then
+    //     advances. The daemon only WOKE the coordinator — orchestration is the coordinator's, not the
+    //     daemon's (Principle 4).
+    const integrationHeadBefore = git(repo, 'rev-parse', INTEGRATION);
+    let phaseReadyAfterLand = false;
+    const landTick = await driveDaemonTurn(
+      daemon,
+      clock,
+      qw,
+      projectId,
+      COORD,
+      agentPanes,
+      bases.land,
+      async () => {
+        await callToolOrThrow(coordClient, 'co_merge', {
+          branch: leadBranch,
+          into: INTEGRATION,
+          intent: { summary: `land the SH-1 dry-run ${phaseId} change` },
+          spec_ref: `spec:${TASK_ID}#locked`,
+        });
+        // The gated lead→integration review IS the phase verification (Principle 10 / RG-4): record
+        // phase.verified at the landing point, baseline = the post-merge integration head.
+        const baselineSha = git(repo, 'rev-parse', INTEGRATION);
+        await callToolOrThrow(coordClient, 'co_phase_update', {
+          task_id: TASK_ID,
+          phase_id: phaseId,
+          status: 'verified',
+          verified: { baseline_sha: baselineSha, pass: true },
+        });
+        await callToolOrThrow(coordClient, 'co_phase_update', {
+          task_id: TASK_ID,
+          phase_id: phaseId,
+          status: 'merged',
+        });
+        // The fold gate: the coordinator confirms THIS phase is ready before advancing — the advance is
+        // causally gated on the merge landing (verifiedPass ∧ workersComplete), not mere sequencing.
+        const status = await callToolJson(coordClient, 'co_phase_status', { task_id: TASK_ID });
+        phaseReadyAfterLand =
+          (status['phases'] as Array<{ phase_id: string; ready: boolean }>).find(
+            (p) => p.phase_id === phaseId,
+          )?.ready === true;
+        if (!phaseReadyAfterLand) {
+          throw new Error(
+            `sh1-dry-run: advance gate — ${phaseId} not ready after its merge landed`,
+          );
+        }
+        await advanceInLandingTurn();
+      },
+    );
+    const mergeCommitSha = git(repo, 'rev-parse', INTEGRATION);
+    const merged = mergeCommitSha !== integrationHeadBefore;
+    const mergedFileOnIntegration =
+      git(repo, 'cat-file', '-t', `${INTEGRATION}:${phaseId}.txt`) === 'blob';
+    const serialized = reviews(projectId).serializedBranches(INTEGRATION).includes(leadBranch);
+    const landedPhase = plans(projectId)
+      .getPlan(TASK_ID)
+      ?.phases.find((p) => p.phaseId === phaseId);
+
+    return {
+      leadProvisioned,
+      finishTick,
+      finishRecorded,
+      workerDonePersisted,
+      mergePending,
+      mergeMode,
+      reviewRequested,
+      passVerdictRecorded,
+      landTick,
+      merged,
+      mergeCommitSha,
+      mergedFileOnIntegration,
+      serialized,
+      verifiedPass: landedPhase?.verifiedPass === true,
+      statusAfterLand: landedPhase?.status ?? '<none>',
+      phaseReadyAfterLand,
+    };
+  }
 }
 
 /**
@@ -874,7 +1084,11 @@ async function callToolJson(
  * fingerprint. The server routes it to `handleReviewResponse` → `mail.replyWithReviewVerdict`, which
  * records the PASS verdict AND sends the review_response back to the lead. A stale fingerprint fails loud.
  */
-async function operatorPassViaIpc(projectId: ProjectId, reviewId: string): Promise<void> {
+async function operatorPassViaIpc(
+  projectId: ProjectId,
+  reviewId: string,
+  branch: string,
+): Promise<void> {
   const sockDir = mkdtempSync(join(tmpdir(), 'co-sh1-sock-'));
   dataDirs.push(sockDir);
   const socketPath = join(sockDir, 'control.sock');
@@ -931,7 +1145,7 @@ async function operatorPassViaIpc(projectId: ProjectId, reviewId: string): Promi
       type: MAIL_REVIEW_RESPONSE,
       reviewVerdict: 'PASS',
       reviewContextFingerprint: context.evidenceFingerprint,
-      subject: `PASS: '${TOY_BRANCH}' into '${INTEGRATION}'`,
+      subject: `PASS: '${branch}' into '${INTEGRATION}'`,
       body: 'Reviewed the diff + locked acceptance criteria. PASS.',
     },
   );
@@ -941,9 +1155,35 @@ async function operatorPassViaIpc(projectId: ProjectId, reviewId: string): Promi
 function determinismFingerprint(r: Sh1DryRunResult): Record<string, unknown> {
   // The root coordinator id is `coord-root-<sha256(projectId)>` — project-derived, so it differs per run.
   // Normalize it to a stable token so the fingerprint compares the STRUCTURE (who was selected), not the
-  // per-project id (lead/worker ids are fixed literals already).
+  // per-project id (lead ids are fixed literals already).
   const norm = (agent: string | null): string | null =>
     agent === r.coordinator ? '<root-coordinator>' : agent;
+  // Per-phase fingerprint: finish (lead) + the coordinator landing turn + the verified/merged/advance
+  // facts. Statuses + booleans only — never a raw git SHA or an event timestamp (those differ per run).
+  const phaseFp = (p: PhaseRunFacts): Record<string, unknown> => ({
+    leadProvisioned: p.leadProvisioned,
+    finishSelected: p.finishTick.selected,
+    finishCandidateCount: p.finishTick.candidateCount,
+    finishErrored: p.finishTick.cycle?.turn.errored ?? null,
+    finishIdle: p.finishTick.cycle?.turn.turnEnd?.idle ?? null,
+    finishSawCompletionVerb: p.finishTick.cycle?.turn.turnEnd?.sawCompletionVerb ?? null,
+    finishRecorded: p.finishRecorded,
+    workerDonePersisted: p.workerDonePersisted,
+    mergePending: p.mergePending,
+    mergeMode: p.mergeMode,
+    reviewRequested: p.reviewRequested,
+    passVerdictRecorded: p.passVerdictRecorded,
+    landSelected: norm(p.landTick.selected),
+    landCandidateCount: p.landTick.candidateCount,
+    landErrored: p.landTick.cycle?.turn.errored ?? null,
+    landIdle: p.landTick.cycle?.turn.turnEnd?.idle ?? null,
+    merged: p.merged,
+    mergedFileOnIntegration: p.mergedFileOnIntegration,
+    serialized: p.serialized,
+    verifiedPass: p.verifiedPass,
+    statusAfterLand: p.statusAfterLand,
+    phaseReadyAfterLand: p.phaseReadyAfterLand,
+  });
   return {
     // Cold-start (P1).
     coldStarted: r.coldStartTick.coldStarted.map((a) => norm(a)),
@@ -956,39 +1196,31 @@ function determinismFingerprint(r: Sh1DryRunResult): Record<string, unknown> {
     brainstormDelivered: r.brainstormDelivered,
     brainstormAnswered: r.brainstormAnswered,
     specLocked: r.specLocked,
-    // Slings (P2).
-    leadSlingSelected: norm(r.leadSlingTick.selected),
-    leadSlingCandidateCount: r.leadSlingTick.candidateCount,
-    leadSlingIdle: r.leadSlingTick.cycle?.turn.turnEnd?.idle ?? null,
-    leadProvisioned: r.leadProvisioned,
-    workerSlingSelected: r.workerSlingTick.selected,
-    workerSlingCandidateCount: r.workerSlingTick.candidateCount,
-    workerSlingIdle: r.workerSlingTick.cycle?.turn.turnEnd?.idle ?? null,
-    workerProvisioned: r.workerProvisioned,
-    // Finish → worker_done.
-    finishSelected: r.finishTick.selected,
-    finishCandidateCount: r.finishTick.candidateCount,
-    finishErrored: r.finishTick.cycle?.turn.errored ?? null,
-    finishIdle: r.finishTick.cycle?.turn.turnEnd?.idle ?? null,
-    finishSawCompletionVerb: r.finishTick.cycle?.turn.turnEnd?.sawCompletionVerb ?? null,
-    finishRecorded: r.finishRecorded,
-    workerDonePersisted: r.workerDonePersisted,
-    // Merge → review → PASS → merge.
-    reviewRequested: r.reviewRequested,
-    mergePending: r.mergePending,
-    passVerdictRecorded: r.passVerdictRecorded,
-    merged: r.merged,
-    mergedFileOnIntegration: r.mergedFileOnIntegration,
+    // Plan ingest (L6b E1) — every phase starts 'planned'.
+    planIngested: r.planIngested,
+    statusesAtIngest: [...r.statusesAtIngest],
+    // Phase 1 sling (the coordinator turn that ingested + slung phase 1's lead).
+    phase1SlingSelected: norm(r.phase1SlingTick.selected),
+    phase1SlingCandidateCount: r.phase1SlingTick.candidateCount,
+    phase1SlingIdle: r.phase1SlingTick.cycle?.turn.turnEnd?.idle ?? null,
+    phase1StatusAfterSling: r.phase1StatusAfterSling,
+    // Phase 1 run + the ADVANCE.
+    phase1: phaseFp(r.phase1),
+    phase2StatusAfterAdvance: r.phase2StatusAfterAdvance,
+    // Phase 2 run + the COMPLETE.
+    phase2: phaseFp(r.phase2),
+    twoDistinctMergeCommits: r.twoDistinctMergeCommits,
+    taskCompleted: r.taskCompleted,
     // Final tick reconstruction.
     finalTickNum: r.finalTick.tick,
-    finalSelected: r.finalTick.selected,
+    finalSelected: norm(r.finalTick.selected),
     finalCandidateCount: r.finalTick.candidateCount,
-    finalColdStarted: [...r.finalTick.coldStarted],
+    finalColdStarted: r.finalTick.coldStarted.map((a) => norm(a)),
   };
 }
 
-describe('SH-1 proof harness — PROVES THE FULL LOOP (cold-start → slings → finish → gated review-merge) over FakePty with ZERO hand-stitched transitions; NOT the SH-1 acceptance bar (which stays a host-live operator proof: docs/sh1-runbook.md)', () => {
-  it('drives operator-start → cold-start → brainstorm/lock → slings → finish → review-gate → gated-merge, asserting every transition via the stores + git log', async () => {
+describe('SH-1 proof harness — PROVES THE FULL MULTI-PHASE LOOP (cold-start → plan → phase 1 [sling→finish→gated-merge→LAND] → ADVANCE → phase 2 → task-complete) over FakePty with ZERO hand-stitched transitions; NOT the SH-1 acceptance bar (which stays a host-live operator proof: docs/sh1-runbook.md)', () => {
+  it('drives operator-start → cold-start → brainstorm/lock → plan-ingest → 2 phases each [finish → review-gate → gated-merge → verified+merged] → coordinator ADVANCE → task-complete, asserting every transition via the stores + git log', async () => {
     const { projectId, repo } = makeProject();
     const result = await driveSh1DryRun(projectId, repo);
 
@@ -1004,45 +1236,85 @@ describe('SH-1 proof harness — PROVES THE FULL LOOP (cold-start → slings →
     expect(result.brainstormAnswered).toBe(true);
     expect(result.specLocked).toBe(true);
 
-    // (2) SLINGS: the coordinator slung the lead and the lead slung the worker — both daemon-driven, both
-    //     provisioned via the loop-driven co_sling (real worktrees on their branches off integration).
-    expect(result.leadSlingTick.selected).toBe(result.coordinator);
-    expect(result.leadProvisioned).toBe(true);
-    expect(git(repo, 'rev-parse', '--verify', LEAD_BRANCH)).toMatch(/^[0-9a-f]{40}$/);
-    expect(result.workerSlingTick.selected).toBe(LEAD);
-    expect(result.workerProvisioned).toBe(true);
-    expect(result.worktreePath).toBe(worktreePathFor(projectId, TOY_BRANCH));
+    // (2) PLAN INGEST (L6b E1): the coordinator ingested the 2-phase plan; every phase starts 'planned'.
+    expect(result.planIngested).toBe(true);
+    expect(result.statusesAtIngest).toEqual(['planned', 'planned']);
 
-    // (3) The daemon selected + drove the worker through EXACTLY ONE idle turn. The scripted co_finish
-    //     ran during the observed provider turn, so the MCP sentinel saw the completion verb.
-    expect(result.finishTick.selected).toBe(WORKER);
-    expect(result.finishTick.candidateCount).toBe(1);
-    expect(result.finishTick.cycle?.turn.errored).toBe(false);
-    expect(result.finishTick.cycle?.turn.turnEnd?.idle).toBe(true);
-    expect(result.finishTick.cycle?.turn.turnEnd?.sawCompletionVerb).toBe(true);
+    // (3) PHASE 1 SLING: the coordinator (daemon-driven) slung phase 1's lead off integration and
+    //     recorded phase1 → building. (lead-per-phase: the lead's own branch carries the change.)
+    expect(result.phase1SlingTick.selected).toBe(result.coordinator);
+    expect(result.phase1.leadProvisioned).toBe(true);
+    expect(git(repo, 'rev-parse', '--verify', LEAD1_BRANCH)).toMatch(/^[0-9a-f]{40}$/);
+    expect(result.phase1StatusAfterSling).toBe('building');
 
-    // (4) FINISH: a finish record exists and its commit sha matches the branch head (the merge's
-    //     reviewed-ref check depends on this), and worker_done reached the lead's inbox.
-    expect(result.finishRecorded).toBe(true);
-    expect(result.finishCommitSha).toMatch(/^[0-9a-f]{40}$/);
-    expect(result.workerDonePersisted).toBe(true);
+    // (4) PHASE 1 FINISH: the daemon selected + drove the lead through EXACTLY ONE idle turn; the
+    //     scripted co_finish ran during the observed turn (sentinel saw the completion verb) and a
+    //     finish record + worker_done (→ coordinator) exist.
+    expect(result.phase1.finishTick.selected).toBe(LEAD1);
+    expect(result.phase1.finishTick.candidateCount).toBe(1);
+    expect(result.phase1.finishTick.cycle?.turn.turnEnd?.idle).toBe(true);
+    expect(result.phase1.finishTick.cycle?.turn.turnEnd?.sawCompletionVerb).toBe(true);
+    expect(result.phase1.finishRecorded).toBe(true);
+    expect(result.phase1.workerDonePersisted).toBe(true);
 
-    // (5) MERGE → REVIEW → PASS → MERGE: the lead's co_merge arose the review_request (pending), the
-    //     operator's IPC PASS recorded a PASS verdict, and the re-merge landed on the integration branch.
-    expect(result.reviewRequested).toBe(true);
-    expect(result.mergePending).toBe(true);
-    expect(result.passVerdictRecorded).toBe(true);
-    expect(result.merged).toBe(true);
-    expect(result.mergeCommitSha).toMatch(/^[0-9a-f]{40}$/);
-    expect(result.mergedFileOnIntegration).toBe(true);
-    // The merge commit really sits on the integration branch (no orchestration file left in the tree).
-    expect(git(repo, 'rev-parse', INTEGRATION)).toBe(result.mergeCommitSha);
+    // (5) PHASE 1 GATED MERGE → REVIEW → PASS → LAND: the COORDINATOR's co_merge (#1) arose the review
+    //     (pending), the operator's IPC PASS recorded a PASS verdict, and the coordinator's landing turn
+    //     merged phase 1 onto integration.
+    expect(result.phase1.mergePending).toBe(true);
+    expect(result.phase1.reviewRequested).toBe(true);
+    expect(result.phase1.passVerdictRecorded).toBe(true);
+    expect(result.phase1.landTick.selected).toBe(result.coordinator);
+    expect(result.phase1.merged).toBe(true);
+    expect(result.phase1.mergedFileOnIntegration).toBe(true);
+
+    // (6) PHASE 1 VERIFIED + MERGED (Principle 10 / RG-4 — the gated review IS the verification): a green
+    //     phase.verified was recorded at the landing point and the phase status advanced to 'merged'.
+    expect(result.phase1.verifiedPass).toBe(true);
+    expect(result.phase1.statusAfterLand).toBe('merged');
+
+    // (7) THE ADVANCE (the keystone transition): the fold passes — co_phase_status reports phase 1 ready
+    //     (verifiedPass ∧ workersComplete) — AND merge.serialized exists for phase 1's branch. ONLY then
+    //     did the coordinator sling phase 2 (causally gated on phase 1's merge landing, not sequencing):
+    //     phase 2 is now 'building'.
+    expect(result.phase1.phaseReadyAfterLand).toBe(true);
+    expect(result.phase1.serialized).toBe(true);
+    expect(result.phase2StatusAfterAdvance).toBe('building');
+
+    // (8) PHASE 2 (same shape, driven ONLY after phase 1 landed): finish → gated merge → land → verified.
+    expect(result.phase2.finishTick.selected).toBe(LEAD2);
+    expect(result.phase2.finishRecorded).toBe(true);
+    expect(result.phase2.workerDonePersisted).toBe(true);
+    expect(result.phase2.mergePending).toBe(true);
+    expect(result.phase2.passVerdictRecorded).toBe(true);
+    expect(result.phase2.landTick.selected).toBe(result.coordinator);
+    expect(result.phase2.merged).toBe(true);
+    expect(result.phase2.mergedFileOnIntegration).toBe(true);
+    expect(result.phase2.verifiedPass).toBe(true);
+    expect(result.phase2.statusAfterLand).toBe('merged');
+    expect(result.phase2.phaseReadyAfterLand).toBe(true);
+    expect(result.phase2.serialized).toBe(true);
+
+    // (9) TWO DISTINCT INTEGRATION MERGES (git): one merge commit per phase, both on integration; both
+    //     phase files landed; no orchestration footprint left in the tree (Principle 12).
+    expect(result.twoDistinctMergeCommits).toBe(true);
+    expect(git(repo, 'rev-parse', INTEGRATION)).toBe(result.phase2.mergeCommitSha);
+    expect(git(repo, 'cat-file', '-t', `${INTEGRATION}:phase1.txt`)).toBe('blob');
+    expect(git(repo, 'cat-file', '-t', `${INTEGRATION}:phase2.txt`)).toBe('blob');
     expect(existsSync(join(repo, '.co'))).toBe(false);
 
-    // (6) The final tick deterministically reconstructs the post-merge live set: every agent was released,
-    //     so nothing remains to drive (no spurious turn), and it cold-starts nothing (the root is done).
-    //     It is tick 7: cold-start, 2 slings, finish, + the 2 now-daemon-driven merges, then this one.
-    expect(result.finalTick.tick).toBe(7);
+    // (10) TASK COMPLETE (the last-phase close): task.completed is present in the plan store, and BOTH
+    //      phases progressed planned → building → verified → merged.
+    expect(result.taskCompleted).toBe(true);
+    const finalPlan = plans(projectId).getPlan(TASK_ID);
+    expect(finalPlan?.completedTs).toBeGreaterThan(0);
+    expect(finalPlan?.phases.map((p) => p.status)).toEqual(['merged', 'merged']);
+    expect(finalPlan?.phases.every((p) => p.verifiedPass === true)).toBe(true);
+
+    // (11) The final tick deterministically reconstructs the post-completion live set: both leads were
+    //      released and the root is skipped, so nothing remains to drive (no spurious turn) and it
+    //      cold-starts nothing. It is tick 9: cold-start, phase-1 sling, + 2 phases × (finish, merge #1,
+    //      land) = 6, then this final tick.
+    expect(result.finalTick.tick).toBe(9);
     expect(result.finalTick.selected).toBeNull();
     expect(result.finalTick.candidateCount).toBe(0);
     expect(result.finalTick.coldStarted).toEqual([]);
@@ -1060,13 +1332,14 @@ describe('SH-1 proof harness — PROVES THE FULL LOOP (cold-start → slings →
 
     // Same scripted MCP-calls + same injected counter-clock sequence ⇒ identical loop outcome. Per-run
     // git SHAs + the production-random review-id differ, so the fingerprint excludes them and compares
-    // the full set of loop-driven transitions + tick outcomes.
+    // the full set of loop-driven transitions + tick outcomes — INCLUDING the per-phase statuses,
+    // phase.verified pass, both integration merges, the advance, and task.completed.
     expect(determinismFingerprint(run1)).toEqual(determinismFingerprint(run2));
-    // Both runs fully landed the gated merge through the human-review round-trip.
-    expect(run1.merged).toBe(true);
-    expect(run2.merged).toBe(true);
-    expect(run1.passVerdictRecorded).toBe(true);
-    expect(run2.passVerdictRecorded).toBe(true);
+    // Both runs fully landed BOTH phases through the human-review round-trip and completed the task.
+    expect(run1.phase1.merged && run1.phase2.merged).toBe(true);
+    expect(run2.phase1.merged && run2.phase2.merged).toBe(true);
+    expect(run1.taskCompleted).toBe(true);
+    expect(run2.taskCompleted).toBe(true);
   });
 });
 
@@ -1074,6 +1347,8 @@ describe('SH-1 proof harness — PROVES THE FULL LOOP (cold-start → slings →
 // The harness repo (makeRepo) deliberately has NO remote, so it resolves to Offline mode. This proves
 // the SH-4 IN-SANDBOX half: Offline auto-detect (repo-mode.ts / WT-4), push/PR disabled, merge STILL
 // gated. The real stranger-repo live run stays an operator TODO (docs/offline-runbook.md, docs/v1-handoff.md).
+// Asserted against PHASE 1's facts — driveSh1DryRun now drives the full 2-phase loop, and phase 1's gated
+// lead→integration merge is itself the offline-mode evidence (phase 2 lands identically).
 describe('SH-4 offline self-host — drives the loop on a local-only no-remote repo: Offline auto-detect, push/PR disabled, merge still gated (NOT the host-live stranger-repo bar — docs/offline-runbook.md)', () => {
   it('auto-detects Offline mode, disables push/PR, and still gates the merge through the human-review round-trip', async () => {
     const { projectId, repo } = makeProject();
@@ -1089,26 +1364,27 @@ describe('SH-4 offline self-host — drives the loop on a local-only no-remote r
     expect(repoModeCapabilities('offline')).toEqual({ push: false, pr: false });
     const gate = new CoRepoModeGate();
     expect(() =>
-      gate.enactPush({ branch: TOY_BRANCH, into: INTEGRATION, repoCwd: repo }, 'offline'),
+      gate.enactPush({ branch: LEAD1_BRANCH, into: INTEGRATION, repoCwd: repo }, 'offline'),
     ).toThrow(/offline/iu);
     expect(() =>
       gate.enactPrMerge(
-        { branch: TOY_BRANCH, into: INTEGRATION, title: 'x', description: 'y', repoCwd: repo },
+        { branch: LEAD1_BRANCH, into: INTEGRATION, title: 'x', description: 'y', repoCwd: repo },
         'offline',
       ),
     ).toThrow(/offline/iu);
 
-    // (3) MERGE STILL GATED. Drive the full loop on the offline repo. co_merge resolves the repo mode
-    //     itself (merge.ts → resolveRepoMode), so the landed merge ran in 'offline' mode — yet it STILL
-    //     round-tripped the human-review gate: merge #1 returned review_pending (no PASS yet), and the
-    //     merge LANDED only after the operator's recorded PASS, as a LOCAL merge (no push, no PR).
+    // (3) MERGE STILL GATED. Drive the full (2-phase) loop on the offline repo. co_merge resolves the
+    //     repo mode itself (merge.ts → resolveRepoMode), so the landed merge ran in 'offline' mode — yet
+    //     phase 1 STILL round-tripped the human-review gate: merge #1 returned review_pending (no PASS
+    //     yet), and the merge LANDED only after the operator's recorded PASS, as a LOCAL merge (no push,
+    //     no PR).
     const result = await driveSh1DryRun(projectId, repo);
-    expect(result.mergeMode).toBe('offline');
-    expect(result.reviewRequested).toBe(true);
-    expect(result.mergePending).toBe(true); // the gate held: pending before PASS
-    expect(result.passVerdictRecorded).toBe(true);
-    expect(result.merged).toBe(true); // landed only after the recorded PASS
-    expect(result.mergedFileOnIntegration).toBe(true);
+    expect(result.phase1.mergeMode).toBe('offline');
+    expect(result.phase1.reviewRequested).toBe(true);
+    expect(result.phase1.mergePending).toBe(true); // the gate held: pending before PASS
+    expect(result.phase1.passVerdictRecorded).toBe(true);
+    expect(result.phase1.merged).toBe(true); // landed only after the recorded PASS
+    expect(result.phase1.mergedFileOnIntegration).toBe(true);
     // The repo never gained a remote — the whole loop ran Offline end to end.
     expect(resolveRepoMode(projectId, repo)).toBe('offline');
   });

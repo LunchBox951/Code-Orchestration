@@ -988,6 +988,7 @@ export type {
   PhaseStatusChanged,
   PhaseVerified,
   PlanReplanned,
+  TaskCompleted,
 } from './plans/events.js';
 export {
   PLANS_EVENT_V,
@@ -995,6 +996,7 @@ export {
   EVENT_PHASE_STATUS_CHANGED,
   EVENT_PHASE_VERIFIED,
   EVENT_PLAN_REPLANNED,
+  EVENT_TASK_COMPLETED,
   PLAN_SCOPE_PREFIX,
   PHASE_STATUSES,
   phaseStatusSchema,
@@ -1003,6 +1005,7 @@ export {
   phaseStatusChangedSchema,
   phaseVerifiedSchema,
   planReplannedSchema,
+  taskCompletedSchema,
   plansSchemas,
   plansUpcasters,
   planScope,
@@ -1010,6 +1013,7 @@ export {
   makePhaseStatusChangedEvent,
   makePhaseVerifiedEvent,
   makePlanReplannedEvent,
+  makeTaskCompletedEvent,
 } from './plans/events.js';
 // Plan projection: the `PlansProjector` folds plan events into `plans` and `plan_phases` read-model tables.
 export { PlansProjector } from './plans/plans-projector.js';
