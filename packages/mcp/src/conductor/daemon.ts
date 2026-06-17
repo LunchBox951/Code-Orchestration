@@ -420,7 +420,7 @@ export class ConductorDaemon {
     for (const identity of candidates) {
       if (this.engine.isHosted(identity.projectId, identity.agent)) continue; // warm — single launch authority
       if (this.isRootIdentity(identity)) continue; // roots stay with the cold-start path (re-warm is non-root)
-      const key = `${identity.projectId} ${identity.agent}`;
+      const key = `${identity.projectId}\0${identity.agent}`;
       if (this.reWarmFailed.has(key)) continue; // already refused — never churn a pane every tick (review-375)
       try {
         await this.engine.ensureHosted(identity);
