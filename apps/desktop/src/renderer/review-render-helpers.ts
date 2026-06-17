@@ -11,7 +11,14 @@
  * still updates the pending-list + badge. These helpers make that decision testable in isolation: NO
  * `document`/`window`/`@co/core` imports; the couple of fields the decision reads are inlined here, so the
  * `ReviewVM` contract is untouched.
+ *
+ * Stage 15 · P-DT1 · AC-S15-9 [SF-4]: the rebuild decision is now the shared `needsRebuild` from
+ * `live-render-helpers.ts` (also used by the Mail composer caret fix, GitHub #39). `reviewDetailSignature`
+ * stays here — it is Review-specific — and `reviewDetailNeedsRebuild` is a thin, behaviour-preserving
+ * wrapper over the shared core.
  */
+
+import { needsRebuild } from './live-render-helpers.js';
 
 /** The non-body fields of the Review detail; a change in any of these REQUIRES a detail-pane rebuild. */
 export interface ReviewDetailSignature {
@@ -141,13 +148,9 @@ export function reviewDetailNeedsRebuild(
   next: ReviewDetailSignature,
   composerFocused: boolean,
 ): boolean {
-  if (prev == null) return true;
-  if (!composerFocused) return true;
-  const allNonBodyFieldsEqual =
-    prev.selectedReviewId === next.selectedReviewId &&
-    prev.contextKey === next.contextKey &&
-    prev.composerActive === next.composerActive &&
-    prev.composerVerdict === next.composerVerdict &&
-    prev.composerPending === next.composerPending;
-  return !allNonBodyFieldsEqual;
+  // Behaviour-preserving delegation to the shared core: rebuild unless the signature is unchanged (the
+  // sole change is the excluded composer.body) AND the composer textarea is focused. The signature is a
+  // flat record of primitives, so the shared shallow comparison is identical to the prior field-by-field
+  // check — verified by review-render-helpers.test.ts (review #316 coverage).
+  return needsRebuild(prev, next, composerFocused);
 }

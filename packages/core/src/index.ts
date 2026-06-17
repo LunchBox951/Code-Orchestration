@@ -156,10 +156,22 @@ export {
   CLARIFY_TIMEOUT_POLICY,
 } from './mail/escalation.js';
 // L1 W6 renderer-registry seam + a trivial generic default renderer (AC-L1-8). The bus stays
-// typed/structured for agents; making a DeliveredMail human-legible is the app's job. L1 ships
-// the seam + the default only — per-type human cards are the L9 plug-point (register).
-export type { MailRenderer, RendererRegistry } from './mail/renderer.js';
-export { createRendererRegistry, defaultMailRenderer } from './mail/renderer.js';
+// typed/structured for agents; making a DeliveredMail human-legible is the app's job. SF-6
+// (AC-S15-12) fills the L9 plug-point: the structured MailCardView model + the built-in per-type
+// CARD renderers (approval/escalation/review_response), registered in core so adapters paint generically.
+export type {
+  MailRenderer,
+  RendererRegistry,
+  MailCardField,
+  MailCardView,
+  MailCardRenderer,
+} from './mail/renderer.js';
+export {
+  createRendererRegistry,
+  defaultMailRenderer,
+  defaultMailCardRenderer,
+  registerBuiltInMailCards,
+} from './mail/renderer.js';
 // L1 W6 mail-type no-stub assertion (AC-L1-7): a reusable completeness check proving every
 // declared type has schema + flow (+ a predicate iff actionable). L1 owns this local assertion;
 // the full build-time gate is L2.
@@ -1182,6 +1194,27 @@ export type { StartupInterstitialName, StartupPhase } from './pty/startup-classi
 export { classifyStartup, normalizeStartupOutput } from './pty/startup-classifier.js';
 export type { StartupOutcome } from './pty/startup-driver.js';
 export { driveToReady } from './pty/startup-driver.js';
+
+// Stage 15 P-F — shared provider startup-byte fixtures (the B1 signatures, with `[documented]` /
+// `[synthesized]` / `[host-live]` provenance tags). Lifted out of `startup-classifier.test.ts` so
+// BOTH the classifier tests AND the mcp host-proof / FakeProvider harness drive ONE source of truth
+// (no divergent re-declared copies). Non-test module: shipped in `src` like FakePty.
+export {
+  CLAUDE_TRUST,
+  CLAUDE_READY,
+  CLAUDE_READY_CURSOR_POSITIONED,
+  CLAUDE_READY_STATUS_STRIP,
+  CLAUDE_THEME,
+  CLAUDE_LOGIN,
+  CLAUDE_OAUTH_LOGIN,
+  CODEX_UPDATE,
+  CODEX_TRUST,
+  CODEX_HOOKS_REVIEW,
+  CODEX_READY,
+  CODEX_READY_CURRENT,
+  CODEX_MCP_STARTING,
+  CODEX_SIGNIN,
+} from './pty/startup-fixtures.js';
 
 // L7 B1 — NodePtyHost: the one real-binary adapter, implementing PtyHost over node-pty. node-pty is
 // reached only via a lazy injected loader behind a local type shim, so the gate is green without the

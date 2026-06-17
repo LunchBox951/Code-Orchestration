@@ -22,6 +22,12 @@ export interface AgentsConsoleState {
   readonly selectedAgentId: string | null;
   readonly selectedStatus: AgentStatus | null;
   readonly transcript: string;
+  /**
+   * A persistent transcript-fetch error for the selected agent (Principle 9 — no-silent-failures).
+   * Non-null after a `transcript()` fetch rejects; the renderer shows it with a Retry button instead of
+   * leaving the pane empty. Cleared on agent switch, an explicit transcript clear, or a successful fetch.
+   */
+  readonly transcriptError: string | null;
   readonly connection: 'live' | 'degraded';
 }
 
@@ -38,6 +44,59 @@ function boundTranscript(text: string): string {
   return text.slice(text.length - CONSOLE_TRANSCRIPT_MAX_CHARS);
 }
 
+const ESC = 0x1b;
+
+/**
+ * Return the index just past the escape sequence that begins at `esc` (where `text.charCodeAt(esc) ===
+ * ESC`), or `text.length` if it is unterminated within `text`. Covers the cases that appear in a raw pty
+ * stream: CSI (`ESC [` … final byte 0x40–0x7e — e.g. the SGR `ESC[31m`), OSC (`ESC ]` … BEL or ST), and
+ * the generic 2-byte / intermediate-then-final escape.
+ */
+function escapeSequenceEnd(text: string, esc: number): number {
+  const n = text.length;
+  if (esc + 1 >= n) return n; // a lone trailing ESC — unterminated
+  const next = text.charCodeAt(esc + 1);
+  if (next === 0x5b /* [ */) {
+    for (let i = esc + 2; i < n; i++) {
+      const c = text.charCodeAt(i);
+      if (c >= 0x40 && c <= 0x7e) return i + 1; // CSI final byte
+    }
+    return n;
+  }
+  if (next === 0x5d /* ] */) {
+    for (let i = esc + 2; i < n; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 0x07) return i + 1; // BEL terminator
+      if (c === ESC && i + 1 < n && text.charCodeAt(i + 1) === 0x5c /* \ */) return i + 2; // ST
+    }
+    return n;
+  }
+  // Generic escape: optional intermediate bytes (0x20–0x2f) then one final byte.
+  let i = esc + 1;
+  while (i < n && text.charCodeAt(i) >= 0x20 && text.charCodeAt(i) <= 0x2f) i++;
+  return i < n ? i + 1 : n;
+}
+
+/**
+ * Adjust a head-trim cut so the retained tail `text.slice(cut)` never BEGINS in the middle of an escape
+ * sequence. If the nearest ESC before `cut` opens a sequence that straddles `cut` (its end is at/after
+ * `cut`), advance the cut to that sequence's end so the dangling remnant (`[31m`, `1m`, `m`, …) is dropped
+ * — a half-cut ESC at the start would otherwise corrupt xterm's emulator. Returns `cut` unchanged when the
+ * tail already starts on a clean boundary (normal text, or a complete sequence start).
+ */
+function escapeSafeCut(text: string, cut: number): number {
+  let esc = -1;
+  for (let i = cut - 1; i >= 0; i--) {
+    if (text.charCodeAt(i) === ESC) {
+      esc = i;
+      break;
+    }
+  }
+  if (esc === -1) return cut; // no ESC in the dropped head → the tail cannot start mid-sequence
+  const end = escapeSequenceEnd(text, esc);
+  return end > cut ? end : cut;
+}
+
 interface TranscriptSegment {
   offset: number;
   text: string;
@@ -49,6 +108,7 @@ export class AgentsConsoleVM {
     selectedAgentId: null,
     selectedStatus: null,
     transcript: '',
+    transcriptError: null,
     connection: 'degraded',
   };
   private readonly listeners = new Set<(state: AgentsConsoleState) => void>();
@@ -123,6 +183,7 @@ export class AgentsConsoleVM {
       selectedAgentId: agentId,
       selectedStatus,
       transcript: '',
+      transcriptError: null,
     };
     this.transcriptSegments = [];
     this.emit();
@@ -134,12 +195,33 @@ export class AgentsConsoleVM {
     this._state = {
       ...this._state,
       transcript: '',
+      transcriptError: null,
     };
+    this.emit();
+  }
+
+  /**
+   * Record a transcript-fetch failure for the selected agent. Ignored when `agentId` is not the current
+   * selection (a stale/again-switched request must never clobber a fresh pane). Pairs with the renderer's
+   * in-pane error + Retry (Principle 9 — no-silent-failures).
+   */
+  setTranscriptError(agentId: string, message: string): void {
+    if (agentId !== this._state.selectedAgentId) return;
+    this._state = { ...this._state, transcriptError: message };
     this.emit();
   }
 
   setTranscriptTail(tail: TranscriptTail): void {
     if (tail.agentId !== this._state.selectedAgentId) return;
+    // A successful fetch clears any stale error. Empty tails still resolve the error (the fetch
+    // succeeded) but `applyTranscriptSegment` short-circuits on empty text and would not emit — so
+    // clear + emit here, then let `applyTranscriptSegment` emit the segment when there is text.
+    const hadError = this._state.transcriptError != null;
+    if (hadError) this._state = { ...this._state, transcriptError: null };
+    if (tail.tail.length === 0) {
+      if (hadError) this.emit();
+      return;
+    }
     this.applyTranscriptSegment(tail.offset, tail.tail);
   }
 
@@ -210,13 +292,23 @@ export class AgentsConsoleVM {
       }
     }
 
-    let total = merged.reduce((sum, segment) => sum + segment.text.length, 0);
-    while (total > CONSOLE_TRANSCRIPT_MAX_CHARS && merged.length > 0) {
+    // Trim the head to the transcript bound. The cut is computed on the joined string (what xterm
+    // consumes) and advanced past any dangling escape sequence so a half-cut ESC never lands at the START
+    // of the retained transcript (which would corrupt xterm's emulator). The bound stays a MAX — the
+    // escape-safety only ever drops a few extra leading bytes. The join allocation is skipped entirely in
+    // the common (under-bound) case — total length is summed cheaply from the segments first.
+    const total = merged.reduce((sum, segment) => sum + segment.text.length, 0);
+    let remaining = 0;
+    if (total > CONSOLE_TRANSCRIPT_MAX_CHARS) {
+      const joined = merged.map((segment) => segment.text).join('');
+      remaining = escapeSafeCut(joined, joined.length - CONSOLE_TRANSCRIPT_MAX_CHARS);
+    }
+    while (remaining > 0 && merged.length > 0) {
       const first = merged[0]!;
-      const drop = Math.min(first.text.length, total - CONSOLE_TRANSCRIPT_MAX_CHARS);
+      const drop = Math.min(first.text.length, remaining);
       first.offset += drop;
       first.text = first.text.slice(drop);
-      total -= drop;
+      remaining -= drop;
       if (first.text.length === 0) merged.shift();
     }
 

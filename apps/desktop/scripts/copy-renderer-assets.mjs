@@ -30,3 +30,9 @@ for (const name of readdirSync(srcDir)) {
 mkdirSync(join(dstDir, 'vendor'), { recursive: true });
 cpSync(require.resolve('@xterm/xterm/lib/xterm.js'), join(dstDir, 'vendor', 'xterm.js'));
 cpSync(require.resolve('@xterm/xterm/css/xterm.css'), join(dstDir, 'vendor', 'xterm.css'));
+// Vendor the fit addon UMD (exposes window.FitAddon) the same way — the strict CSP (`script-src 'self'`)
+// forbids remote scripts, so the renderer loads it locally via <script src="./vendor/addon-fit.js">.
+cpSync(
+  require.resolve('@xterm/addon-fit/lib/addon-fit.js'),
+  join(dstDir, 'vendor', 'addon-fit.js'),
+);

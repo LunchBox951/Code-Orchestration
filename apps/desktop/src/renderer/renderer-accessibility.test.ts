@@ -117,6 +117,18 @@ describe('renderer accessibility states', () => {
     expect(rendererSource).toContain('aria-label="Close composer"');
   });
 
+  it('gates the mail-composer detail rebuild to preserve the caret while typing (GitHub #39)', () => {
+    // Typing in #composer-body must NOT unconditionally rebuild the detail pane: that recreates the
+    // focused textarea and drops the caret to offset 0 on every keystroke (typed text reverses).
+    // renderMailDetail gates the rebuild on the shared needsRebuild helper keyed on whether that
+    // textarea is focused, and captures/restores the caret + scroll when a non-body change forces a
+    // rebuild mid-edit. (Substantive behavioural coverage lives in live-render-helpers.test.ts.)
+    expect(rendererSource).toContain("document.activeElement?.id === 'composer-body'");
+    expect(rendererSource).toContain('mailDetailSignature(');
+    expect(rendererSource).toContain('captureInteractionState(');
+    expect(rendererSource).toContain('restoreInteractionState(');
+  });
+
   it('opens non-approval replies against the selected mail recipient inbox', () => {
     const nonApprovalBranch = rendererSource.slice(
       rendererSource.indexOf('} else if (isActionable)'),
@@ -219,5 +231,48 @@ describe('agents stop / unstick (P4)', () => {
     expect(preloadSource).toContain('agentsUnstick(');
     expect(preloadSource).toContain("'agent:stop'");
     expect(preloadSource).toContain("'agent:unstick'");
+  });
+});
+
+describe('no silent failures (AC-S15-11 [ST-3], Principle 9)', () => {
+  const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+
+  it('Site 1: transcript-fetch error renders a persistent in-pane Retry, wired end-to-end', () => {
+    // Markup: a persistent error container (not a vanishing toast) lives in the agents pane.
+    expect(htmlSource).toContain('id="agents-transcript-error"');
+    // Renderer: render the banner from state.transcriptError + a Retry button → the refresh bridge.
+    expect(rendererSource).toContain('function renderTranscriptError(');
+    expect(rendererSource).toContain('data-agents-action="retry-transcript"');
+    expect(rendererSource).toContain('bridge.agentsRefreshTranscript(');
+    // Bridge + IPC + shell retry channel exist (a re-select of the same agent is a no-op).
+    expect(preloadSource).toContain('agentsRefreshTranscript(');
+    expect(preloadSource).toContain("'agents:refreshTranscript'");
+    expect(mainSource).toContain("'agents:refreshTranscript'");
+    expect(appShellSource).toContain('refreshTranscript()');
+    // The swallow is gone — the catch surfaces the error to the VM instead of {}.
+    expect(appShellSource).toContain('agentsConsoleVm.setTranscriptError(');
+    expect(appShellSource).not.toContain('.catch(() => {});');
+  });
+
+  it('Sites 2 & 4: review-context error/timeout renders an in-pane Retry, wired end-to-end', () => {
+    // Renderer: an error context renders a message + Retry that re-selects (re-enters loading).
+    expect(rendererSource).toContain("context.status === 'error'");
+    expect(rendererSource).toContain('data-review-action="retry-context"');
+    expect(rendererSource).toContain("case 'retry-context'");
+    // Shell: both the in-pane error state and the existing toast fire; a timeout guards eternal loading.
+    expect(appShellSource).toContain('reviewVm.setReviewContextError(');
+    expect(appShellSource).toContain('Timed out loading review context');
+    expect(appShellSource).toContain('REVIEW_CONTEXT_TIMEOUT_MS');
+    expect(appShellSource).toContain('clearTimeout(timer)');
+  });
+
+  it('Site 3: bootstrap fire-and-forget refreshes surface IPC rejections as a toast', () => {
+    // Each bootstrap invoke attaches a .catch → showAppError instead of a bare `void bridge.*()`.
+    expect(rendererSource).toContain('Failed to load mail');
+    expect(rendererSource).toContain('Failed to load limits / cost');
+    expect(rendererSource).toContain('Failed to load reviews');
+    expect(rendererSource).not.toMatch(/void bridge\.mailRefresh\(\);/);
+    expect(rendererSource).not.toMatch(/void bridge\.refreshLimitsCost\(\);/);
+    expect(rendererSource).not.toMatch(/void bridge\.reviewRefresh\(\);/);
   });
 });

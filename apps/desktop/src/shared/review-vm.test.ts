@@ -220,6 +220,61 @@ describe('ReviewVM — setReviewContext', () => {
   });
 });
 
+// ── setReviewContextError (Principle 9 — no-silent-failures) ──────────────────
+
+describe('ReviewVM — setReviewContextError', () => {
+  it('moves the selected review context into the error state', () => {
+    const vm = new ReviewVM();
+    vm.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
+    vm.selectReview('rev-abc');
+    vm.setReviewContextError('rev-abc', 'boom');
+    expect(vm.state.context).toEqual({ status: 'error', reviewId: 'rev-abc', message: 'boom' });
+  });
+
+  it('ignores an error for a non-selected reviewId (stale request)', () => {
+    const vm = new ReviewVM();
+    vm.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
+    vm.selectReview('rev-abc');
+    vm.setReviewContextError('rev-OTHER', 'stale boom');
+    expect(vm.state.context).toEqual({ status: 'loading' });
+  });
+
+  it('emits when it sets the error', () => {
+    const vm = new ReviewVM();
+    vm.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
+    vm.selectReview('rev-abc');
+    const listener = vi.fn();
+    vm.subscribe(listener);
+    vm.setReviewContextError('rev-abc', 'boom');
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('re-selecting after an error returns to loading and re-fires the fetch (retry path)', () => {
+    const onFetch = vi.fn();
+    const vm = new ReviewVM({ onFetchReviewContext: onFetch });
+    vm.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
+    vm.selectReview('rev-abc');
+    vm.setReviewContextError('rev-abc', 'timed out');
+    expect(vm.state.context?.status).toBe('error');
+
+    onFetch.mockClear();
+    vm.selectReview('rev-abc'); // retry — selectReview has no same-id guard
+    expect(vm.state.context).toEqual({ status: 'loading' });
+    expect(onFetch).toHaveBeenCalledWith('rev-abc');
+  });
+
+  it('does not submit a verdict while the context is in the error state', async () => {
+    const onSubmit = vi.fn();
+    const vm = new ReviewVM({ onSubmitVerdict: onSubmit });
+    vm.update([makeReviewMail({ seq: 1, idempotencyKey: 'review-request:rev-abc' })]);
+    vm.selectReview('rev-abc');
+    vm.setReviewContextError('rev-abc', 'boom');
+    vm.beginVerdict('PASS');
+    await vm.submitVerdict();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
 // ── verdict lifecycle ─────────────────────────────────────────────────────────
 
 describe('ReviewVM — verdict lifecycle', () => {

@@ -9,6 +9,37 @@ in-sandbox proof (AC-S10-4 items 1–4) runs automatically as part of `pnpm test
 
 ---
 
+## Proof fidelity: one `runProof({fake|claude|codex})` driver
+
+The in-sandbox proof and this operator proof are the **same driver** — `runProof` in
+`packages/mcp/src/conductor/host-proof.ts` — differing only by the resolved seam bundle:
+
+- **`runProof('fake')`** resolves a `FakePty` + the in-sandbox `FakeProvider` (a scripted
+  startup → spinner → quiet timeline that also drives the MCP client to call `co_mail_send`), an
+  in-memory transport, and an injected counter clock / quiet window. This is what `pnpm test` runs.
+  Its result is tagged **`fidelity: 'sandbox-fake'`**.
+- **`runProof('claude')` / `runProof('codex')`** resolve the host-live bundle — a real `NodePtyHost`
+  (node-pty), the socket-bridge transport, and real timers — exactly what `co-mcp host-proof <provider>`
+  runs below. Its result is tagged **`fidelity: 'host-live'`**.
+
+`fidelity` is **derived from the resolved pty host, never passed in**: a `FakePty` ⇒ `sandbox-fake`,
+a `NodePtyHost` ⇒ `host-live`, and any mismatch (e.g. a non-`FakePty` resolved for `fake` mode, or a
+host matching neither) throws (Principle 9 — fail-loud). A `fake` run can therefore **never** be
+mislabeled `host-live`.
+
+> **A green `fake` run is NOT host-live evidence.** `sandbox-fake` proves the harness wiring — that
+> the spawn → inject → turn → route → steer → SIGKILL → recover sequence is correctly composed. It
+> does **not** prove a real `claude`/`codex` binary reached `ready` and routed mail through a real pty
+> (Principle 2 — authentic-terminal). Only a `host-live` result is SH-1 evidence.
+
+`assertHostLiveProof(result)` is the **forward gate** for this distinction: it throws unless
+`result.fidelity === 'host-live'`. There is no programmatic SH-1-evidence sink today (this command
+prints to stderr and exits; SH-1 evidence is the manual bundle in [`sh1-runbook.md`](sh1-runbook.md)),
+so any **future** SH-1-evidence recorder MUST call `assertHostLiveProof` before recording a result as
+host-live / SH-1 evidence.
+
+---
+
 ## Prerequisites
 
 1. `co` and `co-mcp` built (`pnpm build` in the repo root) and resolvable from the shell. If `co`

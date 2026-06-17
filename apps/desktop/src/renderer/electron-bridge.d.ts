@@ -49,6 +49,18 @@ interface DashboardState {
 
 type MailKind = 'actionable' | 'informational';
 
+// Mirrors @co/core's MailCardView/MailCardField (renderer is isolated from Node — inline, like MailRow).
+interface MailCardField {
+  label: string;
+  value: string;
+}
+
+interface MailCardView {
+  title: string;
+  fields: readonly MailCardField[];
+  body: string;
+}
+
 interface MailRow {
   seq: number;
   type: string;
@@ -57,6 +69,7 @@ interface MailRow {
   recipient: string;
   ts: number;
   renderedBody: string;
+  card: MailCardView;
   kind: MailKind;
   read: boolean;
   resolved: boolean;
@@ -99,6 +112,7 @@ interface AgentsConsoleState {
   selectedAgentId: string | null;
   selectedStatus: AgentStatus | null;
   transcript: string;
+  transcriptError: string | null;
   connection: 'live' | 'degraded';
 }
 
@@ -110,6 +124,19 @@ interface XtermTerminal {
   reset(): void;
   clear(): void;
   dispose(): void;
+  // Load an xterm addon (e.g. the fit addon) — `unknown` keeps the renderer free of an xterm type import.
+  loadAddon(addon: unknown): void;
+}
+
+// The vendored `@xterm/addon-fit` UMD build assigns `globalThis.FitAddon = { FitAddon: <constructor> }`.
+interface XtermFitAddon {
+  fit(): void;
+  activate(terminal: unknown): void;
+  dispose(): void;
+}
+
+interface XtermFitAddonModule {
+  FitAddon: new () => XtermFitAddon;
 }
 
 // ── Review (inline — renderer is isolated from Node context) ─────────────────
@@ -122,7 +149,11 @@ interface ReviewRow {
   ts: number;
 }
 
-type SelectedContext = { status: 'loading' } | { status: 'loaded'; value: ReviewContext } | null;
+type SelectedContext =
+  | { status: 'loading' }
+  | { status: 'loaded'; value: ReviewContext }
+  | { status: 'error'; reviewId: string; message: string }
+  | null;
 
 interface VerdictComposer {
   active: boolean;
@@ -230,6 +261,7 @@ interface CoShellBridge {
   // ── Agents Console ────────────────────────────────────────────────────────
   onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
+  agentsRefreshTranscript(): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
   agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
@@ -252,4 +284,5 @@ interface CoShellBridge {
 interface Window {
   coShell: CoShellBridge;
   Terminal: new (opts?: unknown) => XtermTerminal;
+  FitAddon: XtermFitAddonModule;
 }

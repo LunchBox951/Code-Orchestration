@@ -2,6 +2,13 @@
 // to the coShell bridge exposed by the preload via contextBridge.
 
 import { reviewDetailNeedsRebuild, reviewDetailSignature } from './review-render-helpers.js';
+import {
+  captureInteractionState,
+  mailDetailSignature,
+  needsRebuild,
+  restoreInteractionState,
+} from './live-render-helpers.js';
+import { applyTermFeed, createAgentsTerminal, decideTermFeed } from './agents-terminal-helpers.js';
 
 const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'cost'] as const;
 type NavView = (typeof NAV_VIEWS)[number];
@@ -86,6 +93,10 @@ function showAppError(message: string): void {
   toast.textContent = message;
   document.body.append(toast);
   setTimeout(() => toast.remove(), 7000);
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 // ── Dashboard rendering ────────────────────────────────────────────────────────
@@ -174,6 +185,12 @@ function renderDashboard(state: DashboardState): void {
           })
           .join('');
 
+  // Preserve scroll across the rebuild (AC-S15-9 [SF-4]): the Dashboard rebuilds its content on every
+  // tick; <main> is the scroll container, so snapshot + restore its scrollTop instead of jumping the
+  // operator back to the top. focused=false → restore never steals focus from another view's input.
+  const scrollEl = container.closest<HTMLElement>('main');
+  const scroll = scrollEl != null ? captureInteractionState(scrollEl) : null;
+
   container.innerHTML = `
     <div class="mc-header">
       <div class="mc-title">Mission Control</div>
@@ -190,6 +207,8 @@ function renderDashboard(state: DashboardState): void {
       <div class="actionable-list">${actionableRows}</div>
     </div>
   `;
+
+  if (scrollEl != null && scroll != null) restoreInteractionState(scrollEl, scroll);
 }
 
 // ── Mail rendering ─────────────────────────────────────────────────────────────
@@ -252,9 +271,31 @@ function renderMailSidebar(state: MailState): void {
     .join('');
 }
 
-function renderMailDetail(state: MailState): void {
+function renderMailDetail(state: MailState, prevState: MailState | null): void {
   const detailPane = document.getElementById('mail-detail-pane');
   if (!detailPane) return;
+
+  // Caret preservation (GitHub #39): the detail pane is rebuilt on every MailState emit, which recreates
+  // the focused composer textarea and drops the caret to offset 0 on every keystroke (typed text reverses).
+  // When the ONLY change is composer.body (excluded from the signature) AND #composer-body is focused, skip
+  // the rebuild — the live textarea already holds the typed value. Mirrors the shipped Review #316 guard.
+  const composerFocused = document.activeElement?.id === 'composer-body';
+  const rebuild = needsRebuild(
+    prevState != null ? mailDetailSignature(prevState) : null,
+    mailDetailSignature(state),
+    composerFocused,
+  );
+  if (!rebuild) return;
+
+  // A rebuild is unavoidable (a non-body field changed, or first render). If the user was mid-edit in the
+  // composer, capture caret + scroll from the outgoing textarea so we can re-apply them to the new one
+  // instead of blindly focus()-ing and dropping the caret to 0.
+  const outgoing = composerFocused
+    ? (document.getElementById('composer-body') as HTMLTextAreaElement | null)
+    : null;
+  const captured = outgoing != null ? captureInteractionState(outgoing, true) : null;
+  const composerJustOpened =
+    state.composer.active && (prevState == null || !prevState.composer.active);
 
   const { selected, composer } = state;
 
@@ -327,6 +368,21 @@ function renderMailDetail(state: MailState): void {
       ].join('')
     : '';
 
+  // Paint the typed card GENERICALLY (SF-6 / AC-S15-12): the per-type field/label LOGIC lives in
+  // @co/core (registry.renderCard); the renderer just lays out card.fields as key/value rows + the
+  // body as prose, with no per-type knowledge of its own. Every value is escaped via esc().
+  const cardFieldsHtml =
+    selected.card.fields.length === 0
+      ? ''
+      : [
+          `<div class="mail-card-fields">`,
+          ...selected.card.fields.map(
+            (f) =>
+              `<div class="mail-card-field"><span class="mail-card-field-label">${esc(f.label)}</span><span class="mail-card-field-value">${esc(f.value)}</span></div>`,
+          ),
+          `</div>`,
+        ].join('');
+
   detailPane.innerHTML = [
     `<div class="mail-card${isApproval ? ' approval-card' : ''}">`,
     `<div class="mail-card-header">`,
@@ -334,26 +390,35 @@ function renderMailDetail(state: MailState): void {
     `<div class="mail-card-subject">${esc(selected.subject)}</div>`,
     `<div class="mail-card-meta">From: ${esc(selected.sender)} · To: ${esc(selected.recipient)}</div>`,
     `</div>`,
-    `<div class="mail-card-body">${esc(selected.renderedBody)}</div>`,
+    cardFieldsHtml,
+    `<div class="mail-card-body">${esc(selected.card.body)}</div>`,
     actionButtons,
     `</div>`,
     composerHtml,
   ].join('');
 
-  // Wire composer textarea live-sync
+  // Wire composer textarea live-sync, preserving caret/focus across the rebuild.
   const textarea = document.getElementById('composer-body') as HTMLTextAreaElement | null;
   if (textarea) {
     textarea.addEventListener('input', () => {
       void window.coShell.mailUpdateComposer('body', textarea.value);
     });
-    textarea.focus();
+    if (captured != null) {
+      // Mid-edit rebuild: re-apply the caret/scroll and re-focus the freshly-created textarea.
+      restoreInteractionState(textarea, captured);
+    } else if (composerJustOpened) {
+      // First open (inactive→active): focus the empty textarea (caret at end is fine). Do NOT focus on
+      // unrelated rebuilds while the composer is unfocused — that would steal focus from elsewhere.
+      textarea.focus();
+    }
   }
 }
 
 function renderMail(state: MailState): void {
+  const prevState = latestMailState;
   latestMailState = state;
   renderMailSidebar(state);
-  renderMailDetail(state);
+  renderMailDetail(state, prevState);
 
   // Update nav badge with actionable count
   const totalActionables = state.inbox.filter((r) => r.kind === 'actionable').length;
@@ -501,15 +566,31 @@ function renderCostView(state: LimitsCostState): void {
 // ── Agents Console rendering ──────────────────────────────────────────────────
 
 let agentsTerm: XtermTerminal | null = null;
+let agentsResizeObserver: ResizeObserver | null = null;
 let lastAgentId: string | null = null;
 let lastTranscript = '';
 let latestAgentsState: AgentsConsoleState | null = null;
 
-function getOrCreateTerm(): XtermTerminal {
+// Construct the xterm lazily, on first render while the Agents pane is active+sized (the
+// isAgentsViewActive() gate in renderAgentsTranscript). The terminal is built WITHOUT convertEol (the
+// stream is raw, cursor-addressed pty bytes — converting \n→\r\n corrupts it), with the fit addon loaded
+// so it sizes to its pane on open and on every resize (GitHub #40). Returns null only when the static
+// transcript element is somehow absent — the caller then skips the feed for this tick.
+function getOrCreateTerm(): XtermTerminal | null {
   if (agentsTerm != null) return agentsTerm;
-  const term = new window.Terminal({ convertEol: true, disableStdin: true });
   const el = document.getElementById('agents-transcript');
-  if (el) term.open(el);
+  if (el == null) return null;
+  const { term } = createAgentsTerminal<XtermTerminal>(el, {
+    createTerminal: (options) => new window.Terminal(options),
+    createFitAddon: () => new window.FitAddon.FitAddon(),
+    observeResize: (target, onResize) => {
+      // getOrCreateTerm caches agentsTerm, so this closure runs exactly once per app lifetime; the
+      // disconnect is a defensive guard against a future caller invoking it twice, not a live path.
+      agentsResizeObserver?.disconnect();
+      agentsResizeObserver = new ResizeObserver(() => onResize());
+      agentsResizeObserver.observe(target);
+    },
+  });
   agentsTerm = term;
   return term;
 }
@@ -574,23 +655,47 @@ function renderAgents(state: AgentsConsoleState): void {
     state.selectedAgentId != null && state.connection === 'live' && state.selectedStatus === 'warm';
   setComposerEnabled(composerEnabled);
 
+  renderTranscriptError(state.transcriptError);
   renderAgentsTranscript(state);
+}
+
+// Persistent in-pane transcript-fetch error + Retry (Principle 9 — no-silent-failures). Unlike the
+// vanishing `showTranscriptError` toast, this is a retry STATE: it stays until the operator retries or
+// switches agents. Retry routes through `agentsRefreshTranscript` (a plain re-select of the same agent is
+// a no-op — selectAgent guards same-id — so a dedicated refresh channel is required).
+function renderTranscriptError(message: string | null): void {
+  const banner = document.getElementById('agents-transcript-error');
+  if (!banner) return;
+  if (message == null) {
+    banner.innerHTML = '';
+    banner.hidden = true;
+    return;
+  }
+  banner.innerHTML = [
+    `<span class="agents-transcript-error-msg">${esc(message)}</span>`,
+    `<button class="btn btn-secondary" data-agents-action="retry-transcript" type="button"`,
+    ` aria-label="Retry loading transcript">Retry</button>`,
+  ].join('');
+  banner.hidden = false;
 }
 
 function renderAgentsTranscript(state: AgentsConsoleState): void {
   if (!isAgentsViewActive()) return;
 
   const term = getOrCreateTerm();
-  if (state.selectedAgentId !== lastAgentId) {
-    term.reset();
-    if (state.transcript) term.write(state.transcript);
-  } else if (state.transcript.startsWith(lastTranscript)) {
-    const delta = state.transcript.slice(lastTranscript.length);
-    if (delta) term.write(delta);
-  } else {
-    term.reset();
-    if (state.transcript) term.write(state.transcript);
-  }
+  if (term == null) return;
+  // Feed xterm the RAW bytes verbatim: append the new delta while the transcript only grows, reset +
+  // rewrite on agent-switch or a non-prefix change. No EOL conversion, no sanitization — xterm's emulator
+  // reproduces the final screen from the intact control bytes.
+  applyTermFeed(
+    term,
+    decideTermFeed({
+      selectedAgentId: state.selectedAgentId,
+      lastAgentId,
+      transcript: state.transcript,
+      lastTranscript,
+    }),
+  );
   lastAgentId = state.selectedAgentId;
   lastTranscript = state.transcript;
 }
@@ -623,6 +728,17 @@ function renderReviewDetail(context: SelectedContext, composer: VerdictComposer)
   }
   if (context.status === 'loading') {
     return `<div class="empty-state">Loading review context…</div>`;
+  }
+  if (context.status === 'error') {
+    // No silent failure (Principle 9): a rejected/timed-out fetch shows the message + a Retry button
+    // instead of an eternal "Loading…". Retry re-selects the review (re-enters loading → re-fetches).
+    return [
+      `<div class="review-context-error">`,
+      `<div class="review-context-error-msg">${esc(context.message)}</div>`,
+      `<button class="btn btn-secondary" data-review-action="retry-context"`,
+      ` aria-label="Retry loading review context">Retry</button>`,
+      `</div>`,
+    ].join('');
   }
 
   const { value } = context;
@@ -847,7 +963,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Request initial mail state on load
-  void bridge.mailRefresh();
+  void bridge
+    .mailRefresh()
+    .catch((e: unknown) => showAppError(`Failed to load mail: ${errorMessage(e)}`));
 
   // ── Limits / Cost ──────────────────────────────────────────────────────────
 
@@ -856,7 +974,9 @@ document.addEventListener('DOMContentLoaded', () => {
     renderCostView(state);
   });
 
-  void bridge.refreshLimitsCost();
+  void bridge
+    .refreshLimitsCost()
+    .catch((e: unknown) => showAppError(`Failed to load limits / cost: ${errorMessage(e)}`));
 
   function selectMailRow(row: HTMLElement): void {
     const seq = row.dataset['seq'];
@@ -900,7 +1020,9 @@ document.addEventListener('DOMContentLoaded', () => {
     showAppError(message);
   });
 
-  void bridge.reviewRefresh();
+  void bridge
+    .reviewRefresh()
+    .catch((e: unknown) => showAppError(`Failed to load reviews: ${errorMessage(e)}`));
 
   // ── Session start ──────────────────────────────────────────────────────────
 
@@ -953,6 +1075,17 @@ document.addEventListener('DOMContentLoaded', () => {
           if (s != null) renderReview(s);
         });
         break;
+      case 'retry-context': {
+        // Retry the failed review-context fetch by re-selecting the review (reviewSelect has no same-id
+        // guard, so it re-enters loading and re-fetches — surfacing fresh content, error, or timeout).
+        const reviewId = latestReviewState?.selectedReviewId;
+        if (reviewId != null) {
+          void bridge.reviewSelect(reviewId).then((s) => {
+            if (s != null) renderReview(s);
+          });
+        }
+        break;
+      }
     }
   });
 
@@ -987,6 +1120,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('view-agents')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
+
+    // In-pane transcript Retry — re-runs the failed transcript fetch through the dedicated channel.
+    const retryBtn = target.closest<HTMLElement>('[data-agents-action="retry-transcript"]');
+    if (retryBtn) {
+      void bridge.agentsRefreshTranscript();
+      return;
+    }
 
     // Stop / Unstick per-agent buttons — check before row selection so clicks on the buttons
     // do not also trigger agent selection.

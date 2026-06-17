@@ -1,0 +1,1342 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body { background: oklch(0.165 0.006 262); }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: oklch(0.33 0.01 262); border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  @keyframes coPulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.8); } }
+  @keyframes coBlink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+  @keyframes coFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+</style>
+</helmet>
+<div style="height: 100vh; display: flex; flex-direction: column; background: oklch(0.165 0.006 262); font-family: 'IBM Plex Sans', sans-serif; color: oklch(0.83 0.006 262); overflow: hidden;">
+
+  <!-- ===== HEADER ===== -->
+  <header style="height: 52px; flex: 0 0 52px; display: flex; align-items: center; gap: 18px; padding: 0 16px; border-bottom: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262);">
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <div style="width: 26px; height: 26px; border-radius: 7px; background: oklch(0.71 0.14 255); display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: 14px; color: oklch(0.18 0.02 255);">co</div>
+      <div style="display: flex; flex-direction: column; line-height: 1.1;">
+        <span style="font-size: 13px; font-weight: 600; color: oklch(0.96 0.003 262);">Code Orchestration</span>
+        <span style="font-size: 10.5px; color: oklch(0.65 0.008 262); font-family: 'IBM Plex Mono', monospace;">Conductor · live</span>
+      </div>
+    </div>
+
+    <button style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 11px; background: oklch(0.245 0.008 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 8px; cursor: pointer; color: oklch(0.83 0.006 262); font-family: inherit;">
+      <span style="width: 7px; height: 7px; border-radius: 50%; background: oklch(0.80 0.17 150); animation: coPulse 1.8s infinite;"></span>
+      <span style="font-size: 12.5px; font-weight: 500;">co/stage-9</span>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(0.65 0.008 262);">2026-06-12-stage-9-f215</span>
+      <span style="color: oklch(0.52 0.009 262); font-size: 10px;">▾</span>
+    </button>
+
+    <div style="flex: 1;"></div>
+
+    <div style="position: relative;">
+      <button onClick="{{ toggleLimits }}" style="display: flex; align-items: center; gap: 14px; height: 34px; padding: 0 13px; background: oklch(0.205 0.007 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 9px; cursor: pointer; font-family: inherit;" style-hover="border-color: oklch(0.45 0.012 262);">
+        <sc-for list="{{ sessionPills }}" as="p" hint-placeholder-count="2">
+          <span style="display: flex; align-items: center; gap: 6px;">
+            <span style="width: 7px; height: 7px; border-radius: 50%; background: {{ p.color }};"></span>
+            <span style="font-size: 11px; color: oklch(0.7 0.006 262);">{{ p.name }}</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 600; color: {{ p.color }};">{{ p.pct }}</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: oklch(0.52 0.009 262);">·{{ p.reset }}</span>
+          </span>
+        </sc-for>
+        <span style="color: oklch(0.52 0.009 262); font-size: 10px;">▾</span>
+      </button>
+      <sc-if value="{{ limitsOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position: absolute; top: 42px; right: 0; width: 332px; background: oklch(0.21 0.007 262); border: 1px solid oklch(0.38 0.011 262); border-radius: 13px; box-shadow: 0 22px 56px oklch(0.05 0.006 262 / 0.65); padding: 8px; z-index: 60; animation: coFade 0.12s ease-out;">
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 7px 10px 11px;">
+            <span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: oklch(0.6 0.009 262);">Subscription limits</span>
+            <span style="font-size: 10.5px; color: oklch(0.5 0.009 262);">balancer paces on headroom</span>
+          </div>
+          <sc-for list="{{ provCards }}" as="p" hint-placeholder-count="2">
+            <div style="padding: 11px 12px; margin-bottom: 6px; background: oklch(0.175 0.006 262); border: 1px solid oklch(0.29 0.009 262); border-radius: 10px;">
+              <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 11px;">
+                <span style="width: 8px; height: 8px; border-radius: 50%; background: {{ p.color }};"></span>
+                <span style="font-size: 12.5px; font-weight: 600; color: oklch(0.92 0.004 262);">{{ p.name }}</span>
+                <span style="font-size: 10.5px; color: oklch(0.55 0.009 262);">{{ p.plan }}</span>
+              </div>
+              <div style="margin-bottom: 9px;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                  <span style="font-size: 11px; color: oklch(0.68 0.008 262);">5-hour session</span>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: {{ p.color }};">{{ p.sessionLabel }} · resets {{ p.sessionReset }}</span>
+                </div>
+                <div style="height: 5px; border-radius: 3px; background: oklch(0.27 0.009 262); overflow: hidden;"><div style="height: 100%; width: {{ p.sessionW }}; background: {{ p.color }};"></div></div>
+              </div>
+              <div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                  <span style="font-size: 11px; color: oklch(0.68 0.008 262);">Weekly</span>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: oklch(0.6 0.009 262);">{{ p.weeklyLabel }} · resets {{ p.weeklyReset }}</span>
+                </div>
+                <div style="height: 5px; border-radius: 3px; background: oklch(0.27 0.009 262); overflow: hidden;"><div style="height: 100%; width: {{ p.weeklyW }}; background: oklch(0.6 0.03 262);"></div></div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+
+    <button onClick="{{ togglePalette }}" style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 11px; background: oklch(0.205 0.007 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 8px; cursor: pointer; color: oklch(0.65 0.008 262); font-family: inherit; font-size: 12px;" style-hover="border-color: oklch(0.45 0.012 262);">
+      <span>Search</span>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; padding: 2px 5px; background: oklch(0.27 0.009 262); border-radius: 4px; color: oklch(0.78 0.006 262);">⌘K</span>
+    </button>
+
+    <div style="width: 30px; height: 30px; border-radius: 50%; background: oklch(0.30 0.04 80); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: oklch(0.88 0.04 80); border: 1px solid oklch(0.45 0.05 80);">OP</div>
+  </header>
+
+  <div style="flex: 1; display: flex; min-height: 0; overflow-x: auto;">
+
+    <!-- ===== LEFT RAIL ===== -->
+    <nav style="width: 224px; flex: 0 0 224px; display: flex; flex-direction: column; border-right: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262); padding: 10px;">
+      <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: oklch(0.52 0.009 262); padding: 6px 8px 8px;">Cockpit</div>
+      <sc-for list="{{ navItems }}" as="n" hint-placeholder-count="6">
+        <button onClick="{{ n.onClick }}" style="display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 9px; margin-bottom: 2px; border: none; border-radius: 9px; cursor: pointer; font-family: inherit; text-align: left; background: {{ n.bg }}; position: relative;">
+          <span style="position: absolute; left: -10px; top: 9px; bottom: 9px; width: 3px; border-radius: 0 3px 3px 0; background: {{ n.barColor }};"></span>
+          <span style="width: 24px; height: 24px; flex: 0 0 24px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 600; background: {{ n.iconBg }}; color: {{ n.iconFg }};">{{ n.glyph }}</span>
+          <span style="flex: 1; font-size: 13px; font-weight: 500; color: {{ n.fg }};">{{ n.label }}</span>
+          <sc-if value="{{ n.badge }}" hint-placeholder-val="{{ true }}">
+            <span style="min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; font-weight: 600; background: {{ n.badgeBg }}; color: {{ n.badgeFg }};">{{ n.badge }}</span>
+          </sc-if>
+        </button>
+      </sc-for>
+
+      <div style="flex: 1;"></div>
+
+      <div style="border-top: 1px solid oklch(0.27 0.009 262); padding: 12px 6px 4px; margin-top: 8px;">
+        <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: oklch(0.52 0.009 262); margin-bottom: 9px; padding: 0 2px;">Buddy</div>
+        <button style="display: flex; align-items: center; gap: 11px; width: 100%; padding: 9px 10px; background: oklch(0.21 0.007 262); border: 1px solid oklch(0.30 0.009 262); border-radius: 11px; cursor: pointer; font-family: inherit; text-align: left;" style-hover="border-color: oklch(0.45 0.06 300);">
+          <span style="width: 34px; height: 34px; flex: 0 0 34px; border-radius: 9px; background: oklch(0.30 0.08 300); display: flex; align-items: center; justify-content: center; color: oklch(0.86 0.11 300); font-size: 15px;">◆</span>
+          <span style="display: flex; flex-direction: column; min-width: 0;">
+            <span style="font-size: 12.5px; font-weight: 600; color: oklch(0.9 0.004 262);">Vellum</span>
+            <span style="font-size: 10.5px; color: oklch(0.6 0.009 262);">idle · waves when gates pass</span>
+          </span>
+        </button>
+        <div style="display: flex; align-items: center; gap: 7px; margin-top: 8px; padding: 0 4px;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 3px 7px; border-radius: 6px; background: oklch(0.23 0.008 262); color: oklch(0.7 0.006 262); border: 1px solid oklch(0.30 0.009 262);">/btw</span>
+          <span style="font-size: 10.5px; color: oklch(0.5 0.009 262);">side-channel chat</span>
+        </div>
+      </div>
+    </nav>
+
+    <!-- ===== MAIN ===== -->
+    <main style="flex: 1; min-width: 1080px; display: flex; flex-direction: column; overflow: hidden;">
+
+      <!-- ============ DASHBOARD ============ -->
+      <sc-if value="{{ isDashboard }}" hint-placeholder-val="{{ true }}">
+        <div style="flex: 1; display: flex; flex-direction: column; padding: 18px 20px; min-height: 0; overflow: hidden;">
+          <div style="display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px;">
+            <div>
+              <h1 style="margin: 0; font-size: 19px; font-weight: 600; color: oklch(0.96 0.003 262);">Mission Control</h1>
+              <p style="margin: 4px 0 0; font-size: 12.5px; color: oklch(0.65 0.008 262);">Task <span style="font-family: 'IBM Plex Mono', monospace; color: oklch(0.79 0.12 200);">stage-9</span> · 4 phases · Conductor driving 8 agents</p>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button style="height: 32px; padding: 0 13px; background: oklch(0.245 0.008 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 8px; color: oklch(0.83 0.006 262); font-family: inherit; font-size: 12.5px; cursor: pointer;">Pause all</button>
+              <button style="height: 32px; padding: 0 13px; background: oklch(0.71 0.14 255); border: none; border-radius: 8px; color: oklch(0.16 0.02 255); font-family: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;">New task</button>
+            </div>
+          </div>
+
+          <!-- stat tiles · full-width header -->
+          <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 16px; flex: 0 0 auto;">
+                <sc-for list="{{ fleetStats }}" as="t" hint-placeholder-count="5">
+                  <div style="background: oklch(0.205 0.007 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 11px; padding: 11px 12px;">
+                    <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 8px;">
+                      <span style="width: 7px; height: 7px; border-radius: 50%; background: {{ t.color }};"></span>
+                      <span style="font-size: 10px; color: oklch(0.62 0.008 262); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;">{{ t.label }}</span>
+                    </div>
+                    <div style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600; color: oklch(0.96 0.003 262); line-height: 1;">{{ t.value }}</div>
+                    <div style="font-size: 10px; color: oklch(0.52 0.009 262); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ t.sub }}</div>
+                  </div>
+                </sc-for>
+          </div>
+
+          <!-- content row: fleet 60% · action 40% -->
+          <div style="display: grid; grid-template-columns: 3fr 2fr; gap: 16px; flex: 1; min-height: 0;">
+
+            <!-- agent fleet -->
+            <div style="background: oklch(0.195 0.007 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; min-height: 0;">
+              <div style="display: flex; align-items: center; justify-content: space-between; padding: 13px 15px; border-bottom: 1px solid oklch(0.27 0.009 262);">
+                <span style="font-size: 13px; font-weight: 600; color: oklch(0.92 0.004 262);">Agent fleet</span>
+                <span style="font-size: 11px; color: oklch(0.55 0.009 262); font-family: 'IBM Plex Mono', monospace;">spawn tree · click to open console</span>
+              </div>
+              <div style="padding: 6px; overflow-y: auto; flex: 1; min-height: 0;">
+                <sc-for list="{{ agents }}" as="a" hint-placeholder-count="8">
+                  <button onClick="{{ a.open }}" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border: none; border-radius: 8px; cursor: pointer; font-family: inherit; text-align: left; background: transparent;" style-hover="background: oklch(0.245 0.008 262);">
+                    <span style="width: {{ a.indent }}; flex: 0 0 {{ a.indent }};"></span>
+                    <span style="width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: {{ a.stateColor }}; box-shadow: 0 0 0 3px {{ a.stateGlow }};{{ a.pulse }}"></span>
+                    <span style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
+                      <span style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; font-weight: 500; color: oklch(0.92 0.004 262); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ a.name }}</span>
+                        <span style="flex: 0 0 auto; font-size: 10px; font-weight: 600; padding: 1.5px 7px; border-radius: 20px; background: {{ a.roleTint }}; color: {{ a.roleColor }}; white-space: nowrap;">{{ a.roleLabel }}</span>
+                      </span>
+                      <span style="font-size: 11.5px; color: oklch(0.58 0.009 262); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px;">{{ a.last }}</span>
+                    </span>
+                    <span style="display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: 0 0 auto;">
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; color: {{ a.stateColor }};">{{ a.state }}</span>
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.55 0.009 262);">{{ a.turnsStr }}</span>
+                    </span>
+                  </button>
+                </sc-for>
+              </div>
+            </div>
+
+            <!-- action required -->
+            <div style="background: oklch(0.195 0.007 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; min-height: 0;">
+                <div style="display: flex; align-items: center; gap: 8px; padding: 13px 15px; border-bottom: 1px solid oklch(0.27 0.009 262);">
+                  <span style="font-size: 13px; font-weight: 600; color: oklch(0.92 0.004 262);">Action required</span>
+                  <span style="min-width: 18px; height: 18px; padding: 0 6px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; font-weight: 700; background: oklch(0.67 0.21 25); color: oklch(0.98 0.01 25);">{{ actionCount }}</span>
+                  <div style="flex: 1;"></div>
+                  <button onClick="{{ goMail }}" style="background: none; border: none; color: oklch(0.71 0.14 255); font-family: inherit; font-size: 11.5px; cursor: pointer;">Open mail →</button>
+                </div>
+                <div style="padding: 8px; overflow-y: auto; flex: 1; min-height: 0;">
+                  <sc-for list="{{ actionItems }}" as="m" hint-placeholder-count="3">
+                    <button onClick="{{ m.open }}" style="display: block; width: 100%; text-align: left; padding: 11px; margin-bottom: 6px; border: 1px solid {{ m.edge }}; border-radius: 9px; cursor: pointer; font-family: inherit; background: {{ m.cardBg }};" style-hover="border-color: oklch(0.45 0.012 262);">
+                      <div style="display: flex; align-items: center; gap: 7px; margin-bottom: 6px;">
+                        <span style="font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; padding: 2px 7px; border-radius: 5px; background: {{ m.typeTint }}; color: {{ m.typeColor }};">{{ m.typeLabel }}</span>
+                        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.58 0.009 262);">{{ m.from }}</span>
+                      </div>
+                      <div style="font-size: 12.5px; font-weight: 500; color: oklch(0.93 0.004 262); margin-bottom: 8px; line-height: 1.35;">{{ m.subj }}</div>
+                      <div style="display: flex; gap: 6px;">
+                        <sc-for list="{{ m.actions }}" as="b" hint-placeholder-count="2">
+                          <span style="font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; background: {{ b.bg }}; color: {{ b.fg }}; border: 1px solid {{ b.edge }};">{{ b.label }}</span>
+                        </sc-for>
+                      </div>
+                    </button>
+                  </sc-for>
+                </div>
+            </div>
+
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ============ AGENTS CONSOLE ============ -->
+      <sc-if value="{{ isAgents }}" hint-placeholder-val="{{ true }}">
+        <div style="flex: 1; display: flex; min-height: 0;">
+          <!-- session list -->
+          <div style="width: 256px; flex: 0 0 256px; border-right: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262); display: flex; flex-direction: column;">
+            <div style="padding: 12px 13px; border-bottom: 1px solid oklch(0.27 0.009 262); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: oklch(0.55 0.009 262);">Sessions · 8</div>
+            <div style="flex: 1; overflow-y: auto; padding: 6px;">
+              <sc-for list="{{ agents }}" as="a" hint-placeholder-count="8">
+                <button onClick="{{ a.open }}" style="display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 9px; margin-bottom: 2px; border: none; border-radius: 8px; cursor: pointer; font-family: inherit; text-align: left; background: {{ a.sessBg }};">
+                  <span style="width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: {{ a.stateColor }};{{ a.pulse }}"></span>
+                  <span style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 500; color: oklch(0.91 0.004 262); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ a.short }}</span>
+                    <span style="font-size: 10.5px; color: {{ a.roleColor }}; margin-top: 2px;">{{ a.roleLabel }}</span>
+                  </span>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; color: {{ a.stateColor }};">{{ a.state }}</span>
+                </button>
+              </sc-for>
+            </div>
+          </div>
+
+          <!-- console -->
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; background: oklch(0.15 0.006 262);">
+            <!-- console header -->
+            <div style="padding: 12px 16px; border-bottom: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262);">
+              <div style="display: flex; align-items: center; gap: 11px;">
+                <span style="width: 9px; height: 9px; border-radius: 50%; background: {{ selAgent.stateColor }};{{ selAgent.pulse }}"></span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; font-weight: 600; color: oklch(0.96 0.003 262);">{{ selAgent.name }}</span>
+                <span style="font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 20px; background: {{ selAgent.roleTint }}; color: {{ selAgent.roleColor }};">{{ selAgent.roleFull }}</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; padding: 2px 8px; border-radius: 6px; background: oklch(0.245 0.008 262); color: oklch(0.7 0.006 262);">{{ selAgent.provLabel }}</span>
+                <div style="flex: 1;"></div>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: {{ selAgent.stateColor }};">{{ selAgent.state }} · R {{ selAgent.round }}</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(0.58 0.009 262); margin-left: 12px;">{{ selAgent.turnsStr }}</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 10px; margin-top: 9px;">
+                <span style="display: flex; align-items: center; gap: 6px; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.6 0.009 262);"><span style="width: 6px; height: 6px; border-radius: 50%; background: oklch(0.80 0.17 150);"></span>live session</span>
+                <span style="color: oklch(0.33 0.009 262);">·</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.5 0.009 262);">worktree {{ selAgent.worktree }}</span>
+                <div style="flex: 1;"></div>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.5 0.009 262);">tail · live transcript</span>
+              </div>
+            </div>
+            <!-- transcript -->
+            <div style="flex: 1; overflow-y: auto; padding: 16px 18px; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; line-height: 1.65;">
+              <sc-for list="{{ transcript }}" as="l" hint-placeholder-count="12">
+                <div style="white-space: pre-wrap; color: {{ l.color }}; font-weight: {{ l.weight }}; padding-left: {{ l.pad }}; margin-bottom: {{ l.mb }};">{{ l.text }}</div>
+              </sc-for>
+              <div style="display: flex; align-items: center; gap: 0; margin-top: 4px;">
+                <span style="color: oklch(0.80 0.17 150);">›&nbsp;</span>
+                <span style="width: 8px; height: 16px; background: oklch(0.80 0.17 150); animation: coBlink 1.1s steps(1) infinite;"></span>
+              </div>
+            </div>
+            <!-- composer -->
+            <div style="border-top: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262); padding: 11px 16px;">
+              <div style="display: flex; gap: 7px; margin-bottom: 9px;">
+                <sc-for list="{{ slashCmds }}" as="s" hint-placeholder-count="5">
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; padding: 3px 8px; border-radius: 6px; background: oklch(0.23 0.008 262); color: oklch(0.72 0.006 262); border: 1px solid oklch(0.29 0.009 262);">{{ s }}</span>
+                </sc-for>
+              </div>
+              <div style="display: flex; align-items: center; gap: 10px; background: oklch(0.14 0.006 262); border: 1px solid oklch(0.34 0.01 262); border-radius: 9px; padding: 10px 12px;">
+                <span style="font-family: 'IBM Plex Mono', monospace; color: {{ selAgent.roleColor }}; font-size: 13px;">›</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: oklch(0.5 0.009 262);">Steer {{ selAgent.short }} — push in, redirect, or /lock the spec…</span>
+                <div style="flex: 1;"></div>
+                <span style="font-size: 10.5px; color: oklch(0.5 0.009 262);">live terminal · injects to session</span>
+                <button style="height: 28px; padding: 0 13px; background: {{ selAgent.roleColor }}; border: none; border-radius: 7px; color: oklch(0.16 0.02 262); font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;">Send</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ============ MAIL ============ -->
+      <sc-if value="{{ isMail }}" hint-placeholder-val="{{ true }}">
+        <div style="flex: 1; display: flex; min-height: 0;">
+          <!-- folders -->
+          <div style="width: 210px; flex: 0 0 210px; border-right: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262); display: flex; flex-direction: column; padding: 12px 10px;">
+            <button style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 36px; margin-bottom: 14px; background: oklch(0.71 0.14 255); border: none; border-radius: 9px; color: oklch(0.16 0.02 255); font-family: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;">Compose</button>
+            <sc-for list="{{ folders }}" as="f" hint-placeholder-count="4">
+              <button onClick="{{ f.onClick }}" style="display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; margin-bottom: 2px; border: none; border-radius: 8px; cursor: pointer; font-family: inherit; text-align: left; background: {{ f.bg }};">
+                <span style="width: 7px; height: 7px; border-radius: 2px; background: {{ f.dot }};"></span>
+                <span style="flex: 1; font-size: 12.5px; font-weight: 500; color: {{ f.fg }};">{{ f.label }}</span>
+                <sc-if value="{{ f.count }}" hint-placeholder-val="{{ true }}">
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 9px; background: {{ f.countBg }}; color: {{ f.countFg }};">{{ f.count }}</span>
+                </sc-if>
+              </button>
+            </sc-for>
+            <div style="flex: 1;"></div>
+            <div style="border-top: 1px solid oklch(0.27 0.009 262); padding-top: 12px;">
+              <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: oklch(0.52 0.009 262); margin-bottom: 9px; padding: 0 4px;">View</div>
+              <div style="display: flex; background: oklch(0.16 0.006 262); border: 1px solid oklch(0.29 0.009 262); border-radius: 8px; padding: 3px;">
+                <button onClick="{{ setBusOperator }}" style="flex: 1; height: 28px; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 11.5px; font-weight: 600; background: {{ busOpBg }}; color: {{ busOpFg }};">Operator</button>
+                <button onClick="{{ setBusAgent }}" style="flex: 1; height: 28px; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 11.5px; font-weight: 600; background: {{ busAgBg }}; color: {{ busAgFg }};">Agent bus</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- message list -->
+          <div style="width: 360px; flex: 0 0 360px; border-right: 1px solid oklch(0.31 0.009 262); background: oklch(0.175 0.006 262); display: flex; flex-direction: column;">
+            <div style="padding: 13px 15px; border-bottom: 1px solid oklch(0.27 0.009 262); display: flex; align-items: center; justify-content: space-between;">
+              <span style="font-size: 13px; font-weight: 600; color: oklch(0.93 0.004 262);">{{ folderTitle }}</span>
+              <span style="font-size: 11px; color: oklch(0.55 0.009 262); font-family: 'IBM Plex Mono', monospace;">{{ mailCountLabel }}</span>
+            </div>
+            <div style="flex: 1; overflow-y: auto;">
+              <sc-for list="{{ mailList }}" as="m" hint-placeholder-count="6">
+                <button onClick="{{ m.open }}" style="display: block; width: 100%; text-align: left; padding: 12px 15px; border: none; border-bottom: 1px solid oklch(0.23 0.008 262); border-left: 3px solid {{ m.selBar }}; cursor: pointer; font-family: inherit; background: {{ m.rowBg }};">
+                  <div style="display: flex; align-items: center; gap: 7px; margin-bottom: 5px;">
+                    <sc-if value="{{ m.unread }}" hint-placeholder-val="{{ true }}">
+                      <span style="width: 7px; height: 7px; border-radius: 50%; background: oklch(0.71 0.14 255); flex: 0 0 7px;"></span>
+                    </sc-if>
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; font-weight: 500; color: {{ m.fromColor }}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;">{{ m.from }}</span>
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: oklch(0.5 0.009 262);">{{ m.time }}</span>
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
+                    <span style="font-size: 9px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 1.5px 6px; border-radius: 4px; background: {{ m.typeTint }}; color: {{ m.typeColor }};">{{ m.typeLabel }}</span>
+                    <sc-if value="{{ m.actionable }}" hint-placeholder-val="{{ true }}">
+                      <span style="font-size: 9px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 1.5px 6px; border-radius: 4px; background: oklch(0.30 0.10 25); color: oklch(0.82 0.16 25);">action</span>
+                    </sc-if>
+                  </div>
+                  <div style="font-size: 12.5px; font-weight: {{ m.weight }}; color: {{ m.subjColor }}; line-height: 1.35; margin-bottom: 3px;">{{ m.subj }}</div>
+                  <div style="font-size: 11.5px; color: oklch(0.55 0.009 262); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ m.preview }}</div>
+                </button>
+              </sc-for>
+            </div>
+          </div>
+
+          <!-- reading pane -->
+          <div style="flex: 1; min-width: 0; overflow-y: auto; background: oklch(0.19 0.007 262);">
+            <div style="padding: 22px 26px; max-width: 720px;">
+              <div style="display: flex; align-items: center; gap: 9px; margin-bottom: 14px;">
+                <span style="font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; padding: 3px 9px; border-radius: 6px; background: {{ selMail.typeTint }}; color: {{ selMail.typeColor }};">{{ selMail.typeLabel }}</span>
+                <sc-if value="{{ selMail.actionable }}" hint-placeholder-val="{{ true }}">
+                  <span style="font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; padding: 3px 9px; border-radius: 6px; background: oklch(0.30 0.10 25); color: oklch(0.82 0.16 25);">action required</span>
+                </sc-if>
+                <div style="flex: 1;"></div>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(0.55 0.009 262);">{{ selMail.time }}</span>
+              </div>
+              <h1 style="margin: 0 0 16px; font-size: 19px; font-weight: 600; color: oklch(0.96 0.003 262); line-height: 1.35;">{{ selMail.subj }}</h1>
+              <div style="display: flex; align-items: center; gap: 10px; padding-bottom: 18px; margin-bottom: 18px; border-bottom: 1px solid oklch(0.29 0.009 262);">
+                <span style="width: 34px; height: 34px; border-radius: 9px; background: {{ selMail.fromTint }}; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 600; color: {{ selMail.fromColor }};">{{ selMail.fromInitials }}</span>
+                <div style="display: flex; flex-direction: column;">
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; font-weight: 600; color: oklch(0.92 0.004 262);">{{ selMail.from }}</span>
+                  <span style="font-size: 11px; color: oklch(0.58 0.009 262);">{{ selMail.fromRole }} → {{ selMail.to }}</span>
+                </div>
+              </div>
+
+              <!-- typed rendering -->
+              <div style="font-size: 13.5px; line-height: 1.65; color: oklch(0.8 0.006 262);">
+                <sc-for list="{{ selMail.body }}" as="p" hint-placeholder-count="2">
+                  <p style="margin: 0 0 13px;">{{ p }}</p>
+                </sc-for>
+              </div>
+
+              <!-- approval / review payload card -->
+              <sc-if value="{{ selMail.hasPayload }}" hint-placeholder-val="{{ true }}">
+                <div style="margin: 18px 0; border: 1px solid oklch(0.31 0.009 262); border-radius: 11px; overflow: hidden; background: oklch(0.165 0.006 262);">
+                  <div style="padding: 11px 14px; border-bottom: 1px solid oklch(0.27 0.009 262); font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: oklch(0.6 0.009 262);">{{ selMail.payloadTitle }}</div>
+                  <div style="padding: 6px 14px;">
+                    <sc-for list="{{ selMail.payload }}" as="r" hint-placeholder-count="3">
+                      <div style="display: flex; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid oklch(0.23 0.008 262);">
+                        <span style="font-size: 12.5px; color: oklch(0.65 0.008 262);">{{ r.k }}</span>
+                        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: {{ r.color }};">{{ r.v }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-if>
+
+              <!-- response zone -->
+              <div style="margin-top: 22px; padding-top: 18px; border-top: 1px solid oklch(0.29 0.009 262);">
+                <sc-if value="{{ selMail.actionable }}" hint-placeholder-val="{{ true }}">
+                  <div>
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 11px;">
+                      <span style="font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: oklch(0.6 0.009 262);">Quick actions</span>
+                      <span style="font-size: 10.5px; color: oklch(0.5 0.009 262);">one click sends a structured {{ selMail.ackType }}</span>
+                    </div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px;">
+                      <sc-for list="{{ selMail.actions }}" as="b" hint-placeholder-count="2">
+                        <button onClick="{{ b.send }}" style="height: 38px; padding: 0 18px; border-radius: 9px; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 600; background: {{ b.bg }}; color: {{ b.fg }}; border: 1px solid {{ b.edge }};">{{ b.label }}</button>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <!-- reply composer -->
+                <div style="border: 1px solid oklch(0.32 0.009 262); border-radius: 11px; overflow: hidden; background: oklch(0.165 0.006 262);">
+                  <div style="display: flex; align-items: center; gap: 8px; padding: 9px 13px; border-bottom: 1px solid oklch(0.27 0.009 262); background: oklch(0.185 0.007 262);">
+                    <span style="font-size: 11.5px; color: oklch(0.6 0.009 262);">Reply to</span>
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; font-weight: 600; color: {{ selMail.fromColor }};">{{ selMail.from }}</span>
+                    <div style="flex: 1;"></div>
+                    <sc-if value="{{ selMail.actionable }}" hint-placeholder-val="{{ true }}">
+                      <span style="font-size: 10.5px; color: oklch(0.5 0.009 262);">free-text → structured {{ selMail.ackType }}</span>
+                    </sc-if>
+                  </div>
+                  <textarea value="{{ replyText }}" onChange="{{ onReply }}" placeholder="{{ replyPlaceholder }}" style="display: block; width: 100%; min-height: 86px; resize: vertical; border: none; outline: none; background: transparent; color: oklch(0.88 0.005 262); font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; line-height: 1.6; padding: 12px 13px; box-sizing: border-box;"></textarea>
+                  <div style="display: flex; align-items: center; gap: 10px; padding: 9px 13px; border-top: 1px solid oklch(0.27 0.009 262);">
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.5 0.009 262);">Markdown · ⌘↵ to send</span>
+                    <div style="flex: 1;"></div>
+                    <button style="height: 32px; padding: 0 14px; border-radius: 8px; border: 1px solid oklch(0.31 0.009 262); background: oklch(0.245 0.008 262); color: oklch(0.78 0.006 262); font-family: inherit; font-size: 12px; cursor: pointer;">Save draft</button>
+                    <button onClick="{{ sendReply }}" style="height: 32px; padding: 0 16px; border-radius: 8px; border: none; background: oklch(0.71 0.14 255); color: oklch(0.16 0.02 255); font-family: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;">Send</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ============ REVIEW / DIFF ============ -->
+      <sc-if value="{{ isReview }}" hint-placeholder-val="{{ true }}">
+        <div style="flex: 1; display: flex; min-height: 0;">
+          <!-- files + gate ladder -->
+          <div style="width: 280px; flex: 0 0 280px; border-right: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262); display: flex; flex-direction: column;">
+            <div style="padding: 13px 14px; border-bottom: 1px solid oklch(0.27 0.009 262);">
+              <div style="font-size: 12.5px; font-weight: 600; color: oklch(0.93 0.004 262); margin-bottom: 3px;">Review #234</div>
+              <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(0.79 0.12 200);">co/s9-converge-232 → co/stage-9</div>
+            </div>
+            <div style="padding: 11px 14px; border-bottom: 1px solid oklch(0.27 0.009 262);">
+              <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: oklch(0.52 0.009 262); margin-bottom: 9px;">Gate ladder</div>
+              <sc-for list="{{ gateLadder }}" as="g" hint-placeholder-count="3">
+                <div style="display: flex; align-items: center; gap: 9px; padding: 5px 0;">
+                  <span style="width: 16px; height: 16px; border-radius: 50%; background: {{ g.dotBg }}; display: flex; align-items: center; justify-content: center; font-size: 9px; color: {{ g.tickColor }};">{{ g.tick }}</span>
+                  <span style="flex: 1; font-size: 12px; color: {{ g.fg }};">{{ g.label }}</span>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: {{ g.tagColor }};">{{ g.tag }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="flex: 1; overflow-y: auto; padding: 8px;">
+              <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: oklch(0.52 0.009 262); padding: 6px 6px 8px;">Files · {{ fileCount }}</div>
+              <sc-for list="{{ files }}" as="f" hint-placeholder-count="4">
+                <button onClick="{{ f.open }}" style="display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 9px; margin-bottom: 2px; border: none; border-radius: 7px; cursor: pointer; font-family: inherit; text-align: left; background: {{ f.bg }};">
+                  <span style="width: 6px; height: 6px; border-radius: 2px; background: {{ f.statusColor }};"></span>
+                  <span style="flex: 1; min-width: 0; font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: {{ f.fg }}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left;">{{ f.path }}</span>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: oklch(0.75 0.16 150);">+{{ f.add }}</span>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: oklch(0.68 0.18 25);">-{{ f.del }}</span>
+                </button>
+              </sc-for>
+            </div>
+          </div>
+
+          <!-- diff -->
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; background: oklch(0.155 0.006 262);">
+            <div style="padding: 11px 16px; border-bottom: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262); display: flex; align-items: center; gap: 12px;">
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: oklch(0.92 0.004 262);">{{ selFile.path }}</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.6 0.009 262);">{{ selFile.add }} additions · {{ selFile.del }} deletions</span>
+              <div style="flex: 1;"></div>
+              <span style="font-size: 11px; color: oklch(0.55 0.009 262);">Unified · syntax</span>
+            </div>
+            <div style="flex: 1; overflow-y: auto; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; line-height: 1.6;">
+              <sc-for list="{{ hunks }}" as="h" hint-placeholder-count="14">
+                <div style="display: flex; background: {{ h.rowBg }};">
+                  <span style="flex: 0 0 44px; text-align: right; padding: 0 8px; color: oklch(0.45 0.009 262); user-select: none; background: oklch(0.135 0.006 262);">{{ h.ln }}</span>
+                  <span style="flex: 0 0 18px; text-align: center; color: {{ h.signColor }}; user-select: none;">{{ h.sign }}</span>
+                  <span style="flex: 1; white-space: pre-wrap; color: {{ h.color }}; padding-right: 12px;">{{ h.text }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <!-- review panel -->
+          <div style="width: 320px; flex: 0 0 320px; border-left: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262); display: flex; flex-direction: column;">
+            <div style="padding: 14px 16px; border-bottom: 1px solid oklch(0.27 0.009 262);">
+              <div style="font-size: 13px; font-weight: 600; color: oklch(0.93 0.004 262);">Human review</div>
+              <div style="font-size: 11.5px; color: oklch(0.58 0.009 262); margin-top: 3px;">PR scope · operator-gated</div>
+            </div>
+            <div style="flex: 1; overflow-y: auto; padding: 14px 16px;">
+              <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: oklch(0.52 0.009 262); margin-bottom: 11px;">Acceptance criteria</div>
+              <sc-for list="{{ criteria }}" as="c" hint-placeholder-count="4">
+                <div style="display: flex; gap: 9px; margin-bottom: 11px;">
+                  <span style="width: 17px; height: 17px; flex: 0 0 17px; border-radius: 5px; background: {{ c.boxBg }}; border: 1px solid {{ c.boxEdge }}; display: flex; align-items: center; justify-content: center; font-size: 10px; color: {{ c.tickColor }}; margin-top: 1px;">{{ c.tick }}</span>
+                  <span style="font-size: 12.5px; color: oklch(0.76 0.006 262); line-height: 1.45;">{{ c.text }}</span>
+                </div>
+              </sc-for>
+
+              <div style="margin-top: 18px; padding: 12px; background: oklch(0.16 0.006 262); border: 1px solid oklch(0.29 0.009 262); border-radius: 10px;">
+                <div style="font-size: 11px; color: oklch(0.6 0.009 262); margin-bottom: 8px;">Verification</div>
+                <div style="display: flex; align-items: center; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: oklch(0.78 0.13 150);">
+                  <span>✓</span><span>2087 passed · 3 skipped · 115 files</span>
+                </div>
+                <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.55 0.009 262); margin-top: 6px;">baseline matched · no regressions @ 2ba0739</div>
+              </div>
+            </div>
+            <div style="padding: 14px 16px; border-top: 1px solid oklch(0.27 0.009 262);">
+              <div style="display: flex; gap: 9px; margin-bottom: 10px;">
+                <button style="flex: 1; height: 40px; border-radius: 9px; border: none; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 700; background: oklch(0.72 0.16 150); color: oklch(0.16 0.03 150);">✓ PASS</button>
+                <button style="flex: 1; height: 40px; border-radius: 9px; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 700; background: oklch(0.24 0.06 25); color: oklch(0.82 0.16 25); border: 1px solid oklch(0.4 0.1 25);">ISSUES</button>
+              </div>
+              <button style="width: 100%; height: 38px; border-radius: 9px; cursor: pointer; font-family: inherit; font-size: 12.5px; font-weight: 600; background: oklch(0.71 0.14 255); color: oklch(0.16 0.02 255); border: none;">Merge PR #25 → origin/dev</button>
+              <div style="font-size: 10.5px; color: oklch(0.5 0.009 262); text-align: center; margin-top: 8px;">gated · operator-override audited</div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ============ SOURCE ============ -->
+      <sc-if value="{{ isSource }}" hint-placeholder-val="{{ true }}">
+        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+          <div style="padding: 12px 18px; border-bottom: 1px solid oklch(0.31 0.009 262); background: oklch(0.185 0.007 262);">
+            <div style="display: flex; align-items: center; gap: 11px; margin-bottom: 12px;">
+              <span style="font-family: 'IBM Plex Mono', monospace; color: oklch(0.71 0.14 255); font-size: 14px;">⎇</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: oklch(0.93 0.004 262);">LunchBox951/Code-Orchestration</span>
+              <button style="display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px; background: oklch(0.23 0.008 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 7px; cursor: pointer; font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: oklch(0.8 0.006 262);"><span style="color: oklch(0.74 0.15 300);">⎇</span>co/stage-9<span style="color: oklch(0.52 0.009 262);">▾</span></button>
+              <div style="flex: 1;"></div>
+              <div style="display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 11px; background: oklch(0.16 0.006 262); border: 1px solid oklch(0.30 0.009 262); border-radius: 7px; width: 190px;"><span style="color: oklch(0.5 0.009 262); font-size: 12px;">Search source…</span></div>
+              <button style="height: 28px; padding: 0 12px; background: oklch(0.23 0.008 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 7px; cursor: pointer; font-family: inherit; font-size: 12px; color: oklch(0.8 0.006 262);">Fetch</button>
+              <button style="height: 28px; padding: 0 12px; background: oklch(0.23 0.008 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 7px; cursor: pointer; font-family: inherit; font-size: 12px; color: oklch(0.8 0.006 262);">Push</button>
+              <button style="height: 28px; padding: 0 12px; background: oklch(0.71 0.14 255); border: none; border-radius: 7px; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 600; color: oklch(0.16 0.02 255);">Pull</button>
+            </div>
+            <div style="display: flex; gap: 18px;">
+              <sc-for list="{{ srcTabs }}" as="t" hint-placeholder-count="4">
+                <button onClick="{{ t.onClick }}" style="background: none; border: none; padding: 0 0 11px; cursor: pointer; font-family: inherit; font-size: 12.5px; font-weight: 500; color: {{ t.fg }}; border-bottom: 2px solid {{ t.bar }};">{{ t.label }}<span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; margin-left: 6px; padding: 1px 6px; border-radius: 10px; background: oklch(0.25 0.008 262); color: oklch(0.62 0.008 262);">{{ t.count }}</span></button>
+              </sc-for>
+            </div>
+          </div>
+          <div style="flex: 1; overflow-y: auto;">
+
+            <!-- PRs (dense rows) -->
+            <sc-if value="{{ isPrs }}" hint-placeholder-val="{{ true }}">
+              <div style="display: flex; align-items: center; gap: 9px; padding: 9px 18px; border-bottom: 1px solid oklch(0.25 0.008 262); background: oklch(0.175 0.006 262);">
+                <span style="font-size: 11px; font-weight: 600; color: oklch(0.8 0.006 262);">Open</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; padding: 1px 6px; border-radius: 10px; background: oklch(0.25 0.008 262); color: oklch(0.62 0.008 262);">2</span>
+                <span style="font-size: 11px; color: oklch(0.5 0.009 262); margin-left: 8px;">Merged</span>
+                <div style="flex: 1;"></div>
+                <span style="font-size: 11px; color: oklch(0.5 0.009 262);">sort: recently updated</span>
+                <button style="height: 28px; padding: 0 12px; margin-left: 12px; background: oklch(0.72 0.16 150); border: none; border-radius: 7px; cursor: pointer; font-family: inherit; font-size: 11.5px; font-weight: 600; color: oklch(0.16 0.03 150);">New pull request</button>
+              </div>
+              <sc-for list="{{ prs }}" as="p" hint-placeholder-count="3">
+                <div style="display: flex; align-items: center; gap: 13px; padding: 13px 18px; border-bottom: 1px solid oklch(0.25 0.008 262); cursor: pointer;" style-hover="background: oklch(0.205 0.007 262);">
+                  <span style="width: 14px; height: 14px; flex: 0 0 14px; border-radius: 50%; border: 2px solid {{ p.stateColor }}; background: {{ p.stateTint }};"></span>
+                  <div style="min-width: 0; flex: 1;">
+                    <div style="display: flex; align-items: center; gap: 9px;">
+                      <span style="font-size: 13px; font-weight: 600; color: oklch(0.93 0.004 262); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ p.title }}</span>
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: oklch(0.5 0.009 262); flex: 0 0 auto;">#{{ p.num }}</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 9px; margin-top: 3px;">
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.6 0.009 262);">{{ p.branch }}</span>
+                      <span style="font-size: 10.5px; color: oklch(0.5 0.009 262);">{{ p.author }} · {{ p.when }}</span>
+                    </div>
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 5px; flex: 0 0 auto;">
+                    <sc-for list="{{ p.checks }}" as="c" hint-placeholder-count="3">
+                      <span title="{{ c.name }}" style="width: 18px; height: 18px; border-radius: 5px; display: flex; align-items: center; justify-content: center; font-size: 10px; background: {{ c.tint }}; color: {{ c.color }};">{{ c.icon }}</span>
+                    </sc-for>
+                  </div>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: {{ p.gateColor }}; flex: 0 0 auto; width: 150px; text-align: right;">{{ p.gate }}</span>
+                  <div style="display: flex; align-items: center; gap: 6px; flex: 0 0 auto;">
+                    <sc-for list="{{ p.actions }}" as="b" hint-placeholder-count="2">
+                      <button onClick="{{ b.onClick }}" style="height: 28px; padding: 0 11px; border-radius: 7px; cursor: pointer; font-family: inherit; font-size: 11.5px; font-weight: 600; flex: 0 0 auto; background: {{ b.bg }}; color: {{ b.fg }}; border: 1px solid {{ b.edge }};">{{ b.label }}</button>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </sc-if>
+
+            <!-- Issues (dense board, full width) -->
+            <sc-if value="{{ isIssues }}" hint-placeholder-val="{{ true }}">
+              <div style="display: flex; align-items: center; gap: 9px; padding: 9px 18px; border-bottom: 1px solid oklch(0.25 0.008 262); background: oklch(0.175 0.006 262);">
+                <span style="font-size: 11px; font-weight: 600; color: oklch(0.8 0.006 262);">Stage-9 board · 6 open</span>
+                <div style="flex: 1;"></div>
+                <button style="height: 28px; padding: 0 12px; background: oklch(0.72 0.16 150); border: none; border-radius: 7px; cursor: pointer; font-family: inherit; font-size: 11.5px; font-weight: 600; color: oklch(0.16 0.03 150);">New issue</button>
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; padding: 16px 18px;">
+                <sc-for list="{{ issueCols }}" as="col" hint-placeholder-count="3">
+                  <div>
+                    <div style="display: flex; align-items: center; gap: 8px; padding: 4px 4px 11px;">
+                      <span style="width: 8px; height: 8px; border-radius: 50%; background: {{ col.color }};"></span>
+                      <span style="font-size: 12px; font-weight: 600; color: oklch(0.9 0.004 262);">{{ col.title }}</span>
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; padding: 1px 6px; border-radius: 10px; background: oklch(0.25 0.008 262); color: oklch(0.6 0.009 262);">{{ col.count }}</span>
+                    </div>
+                    <sc-for list="{{ col.cards }}" as="c" hint-placeholder-count="3">
+                      <div style="background: oklch(0.205 0.007 262); border: 1px solid oklch(0.29 0.009 262); border-radius: 9px; padding: 11px 12px; margin-bottom: 8px; cursor: pointer;" style-hover="border-color: oklch(0.4 0.012 262);">
+                        <div style="font-size: 12px; color: oklch(0.85 0.005 262); line-height: 1.4; margin-bottom: 9px;">{{ c.title }}</div>
+                        <div style="display: flex; align-items: center; gap: 7px;">
+                          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: oklch(0.52 0.009 262);">#{{ c.num }}</span>
+                          <span style="font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 7px; border-radius: 5px; background: {{ c.tagTint }}; color: {{ c.tagColor }};">{{ c.tag }}</span>
+                        </div>
+                      </div>
+                    </sc-for>
+                    <button style="display: flex; align-items: center; gap: 6px; width: 100%; padding: 8px 10px; background: transparent; border: 1px dashed oklch(0.32 0.009 262); border-radius: 9px; cursor: pointer; font-family: inherit; font-size: 11.5px; color: oklch(0.58 0.009 262);">+ Add issue</button>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <!-- Commits · git graph -->
+            <sc-if value="{{ isCommits }}" hint-placeholder-val="{{ true }}">
+              <div style="display: flex; align-items: center; gap: 12px; padding: 9px 18px; border-bottom: 1px solid oklch(0.25 0.008 262); background: oklch(0.175 0.006 262);">
+                <span style="display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; color: oklch(0.85 0.005 262);"><span style="color: oklch(0.74 0.15 300);">⏂</span>co/stage-9</span>
+                <span style="font-size: 11px; color: oklch(0.55 0.009 262);">{{ graphSummary }}</span>
+                <div style="flex: 1;"></div>
+                <button style="height: 27px; padding: 0 11px; background: oklch(0.23 0.008 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 7px; cursor: pointer; font-family: inherit; font-size: 11.5px; color: oklch(0.8 0.006 262);">New branch</button>
+                <button style="height: 27px; padding: 0 11px; background: oklch(0.23 0.008 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 7px; cursor: pointer; font-family: inherit; font-size: 11.5px; color: oklch(0.8 0.006 262);">Tag</button>
+              </div>
+              <div style="position: relative;">
+                <svg width="{{ graphW }}" height="{{ graphH }}" style="position: absolute; left: 0; top: 0; pointer-events: none;">
+                  <sc-for list="{{ graphEdges }}" as="e" hint-placeholder-count="9">
+                    <path d="{{ e.d }}" style="fill: none; stroke: {{ e.c }}; stroke-width: 2px; stroke-linecap: round;"></path>
+                  </sc-for>
+                  <sc-for list="{{ graphNodes }}" as="n" hint-placeholder-count="8">
+                    <circle cx="{{ n.x }}" cy="{{ n.y }}" r="5" style="fill: {{ n.fill }}; stroke: {{ n.stroke }}; stroke-width: 2.5px;"></circle>
+                  </sc-for>
+                </svg>
+                <sc-for list="{{ gitRows }}" as="g" hint-placeholder-count="8">
+                  <div style="display: flex; align-items: center; gap: 9px; height: 44px; padding: {{ g.gutterPad }}; border-bottom: 1px solid oklch(0.21 0.007 262);" style-hover="background: oklch(0.205 0.007 262);">
+                    <sc-for list="{{ g.refs }}" as="r" hint-placeholder-count="1">
+                      <span style="display: flex; align-items: center; gap: 4px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 20px; background: {{ r.bg }}; color: {{ r.c }}; border: 1px solid {{ r.edge }}; flex: 0 0 auto; white-space: nowrap;"><span style="opacity: 0.85;">{{ r.glyph }}</span>{{ r.t }}</span>
+                    </sc-for>
+                    <span style="font-size: 12.5px; color: oklch(0.87 0.005 262); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ g.msg }}</span>
+                    <span style="width: 22px; height: 22px; flex: 0 0 22px; border-radius: 6px; background: {{ g.avatarBg }}; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600; color: {{ g.avatarFg }};">{{ g.initials }}</span>
+                    <span style="font-size: 11px; color: oklch(0.58 0.009 262); flex: 0 0 132px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ g.author }}</span>
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(0.79 0.12 200); flex: 0 0 64px;">{{ g.sha }}</span>
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.5 0.009 262); flex: 0 0 52px; text-align: right;">{{ g.when }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <!-- Branches (dense table) -->
+            <sc-if value="{{ isBranches }}" hint-placeholder-val="{{ true }}">
+              <div style="display: flex; align-items: center; gap: 9px; padding: 9px 18px; border-bottom: 1px solid oklch(0.25 0.008 262); background: oklch(0.175 0.006 262);">
+                <span style="font-size: 11px; font-weight: 600; color: oklch(0.8 0.006 262);">8 branches</span>
+                <div style="flex: 1;"></div>
+                <button style="height: 28px; padding: 0 12px; background: oklch(0.72 0.16 150); border: none; border-radius: 7px; cursor: pointer; font-family: inherit; font-size: 11.5px; font-weight: 600; color: oklch(0.16 0.03 150);">New branch</button>
+              </div>
+              <sc-for list="{{ branches }}" as="b" hint-placeholder-count="5">
+                <div style="display: flex; align-items: center; gap: 13px; padding: 12px 18px; border-bottom: 1px solid oklch(0.23 0.008 262); cursor: pointer;" style-hover="background: oklch(0.205 0.007 262);">
+                  <span style="width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: {{ b.dot }};"></span>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: oklch(0.88 0.005 262); flex: 0 0 240px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ b.name }}</span>
+                  <span style="font-size: 11px; color: oklch(0.58 0.009 262); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ b.agent }}</span>
+                  <span style="display: flex; align-items: center; gap: 10px; flex: 0 0 auto;">
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.75 0.16 150);">↑{{ b.ahead }}</span>
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.62 0.04 262);">↓{{ b.behind }}</span>
+                  </span>
+                  <span style="font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 3px 9px; border-radius: 20px; background: {{ b.stTint }}; color: {{ b.stColor }}; flex: 0 0 auto; width: 94px; text-align: center;">{{ b.status }}</span>
+                  <div style="display: flex; align-items: center; gap: 6px; flex: 0 0 auto;">
+                    <sc-for list="{{ b.actions }}" as="a" hint-placeholder-count="3">
+                      <button onClick="{{ a.onClick }}" style="font-family: inherit; font-size: 11px; border-radius: 6px; padding: 6px 11px; cursor: pointer; background: {{ a.bg }}; color: {{ a.fg }}; border: 1px solid {{ a.edge }};">{{ a.label }}</button>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </sc-if>
+
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ============ COST ============ -->
+      <sc-if value="{{ isCost }}" hint-placeholder-val="{{ true }}">
+        <div style="flex: 1; overflow-y: auto; padding: 18px 22px;">
+          <h1 style="margin: 0 0 4px; font-size: 19px; font-weight: 600; color: oklch(0.96 0.003 262);">Usage &amp; limits</h1>
+          <p style="margin: 0 0 18px; font-size: 12.5px; color: oklch(0.65 0.008 262);">Live subscription headroom feeds the balancer — it routes to the roomier provider and paces when a window runs low.</p>
+
+          <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-bottom: 16px;">
+            <sc-for list="{{ provCards }}" as="p" hint-placeholder-count="2">
+              <div style="background: oklch(0.205 0.007 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 13px; padding: 17px 18px;">
+                <div style="display: flex; align-items: center; gap: 9px; margin-bottom: 16px;">
+                  <span style="width: 10px; height: 10px; border-radius: 50%; background: {{ p.color }};"></span>
+                  <span style="font-size: 14px; font-weight: 600; color: oklch(0.94 0.004 262);">{{ p.name }}</span>
+                  <span style="font-size: 11px; color: oklch(0.58 0.009 262);">{{ p.plan }}</span>
+                  <div style="flex: 1;"></div>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: oklch(0.55 0.009 262);">{{ p.models }}</span>
+                </div>
+                <div style="display: flex; gap: 24px;">
+                  <div style="flex: 1;">
+                    <div style="display: flex; align-items: baseline; gap: 5px; margin-bottom: 9px;">
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; color: {{ p.color }}; line-height: 1;">{{ p.sessionLabel }}</span>
+                      <span style="font-size: 11px; color: oklch(0.58 0.009 262);">5-hour</span>
+                    </div>
+                    <div style="height: 6px; border-radius: 4px; background: oklch(0.27 0.009 262); overflow: hidden; margin-bottom: 6px;"><div style="height: 100%; width: {{ p.sessionW }}; background: {{ p.color }};"></div></div>
+                    <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: oklch(0.55 0.009 262);">resets in {{ p.sessionReset }}</div>
+                  </div>
+                  <div style="flex: 1;">
+                    <div style="display: flex; align-items: baseline; gap: 5px; margin-bottom: 9px;">
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; color: oklch(0.78 0.03 262); line-height: 1;">{{ p.weeklyLabel }}</span>
+                      <span style="font-size: 11px; color: oklch(0.58 0.009 262);">weekly</span>
+                    </div>
+                    <div style="height: 6px; border-radius: 4px; background: oklch(0.27 0.009 262); overflow: hidden; margin-bottom: 6px;"><div style="height: 100%; width: {{ p.weeklyW }}; background: oklch(0.6 0.03 262);"></div></div>
+                    <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: oklch(0.55 0.009 262);">resets {{ p.weeklyReset }}</div>
+                  </div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 16px;">
+            <div style="background: oklch(0.195 0.007 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 12px; overflow: hidden;">
+              <div style="padding: 13px 15px; border-bottom: 1px solid oklch(0.27 0.009 262); display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-size: 13px; font-weight: 600; color: oklch(0.92 0.004 262);">Activity by agent</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(0.58 0.009 262);">turns · tokens</span>
+              </div>
+              <div style="padding: 13px 15px;">
+                <sc-for list="{{ usageRows }}" as="c" hint-placeholder-count="6">
+                  <div style="margin-bottom: 12px;">
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 5px;">
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: oklch(0.82 0.005 262); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ c.name }}</span>
+                      <span style="font-size: 10px; color: {{ c.roleColor }};">{{ c.role }}</span>
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(0.7 0.006 262); width: 64px; text-align: right;">{{ c.turns }}</span>
+                      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(0.55 0.009 262); width: 46px; text-align: right;">{{ c.tokens }}</span>
+                    </div>
+                    <div style="height: 6px; border-radius: 4px; background: oklch(0.25 0.008 262); overflow: hidden;"><div style="height: 100%; width: {{ c.pct }}; background: {{ c.roleColor }};"></div></div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="background: oklch(0.195 0.007 262); border: 1px solid oklch(0.31 0.009 262); border-radius: 12px; padding: 16px 17px;">
+              <div style="font-size: 13px; font-weight: 600; color: oklch(0.92 0.004 262); margin-bottom: 16px;">Throughput · today</div>
+              <div style="display: flex; flex-direction: column; gap: 14px;">
+                <div style="display: flex; justify-content: space-between; align-items: baseline;"><span style="font-size: 12px; color: oklch(0.62 0.008 262);">Turns run</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 20px; font-weight: 600; color: oklch(0.94 0.004 262);">59</span></div>
+                <div style="display: flex; justify-content: space-between; align-items: baseline;"><span style="font-size: 12px; color: oklch(0.62 0.008 262);">Tokens in</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: oklch(0.85 0.005 262);">8.4M</span></div>
+                <div style="display: flex; justify-content: space-between; align-items: baseline;"><span style="font-size: 12px; color: oklch(0.62 0.008 262);">Tokens out</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: oklch(0.85 0.005 262);">1.1M</span></div>
+                <div style="display: flex; justify-content: space-between; align-items: baseline;"><span style="font-size: 12px; color: oklch(0.62 0.008 262);">Cache hit rate</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 14px; color: oklch(0.78 0.13 150);">63%</span></div>
+              </div>
+              <div style="margin-top: 18px; padding-top: 16px; border-top: 1px solid oklch(0.27 0.009 262); font-size: 11px; color: oklch(0.55 0.009 262); line-height: 1.5;">Subscription-only in V1 — no per-token billing. The balancer pins roles to providers and paces when a 5-hour window runs low.</div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+    </main>
+  </div>
+
+  <!-- ===== TOAST ===== -->
+  <sc-if value="{{ toast }}" hint-placeholder-val="{{ false }}">
+    <div style="position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: oklch(0.26 0.008 262); border: 1px solid oklch(0.42 0.012 262); color: oklch(0.95 0.003 262); font-family: 'IBM Plex Sans', sans-serif; font-size: 12.5px; font-weight: 500; padding: 10px 16px; border-radius: 10px; box-shadow: 0 12px 36px oklch(0.05 0.006 262 / 0.6); z-index: 80; display: flex; align-items: center; gap: 8px; animation: coFade 0.14s ease-out;"><span style="width: 7px; height: 7px; border-radius: 50%; background: oklch(0.80 0.17 150);"></span>{{ toast }}</div>
+  </sc-if>
+
+  <!-- ===== COMMAND PALETTE ===== -->
+  <sc-if value="{{ palette }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ togglePalette }}" style="position: fixed; inset: 0; background: oklch(0.1 0.006 262 / 0.6); display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; z-index: 50;">
+      <div style="width: 560px; max-width: 90vw; background: oklch(0.21 0.007 262); border: 1px solid oklch(0.38 0.011 262); border-radius: 14px; overflow: hidden; box-shadow: 0 24px 70px oklch(0.05 0.006 262 / 0.7); animation: coFade 0.12s ease-out;">
+        <div style="display: flex; align-items: center; gap: 11px; padding: 15px 17px; border-bottom: 1px solid oklch(0.29 0.009 262);">
+          <span style="font-family: 'IBM Plex Mono', monospace; color: oklch(0.71 0.14 255); font-size: 15px;">›</span>
+          <span style="font-size: 14px; color: oklch(0.55 0.009 262);">Jump to a page, agent, PR, or run a command…</span>
+        </div>
+        <div style="max-height: 360px; overflow-y: auto; padding: 8px;">
+          <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: oklch(0.5 0.009 262); padding: 7px 9px;">Pages</div>
+          <sc-for list="{{ navItems }}" as="n" hint-placeholder-count="6">
+            <button onClick="{{ n.onClick }}" style="display: flex; align-items: center; gap: 11px; width: 100%; padding: 9px 10px; border: none; border-radius: 8px; cursor: pointer; font-family: inherit; text-align: left; background: transparent;" style-hover="background: oklch(0.27 0.009 262);">
+              <span style="width: 22px; height: 22px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; font-weight: 600; background: {{ n.iconBg }}; color: {{ n.iconFg }};">{{ n.glyph }}</span>
+              <span style="flex: 1; font-size: 13px; color: oklch(0.86 0.005 262);">{{ n.label }}</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: oklch(0.5 0.009 262);">{{ n.kbd }}</span>
+            </button>
+          </sc-for>
+          <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: oklch(0.5 0.009 262); padding: 12px 9px 7px;">Agents</div>
+          <sc-for list="{{ agents }}" as="a" hint-placeholder-count="4">
+            <button onClick="{{ a.open }}" style="display: flex; align-items: center; gap: 11px; width: 100%; padding: 9px 10px; border: none; border-radius: 8px; cursor: pointer; font-family: inherit; text-align: left; background: transparent;" style-hover="background: oklch(0.27 0.009 262);">
+              <span style="width: 8px; height: 8px; border-radius: 50%; background: {{ a.stateColor }};"></span>
+              <span style="flex: 1; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: oklch(0.86 0.005 262);">{{ a.name }}</span>
+              <span style="font-size: 11px; color: {{ a.roleColor }};">{{ a.roleLabel }}</span>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { page: 'dashboard', agentId: 'lead', mailId: 'm_approve', folder: 'action', bus: 'operator', fileId: 'cleanup', src: 'prs', drafts: {}, toast: null, palette: false, limitsOpen: false };
+
+  ROLE = {
+    Coordinator: 'oklch(0.74 0.15 300)',
+    Lead: 'oklch(0.71 0.14 255)',
+    Implementer: 'oklch(0.77 0.15 158)',
+    Reviewer: 'oklch(0.81 0.13 80)',
+    Researcher: 'oklch(0.79 0.12 200)',
+  };
+  ST = {
+    RUNNING: 'oklch(0.80 0.17 150)',
+    WAITING: 'oklch(0.66 0.02 260)',
+    STUCK: 'oklch(0.67 0.21 25)',
+    DONE: 'oklch(0.69 0.10 255)',
+    PAUSED: 'oklch(0.81 0.13 80)',
+  };
+  tint(c, p) { return 'color-mix(in oklch, ' + c + ' ' + p + ', transparent)'; }
+
+  AG = [
+    { id: 'coord', name: 'coord-stage-9-d0f67f', short: 'coord-stage-9', role: 'Coordinator', sub: '', prov: 'claude', model: 'opus-4-8', state: 'WAITING', depth: 0, cost: 0.00, round: '6/5', worktree: 'main', last: 'Awaiting phase-ready; merge queue idle.' },
+    { id: 'lead', name: 'lead-stage-9-conductor-1bc396', short: 'lead-stage-9-conductor', role: 'Lead', sub: '', prov: 'claude', model: 'opus-4-8', state: 'RUNNING', depth: 1, cost: 8.79, round: '14/5', worktree: '.co/worktrees/stage-9', last: 'Five-command gate GREEN @ 2ba0739 — sending worker_done.' },
+    { id: 'p1a', name: 'impl-p1a-engine-724b6c', short: 'impl-p1a-engine', role: 'Implementer', sub: 'code', prov: 'claude', model: 'sonnet-4-8', state: 'WAITING', depth: 2, cost: 3.10, round: '1/5', worktree: '.co/worktrees/s9-p1a', last: 'worker_done mailed; awaiting review #200.' },
+    { id: 'rev200', name: 'rev-review-200-7f9920', short: 'rev-review-200', role: 'Reviewer', sub: 'feature', prov: 'claude', model: 'opus-4-8', state: 'WAITING', depth: 3, cost: 1.20, round: '1/5', worktree: '(reads p1a)', last: 'Verdict pending dispatch.' },
+    { id: 'p1b', name: 'impl-p1b-routing-12c4ec', short: 'impl-p1b-routing', role: 'Implementer', sub: 'code', prov: 'codex', model: 'gpt-5-codex', state: 'RUNNING', depth: 2, cost: 2.44, round: '2/5', worktree: '.co/worktrees/s9-p1b', last: 'Editing router.revertStuck — keying ops by agentId.' },
+    { id: 'p2', name: 'impl-p2-spawn-578b7d', short: 'impl-p2-spawn', role: 'Implementer', sub: 'test', prov: 'claude', model: 'sonnet-4-8', state: 'WAITING', depth: 2, cost: 1.96, round: '1/5', worktree: '.co/worktrees/s9-p2', last: 'Regression test written; watching it fail before fix.' },
+    { id: 'p4', name: 'impl-p4-watchdog-c5c1a3', short: 'impl-p4-watchdog', role: 'Implementer', sub: 'code', prov: 'codex', model: 'gpt-5-codex', state: 'STUCK', depth: 2, cost: 4.05, round: '5/5', worktree: '.co/worktrees/s9-p4', last: '3-strike: reviewer rejected ×3 on baseline failure. Escalated.' },
+    { id: 'res', name: 'res-stage-9-gap-audit-fef1b5', short: 'res-gap-audit', role: 'Researcher', sub: 'codebase', prov: 'claude', model: 'haiku-4-8', state: 'DONE', depth: 1, cost: 0.62, round: '—', worktree: '(read-only)', last: 'Gap audit finalized — 4 findings cited. Warm.' },
+  ];
+
+  TR = {
+    lead: [
+      { k: 'sys', t: 'session 873af7d9  ·  model claude-opus-4-8  ·  worktree .co/worktrees/stage-9' },
+      { k: 'gap' },
+      { k: 'role', t: '● lead-stage-9-conductor', who: 'Lead' },
+      { k: 'body', t: 'Review #234 is PASS, clean. Applying the merge and syncing.' },
+      { k: 'gap' },
+      { k: 'tool', t: '▸ Bash  cd .co/worktrees/stage-9  ·  co merge co/s9-converge-232  [+7 lines]' },
+      { k: 'body', t: '#232 merged → co/stage-9 @ 2ba0739, pristine. Running the full five-command gate.' },
+      { k: 'gap' },
+      { k: 'tool', t: '▸ Bash  format:check ✓  lint ✓  typecheck ✓  build ✓  test  [+18 lines]' },
+      { k: 'ok', t: 'Five-command gate GREEN @ 2ba0739: 2087 passed · 3 skipped · 115 files.' },
+      { k: 'gap' },
+      { k: 'tool', t: '▸ co_mail_send  worker_done → coordinator  (mail #888)' },
+      { k: 'hi', t: 'worker_done delivered. The "final convergence round" is done.' },
+      { k: 'gap' },
+      { k: 'result', t: 'result   cost=$3.5329   exit=success' },
+    ],
+    p1b: [
+      { k: 'sys', t: 'session 4f1c-codex  ·  model gpt-5-codex  ·  worktree .co/worktrees/s9-p1b' },
+      { k: 'gap' },
+      { k: 'role', t: '● impl-p1b-routing', who: 'Implementer' },
+      { k: 'body', t: 'Routing fix: revertStuck must resolve branch → WorktreeRecord.agent before side effects.' },
+      { k: 'gap' },
+      { k: 'tool', t: '▸ Edit  packages/core/src/router/revert.ts  [+9 -3]' },
+      { k: 'body', t: 'Now keyed by agentId, not branch. Adding the fail-loud P9 guard for missing agent.' },
+      { k: 'tool', t: '▸ Bash  pnpm test router  [running…]' },
+      { k: 'dim', t: 'watching 6 router specs — expecting the new regression guard to go green.' },
+    ],
+    p4: [
+      { k: 'sys', t: 'session 91ab-codex  ·  model gpt-5-codex  ·  worktree .co/worktrees/s9-p4' },
+      { k: 'gap' },
+      { k: 'role', t: '● impl-p4-watchdog', who: 'Implementer' },
+      { k: 'warn', t: 'STUCK — review #221 rejected (strike 3/3). Blocker: watchdog.test.ts fails on baseline.' },
+      { k: 'body', t: 'The failing test pre-dates my branch — it is in the captured baseline, not my regression.' },
+      { k: 'gap' },
+      { k: 'tool', t: '▸ co_escalate → lead-stage-9-conductor  (escalation, urgent)' },
+      { k: 'hi', t: 'Escalated to parent: cannot fix a pre-existing baseline failure inside my scope.' },
+      { k: 'dim', t: 'WAITING for parent to resolve, re-scope, or spawn a remediation worker.' },
+    ],
+    res: [
+      { k: 'sys', t: 'session 0c7d  ·  model claude-haiku-4-8  ·  read-only' },
+      { k: 'gap' },
+      { k: 'role', t: '● res-gap-audit', who: 'Researcher' },
+      { k: 'body', t: 'Gap audit finalized. 4 findings, each cited to file:line. Report sealed; staying warm.' },
+      { k: 'ok', t: '✓ finding 1  packages/core/src/gate/cleanup-gate.ts:41 — unstick keys on branch, not agent.' },
+      { k: 'dim', t: 'Spawn a follow_up_question to reopen — context retained.' },
+    ],
+  };
+
+  MAIL = [
+    { id: 'm_approve', from: 'lead-stage-9-conductor', fromRole: 'Lead', to: '@operator', type: 'approval', typeLabel: 'approval', folder: 'action', actionable: true, unread: true, time: '13:24', subj: 'Approve outward merge: PR #25 → origin/dev', preview: 'Stage-9 gate is green. Requesting blessing to merge to origin/dev.',
+      body: ['Stage-9 has passed its full five-command gate and the final convergence review (#234) is a clean PASS.', 'This is an outward action — it leaves the local sandbox. Per the gate, I need your approval before opening the PR merge to origin/dev.'],
+      payloadTitle: 'Outward action', payload: [ { k: 'Action', v: 'gh pr merge #25 --squash' }, { k: 'Target', v: 'origin/dev', c: 'role' }, { k: 'Head SHA', v: '2ba0739' }, { k: 'Gate', v: 'GREEN · 2087 passed', c: 'ok' } ],
+      actions: [ { label: 'Approve & merge', kind: 'primary' }, { label: 'Review diff first', kind: 'ghost' }, { label: 'Decline', kind: 'danger' } ] },
+    { id: 'm_clarify', from: 'impl-p1b-routing', fromRole: 'Implementer', to: '@operator', type: 'clarify_request', typeLabel: 'clarify', folder: 'action', actionable: true, unread: true, time: '13:09', subj: 'Should revertStuck preserve queued mail on the reverted agent?', preview: 'Two valid readings of the spec — need intent before I commit.',
+      body: ['The spec says revertStuck flips a STUCK agent back to WAITING, but is silent on its unread mail.', 'Reading A: drop queued mail (clean restart). Reading B: preserve it (never-drop guarantee).', 'I will not guess on intent. Which behavior is correct?'],
+      hasPayload: false,
+      actions: [ { label: 'Reply: preserve mail', kind: 'primary' }, { label: 'Reply: drop mail', kind: 'ghost' } ] },
+    { id: 'm_escal', from: 'lead-stage-9-conductor', fromRole: 'Lead', to: '@operator', type: 'escalation', typeLabel: 'escalation', folder: 'action', actionable: true, unread: false, time: '12:51', subj: 'impl-p4-watchdog stuck after 3 strikes — baseline failure', preview: 'Honest worker trapped on a pre-existing failing test. Needs a decision.',
+      body: ['impl-p4-watchdog hit the 3-strike rule on review #221. The blocker is watchdog.test.ts failing — but that failure is in the captured baseline, predating the branch.', 'Within my mandate I can ack the baseline failure or spawn a remediation worker. This touches phase scope, so I am surfacing it to you.'],
+      payloadTitle: 'Escalation context', payload: [ { k: 'Worker', v: 'impl-p4-watchdog', c: 'role' }, { k: 'Strikes', v: '3 / 3', c: 'warn' }, { k: 'Failing test', v: 'watchdog.test.ts', c: 'warn' }, { k: 'In baseline?', v: 'yes — pre-existing', c: 'ok' } ],
+      actions: [ { label: 'Ack baseline & continue', kind: 'primary' }, { label: 'Spawn remediation', kind: 'ghost' } ] },
+    { id: 'm_verdict', from: 'rev-review-234', fromRole: 'Reviewer', to: 'lead-stage-9-conductor', type: 'review_verdict', typeLabel: 'verdict · pass', folder: 'inbox', actionable: false, unread: true, time: '13:11', subj: 'review-result #234 — PASS', preview: 'Verdict: PASS · 0 blockers · 0 suggestions.',
+      body: ['Convergence #232 reviewed against co/stage-9. Verified the unstick fix keys on agentId, not branch, and fails loud (P9) when no agent is recorded.'],
+      payloadTitle: 'Verdict', payload: [ { k: 'Verdict', v: 'PASS ✓', c: 'ok' }, { k: 'Blockers', v: '0', c: 'ok' }, { k: 'Target', v: 'co/s9-converge-232 → co/stage-9', c: 'role' }, { k: 'Head SHA', v: '6ca2408' } ],
+      actions: [] },
+    { id: 'm_done', from: 'impl-p1a-engine', fromRole: 'Implementer', to: 'lead-stage-9-conductor', type: 'worker_done', typeLabel: 'worker_done', folder: 'inbox', actionable: false, unread: false, time: '12:38', subj: 'Phase 1a engine — worker_done', preview: 'Engine slice complete; tests green; ready for review #200.',
+      body: ['Engine implementation finished and self-verified. Committed the worktree and recorded test results. Ready for reviewer dispatch.'],
+      payloadTitle: 'Result', payload: [ { k: 'Tests', v: '418 passed · 0 failed', c: 'ok' }, { k: 'Branch', v: 'co/s9-p1a-engine', c: 'role' }, { k: 'Verdict', v: 'awaiting #200' } ],
+      actions: [] },
+    { id: 'm_op', from: '@operator', fromRole: 'Operator', to: 'coord-stage-9', type: 'operator_message', typeLabel: 'operator', folder: 'sent', actionable: false, unread: false, time: '11:02', subj: 'Keep PR merges human-reviewed for stage-9', preview: 'Set the PR scope to human review for this task.',
+      body: ['For stage-9, route all outward PR merges through me (human review). Internal worker and phase merges can stay agent-reviewed.'],
+      hasPayload: false, actions: [] },
+  ];
+
+  BUS = [
+    { id: 'b1', from: 'lead-stage-9-conductor', fromRole: 'Lead', to: 'rev-review-234', type: 'review_request', typeLabel: 'review_request', folder: 'inbox', actionable: false, unread: false, time: '12:55', subj: 'Review co/s9-converge-232 against acceptance criteria', preview: 'Diff ready; baseline attached.', body: ['Please review the convergence branch.'], hasPayload: false, actions: [] },
+    { id: 'b2', from: 'rev-review-234', fromRole: 'Reviewer', to: 'lead-stage-9-conductor', type: 'review_verdict', typeLabel: 'verdict · pass', folder: 'inbox', actionable: false, unread: false, time: '13:11', subj: 'review-result #234 — PASS', preview: '0 blockers.', body: ['PASS.'], payloadTitle: 'Verdict', payload: [ { k: 'Verdict', v: 'PASS ✓', c: 'ok' } ], actions: [] },
+    { id: 'b3', from: 'impl-p1b-routing', fromRole: 'Implementer', to: 'lead-stage-9-conductor', type: 'clarify_request', typeLabel: 'clarify', folder: 'inbox', actionable: false, unread: true, time: '13:09', subj: 'revertStuck queued-mail behavior — forwarding up', preview: 'Cannot resolve within phase; forwarding to operator.', body: ['Forwarding an intent question upward.'], hasPayload: false, actions: [] },
+    { id: 'b4', from: 'impl-p4-watchdog', fromRole: 'Implementer', to: 'lead-stage-9-conductor', type: 'escalation', typeLabel: 'escalation', folder: 'inbox', actionable: false, unread: false, time: '12:50', subj: 'Stuck on baseline failure (strike 3)', preview: 'Resolve-or-forward: forwarding.', body: ['Escalating per 3-strike rule.'], hasPayload: false, actions: [] },
+  ];
+
+  FILES = [
+    { id: 'cleanup', path: 'packages/core/src/gate/cleanup-gate.ts', add: 14, del: 3, status: 'M' },
+    { id: 'revert', path: 'packages/core/src/router/revert.ts', add: 9, del: 3, status: 'M' },
+    { id: 'test', path: 'packages/core/src/gate/cleanup-gate.test.ts', add: 22, del: 0, status: 'A' },
+    { id: 'memo', path: 'memory/review-spy-key-value-blind-spot.md', add: 11, del: 0, status: 'A' },
+  ];
+
+  HUNKS = {
+    cleanup: [
+      { s: 'meta', t: '@@ -38,9 +38,20 @@  async unstick(branch: string) {' },
+      { s: 'ctx', t: '  const wt = this.worktrees.getWorktree(branch);' },
+      { s: 'del', t: "  return this.router.revertStuck(branch);" },
+      { s: 'add', t: "  const rec = this.worktrees.getWorktree(branch);" },
+      { s: 'add', t: "  if (!rec?.agent) {" },
+      { s: 'add', t: "    // Principle 9 — fail loud: no agent recorded for this worktree." },
+      { s: 'add', t: "    throw new MnrError('MNR-3', `unstick: no agent for ${branch}`);" },
+      { s: 'add', t: "  }" },
+      { s: 'add', t: "  return this.router.revertStuck(rec.agent);" },
+      { s: 'ctx', t: '}' },
+      { s: 'meta', t: '@@ -71,6 +82,7 @@  async pauseSiblings(agentId: string) {' },
+      { s: 'ctx', t: '  const siblings = this.tree.siblingsOf(agentId);' },
+      { s: 'add', t: "  this.audit.record('pause', { agentId, count: siblings.length });" },
+      { s: 'ctx', t: '  return Promise.all(siblings.map((s) => this.pause(s.agent)));' },
+    ],
+    revert: [
+      { s: 'meta', t: '@@ -12,7 +12,13 @@  revertStuck(agentId: string) {' },
+      { s: 'del', t: "  const rec = this.byBranch.get(agentId);" },
+      { s: 'add', t: "  const rec = this.byAgent.get(agentId);" },
+      { s: 'add', t: "  if (!rec) throw new MnrError('MNR-3', 'revertStuck: unknown agent');" },
+      { s: 'ctx', t: '  rec.state = AgentState.WAITING;' },
+      { s: 'add', t: "  this.markStuck(agentId, false);" },
+      { s: 'ctx', t: '  return rec;' },
+    ],
+    test: [
+      { s: 'meta', t: '@@ -0,0 +1,22 @@  cleanup-gate.test.ts (new)' },
+      { s: 'add', t: "it('unstick resolves agent before side effects', async () => {" },
+      { s: 'add', t: "  const wt = fakeWorktree({ agent: 'impl-stuck-agent' });" },
+      { s: 'add', t: "  await gate.unstick('co/s9-p4');" },
+      { s: 'add', t: "  expect(router.revertStuck).toHaveBeenCalledWith('impl-stuck-agent');" },
+      { s: 'add', t: "  // regression: must pass agentId, NOT the branch" },
+      { s: 'add', t: "});" },
+    ],
+    memo: [
+      { s: 'meta', t: '@@ -0,0 +1,11 @@  review-spy-key-value-blind-spot.md (new)' },
+      { s: 'add', t: '# Review blind spot: assert spy *values*, not just calls' },
+      { s: 'add', t: 'When reviewing seam-injected code, assert the exact key/arg a spy' },
+      { s: 'add', t: 'receives (agentId vs branch) — not merely that the seam was called.' },
+    ],
+  };
+
+  CRIT = [
+    { text: 'unstick resolves branch → agent before any side effect', done: true },
+    { text: 'Fails loud (MNR-3 / P9) when no agent is recorded', done: true },
+    { text: 'router.revertStuck is called with agentId, not branch', done: true },
+    { text: 'Regression test asserts the exact spy argument value', done: true },
+  ];
+
+  GATE = [
+    { label: 'Worker merge → phase', tag: 'agent', state: 'pass' },
+    { label: 'Phase merge → stage-9', tag: 'agent', state: 'pass' },
+    { label: 'PR / push → origin/dev', tag: 'human', state: 'active' },
+  ];
+
+  PRS = [
+    { num: 25, title: 'stage-9: unstick keys on agentId + fail-loud guard', state: 'open', branch: 'co/stage-9 → origin/dev', author: 'co-conductor', when: '8m ago', gate: 'gated · awaiting operator', mergeable: true,
+      checks: [ { name: 'format', icon: '✓', ok: true }, { name: 'lint', icon: '✓', ok: true }, { name: 'typecheck', icon: '✓', ok: true }, { name: 'build', icon: '✓', ok: true }, { name: 'test 2087', icon: '✓', ok: true }, { name: 'co-review', icon: '◷', ok: null } ] },
+    { num: 24, title: 'dispatch: rate-limit-aware balancer headroom signals', state: 'open', branch: 'co/s9-p1b-routing → co/stage-9', author: 'impl-p1b-routing', when: '41m ago', gate: 'agent-reviewed', mergeable: false,
+      checks: [ { name: 'format', icon: '✓', ok: true }, { name: 'lint', icon: '✓', ok: true }, { name: 'test', icon: '◷', ok: null } ] },
+    { num: 22, title: 'mail: render typed envelopes per audience', state: 'merged', branch: 'co/s8-mail → main', author: 'co-conductor', when: '2h ago', gate: 'merged @ 6ca2408', mergeable: false,
+      checks: [ { name: 'all checks', icon: '✓', ok: true } ] },
+  ];
+
+  ISSUE_COLS = [
+    { title: 'Spec', color: 'oklch(0.79 0.12 200)', count: 2, cards: [ { num: 141, title: 'Lock spec: stage-9 convergence acceptance criteria', tag: 'locked', tagC: 'ok' }, { num: 138, title: 'Define human-review scopes per repo', tag: 'spec', tagC: 'role' } ] },
+    { title: 'In phase', color: 'oklch(0.80 0.17 150)', count: 3, cards: [ { num: 152, title: 'P1b routing: key ops by agentId', tag: 'p1b', tagC: 'role' }, { num: 149, title: 'P2 spawn regression test', tag: 'p2', tagC: 'role' }, { num: 153, title: 'P4 watchdog baseline failure', tag: 'stuck', tagC: 'warn' } ] },
+    { title: 'In review', color: 'oklch(0.81 0.13 80)', count: 1, cards: [ { num: 154, title: 'Converge #232 → stage-9', tag: 'PR #25', tagC: 'ok' } ] },
+  ];
+
+  COMMITS = [
+    { sha: '2ba0739', msg: 'gate: unstick resolves agent before side effects; fail loud on MNR-3', author: 'co-conductor', when: '8m ago', initials: 'CO', ac: 'oklch(0.71 0.14 255)' },
+    { sha: '6ca2408', msg: 'merge: converge #232 → co/stage-9 (review #234 PASS)', author: 'lead-stage-9', when: '14m ago', initials: 'LD', ac: 'oklch(0.71 0.14 255)' },
+    { sha: 'a8a2a2a', msg: 'router: key revertStuck by agentId, add P9 guard', author: 'impl-p1b-routing', when: '52m ago', initials: 'IB', ac: 'oklch(0.77 0.15 158)' },
+    { sha: 'f12d4c0', msg: 'test: regression — spy asserts agentId arg value', author: 'impl-p2-spawn', when: '1h ago', initials: 'IP', ac: 'oklch(0.77 0.15 158)' },
+    { sha: 'd7e1b9c', msg: 'memory: capture review spy key/value blind spot', author: 'res-gap-audit', when: '1h ago', initials: 'RS', ac: 'oklch(0.79 0.12 200)' },
+  ];
+
+  BRANCHES = [
+    { name: 'co/stage-9', agent: 'lead-stage-9', ahead: 12, behind: 0, status: 'gate green', stC: 'oklch(0.78 0.13 150)', dot: 'oklch(0.71 0.14 255)' },
+    { name: 'co/s9-p1a-engine', agent: 'impl-p1a-engine', ahead: 4, behind: 2, status: 'in review', stC: 'oklch(0.81 0.13 80)', dot: 'oklch(0.77 0.15 158)' },
+    { name: 'co/s9-p1b-routing', agent: 'impl-p1b-routing', ahead: 2, behind: 1, status: 'running', stC: 'oklch(0.80 0.17 150)', dot: 'oklch(0.77 0.15 158)' },
+    { name: 'co/s9-p4-watchdog', agent: 'impl-p4-watchdog', ahead: 3, behind: 5, status: 'stuck', stC: 'oklch(0.67 0.21 25)', dot: 'oklch(0.77 0.15 158)' },
+  ];
+
+  PROVS = [
+    { name: 'Claude', plan: 'Max 20× subscription', models: 'Opus · Sonnet · Haiku', color: 'oklch(0.71 0.14 255)', sessionPct: 47, sessionReset: '2h 14m', weeklyPct: 62, weeklyReset: 'Mon 09:00' },
+    { name: 'Codex', plan: 'ChatGPT Pro · app-server', models: 'gpt-5-codex', color: 'oklch(0.77 0.15 158)', sessionPct: 28, sessionReset: '4h 02m', weeklyPct: 35, weeklyReset: 'Mon 09:00' },
+  ];
+
+  TURNS = { coord: { t: 6, tok: '0.4M' }, lead: { t: 14, tok: '2.1M' }, p1a: { t: 9, tok: '1.3M' }, rev200: { t: 3, tok: '0.5M' }, p1b: { t: 7, tok: '0.9M' }, p2: { t: 5, tok: '0.6M' }, p4: { t: 11, tok: '1.4M' }, res: { t: 4, tok: '0.3M' } };
+
+  GRAPH = [
+    { sha: '2ba0739', msg: 'merge: converge #232 → co/stage-9 (review #234 PASS)', author: 'lead-stage-9', initials: 'LD', ac: 'oklch(0.74 0.15 300)', when: '8m', nodeX: 36, nodeColor: 'oklch(0.74 0.15 300)', tags: [{ t: 'co/stage-9', c: 'oklch(0.74 0.15 300)' }, { t: 'HEAD', c: 'oklch(0.71 0.14 255)' }], lines: [{ d: 'M14,0 L14,40', c: 'oklch(0.71 0.14 255)' }, { d: 'M36,0 L36,40', c: 'oklch(0.74 0.15 300)' }, { d: 'M58,40 C58,30 36,30 36,20', c: 'oklch(0.77 0.15 158)' }] },
+    { sha: 'a8a2a2a', msg: 'router: key revertStuck by agentId; add P9 fail-loud guard', author: 'impl-p1b-routing', initials: 'IB', ac: 'oklch(0.77 0.15 158)', when: '41m', nodeX: 58, nodeColor: 'oklch(0.77 0.15 158)', tags: [], lines: [{ d: 'M14,0 L14,40', c: 'oklch(0.71 0.14 255)' }, { d: 'M36,0 L36,40', c: 'oklch(0.74 0.15 300)' }, { d: 'M58,0 L58,40', c: 'oklch(0.77 0.15 158)' }] },
+    { sha: 'f12d4c0', msg: 'test: lock agentId contract against regression', author: 'impl-p1b-routing', initials: 'IB', ac: 'oklch(0.77 0.15 158)', when: '1h', nodeX: 58, nodeColor: 'oklch(0.77 0.15 158)', tags: [], lines: [{ d: 'M14,0 L14,40', c: 'oklch(0.71 0.14 255)' }, { d: 'M36,0 L36,40', c: 'oklch(0.74 0.15 300)' }, { d: 'M58,0 L58,40', c: 'oklch(0.77 0.15 158)' }] },
+    { sha: '7d2e1b9', msg: 'p1b: branch routing worker from stage-9', author: 'lead-stage-9', initials: 'LD', ac: 'oklch(0.74 0.15 300)', when: '1h 12m', nodeX: 58, nodeColor: 'oklch(0.77 0.15 158)', tags: [], lines: [{ d: 'M14,0 L14,40', c: 'oklch(0.71 0.14 255)' }, { d: 'M36,0 L36,40', c: 'oklch(0.74 0.15 300)' }, { d: 'M58,0 L58,20', c: 'oklch(0.77 0.15 158)' }, { d: 'M58,20 C58,30 36,30 36,40', c: 'oklch(0.77 0.15 158)' }] },
+    { sha: '6ca2408', msg: 'stage-9: integrate phase-1 reviewed branches', author: 'lead-stage-9', initials: 'LD', ac: 'oklch(0.74 0.15 300)', when: '1h 20m', nodeX: 36, nodeColor: 'oklch(0.74 0.15 300)', tags: [], lines: [{ d: 'M14,0 L14,40', c: 'oklch(0.71 0.14 255)' }, { d: 'M36,0 L36,40', c: 'oklch(0.74 0.15 300)' }] },
+    { sha: 'd7e1b9c', msg: 'memory: capture review spy key/value blind spot', author: 'res-gap-audit', initials: 'RS', ac: 'oklch(0.79 0.12 200)', when: '1h 40m', nodeX: 36, nodeColor: 'oklch(0.74 0.15 300)', tags: [], lines: [{ d: 'M14,0 L14,40', c: 'oklch(0.71 0.14 255)' }, { d: 'M36,0 L36,40', c: 'oklch(0.74 0.15 300)' }] },
+    { sha: 'b0a3f01', msg: 'stage-9: lock spec, open phases', author: 'co-conductor', initials: 'CO', ac: 'oklch(0.71 0.14 255)', when: '2h', nodeX: 36, nodeColor: 'oklch(0.74 0.15 300)', tags: [{ t: 'task f215', c: 'oklch(0.74 0.15 300)' }], lines: [{ d: 'M14,0 L14,40', c: 'oklch(0.71 0.14 255)' }, { d: 'M36,0 L36,20', c: 'oklch(0.74 0.15 300)' }, { d: 'M36,20 C36,30 14,30 14,40', c: 'oklch(0.74 0.15 300)' }] },
+    { sha: '9f1c0aa', msg: 'main: 0.4 release baseline', author: 'co-conductor', initials: 'CO', ac: 'oklch(0.71 0.14 255)', when: '3h', nodeX: 14, nodeColor: 'oklch(0.71 0.14 255)', tags: [{ t: 'origin/dev', c: 'oklch(0.71 0.14 255)' }], lines: [{ d: 'M14,0 L14,40', c: 'oklch(0.71 0.14 255)' }] },
+  ];
+
+  LANEC = { 0: 'oklch(0.71 0.14 255)', 1: 'oklch(0.74 0.15 300)', 2: 'oklch(0.77 0.15 158)', 3: 'oklch(0.81 0.13 80)' };
+  GITLOG = [
+    { sha: '2ba0739', lane: 1, msg: 'merge: converge #232 → co/stage-9 (review #234 PASS)', author: 'lead-stage-9', initials: 'LD', when: '8m', parents: ['6ca2408', 'a8a2a2a'], refs: [{ t: 'co/stage-9', lane: 1 }, { t: 'HEAD', lane: 1, head: true }] },
+    { sha: 'a8a2a2a', lane: 2, msg: 'router: key revertStuck by agentId; add P9 fail-loud guard', author: 'impl-p1b-routing', initials: 'IB', when: '41m', parents: ['f12d4c0'], refs: [{ t: 'co/s9-p1b-routing', lane: 2 }] },
+    { sha: 'f12d4c0', lane: 2, msg: 'test: lock agentId contract against regression', author: 'impl-p1b-routing', initials: 'IB', when: '1h', parents: ['7d2e1b9'], refs: [] },
+    { sha: '7d2e1b9', lane: 2, msg: 'p1b: branch routing worker from stage-9', author: 'lead-stage-9', initials: 'LD', when: '1h 12m', parents: ['6ca2408'], refs: [] },
+    { sha: '6ca2408', lane: 1, msg: 'stage-9: integrate phase-1 reviewed branches', author: 'lead-stage-9', initials: 'LD', when: '1h 20m', parents: ['d7e1b9c'], refs: [] },
+    { sha: 'd7e1b9c', lane: 1, msg: 'memory: capture review spy key/value blind spot', author: 'res-gap-audit', initials: 'RS', when: '1h 40m', parents: ['b0a3f01'], refs: [] },
+    { sha: 'b0a3f01', lane: 1, msg: 'stage-9: lock spec, open phases', author: 'co-conductor', initials: 'CO', when: '2h', parents: ['9f1c0aa'], refs: [{ t: 'task f215', lane: 1 }] },
+    { sha: '9f1c0aa', lane: 0, msg: 'main: 0.4 release baseline', author: 'co-conductor', initials: 'CO', when: '3h', parents: [], refs: [{ t: 'origin/dev', lane: 0 }, { t: 'origin/main', lane: 3 }] },
+  ];
+
+  // ---- handlers ----
+  componentDidMount() { window.addEventListener('keydown', this.onKey); }
+  componentWillUnmount() { window.removeEventListener('keydown', this.onKey); }
+  onKey = (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); this.setState((s) => ({ palette: !s.palette })); }
+    if (e.key === 'Escape') this.setState({ palette: false });
+  };
+  go = (p) => this.setState({ page: p, palette: false });
+  openAgent = (id) => this.setState({ page: 'agents', agentId: id, palette: false });
+  openMail = (id) => this.setState({ page: 'mail', mailId: id, palette: false });
+
+  flash = (label) => { this.setState({ toast: label }); clearTimeout(this._t); this._t = setTimeout(() => this.setState({ toast: null }), 1700); };
+  onReply = (e) => { const v = e.target.value; this.setState((st) => ({ drafts: { ...st.drafts, [st.mailId]: v } })); };
+  sendReply = () => { this.setState((st) => ({ drafts: { ...st.drafts, [st.mailId]: '' } })); this.flash('Reply sent'); };
+  quickSend = (label) => { this.flash('Sent · ' + label); };
+
+  payloadColor(c) {
+    if (c === 'ok') return 'oklch(0.78 0.13 150)';
+    if (c === 'warn') return 'oklch(0.78 0.16 40)';
+    if (c === 'role') return 'oklch(0.79 0.12 200)';
+    return 'oklch(0.82 0.005 262)';
+  }
+  typeStyle(type) {
+    const map = {
+      approval: 'oklch(0.81 0.13 80)', clarify_request: 'oklch(0.79 0.12 200)', escalation: 'oklch(0.72 0.18 35)',
+      review_verdict: 'oklch(0.78 0.14 150)', worker_done: 'oklch(0.69 0.10 255)', operator_message: 'oklch(0.74 0.10 300)',
+      review_request: 'oklch(0.71 0.14 255)', chat: 'oklch(0.7 0.02 262)',
+    };
+    return map[type] || 'oklch(0.7 0.02 262)';
+  }
+
+  renderVals() {
+    const s = this.state;
+    const R = this.ROLE, ST = this.ST;
+
+    const agents = this.AG.map((a) => {
+      const roleColor = R[a.role];
+      const stateColor = ST[a.state];
+      return {
+        ...a,
+        roleColor, roleTint: this.tint(roleColor, '18%'),
+        roleLabel: a.sub ? a.role + ':' + a.sub : a.role,
+        roleFull: a.sub ? a.role + ' · ' + a.sub : a.role,
+        stateColor, stateGlow: this.tint(stateColor, '22%'),
+        pulse: a.state === 'RUNNING' ? ' animation: coPulse 1.8s infinite;' : '',
+        indent: (a.depth * 18) + 'px',
+        costStr: '$' + a.cost.toFixed(2),
+        turnsStr: (this.TURNS[a.id] ? this.TURNS[a.id].t : 0) + ' turns',
+        provLabel: a.prov + ' · ' + a.model,
+        open: () => this.openAgent(a.id),
+        sessBg: a.id === s.agentId ? 'oklch(0.25 0.008 262)' : 'transparent',
+      };
+    });
+
+    const selAgent = agents.find((a) => a.id === s.agentId) || agents[0];
+    const rawTr = this.TR[s.agentId] || this.TR.lead;
+    const trColor = { sys: 'oklch(0.52 0.009 262)', tool: 'oklch(0.72 0.13 255)', hi: 'oklch(0.96 0.003 262)', ok: 'oklch(0.80 0.15 150)', warn: 'oklch(0.74 0.18 35)', dim: 'oklch(0.58 0.009 262)', body: 'oklch(0.83 0.006 262)', result: 'oklch(0.70 0.12 150)' };
+    const transcript = rawTr.map((l) => {
+      if (l.k === 'gap') return { text: ' ', color: 'transparent', weight: '400', pad: '0', mb: '6px' };
+      let color = trColor[l.k] || trColor.body;
+      let text = l.t;
+      if (l.k === 'role') { color = selAgent.roleColor; }
+      const weight = (l.k === 'hi' || l.k === 'role' || l.k === 'ok' || l.k === 'tool') ? '600' : '400';
+      return { text, color, weight, pad: '0', mb: '0' };
+    });
+
+    const consoleTabs = ['Transcript', 'Mail', 'Info', 'Diff'].map((label, i) => ({
+      label, fg: i === 0 ? 'oklch(0.96 0.003 262)' : 'oklch(0.6 0.009 262)', bar: i === 0 ? selAgent.roleColor : 'transparent',
+    }));
+
+    // mail
+    const source = s.bus === 'agent' ? this.BUS : this.MAIL;
+    const mailList = source.filter((m) => s.bus === 'agent' ? true : (s.folder === 'all' ? true : m.folder === s.folder)).map((m) => {
+      const tc = this.typeStyle(m.type);
+      const fromColor = m.fromRole && R[m.fromRole] ? R[m.fromRole] : 'oklch(0.78 0.006 262)';
+      return {
+        ...m, typeColor: tc, typeTint: this.tint(tc, '20%'),
+        fromColor, rowBg: m.id === s.mailId ? 'oklch(0.22 0.008 262)' : 'transparent',
+        selBar: m.id === s.mailId ? (m.actionable ? 'oklch(0.67 0.21 25)' : 'oklch(0.71 0.14 255)') : 'transparent',
+        weight: m.unread ? '600' : '500', subjColor: m.unread ? 'oklch(0.95 0.003 262)' : 'oklch(0.78 0.006 262)',
+        open: () => this.openMail(m.id),
+      };
+    });
+    const selRaw = source.find((m) => m.id === s.mailId) || source[0];
+    const selTc = this.typeStyle(selRaw.type);
+    const selFromColor = selRaw.fromRole && R[selRaw.fromRole] ? R[selRaw.fromRole] : 'oklch(0.78 0.006 262)';
+    const actBtn = (b) => {
+      if (b.kind === 'primary') return { ...b, bg: 'oklch(0.72 0.16 150)', fg: 'oklch(0.16 0.03 150)', edge: 'transparent' };
+      if (b.kind === 'danger') return { ...b, bg: 'oklch(0.24 0.06 25)', fg: 'oklch(0.82 0.16 25)', edge: 'oklch(0.4 0.1 25)' };
+      return { ...b, bg: 'oklch(0.245 0.008 262)', fg: 'oklch(0.82 0.006 262)', edge: 'oklch(0.32 0.009 262)' };
+    };
+    const ackMap = { approval: 'approval ack', clarify_request: 'clarify_response', escalation: 'resolution', review_request: 'review_verdict', review_verdict: 'reply', worker_done: 'reply', operator_message: 'reply', chat: 'reply' };
+    const selMail = {
+      ...selRaw, typeColor: selTc, typeTint: this.tint(selTc, '20%'),
+      fromColor: selFromColor, fromTint: this.tint(selFromColor, '20%'),
+      fromInitials: (selRaw.fromRole || 'OP').slice(0, 2).toUpperCase(),
+      ackType: ackMap[selRaw.type] || 'reply',
+      hasPayload: !!selRaw.payload && selRaw.payload.length > 0,
+      payload: (selRaw.payload || []).map((r) => ({ ...r, color: this.payloadColor(r.c) })),
+      actions: (selRaw.actions || []).map((b) => ({ ...actBtn(b), send: () => this.quickSend(b.label) })),
+    };
+
+    const folderDefs = [
+      { id: 'action', label: 'Action required', dot: 'oklch(0.67 0.21 25)', count: this.MAIL.filter((m) => m.folder === 'action').length, hot: true },
+      { id: 'inbox', label: 'Inbox', dot: 'oklch(0.71 0.14 255)', count: this.MAIL.filter((m) => m.folder === 'inbox' && m.unread).length },
+      { id: 'sent', label: 'Sent', dot: 'oklch(0.6 0.009 262)', count: 0 },
+      { id: 'all', label: 'All mail', dot: 'oklch(0.6 0.009 262)', count: 0 },
+    ];
+    const folders = folderDefs.map((f) => ({
+      ...f,
+      bg: (s.bus === 'operator' && s.folder === f.id) ? 'oklch(0.25 0.008 262)' : 'transparent',
+      fg: (s.bus === 'operator' && s.folder === f.id) ? 'oklch(0.95 0.003 262)' : 'oklch(0.78 0.006 262)',
+      countBg: f.hot ? 'oklch(0.30 0.12 25)' : 'oklch(0.27 0.009 262)',
+      countFg: f.hot ? 'oklch(0.84 0.16 25)' : 'oklch(0.75 0.006 262)',
+      onClick: () => this.setState({ folder: f.id, bus: 'operator', mailId: (s.bus === 'agent' ? this.MAIL : source).find((m) => m.folder === f.id) ? source.find ? (this.MAIL.find((m) => m.folder === f.id) || {}).id || s.mailId : s.mailId : s.mailId }),
+    }));
+    // simpler folder click
+    folders.forEach((f) => { f.onClick = () => { const first = this.MAIL.find((m) => f.id === 'all' ? true : m.folder === f.id); this.setState({ folder: f.id, bus: 'operator', mailId: first ? first.id : s.mailId }); }; });
+
+    const folderTitle = s.bus === 'agent' ? 'Agent-to-agent bus' : (folderDefs.find((f) => f.id === s.folder) || {}).label;
+
+    // files / diff
+    const files = this.FILES.map((f) => ({
+      ...f,
+      bg: f.id === s.fileId ? 'oklch(0.24 0.008 262)' : 'transparent',
+      fg: f.id === s.fileId ? 'oklch(0.93 0.004 262)' : 'oklch(0.74 0.006 262)',
+      statusColor: f.status === 'A' ? 'oklch(0.75 0.16 150)' : 'oklch(0.78 0.12 255)',
+      open: () => this.setState({ fileId: f.id }),
+    }));
+    const selFile = files.find((f) => f.id === s.fileId) || files[0];
+    const hunkColor = { add: 'oklch(0.82 0.10 150)', del: 'oklch(0.80 0.12 25)', ctx: 'oklch(0.72 0.006 262)', meta: 'oklch(0.65 0.10 290)' };
+    const hunkBg = { add: 'oklch(0.30 0.06 150 / 0.30)', del: 'oklch(0.30 0.07 25 / 0.28)', ctx: 'transparent', meta: 'oklch(0.22 0.02 290 / 0.5)' };
+    const hunks = (this.HUNKS[s.fileId] || []).map((h, i) => ({
+      text: h.t, color: hunkColor[h.s], rowBg: hunkBg[h.s],
+      sign: h.s === 'add' ? '+' : (h.s === 'del' ? '-' : ''), signColor: h.s === 'add' ? 'oklch(0.75 0.16 150)' : (h.s === 'del' ? 'oklch(0.72 0.18 25)' : 'transparent'),
+      ln: h.s === 'meta' ? '' : String(i + 1),
+    }));
+    const criteria = this.CRIT.map((c) => ({
+      text: c.text, tick: c.done ? '✓' : '', boxBg: c.done ? 'oklch(0.72 0.16 150)' : 'transparent',
+      boxEdge: c.done ? 'transparent' : 'oklch(0.4 0.012 262)', tickColor: 'oklch(0.16 0.03 150)',
+    }));
+    const gateLadder = this.GATE.map((g) => ({
+      label: g.label, tag: g.tag,
+      tagColor: g.tag === 'human' ? 'oklch(0.74 0.10 300)' : 'oklch(0.6 0.009 262)',
+      tick: g.state === 'pass' ? '✓' : (g.state === 'active' ? '●' : ''),
+      tickColor: g.state === 'pass' ? 'oklch(0.16 0.03 150)' : 'oklch(0.16 0.02 80)',
+      dotBg: g.state === 'pass' ? 'oklch(0.72 0.16 150)' : (g.state === 'active' ? 'oklch(0.81 0.13 80)' : 'oklch(0.3 0.009 262)'),
+      fg: g.state === 'active' ? 'oklch(0.93 0.004 262)' : 'oklch(0.72 0.006 262)',
+    }));
+
+    // source
+    const srcTabsDef = [ { id: 'prs', label: 'Pull requests', count: 2 }, { id: 'issues', label: 'Issues', count: 6 }, { id: 'commits', label: 'Commits', count: 247 }, { id: 'branches', label: 'Branches', count: 8 } ];
+    const srcTabs = srcTabsDef.map((t) => ({
+      ...t, fg: t.id === s.src ? 'oklch(0.96 0.003 262)' : 'oklch(0.65 0.008 262)',
+      bar: t.id === s.src ? 'oklch(0.71 0.14 255)' : 'transparent', onClick: () => this.setState({ src: t.id }),
+    }));
+    const srcBtn = (b) => {
+      const m = {
+        green: { bg: 'oklch(0.72 0.16 150)', fg: 'oklch(0.16 0.03 150)', edge: 'transparent' },
+        primary: { bg: 'oklch(0.71 0.14 255)', fg: 'oklch(0.16 0.02 255)', edge: 'transparent' },
+        ghost: { bg: 'oklch(0.245 0.008 262)', fg: 'oklch(0.8 0.006 262)', edge: 'oklch(0.31 0.009 262)' },
+      };
+      const st = m[b.kind] || m.ghost;
+      return { label: b.label, bg: st.bg, fg: st.fg, edge: st.edge, onClick: b.go === 'review' ? (() => this.go('review')) : (() => this.flash(b.label + ' ✓')) };
+    };
+    const prs = this.PRS.map((p) => {
+      let acts;
+      if (p.state === 'merged') acts = [{ label: 'View', kind: 'ghost' }];
+      else if (p.mergeable) acts = [{ label: 'Comment', kind: 'ghost' }, { label: 'Review', kind: 'ghost', go: 'review' }, { label: 'Merge', kind: 'green' }];
+      else acts = [{ label: 'View', kind: 'ghost' }, { label: 'Approve', kind: 'ghost' }];
+      return {
+        ...p,
+        stateColor: p.state === 'open' ? 'oklch(0.80 0.15 150)' : (p.state === 'merged' ? 'oklch(0.74 0.10 300)' : 'oklch(0.7 0.02 262)'),
+        stateTint: this.tint(p.state === 'open' ? 'oklch(0.80 0.15 150)' : 'oklch(0.74 0.10 300)', '18%'),
+        edge: p.mergeable ? 'oklch(0.4 0.05 150)' : 'oklch(0.31 0.009 262)',
+        gateColor: p.mergeable ? 'oklch(0.81 0.13 80)' : 'oklch(0.6 0.009 262)',
+        checks: p.checks.map((c) => { const col = c.ok === true ? 'oklch(0.78 0.15 150)' : (c.ok === null ? 'oklch(0.81 0.13 80)' : 'oklch(0.72 0.18 25)'); return { ...c, color: col, tint: this.tint(col, '20%') }; }),
+        actions: acts.map(srcBtn),
+      };
+    });
+    const issueCols = this.ISSUE_COLS.map((col) => ({
+      ...col, cards: col.cards.map((c) => ({ ...c, tagColor: this.payloadColor(c.tagC), tagTint: this.tint(this.payloadColor(c.tagC), '18%') })),
+    }));
+    const commits = this.COMMITS.map((c) => ({ ...c, authorColor: c.ac, authorTint: this.tint(c.ac, '20%') }));
+    const branches = this.BRANCHES.map((b) => ({
+      ...b, stColor: b.stC, stTint: this.tint(b.stC, '18%'),
+      actions: [{ label: 'Checkout', kind: 'ghost' }, { label: 'Create PR', kind: 'ghost' }, { label: 'Merge', kind: 'green' }].map(srcBtn),
+    }));
+
+    const provCards = this.PROVS.map((p) => ({
+      ...p, sessionLabel: p.sessionPct + '%', sessionW: p.sessionPct + '%', weeklyLabel: p.weeklyPct + '%', weeklyW: p.weeklyPct + '%',
+    }));
+    const sessionPills = this.PROVS.map((p) => ({ name: p.name, pct: p.sessionPct + '%', reset: p.sessionReset.replace(/\s/g, ''), color: p.color }));
+    const maxTurns = Math.max(...Object.values(this.TURNS).map((u) => u.t));
+    const usageRows = this.AG.map((a) => ({
+      name: a.short, role: a.role, roleColor: R[a.role],
+      turns: (this.TURNS[a.id] ? this.TURNS[a.id].t : 0) + ' turns',
+      tokens: this.TURNS[a.id] ? this.TURNS[a.id].tok : '0',
+      pct: (((this.TURNS[a.id] ? this.TURNS[a.id].t : 0) / maxTurns) * 100) + '%',
+    })).sort((a, b) => parseFloat(b.pct) - parseFloat(a.pct));
+    const graph = this.GRAPH.map((g) => ({
+      ...g, acTint: this.tint(g.ac, '20%'),
+      tags: (g.tags || []).map((t) => ({ ...t, tint: this.tint(t.c, '18%') })),
+    }));
+
+    // ---- git graph (VS Code style) ----
+    const GH = 44, LG = 20, LP = 22, BG = 'oklch(0.165 0.006 262)';
+    const xOf = (l) => LP + l * LG, yOf = (i) => i * GH + GH / 2;
+    const rowOf = {}; this.GITLOG.forEach((c, i) => { rowOf[c.sha] = i; });
+    const maxLane = Math.max.apply(null, this.GITLOG.map((c) => c.lane));
+    const graphW = LP + maxLane * LG + LP;
+    const graphH = this.GITLOG.length * GH;
+    const graphGutter = '0 18px 0 ' + (graphW + 8) + 'px';
+    const graphEdges = [], graphNodes = [];
+    this.GITLOG.forEach((c, i) => {
+      if (!c.parents.length) graphEdges.push({ d: 'M' + xOf(c.lane) + ' ' + yOf(i) + ' L' + xOf(c.lane) + ' ' + graphH, c: this.LANEC[c.lane] });
+      c.parents.forEach((p) => {
+        const j = rowOf[p]; if (j === undefined) return;
+        const x1 = xOf(c.lane), y1 = yOf(i), x2 = xOf(this.GITLOG[j].lane), y2 = yOf(j);
+        const col = this.LANEC[Math.max(c.lane, this.GITLOG[j].lane)];
+        const d = (c.lane === this.GITLOG[j].lane)
+          ? ('M' + x1 + ' ' + y1 + ' L' + x2 + ' ' + y2)
+          : ('M' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + (y1 + GH * 0.6) + ' ' + x2 + ' ' + (y2 - GH * 0.6) + ' ' + x2 + ' ' + y2);
+        graphEdges.push({ d: d, c: col });
+      });
+    });
+    this.GITLOG.forEach((c, i) => { graphNodes.push({ x: xOf(c.lane), y: yOf(i), fill: this.LANEC[c.lane], stroke: BG }); });
+    const gitRows = this.GITLOG.map((c) => ({
+      sha: c.sha, msg: c.msg, author: c.author, initials: c.initials, when: c.when, gutterPad: graphGutter,
+      avatarBg: this.tint(this.LANEC[c.lane], '24%'), avatarFg: this.LANEC[c.lane],
+      refs: (c.refs || []).map((r) => ({ t: r.t, glyph: r.head ? '◆' : '⏂', c: r.head ? 'oklch(0.16 0.02 255)' : this.LANEC[r.lane], bg: r.head ? this.LANEC[r.lane] : this.tint(this.LANEC[r.lane], '16%'), edge: this.tint(this.LANEC[r.lane], '42%') })),
+    }));
+    const graphSummary = this.GITLOG.length + ' commits · branched from origin/dev, p1b merged back';
+
+    // nav
+    const navDef = [
+      { id: 'dashboard', label: 'Mission Control', glyph: '⊞', kbd: '1' },
+      { id: 'agents', label: 'Agents', glyph: '›_', kbd: '2', badge: '2' },
+      { id: 'mail', label: 'Mail', glyph: '✉', kbd: '3', badge: '3', hot: true },
+      { id: 'review', label: 'Review', glyph: '±', kbd: '4', badge: '1' },
+      { id: 'source', label: 'Source', glyph: '⎇', kbd: '5' },
+      { id: 'cost', label: 'Usage', glyph: '%', kbd: '6' },
+    ];
+    const navItems = navDef.map((n) => {
+      const active = n.id === s.page;
+      return {
+        ...n, active, onClick: () => this.go(n.id),
+        bg: active ? 'oklch(0.25 0.008 262)' : 'transparent',
+        fg: active ? 'oklch(0.96 0.003 262)' : 'oklch(0.78 0.006 262)',
+        barColor: active ? 'oklch(0.71 0.14 255)' : 'transparent',
+        iconBg: active ? 'oklch(0.71 0.14 255)' : 'oklch(0.27 0.009 262)',
+        iconFg: active ? 'oklch(0.16 0.02 255)' : 'oklch(0.75 0.006 262)',
+        badgeBg: n.hot ? 'oklch(0.30 0.12 25)' : 'oklch(0.30 0.009 262)',
+        badgeFg: n.hot ? 'oklch(0.84 0.16 25)' : 'oklch(0.78 0.006 262)',
+      };
+    });
+
+    const headStats = [
+      { label: 'agents', value: '8', dot: 'oklch(0.71 0.14 255)' },
+      { label: 'running', value: '2', dot: 'oklch(0.80 0.17 150)' },
+      { label: 'cost', value: '$22.16', dot: 'oklch(0.81 0.13 80)' },
+    ];
+    const railLimits = [
+      { name: 'Claude', pct: '47%', pctLabel: '47%', reset: 'in 2h14m', color: 'oklch(0.71 0.14 255)' },
+      { name: 'Codex', pct: '28%', pctLabel: '28%', reset: 'in 4h02m', color: 'oklch(0.77 0.15 158)' },
+    ];
+
+    const fleetStats = [
+      { label: 'Agents', value: '8', sub: 'across 4 phases', color: 'oklch(0.71 0.14 255)' },
+      { label: 'Running', value: '2', sub: 'executing turns', color: 'oklch(0.80 0.17 150)' },
+      { label: 'Waiting', value: '4', sub: 'eligible to wake', color: 'oklch(0.66 0.02 260)' },
+      { label: 'Stuck', value: '1', sub: 'needs decision', color: 'oklch(0.67 0.21 25)' },
+      { label: 'Action req.', value: '3', sub: 'in your inbox', color: 'oklch(0.81 0.13 80)' },
+    ];
+
+    const actionItems = this.MAIL.filter((m) => m.actionable).map((m) => {
+      const tc = this.typeStyle(m.type);
+      return {
+        ...m, typeColor: tc, typeTint: this.tint(tc, '20%'),
+        edge: m.type === 'escalation' ? 'oklch(0.4 0.09 30)' : 'oklch(0.31 0.009 262)',
+        cardBg: 'oklch(0.175 0.006 262)',
+        actions: (m.actions || []).slice(0, 2).map(actBtn),
+        open: () => this.openMail(m.id),
+      };
+    });
+
+    const activity = [
+      { time: '13:24', dot: 'oklch(0.81 0.13 80)', text: 'lead-stage-9 requests approval to merge PR #25 → origin/dev' },
+      { time: '13:11', dot: 'oklch(0.78 0.14 150)', text: 'review #234 returned PASS · 0 blockers' },
+      { time: '13:09', dot: 'oklch(0.79 0.12 200)', text: 'impl-p1b-routing asks a clarify question (intent)' },
+      { time: '12:55', dot: 'oklch(0.71 0.14 255)', text: 'lead-stage-9 dispatched review #234' },
+      { time: '12:51', dot: 'oklch(0.67 0.21 25)', text: 'impl-p4-watchdog hit 3-strike rule → escalated' },
+      { time: '12:38', dot: 'oklch(0.77 0.15 158)', text: 'impl-p1a-engine signalled worker_done' },
+    ];
+
+    return {
+      isDashboard: s.page === 'dashboard', isAgents: s.page === 'agents', isMail: s.page === 'mail',
+      isReview: s.page === 'review', isSource: s.page === 'source', isCost: s.page === 'cost',
+      isPrs: s.src === 'prs', isIssues: s.src === 'issues', isCommits: s.src === 'commits', isBranches: s.src === 'branches',
+      palette: s.palette, togglePalette: () => this.setState((st) => ({ palette: !st.palette })),
+      navItems, headStats, railLimits, fleetStats, agents, actionItems, activity,
+      actionCount: this.MAIL.filter((m) => m.actionable).length,
+      goMail: () => this.go('mail'), goReview: () => this.go('review'),
+      selAgent, transcript, consoleTabs, slashCmds: ['/help', '/status', '/worktrees', '/lock', '/btw'],
+      folders, folderTitle, mailList, selMail,
+      mailCountLabel: mailList.length + ' messages',
+      busOpBg: s.bus === 'operator' ? 'oklch(0.71 0.14 255)' : 'transparent', busOpFg: s.bus === 'operator' ? 'oklch(0.16 0.02 255)' : 'oklch(0.7 0.006 262)',
+      busAgBg: s.bus === 'agent' ? 'oklch(0.71 0.14 255)' : 'transparent', busAgFg: s.bus === 'agent' ? 'oklch(0.16 0.02 255)' : 'oklch(0.7 0.006 262)',
+      setBusOperator: () => this.setState({ bus: 'operator', mailId: (this.MAIL.find((m) => m.folder === s.folder) || this.MAIL[0]).id }),
+      setBusAgent: () => this.setState({ bus: 'agent', mailId: this.BUS[0].id }),
+      files, selFile, hunks, criteria, gateLadder, fileCount: this.FILES.length,
+      srcTabs, prs, issueCols, branches, graph, provCards, usageRows,
+      sessionPills, limitsOpen: s.limitsOpen, toggleLimits: () => this.setState((st) => ({ limitsOpen: !st.limitsOpen })),
+      replyText: s.drafts[s.mailId] || '', onReply: this.onReply, sendReply: this.sendReply,
+      replyPlaceholder: selMail.actionable ? 'Add a note, or use a quick action above…' : ('Reply to ' + selRaw.from + '…'),
+      toast: s.toast,
+      gitRows, graphNodes, graphEdges, graphW, graphH, graphGutter, graphSummary,
+    };
+  }
+}
+</script>
+</body>
+</html>
