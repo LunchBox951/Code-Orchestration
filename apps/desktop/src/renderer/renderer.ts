@@ -31,6 +31,9 @@ const OPERATOR_BUS = '@operator';
 const MAIL_REVIEW_REQUEST = 'review_request';
 const knownMailBuses = new Set<string>([OPERATOR_BUS]);
 let latestMailState: MailState | null = null;
+// Cached so a daemon:status change can re-render the dashboard's degraded banner with the right copy.
+let latestDashboardState: DashboardState | null = null;
+let latestDaemonStatus: DaemonStatus | null = null;
 
 function collectAgentIds(nodes: readonly TreeNode[], out: string[] = []): string[] {
   for (const node of nodes) {
@@ -90,6 +93,8 @@ function setLiveStatus(status: string): void {
 // The app-owned Conductor daemon's lifecycle, surfaced in the header. A `failed` status reveals the
 // Retry button (Principle 9 — no-silent-failures: a start/respawn failure is visible + recoverable).
 function setDaemonStatus(payload: DaemonStatusPayload): void {
+  const statusChanged = latestDaemonStatus !== payload.status;
+  latestDaemonStatus = payload.status;
   const dot = document.getElementById('daemon-dot');
   const label = document.getElementById('daemon-label');
   const retry = document.getElementById('daemon-retry');
@@ -109,6 +114,9 @@ function setDaemonStatus(payload: DaemonStatusPayload): void {
     label.setAttribute('title', payload.detail ?? text);
   }
   if (retry) retry.hidden = payload.status !== 'failed';
+  // When degraded, the dashboard banner copy depends on the daemon status (restarting vs. not running);
+  // re-render it on a status change so the banner reflects an in-flight restart promptly.
+  if (statusChanged && latestDashboardState != null) renderDashboard(latestDashboardState);
 }
 
 function showAppError(message: string): void {
@@ -162,7 +170,9 @@ function renderDashboard(state: DashboardState): void {
 
   const degradedBanner = isLive
     ? ''
-    : `<div class="degraded-banner">Conductor not running — showing last known state</div>`;
+    : latestDaemonStatus === 'restarting'
+      ? `<div class="degraded-banner">Conductor daemon restarting — showing last known state</div>`
+      : `<div class="degraded-banner">Conductor not running — showing last known state</div>`;
 
   const tiles = [
     { label: 'TOTAL', value: s.total, cls: '' },
@@ -771,7 +781,7 @@ function renderReviewDetail(context: SelectedContext, composer: VerdictComposer)
     return `<div class="empty-state">Review not found: ${esc(value.reviewId)}</div>`;
   }
   if (value.kind === 'conductor-down') {
-    return `<div class="empty-state">Conductor not running — start \`co-mcp serve <projectId>\` to load review context.</div>`;
+    return `<div class="empty-state">Conductor unavailable — the app manages the daemon; check the status badge in the header (use Retry if it failed) to load review context.</div>`;
   }
 
   // kind === 'resolved'
@@ -976,6 +986,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   bridge.onDashboardState((state) => {
+    latestDashboardState = state;
     rememberMailBuses(state);
     renderDashboard(state);
     if (latestMailState != null) renderMail(latestMailState);
