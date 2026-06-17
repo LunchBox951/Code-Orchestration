@@ -368,6 +368,21 @@ function renderMailDetail(state: MailState, prevState: MailState | null): void {
       ].join('')
     : '';
 
+  // Paint the typed card GENERICALLY (SF-6 / AC-S15-12): the per-type field/label LOGIC lives in
+  // @co/core (registry.renderCard); the renderer just lays out card.fields as key/value rows + the
+  // body as prose, with no per-type knowledge of its own. Every value is escaped via esc().
+  const cardFieldsHtml =
+    selected.card.fields.length === 0
+      ? ''
+      : [
+          `<div class="mail-card-fields">`,
+          ...selected.card.fields.map(
+            (f) =>
+              `<div class="mail-card-field"><span class="mail-card-field-label">${esc(f.label)}</span><span class="mail-card-field-value">${esc(f.value)}</span></div>`,
+          ),
+          `</div>`,
+        ].join('');
+
   detailPane.innerHTML = [
     `<div class="mail-card${isApproval ? ' approval-card' : ''}">`,
     `<div class="mail-card-header">`,
@@ -375,7 +390,8 @@ function renderMailDetail(state: MailState, prevState: MailState | null): void {
     `<div class="mail-card-subject">${esc(selected.subject)}</div>`,
     `<div class="mail-card-meta">From: ${esc(selected.sender)} · To: ${esc(selected.recipient)}</div>`,
     `</div>`,
-    `<div class="mail-card-body">${esc(selected.renderedBody)}</div>`,
+    cardFieldsHtml,
+    `<div class="mail-card-body">${esc(selected.card.body)}</div>`,
     actionButtons,
     `</div>`,
     composerHtml,

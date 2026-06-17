@@ -49,6 +49,18 @@ interface DashboardState {
 
 type MailKind = 'actionable' | 'informational';
 
+// Mirrors @co/core's MailCardView/MailCardField (renderer is isolated from Node — inline, like MailRow).
+interface MailCardField {
+  label: string;
+  value: string;
+}
+
+interface MailCardView {
+  title: string;
+  fields: readonly MailCardField[];
+  body: string;
+}
+
 interface MailRow {
   seq: number;
   type: string;
@@ -57,6 +69,7 @@ interface MailRow {
   recipient: string;
   ts: number;
   renderedBody: string;
+  card: MailCardView;
   kind: MailKind;
   read: boolean;
   resolved: boolean;

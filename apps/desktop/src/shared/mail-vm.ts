@@ -3,6 +3,7 @@ import type {
   ApprovalDecision,
   ApprovalReply,
   DeliveredMail,
+  MailCardView,
   MailKind,
   MailType,
   OperatorMailRef,
@@ -19,6 +20,8 @@ export interface MailRow {
   readonly recipient: string;
   readonly ts: number;
   readonly renderedBody: string;
+  /** The structured per-type card (key/value fields + body) the detail pane paints generically (SF-6). */
+  readonly card: MailCardView;
   readonly kind: MailKind;
   readonly read: boolean;
   readonly resolved: boolean;
@@ -352,6 +355,7 @@ export class MailVM {
       recipient: mail.recipient,
       ts: mail.ts,
       renderedBody: this.registry.render(mail),
+      card: this.registry.renderCard(mail),
       kind: mailKind(mail.type),
       read: mail.read ?? false,
       resolved: mail.resolved ?? false,
