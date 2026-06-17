@@ -31,7 +31,7 @@ inside the boundary. What counts as destructive:
 - **`git push --force` / `-f` / `--force-with-lease`** — rewrites shared history.
 - **`rm -rf /` | `~`**, **`sudo`**, invoking the daemon directly.
 
-*Bypasses the gate (destructive to the codebase — lets unreviewed code into a protected target):*
+*Bypasses the gate (destructive to the codebase — lets unreviewed code into master):*
 - **Raw `git merge` / `git push`** → forces `co_merge` / `co_push`, which require a PASS
   verdict or the explicit audited `@operator` override with a recorded reason.
 - **Raw `gh pr create` / `gh pr merge`** → blocks direct GitHub PR mutation. Opening a PR goes
@@ -92,11 +92,11 @@ ride on the runtime-substrate research; the model is substrate-independent.)*
 
 ### Defense in depth + drift
 
-The block list is declared in core now and is designed to be enforced by hosted-session gate hooks
+The block list is declared in core now and is designed to be enforced by L7 harness gate hooks
 (publishing-verb gate, dangerous-shell gate), across Claude and Codex variants, so a single
 failure does not open a bypass once the hosted hooks are wired. A drift check (heir to
 `co permissions check`) verifies the enforced config matches the registry.
 
-> **Host-live dependency:** *how* the blocks are enforced against real hosted sessions (host harness
-> permission system vs. `co` PreToolUse hooks) remains part of the runtime proof; the philosophy and
-> block list above are substrate-independent.
+> **Substrate dependency:** *how* the blocks are enforced (host harness permission system
+> vs. our PreToolUse hooks) depends partly on the parked runtime-substrate research; the
+> philosophy and block list above are substrate-independent.

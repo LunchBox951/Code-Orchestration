@@ -8,14 +8,13 @@ tier** — because heavy parallelism burns subscription limits, and that must be
 concern. Provider selection is **two-tier**:
 
 - **Pinned roles** — the operator pins specific roles/sub-roles to specific provider+models in
-  settings (global ← repo), especially quality-critical seats such as Coordinator or `reviewer:pr`.
-  The balancer **never overrides a pin** — provider/model choice stays operator-configured, not
-  hard-coded in core.
+  settings (global ← repo): e.g. **Coordinator → Opus (max effort)**, **`reviewer:pr` → Opus.**
+  The balancer **never overrides a pin** — these are the quality-critical, predictable seats.
 - **Floating roles** — everything else is placed by a **rate-limit-aware balancer**: among
   providers offering the required tier, it biases toward the one with the most **live headroom**
   (lowest session usage, accounting for reset timing), to **even out burn across the default
   Claude/Codex provider accounts.** ("Claude 50% used / Codex 10% used → lean on Codex.")
-  Later dispatch work adds same-provider multi-subscription placement.
+  Same-provider multi-subscription routing is later work, not part of this L4 policy.
 
 All customizable in settings; the **max-children caps** ([PHASES](phases-and-plans.md)) bound total concurrent fan-out.
 

@@ -36,17 +36,17 @@ of letting it through rises the closer the change gets to leaving the sandbox. T
 follows the review scopes (worker merge → phase merge → outward PR / remote publish):
 
 - **Worker merge → a lead/phase branch (most lenient).** The work is still in an isolated
-  branch with more review ahead of it. Correctness problems still block, but quality findings,
-  style nits, and polish suggestions ride as non-blocking suggestions on a PASS. Blocking on quality
-  debt here would only trap honest workers (and waste the 3-strike budget) over things the
-  lead/phase consolidation gate is designed to catch.
-- **Phase merge → the protected integration branch (stricter).** Accumulated nits get a harder look;
-  quality suggestions tolerated per-worker are expected resolved before the phase consolidates.
+  branch with more review ahead of it. Correctness and quality-affecting problems still block,
+  but **style nits and polish suggestions ride as non-blocking suggestions on a PASS** —
+  blocking on cosmetics here would only trap honest workers (and waste the 3-strike budget)
+  over things a later pass will catch anyway.
+- **Phase merge → the integration / master-bound branch (stricter).** Accumulated nits get a
+  harder look; suggestions tolerated per-worker are expected resolved before the phase
+  consolidates.
 - **Outward PR / remote publish (strictest).** The code is leaving the sandbox, so the reviewer is
   **selective and harsh: nits and polish that rode as suggestions earlier now become blockers.**
-  Nothing cosmetic passes into prod. This is why `reviewer:pr` is the heaviest seat and should be
-  routed by operator/project config to the strongest available reviewer model rather than hard-coded
-  in core ([DISPATCH](dispatch.md)); outward merges are also the prime candidate for **human review** (below).
+  Nothing cosmetic passes into prod. This is why `reviewer:pr` is the heaviest seat (pinned to
+  Opus — [DISPATCH](dispatch.md)) and why outward merges are the prime candidate for **human review** (below).
 
 Leniency is *front-loaded* where iteration is cheap and rework is expected; strictness is
 *back-loaded* where the change is about to become permanent and public. The verdict set never
@@ -96,8 +96,8 @@ merges stay agent-reviewed.
 
 When a scope is human-reviewed, the gate **skips the reviewer agent** and records the target
 slot, `review.requested` row, and **actionable review-request mail** to the operator in one
-program-data transaction ([MAIL](mail-bus.md) — it stays unresolved/actionable until a verdict is
-rendered, so it can't be lost). The operator reviews the diff **in-app** (the diff viewer / gate UI — [TUI](tui.md)),
+program-data transaction ([MAIL](mail-bus.md) — it stays unread until a verdict is rendered, so it
+can't be lost). The operator reviews the diff **in-app** (the diff viewer / gate UI — [TUI](tui.md)),
 against the **same acceptance criteria** an agent reviewer would use, and renders **PASS / ISSUES**
 (blockers required for ISSUES). The verdict re-enters the gate identically — merge proceeds or
 kicks back; the 3-strike/escalation loop and per-target merge serialization are unchanged. Only

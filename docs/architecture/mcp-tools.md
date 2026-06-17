@@ -6,7 +6,7 @@ Agents act through **exactly one** surface — the orchestration **MCP server** 
 **no fallback**. The prototype's dual CLI+MCP surface was the root cause of its "only
 works on the `co` repo" failure: because agents could always fall back to the CLI when
 an MCP tool was missing or stubbed, **the MCP's gaps never had to be fixed** —
-half-implemented tools shipped toward protected targets, silently masked by the fallback. The
+half-implemented tools shipped to master, silently masked by the fallback. The
 redundancy didn't add safety; it *hid* defects, and it forced `co orient` to teach two
 surfaces while agents burned tokens choosing between them and recovering from the
 wrong pick.
@@ -32,12 +32,12 @@ adapter** over that core. Adapters cannot drift in *logic* (only presentation
 differs); the prototype's MCP/CLI drift came from maintaining two separate
 implementations.
 
-### Completeness gate — no stubs reach protected targets
+### Completeness gate — no stubs reach master
 
 Because there is no fallback, a stubbed agent tool breaks the agent outright — so
 completeness is enforceable and enforced. A parity/completeness check (heir to the
 prototype's feature-registry parity + prompt-lint) **fails the build/review if any
-declared MCP tool is stubbed or partial.** No half-implemented tool reaches a protected target.
+declared MCP tool is stubbed or partial.** No half-implemented tool reaches master.
 
 ### `co orient` stays — but lighter
 

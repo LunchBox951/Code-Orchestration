@@ -1,11 +1,12 @@
 # Vision
 
 `co` (Code Orchestration) is a **desktop-first, multi-agent software-engineering
-orchestrator**. It runs a team of AI coding agents (Claude and Codex behind one
-provider-neutral dispatch model) as **live, interactive terminal sessions** the operator can watch
-and steer in real time, while the agents coordinate *among themselves* through a **typed mail bus**.
-Every change passes a **strict review gate** before it can merge, push, or publish, and durable
-orchestration state is recorded so the system can be inspected, replayed, and recovered.
+orchestrator**. It runs a team of AI coding agents (Claude by default, Codex
+optionally) as **live, interactive terminal sessions** the operator can watch and
+steer in real time, while the agents coordinate *among themselves* through a
+**typed mail bus**. Every change passes a **strict review gate** before it can
+merge, push, or publish, and all state is durably recorded so the system can be
+inspected, replayed, and recovered.
 
 The core promise is unchanged in spirit but sharper in practice: **autonomous
 multi-agent work that stays auditable, gated, recoverable — and steerable.** The

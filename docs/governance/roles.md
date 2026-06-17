@@ -5,6 +5,9 @@ itself an instance of `co`'s model. The authoritative description of each agent 
 [`docs/architecture/agent-roles.md`](../architecture/agent-roles.md); this doc maps those roles onto
 GitHub mechanics — labels, the board, the review gate, and `CODEOWNERS`.
 
+> Note: the `agent-roles.md` link resolves once the docs-migration phase lands; until then it may
+> dangle. The mapping below is the governance-side summary.
+
 ## The roles
 
 | Role | What it does on `co` | GitHub expression |
