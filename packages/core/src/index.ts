@@ -1345,5 +1345,10 @@ export {
   OPERATOR_IPC_TRANSCRIPT,
 } from './operator-ipc/contract.js';
 
+// AC-S15-7 — read-only local branch data surface for the desktop Source view (offline-safe).
+// Uses refs/heads only — no network, no gh, no remotes. PRs deliberately deferred (CSP + SH-4).
+export type { BranchInfo } from './source/list-branches.js';
+export { listBranches } from './source/list-branches.js';
+
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;
