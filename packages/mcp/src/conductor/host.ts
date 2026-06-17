@@ -693,7 +693,8 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
     onTick: (o) =>
       console.error(
         `[co-mcp serve] tick ${o.tick} candidates=${o.candidateCount} ` +
-          `cold=${o.coldCandidates.length} selected=${o.selected ?? '-'} cadence=${o.cadenceFired}`,
+          `cold=${o.coldCandidates.length} rewarmed=${o.reWarmed.length} ` +
+          `selected=${o.selected ?? '-'} cadence=${o.cadenceFired}`,
       ),
     onError: (err) => console.error('[co-mcp serve] tick error:', err),
   });
