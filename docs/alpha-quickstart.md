@@ -18,7 +18,7 @@ the Conductor daemon for you — you do not need to start it manually.
 ### Step 2 — Open your project
 
 Click the **Open project** control in the top bar. Select the root directory of the repository you
-want to orchestrate. The app registers the project and stores it in recent projects.
+want to orchestrate. The app registers the project; re-opening the same directory reuses its id.
 
 Once a project is open the **daemon status indicator** in the status bar shows the Conductor health:
 `starting → healthy` (or `restarting` / `failed` if something went wrong). Wait for `healthy` before

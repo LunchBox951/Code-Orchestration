@@ -81,6 +81,10 @@ function activateView(view: NavView): void {
   if (view === 'review' && latestReviewState != null) {
     renderReview(latestReviewState);
   }
+  // Source is a pull-only read surface: fetch the branch list whenever the view becomes active.
+  if (view === 'source') {
+    refreshSource();
+  }
 }
 
 function setLiveStatus(status: string): void {
@@ -953,6 +957,84 @@ function renderReview(state: ReviewState): void {
   }
 }
 
+// ── Source view rendering (read-only Branches; P-ON4) ──────────────────────────
+
+// The date portion (YYYY-MM-DD) of an ISO-8601 commit date; '' when absent. Plain slice (no Date
+// parse) so it is deterministic + offline, and the substring is HTML-safe (digits + dashes only).
+function shortCommitDate(iso: string | undefined): string {
+  if (iso == null || iso.length < 10) return '';
+  return iso.slice(0, 10);
+}
+
+// Render the read-only Source branch list. Every state is explicit (Principle 9): a no-project notice,
+// a visible error + Retry, an empty-repo notice, or the branch rows. Rows are NON-interactive — Source
+// is a read surface (§⊘ not-an-IDE): no editing, no file browser, just branches + the deferred-PR panel.
+function renderSource(state: SourceState): void {
+  const container = document.getElementById('source-branches');
+  if (!container) return;
+
+  if (state.kind === 'no-project') {
+    container.innerHTML = `<div class="empty-state">No project open — open a repository to view its branches.</div>`;
+    return;
+  }
+
+  if (state.kind === 'error') {
+    container.innerHTML = [
+      `<div class="source-error" role="alert">`,
+      `<span class="source-error-msg">${esc(state.message)}</span>`,
+      `<button class="btn btn-secondary" data-source-action="retry" type="button"`,
+      ` aria-label="Retry loading branches">Retry</button>`,
+      `</div>`,
+    ].join('');
+    return;
+  }
+
+  if (state.branches.length === 0) {
+    container.innerHTML = `<div class="empty-state">No branches in this repository.</div>`;
+    return;
+  }
+
+  container.innerHTML = state.branches
+    .map((b) => {
+      const marker = b.isCurrent
+        ? `<span class="source-branch-current" title="current branch" aria-label="current branch">●</span>`
+        : `<span class="source-branch-current-spacer" aria-hidden="true"></span>`;
+      const upstream =
+        b.upstream != null
+          ? `<span class="source-branch-upstream">↑ ${esc(b.upstream)}</span>`
+          : '';
+      const date = shortCommitDate(b.lastCommit.committedAt);
+      const author = b.lastCommit.author ?? '';
+      const metaParts = [b.lastCommit.sha, date, author].filter((p) => p.length > 0);
+      const metaHtml = metaParts
+        .map((p) => `<span class="source-meta-item">${esc(p)}</span>`)
+        .join('<span class="source-meta-sep" aria-hidden="true">·</span>');
+      return [
+        `<div class="source-branch-row">`,
+        `<div class="source-branch-head">`,
+        marker,
+        `<span class="source-branch-name${b.isCurrent ? ' current' : ''}">${esc(b.name)}</span>`,
+        upstream,
+        `</div>`,
+        `<div class="source-branch-subject">${esc(b.lastCommit.subject)}</div>`,
+        `<div class="source-branch-meta">${metaHtml}</div>`,
+        `</div>`,
+      ].join('');
+    })
+    .join('');
+}
+
+// Pull the latest branches for the read-only Source view. Source has no push channel (it is a direct
+// main-process read), so it is refreshed on view activation + the manual Refresh/Retry controls.
+function refreshSource(): void {
+  void window.coShell
+    .sourceRefresh()
+    .then((s) => {
+      if (s != null) renderSource(s);
+    })
+    .catch((e: unknown) => showAppError(`Failed to load branches: ${errorMessage(e)}`));
+}
+
 // ── Session start form rendering ───────────────────────────────────────────────
 
 function renderSessionStartForm(): void {
@@ -966,6 +1048,10 @@ function renderSessionStartForm(): void {
     ` aria-label="Coordinator session prompt"></textarea>`,
     `</div>`,
     `<div class="session-form-footer">`,
+    // The AC-S15-6 merge bar: launch a coordinator from the BUNDLED predesigned demo spec — no prompt,
+    // no terminal. Sits alongside the free-form "Start session" button, which is unchanged.
+    `<button class="btn btn-secondary" id="session-start-demo-btn" type="button"`,
+    ` aria-label="Start coordinator session from demo spec">Start from demo spec</button>`,
     `<button class="btn btn-reply" id="session-start-btn" type="button"`,
     ` aria-label="Start coordinator session">Start session</button>`,
     `</div>`,
@@ -1121,7 +1207,18 @@ document.addEventListener('DOMContentLoaded', () => {
   renderSessionStartForm();
 
   document.getElementById('session-start-form')?.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest<HTMLElement>('#session-start-btn');
+    const target = e.target as HTMLElement;
+
+    // "Start from demo spec" — launch from the bundled predesigned spec (no prompt). On !ok the
+    // main-process reason (no project / missing spec / start failure) surfaces as a toast (Principle 9).
+    if (target.closest<HTMLElement>('#session-start-demo-btn')) {
+      void bridge.startFromDemoSpec().then((r) => {
+        if (!r.ok) showAppError(r.error ?? 'Failed to start from the demo spec');
+      });
+      return;
+    }
+
+    const btn = target.closest<HTMLElement>('#session-start-btn');
     if (!btn) return;
     const textarea = document.getElementById('session-prompt-input') as HTMLTextAreaElement | null;
     const prompt = textarea?.value.trim() ?? '';
@@ -1129,6 +1226,16 @@ document.addEventListener('DOMContentLoaded', () => {
       if (r.ok && textarea) textarea.value = '';
       else if (!r.ok) showAppError(r.error ?? 'Failed to start coordinator session');
     });
+  });
+
+  // ── Source (read-only Branches) ──────────────────────────────────────────────
+  // Both the header Refresh button and the in-pane error Retry re-pull the branch list.
+  document.getElementById('view-source')?.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    const trigger = target.closest<HTMLElement>(
+      '#source-refresh-btn, [data-source-action="retry"]',
+    );
+    if (trigger) refreshSource();
   });
 
   document.getElementById('view-review')?.addEventListener('click', (e) => {

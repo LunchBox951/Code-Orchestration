@@ -33,6 +33,13 @@ describe('desktop built-output script modes', () => {
     expect(xtermCss).toContain('.xterm');
   });
 
+  it('bundles the predesigned demo spec into dist/renderer for session:startFromDemoSpec (P-ON3)', () => {
+    // copy-renderer-assets.mjs copies repo-root docs/demo-spec-co-improves-its-docs.md → demo-spec.md
+    // so the main process can read it at runtime (readBundledDemoSpec(__dirname) → ../renderer/demo-spec.md).
+    const spec = distFile('renderer', 'demo-spec.md');
+    expect(spec).toContain('# co improves its own docs');
+  });
+
   it('emits sandbox-compatible preload JavaScript without static ESM syntax', () => {
     const preload = distFile('preload', 'preload.cjs');
 
