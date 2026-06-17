@@ -1,8 +1,13 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
-import type { ApprovalReply, OperatorMailRef, ReplyDraft } from '@co/core';
+import type { ApprovalReply, OperatorMailRef, ProjectId, ReplyDraft } from '@co/core';
 import { createAppShell } from './app-shell.js';
+import {
+  createDaemonSupervisor,
+  type DaemonStatus,
+  type DaemonSupervisor,
+} from './daemon-supervisor.js';
 import {
   requireComposerField,
   requireFiniteSeq,
@@ -20,29 +25,51 @@ const __dirname = dirname(__filename);
 
 let shell: ReturnType<typeof createAppShell> | null = null;
 let mainWindow: BrowserWindow | null = null;
+let supervisor: DaemonSupervisor | null = null;
+let currentProjectId: ProjectId | null = null;
+let latestDaemonStatus: { status: DaemonStatus; detail: string | null } | null = null;
+let shellStarted = false;
 
 function sendToRenderer(channel: string, data: unknown): void {
   mainWindow?.webContents?.send(channel, data);
+}
+
+/**
+ * Push the app-owned daemon's lifecycle status to the renderer's status badge (Principle 9 — a start
+ * failure / post-max-retries `failed` is VISIBLE, with a Retry). Once the daemon (re)becomes healthy
+ * after the shell is up, nudge the operator-IPC client to reconnect to the freshly-spawned daemon.
+ */
+function pushDaemonStatus(status: DaemonStatus): void {
+  latestDaemonStatus = { status, detail: supervisor?.detail ?? null };
+  sendToRenderer('daemon:status', latestDaemonStatus);
+  if (status === 'healthy' && shellStarted) {
+    void shell?.connection.refresh().catch((error: unknown) => {
+      console.error('Failed to reconnect after the Conductor daemon became healthy:', error);
+    });
+  }
 }
 
 function handleStartupFailure(error: unknown): void {
   console.error('Failed to start CO desktop:', error);
 
   const activeShell = shell;
+  const activeSupervisor = supervisor;
   shell = null;
+  supervisor = null;
+  shellStarted = false;
 
   if (mainWindow != null) {
     mainWindow.destroy();
     mainWindow = null;
   }
 
-  if (activeShell == null) {
-    app.quit();
-    return;
-  }
-
-  void activeShell
-    .close()
+  // Tear the app-owned daemon down before the shell so we never leak a `co-mcp serve` child.
+  void Promise.resolve()
+    .then(() => activeSupervisor?.stop())
+    .catch((stopError: unknown) => {
+      console.error('Failed to stop Conductor daemon after startup failure:', stopError);
+    })
+    .then(() => activeShell?.close())
     .catch((closeError: unknown) => {
       console.error('Failed to close CO desktop shell after startup failure:', closeError);
     })
@@ -61,6 +88,14 @@ async function createWindow(): Promise<void> {
     throw new Error('CO_PROJECT_ID environment variable is required to identify the project');
   }
   const projectId = rawProjectId as Parameters<typeof createAppShell>[0]['projectId'];
+  currentProjectId = projectId;
+
+  // The Electron app OWNS the Conductor daemon: it spawns + supervises `co-mcp serve <projectId>` so
+  // the daemon's lifecycle is the app's, not a separately-run process the operator has to launch. The
+  // supervisor pushes its status to the renderer's badge (Principle 9 — failures are visible + retryable).
+  supervisor = createDaemonSupervisor({
+    onStatus: pushDaemonStatus,
+  });
 
   shell = createAppShell({
     projectId,
@@ -95,13 +130,24 @@ async function createWindow(): Promise<void> {
     event.preventDefault();
   });
 
+  // Re-push the latest daemon status once the renderer has loaded + subscribed, so the badge reflects
+  // any status that was emitted before the renderer was ready to receive the push (startup race).
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (latestDaemonStatus != null) sendToRenderer('daemon:status', latestDaemonStatus);
+  });
+
   await mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
 
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
 
+  // Start the app-owned daemon BEFORE the shell client connects, so it attaches to a healthy socket.
+  // A `failed` start is surfaced as a visible status + Retry rather than a dead-end — we still bring up
+  // the (degraded) shell so the operator keeps a working window and can retry from inside the app.
+  await supervisor.start(projectId);
   await shell.start();
+  shellStarted = true;
 }
 
 function requireString(value: unknown, label: string): string {
@@ -387,6 +433,24 @@ ipcMain.handle('session:start', async (_event, prompt: unknown, specBody: unknow
   }
 });
 
+// ── Daemon IPC channels ──────────────────────────────────────────────────────
+
+ipcMain.handle('daemon:retry', async () => {
+  if (supervisor == null || currentProjectId == null) {
+    return { ok: false, error: 'Daemon supervisor is not ready.' };
+  }
+  try {
+    const status = await supervisor.start(currentProjectId);
+    if (status === 'healthy') {
+      await shell?.connection.refresh();
+      return { ok: true };
+    }
+    return { ok: false, error: supervisor.detail ?? 'The Conductor daemon failed to start.' };
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+});
+
 // ── Review IPC channels ─────────────────────────────────────────────────────
 
 ipcMain.handle('review:select', (_event, reviewId: unknown) => {
@@ -413,12 +477,33 @@ ipcMain.handle('review:refresh', () => {
   return shell?.reviewRefresh() ?? null;
 });
 
+/** STOP the app-owned daemon, then close the shell — the inverse of the startup order. */
+async function shutdownDaemonAndShell(): Promise<void> {
+  shellStarted = false;
+  try {
+    await supervisor?.stop();
+  } catch (error: unknown) {
+    console.error('Failed to stop the Conductor daemon:', error);
+  }
+  try {
+    await shell?.close();
+  } catch (error: unknown) {
+    console.error('Failed to close CO desktop shell:', error);
+  }
+}
+
 app.whenReady().then(openWindow).catch(handleStartupFailure);
 
 app.on('window-all-closed', () => {
-  void shell?.close().then(() => {
+  void shutdownDaemonAndShell().then(() => {
     if (process.platform !== 'darwin') app.quit();
   });
+});
+
+app.on('before-quit', () => {
+  // Best-effort: SIGTERM the daemon synchronously so a quit that bypasses window-all-closed (e.g. macOS
+  // Cmd-Q) still tears it down. stop() is idempotent, so the window-all-closed path may also run.
+  void supervisor?.stop();
 });
 
 app.on('activate', () => {

@@ -87,6 +87,30 @@ function setLiveStatus(status: string): void {
   if (label) label.textContent = status === 'live' ? 'live' : 'offline';
 }
 
+// The app-owned Conductor daemon's lifecycle, surfaced in the header. A `failed` status reveals the
+// Retry button (Principle 9 — no-silent-failures: a start/respawn failure is visible + recoverable).
+function setDaemonStatus(payload: DaemonStatusPayload): void {
+  const dot = document.getElementById('daemon-dot');
+  const label = document.getElementById('daemon-label');
+  const retry = document.getElementById('daemon-retry');
+  if (dot) dot.className = `daemon-dot daemon-${payload.status}`;
+  if (label) {
+    const text =
+      payload.status === 'healthy'
+        ? 'daemon: healthy'
+        : payload.status === 'starting'
+          ? 'daemon: starting…'
+          : payload.status === 'restarting'
+            ? 'daemon: restarting…'
+            : payload.status === 'failed'
+              ? `daemon: failed${payload.detail ? ` — ${payload.detail}` : ''}`
+              : 'daemon: stopped';
+    label.textContent = text;
+    label.setAttribute('title', payload.detail ?? text);
+  }
+  if (retry) retry.hidden = payload.status !== 'failed';
+}
+
 function showAppError(message: string): void {
   const toast = document.createElement('div');
   toast.className = 'app-error-toast';
@@ -938,6 +962,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   bridge.onConnectionError((message) => {
     showAppError(message);
+  });
+
+  // Daemon lifecycle badge + Retry (the app owns the Conductor daemon).
+  bridge.onDaemonStatus((payload) => {
+    setDaemonStatus(payload);
+  });
+
+  document.getElementById('daemon-retry')?.addEventListener('click', () => {
+    void bridge.daemonRetry().then((r) => {
+      if (!r.ok) showAppError(r.error ?? 'Failed to restart the Conductor daemon');
+    });
   });
 
   bridge.onDashboardState((state) => {

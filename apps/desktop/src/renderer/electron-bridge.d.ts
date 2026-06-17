@@ -4,6 +4,12 @@
 type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'cost';
 type ConnectionStatus = 'connecting' | 'live' | 'degraded';
 type AgentStatus = 'warm' | 'waiting' | 'stuck' | 'paused' | 'unknown';
+type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
+
+interface DaemonStatusPayload {
+  status: DaemonStatus;
+  detail: string | null;
+}
 
 interface ConnectionObservation {
   kind: 'live' | 'static';
@@ -279,6 +285,9 @@ interface CoShellBridge {
     prompt: string | null,
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
+  // ── Daemon ────────────────────────────────────────────────────────────────
+  onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;
+  daemonRetry(): Promise<{ ok: boolean; error?: string }>;
 }
 
 interface Window {
