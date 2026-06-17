@@ -104,6 +104,64 @@
         animation: pulse 2s ease-in-out infinite;
       }
 
+      .daemon-pill {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 99px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        -webkit-app-region: no-drag;
+      }
+
+      .daemon-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--border);
+        flex-shrink: 0;
+        transition: background 0.3s;
+      }
+
+      .daemon-dot.daemon-starting,
+      .daemon-dot.daemon-restarting {
+        background: var(--accent);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      .daemon-dot.daemon-healthy {
+        background: var(--live);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      .daemon-dot.daemon-failed {
+        background: var(--stuck);
+      }
+
+      .daemon-dot.daemon-stopped {
+        background: var(--paused);
+      }
+
+      .daemon-retry {
+        -webkit-app-region: no-drag;
+        cursor: pointer;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--stuck);
+        color: var(--bg);
+        font-family: inherit;
+        font-size: 10px;
+        padding: 1px 7px;
+      }
+
+      .daemon-retry[hidden] {
+        display: none;
+      }
+
       @keyframes pulse {
         0%,
         100% {
@@ -1609,6 +1667,19 @@
       <div class="live-pill">
         <span class="live-dot" id="live-dot"></span>
         <span id="live-label">offline</span>
+      </div>
+      <div class="daemon-pill" title="Conductor daemon (app-owned) lifecycle status">
+        <span class="daemon-dot daemon-starting" id="daemon-dot"></span>
+        <span id="daemon-label">daemon: starting…</span>
+        <button
+          type="button"
+          class="daemon-retry"
+          id="daemon-retry"
+          aria-label="Retry starting the Conductor daemon"
+          hidden
+        >
+          Retry
+        </button>
       </div>
       <div class="limits-wrapper" id="limits-wrapper">
         <button

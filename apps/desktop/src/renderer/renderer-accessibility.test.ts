@@ -49,11 +49,20 @@ describe('review view', () => {
     expect(rendererSource).toContain("document.activeElement?.id === 'review-composer-body'");
   });
 
-  it('points operator-facing conductor guidance at the shipped co-mcp binary', () => {
-    expect(rendererSource).toContain('start \\`co-mcp serve <projectId>\\`');
-    expect(appShellSource).toContain('start `co-mcp serve <projectId>`');
-    expect(rendererSource).not.toContain('start \\`co serve\\`');
-    expect(appShellSource).not.toContain('start `co serve`');
+  it('points operator-facing conductor guidance at the app-owned daemon status badge + Retry', () => {
+    // P-ON1: the app OWNS the Conductor daemon, so guidance must NOT tell the operator to run it by
+    // hand. The old "start `co-mcp serve <projectId>`" (and the older `co serve`) copy is gone from
+    // both the renderer and the main-process shell.
+    expect(rendererSource).not.toContain('co-mcp serve');
+    expect(appShellSource).not.toContain('co-mcp serve');
+    expect(rendererSource).not.toContain('co serve');
+    expect(appShellSource).not.toContain('co serve');
+    // Instead it points at the app-owned lifecycle UX: the header status badge + the Retry action.
+    expect(appShellSource).toContain('the app manages the daemon');
+    expect(appShellSource).toContain('status badge in the header');
+    expect(appShellSource).toContain('Retry');
+    expect(rendererSource).toContain('the app manages the daemon');
+    expect(rendererSource).toContain('status badge in the header');
   });
 
   it('only exposes verdict actions when the Review view has diff and locked criteria evidence', () => {

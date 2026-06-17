@@ -6,6 +6,10 @@ type LimitsCostState = unknown;
 type MailState = unknown;
 type AgentsConsoleState = unknown;
 type Steer = { kind: 'answer' | 'redirect'; text: string } | { kind: 'interrupt' };
+type DaemonStatusPayload = {
+  status: 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
+  detail: string | null;
+};
 
 interface ContextBridgeLike {
   exposeInMainWorld(key: string, api: unknown): void;
@@ -77,6 +81,9 @@ interface CoShellBridge {
     prompt: string | null,
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
+  // ── Daemon ────────────────────────────────────────────────────────────────
+  onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;
+  daemonRetry(): Promise<{ ok: boolean; error?: string }>;
 }
 
 const bridge: CoShellBridge = {
@@ -235,6 +242,15 @@ const bridge: CoShellBridge = {
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:start', prompt, specBody);
+  },
+  // ── Daemon ────────────────────────────────────────────────────────────────
+  onDaemonStatus(listener: (payload: DaemonStatusPayload) => void) {
+    const handler = (_event: unknown, payload: DaemonStatusPayload): void => listener(payload);
+    ipcRenderer.on('daemon:status', handler);
+    return () => ipcRenderer.removeListener('daemon:status', handler);
+  },
+  async daemonRetry(): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('daemon:retry');
   },
 };
 
