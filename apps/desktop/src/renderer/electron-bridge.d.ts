@@ -99,6 +99,7 @@ interface AgentsConsoleState {
   selectedAgentId: string | null;
   selectedStatus: AgentStatus | null;
   transcript: string;
+  transcriptError: string | null;
   connection: 'live' | 'degraded';
 }
 
@@ -135,7 +136,11 @@ interface ReviewRow {
   ts: number;
 }
 
-type SelectedContext = { status: 'loading' } | { status: 'loaded'; value: ReviewContext } | null;
+type SelectedContext =
+  | { status: 'loading' }
+  | { status: 'loaded'; value: ReviewContext }
+  | { status: 'error'; reviewId: string; message: string }
+  | null;
 
 interface VerdictComposer {
   active: boolean;
@@ -243,6 +248,7 @@ interface CoShellBridge {
   // ── Agents Console ────────────────────────────────────────────────────────
   onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
+  agentsRefreshTranscript(): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
   agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;

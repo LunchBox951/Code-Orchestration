@@ -13,7 +13,7 @@ import type {
 } from '@co/core';
 import type { ProjectId } from '@co/core';
 import { MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE, OPERATOR, projectDataDir } from '@co/core';
-import { operatorIpcSocketPath } from '@co/mcp';
+import { ConductorUnavailableError, operatorIpcSocketPath } from '@co/mcp';
 import type { OperatorIpcClient } from '@co/mcp';
 
 const FAKE_PROJECT_ID = 'test-project' as ProjectId;
@@ -1060,5 +1060,248 @@ describe('createAppShell — agentsConsole VM wiring', () => {
       selectedAgentId: 'impl-x',
       transcript: 'fresh tail\n',
     });
+  });
+});
+
+// ── No silent failures (AC-S15-11 [ST-3], Principle 9) ────────────────────────
+
+describe('createAppShell — transcript fetch failures surface (Site 1)', () => {
+  function transcriptClient(transcript: OperatorIpcClient['transcript']): OperatorIpcClient {
+    return {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript,
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+  }
+
+  it('a rejected transcript fetch yields an in-pane error, not a silently empty pane, and never throws', async () => {
+    const client = transcriptClient(vi.fn().mockRejectedValue(new Error('socket closed')));
+    const shell = createAppShell({ projectId: FAKE_PROJECT_ID, socketPath: FAKE_SOCKET, client });
+    await shell.start();
+
+    expect(() => shell.selectAgent('impl-x')).not.toThrow();
+
+    await vi.waitFor(() => {
+      expect(shell.agentsConsole.state.transcriptError).toBe('socket closed');
+    });
+    // The error is a retry STATE, not just a vanished toast — the transcript stays empty + flagged.
+    expect(shell.agentsConsole.state.transcript).toBe('');
+  });
+
+  it('refreshTranscript retries the fetch and clears the error on recovery', async () => {
+    const client = transcriptClient(
+      vi
+        .fn()
+        .mockRejectedValueOnce(new Error('transient'))
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'recovered output')),
+    );
+    const shell = createAppShell({ projectId: FAKE_PROJECT_ID, socketPath: FAKE_SOCKET, client });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    await vi.waitFor(() => {
+      expect(shell.agentsConsole.state.transcriptError).toBe('transient');
+    });
+
+    shell.refreshTranscript();
+    await vi.waitFor(() => {
+      expect(shell.agentsConsole.state.transcriptError).toBeNull();
+      expect(shell.agentsConsole.state.transcript).toBe('recovered output');
+    });
+  });
+
+  it('a stale transcript rejection does not clobber a newer selection', async () => {
+    let rejectFirst!: (e: unknown) => void;
+    const firstP = new Promise<TranscriptTail>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    const client = transcriptClient(
+      vi
+        .fn()
+        .mockReturnValueOnce(firstP)
+        .mockResolvedValueOnce(transcriptTail('impl-y', 'y output')),
+    );
+    const shell = createAppShell({ projectId: FAKE_PROJECT_ID, socketPath: FAKE_SOCKET, client });
+    await shell.start();
+
+    shell.selectAgent('impl-x'); // request 1 — left pending
+    shell.selectAgent('impl-y'); // request 2 — resolves
+    await vi.waitFor(() => {
+      expect(shell.agentsConsole.state.transcript).toBe('y output');
+    });
+
+    rejectFirst(new Error('stale x error'));
+    await flushPromises();
+
+    // The superseded impl-x rejection must NOT flag impl-y's pane.
+    expect(shell.agentsConsole.state.selectedAgentId).toBe('impl-y');
+    expect(shell.agentsConsole.state.transcriptError).toBeNull();
+  });
+});
+
+describe('createAppShell — review-context fetch failures surface (Sites 2 & 4)', () => {
+  const REVIEW_MAIL_A = {
+    seq: 1,
+    recipient: OPERATOR,
+    sender: 'lead-1',
+    type: MAIL_REVIEW_REQUEST,
+    subject: 'Review A',
+    body: 'Please review branch A.',
+    ts: 1700000000000,
+    idempotencyKey: 'review-request:rev-a',
+    resolved: false,
+  } as DeliveredMail;
+
+  const REVIEW_MAIL_B = {
+    ...REVIEW_MAIL_A,
+    seq: 2,
+    subject: 'Review B',
+    idempotencyKey: 'review-request:rev-b',
+  } as DeliveredMail;
+
+  const RESOLVED_CTX_B = {
+    kind: 'resolved',
+    reviewId: 'rev-b',
+    branch: 'co/b',
+    target: 'main',
+    scope: 'merge',
+    evidenceFingerprint: 'sha256:b',
+    diff: { kind: 'patch', patch: '@@ -1 +1 @@\n-a\n+b' },
+    criteria: { kind: 'criteria', specRef: 'spec#b', criteria: [{ text: 'b' }] },
+  } as const;
+
+  function reviewClient(reviewContext: OperatorIpcClient['reviewContext']): OperatorIpcClient {
+    return {
+      ...makeClient(),
+      reviewContext,
+    } as unknown as OperatorIpcClient;
+  }
+
+  it('a rejected reviewContext fetch surfaces an in-pane error AND a toast, not eternal loading', async () => {
+    const client = reviewClient(vi.fn().mockRejectedValue(new Error('ctx boom')));
+    const onReviewState = vi.fn();
+    const onReviewError = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => [REVIEW_MAIL_A],
+      outboxReader: () => [],
+      onReviewState,
+      onReviewError,
+    });
+
+    shell.reviewRefresh();
+    expect(shell.reviewSelect('rev-a').context).toEqual({ status: 'loading' });
+
+    await vi.waitFor(() => {
+      expect(onReviewState.mock.calls.at(-1)?.[0].context).toEqual({
+        status: 'error',
+        reviewId: 'rev-a',
+        message: 'ctx boom',
+      });
+    });
+    expect(onReviewError).toHaveBeenCalledWith('ctx boom');
+  });
+
+  it('maps a ConductorUnavailableError to the start-the-daemon guidance', async () => {
+    const client = reviewClient(vi.fn().mockRejectedValue(new ConductorUnavailableError('down')));
+    const onReviewState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => [REVIEW_MAIL_A],
+      outboxReader: () => [],
+      onReviewState,
+    });
+
+    shell.reviewRefresh();
+    shell.reviewSelect('rev-a');
+
+    await vi.waitFor(() => {
+      const ctx = onReviewState.mock.calls.at(-1)?.[0].context;
+      expect(ctx?.status).toBe('error');
+      expect(ctx?.message).toContain('co-mcp serve <projectId>');
+    });
+  });
+
+  it('times out a hung reviewContext fetch (loading → error)', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = reviewClient(vi.fn().mockReturnValue(new Promise<never>(() => {})));
+      const onReviewState = vi.fn();
+      const shell = createAppShell({
+        projectId: FAKE_PROJECT_ID,
+        socketPath: FAKE_SOCKET,
+        client,
+        actionablesReader: () => [],
+        inboxReader: () => [REVIEW_MAIL_A],
+        outboxReader: () => [],
+        onReviewState,
+      });
+
+      shell.reviewRefresh();
+      expect(shell.reviewSelect('rev-a').context).toEqual({ status: 'loading' });
+
+      vi.advanceTimersByTime(10_000);
+
+      expect(onReviewState.mock.calls.at(-1)?.[0].context).toEqual({
+        status: 'error',
+        reviewId: 'rev-a',
+        message: 'Timed out loading review context — the conductor may be busy or unreachable.',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a stale reviewContext rejection does not clobber a newer selection', async () => {
+    let rejectFirst!: (e: unknown) => void;
+    const firstP = new Promise<never>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    const client = reviewClient(
+      vi.fn().mockReturnValueOnce(firstP).mockResolvedValueOnce(RESOLVED_CTX_B),
+    );
+    const onReviewState = vi.fn();
+    const onReviewError = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => [REVIEW_MAIL_A, REVIEW_MAIL_B],
+      outboxReader: () => [],
+      onReviewState,
+      onReviewError,
+    });
+
+    shell.reviewRefresh();
+    shell.reviewSelect('rev-a'); // request 1 — left pending
+    shell.reviewSelect('rev-b'); // request 2 — resolves
+
+    await vi.waitFor(() => {
+      expect(onReviewState.mock.calls.at(-1)?.[0].context).toEqual({
+        status: 'loaded',
+        value: RESOLVED_CTX_B,
+      });
+    });
+
+    rejectFirst(new Error('stale a error'));
+    await flushPromises();
+
+    // The superseded rev-a rejection must neither flip rev-b into error nor fire a toast.
+    expect(onReviewState.mock.calls.at(-1)?.[0].context).toEqual({
+      status: 'loaded',
+      value: RESOLVED_CTX_B,
+    });
+    expect(onReviewError).not.toHaveBeenCalled();
   });
 });

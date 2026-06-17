@@ -360,6 +360,86 @@ describe('AgentsConsoleVM — setTranscriptTail', () => {
   });
 });
 
+describe('AgentsConsoleVM — setTranscriptError (Principle 9 — no-silent-failures)', () => {
+  it('sets the error for the selected agent', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptError('a1', 'fetch failed');
+    expect(vm.state.transcriptError).toBe('fetch failed');
+  });
+
+  it('is ignored for a non-selected agent (stale/again-switched request)', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator'), makeAgent('a2', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptError('a2', 'stale error');
+    expect(vm.state.transcriptError).toBeNull();
+  });
+
+  it('is ignored when no agent is selected', () => {
+    const vm = new AgentsConsoleVM();
+    vm.setTranscriptError('a1', 'no selection');
+    expect(vm.state.transcriptError).toBeNull();
+  });
+
+  it('emits when it sets the error', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    const listener = vi.fn();
+    vm.subscribe(listener);
+    vm.setTranscriptError('a1', 'boom');
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('a successful setTranscriptTail clears the error', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptError('a1', 'fetch failed');
+    vm.setTranscriptTail(tail('a1', 'recovered output'));
+    expect(vm.state.transcriptError).toBeNull();
+    expect(vm.state.transcript).toBe('recovered output');
+  });
+
+  it('a successful empty setTranscriptTail still clears the error', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptError('a1', 'fetch failed');
+    vm.setTranscriptTail(tail('a1', ''));
+    expect(vm.state.transcriptError).toBeNull();
+  });
+
+  it('switching agents clears the error', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator'), makeAgent('a2', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptError('a1', 'fetch failed');
+    vm.selectAgent('a2');
+    expect(vm.state.transcriptError).toBeNull();
+  });
+
+  it('clearSelectedTranscript clears the error', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptError('a1', 'fetch failed');
+    vm.clearSelectedTranscript();
+    expect(vm.state.transcriptError).toBeNull();
+  });
+
+  it('a roster tick does NOT clear the error (still actionable until retry/switch)', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptError('a1', 'fetch failed');
+    vm.update(liveObs([makeAgent('a1', '@operator', { hosted: true })]));
+    expect(vm.state.transcriptError).toBe('fetch failed');
+  });
+});
+
 describe('AgentsConsoleVM — appendChunk', () => {
   it('appends chunk for the selected agent', () => {
     const vm = new AgentsConsoleVM();

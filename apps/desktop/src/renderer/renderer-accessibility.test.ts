@@ -233,3 +233,46 @@ describe('agents stop / unstick (P4)', () => {
     expect(preloadSource).toContain("'agent:unstick'");
   });
 });
+
+describe('no silent failures (AC-S15-11 [ST-3], Principle 9)', () => {
+  const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+
+  it('Site 1: transcript-fetch error renders a persistent in-pane Retry, wired end-to-end', () => {
+    // Markup: a persistent error container (not a vanishing toast) lives in the agents pane.
+    expect(htmlSource).toContain('id="agents-transcript-error"');
+    // Renderer: render the banner from state.transcriptError + a Retry button → the refresh bridge.
+    expect(rendererSource).toContain('function renderTranscriptError(');
+    expect(rendererSource).toContain('data-agents-action="retry-transcript"');
+    expect(rendererSource).toContain('bridge.agentsRefreshTranscript(');
+    // Bridge + IPC + shell retry channel exist (a re-select of the same agent is a no-op).
+    expect(preloadSource).toContain('agentsRefreshTranscript(');
+    expect(preloadSource).toContain("'agents:refreshTranscript'");
+    expect(mainSource).toContain("'agents:refreshTranscript'");
+    expect(appShellSource).toContain('refreshTranscript()');
+    // The swallow is gone — the catch surfaces the error to the VM instead of {}.
+    expect(appShellSource).toContain('agentsConsoleVm.setTranscriptError(');
+    expect(appShellSource).not.toContain('.catch(() => {});');
+  });
+
+  it('Sites 2 & 4: review-context error/timeout renders an in-pane Retry, wired end-to-end', () => {
+    // Renderer: an error context renders a message + Retry that re-selects (re-enters loading).
+    expect(rendererSource).toContain("context.status === 'error'");
+    expect(rendererSource).toContain('data-review-action="retry-context"');
+    expect(rendererSource).toContain("case 'retry-context'");
+    // Shell: both the in-pane error state and the existing toast fire; a timeout guards eternal loading.
+    expect(appShellSource).toContain('reviewVm.setReviewContextError(');
+    expect(appShellSource).toContain('Timed out loading review context');
+    expect(appShellSource).toContain('REVIEW_CONTEXT_TIMEOUT_MS');
+    expect(appShellSource).toContain('clearTimeout(timer)');
+  });
+
+  it('Site 3: bootstrap fire-and-forget refreshes surface IPC rejections as a toast', () => {
+    // Each bootstrap invoke attaches a .catch → showAppError instead of a bare `void bridge.*()`.
+    expect(rendererSource).toContain('Failed to load mail');
+    expect(rendererSource).toContain('Failed to load limits / cost');
+    expect(rendererSource).toContain('Failed to load reviews');
+    expect(rendererSource).not.toMatch(/void bridge\.mailRefresh\(\);/);
+    expect(rendererSource).not.toMatch(/void bridge\.refreshLimitsCost\(\);/);
+    expect(rendererSource).not.toMatch(/void bridge\.reviewRefresh\(\);/);
+  });
+});

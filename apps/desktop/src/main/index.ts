@@ -327,6 +327,11 @@ ipcMain.handle('agents:select', (_event, agentId: unknown) => {
   return shell?.agentsConsole.state ?? null;
 });
 
+ipcMain.handle('agents:refreshTranscript', () => {
+  shell?.refreshTranscript();
+  return shell?.agentsConsole.state ?? null;
+});
+
 ipcMain.handle('agents:steer', async (_event, agentId: unknown, steer: unknown) => {
   if (shell == null) return { ok: false, error: 'shell not ready' };
   try {
