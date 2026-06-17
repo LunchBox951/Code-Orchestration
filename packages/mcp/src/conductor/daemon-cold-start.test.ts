@@ -506,6 +506,52 @@ function makeSpyEngine(): {
   return { engine: fake as unknown as ConductorEngine, ensureHostedCalls, drivableSeen };
 }
 
+/** A launch-authority stand-in whose `ensureHosted` runs the recovered agent back through the REAL
+ *  session store (`recordSession`) — exactly what the engine's `hostSession` does — so it THROWS the
+ *  GENUINE production failure ("already has an active session") for an agent that still owns its
+ *  recovered session row. This exercises the daemon's review-375 GUARD against the real default-path
+ *  throw — NOT an always-succeeds spy (the always-succeeds spy is precisely what masked the bug).
+ *  Records each `ensureHosted` attempt + counts `runCycle` runs so the test can prove the tick SURVIVED
+ *  the throw and did NOT churn a pane every tick. */
+function makeRecoveredRelaunchEngine(): {
+  engine: ConductorEngine;
+  ensureHostedCalls: HostedIdentity[];
+  runCycleCount: () => number;
+} {
+  const ensureHostedCalls: HostedIdentity[] = [];
+  let runCycles = 0;
+  const fake = {
+    isHosted: (): boolean => false, // a recovered agent is cold in this fresh engine process
+    ensureHosted: async (identity: HostedIdentity): Promise<void> => {
+      ensureHostedCalls.push(identity);
+      const sessions = openSessionStore(identity.projectId);
+      try {
+        // The REAL store refuses a duplicate active session — the production throw the GUARD must survive
+        // (the real session-reconciling relaunch is deferred [host-live] glue).
+        sessions.recordSession({
+          agentId: identity.agent,
+          pane: identity.pane,
+          cwd: identity.cwd,
+          provider: identity.provider,
+          resume: identity.resume,
+        });
+      } finally {
+        sessions.close();
+      }
+    },
+    runCycle: async (): Promise<null> => {
+      runCycles += 1;
+      return null;
+    },
+    tickClarifyTimeouts: async (): Promise<readonly DeliveredMail[]> => [],
+  };
+  return {
+    engine: fake as unknown as ConductorEngine,
+    ensureHostedCalls,
+    runCycleCount: () => runCycles,
+  };
+}
+
 /** Register the coord-1 → lead-1 parent chain a real spawn would have recorded (the roster REFUSES an
  *  agent whose parent is unregistered). coord-1 has NO provisioned worktree, so it is never a cold-start
  *  root — it stays inert (no session ⇒ not a candidate; no worktree ⇒ not cold-started). */
@@ -667,5 +713,32 @@ describe('ConductorDaemon — Stage 15 P-E re-warm recovered NON-root agents (AC
     const run2 = await reWarmSelection();
     expect(run2).toEqual(run1); // replay-stable: no wall clock in the selection
     expect(run1).toEqual(['impl-a', 'impl-b']); // candidates order = session creation order
+  });
+
+  it('GUARDS a throwing per-tick relaunch (review-375): a recovered agent that still owns its session row makes ensureHosted→recordSession THROW — the tick survives (runCycle still runs) and does not churn (attempted once)', async () => {
+    const { projectId, repo } = makeProject();
+    seedLeadChain(projectId);
+    recordRecoveredAgent(projectId, repo, 'impl-cold', 'implementer', 'lead-1');
+
+    const clock = makeClock();
+    const engine = makeRecoveredRelaunchEngine();
+    const daemon = makeReWarmDaemon(projectId, engine.engine, clock);
+
+    // TICK 1 — the REAL recordSession throw is GUARDED: the tick COMPLETES (does NOT reject), runCycle
+    // still ran, and nothing was re-warmed. PRE-GUARD this throw rejected the whole tick (starving
+    // runCycle) and spawned+killed a pane every tick (the review-375 default-path bug).
+    const t1 = await daemon.tick();
+    expect(t1.reWarmed).toEqual([]); // the launch authority refused the recovered agent
+    expect(engine.ensureHostedCalls.map((i) => i.agent)).toEqual(['impl-cold']); // attempted once
+    expect(engine.runCycleCount()).toBe(1); // runCycle RAN despite the throw — not starved
+    expect(t1.coldCandidates).toEqual(['impl-cold']); // stays a cold candidate (reported, not driven)
+
+    // TICK 2 — NO CHURN: the refused agent is NOT re-attempted (a re-attempt would spawn+kill a pane
+    // every tick), yet the daemon keeps ticking and running runCycle.
+    const t2 = await daemon.tick();
+    expect(t2.reWarmed).toEqual([]);
+    expect(engine.ensureHostedCalls.map((i) => i.agent)).toEqual(['impl-cold']); // STILL once — no per-tick churn
+    expect(engine.runCycleCount()).toBe(2); // runCycle ran again
+    expect(t2.coldCandidates).toEqual(['impl-cold']);
   });
 });

@@ -169,6 +169,14 @@ export class ConductorDaemon {
   private readonly isSkipped: (projectId: ProjectId, agent: string) => boolean;
   private tickCount = 0;
   private recovered = false;
+  /**
+   * Stage 15 (review-375 GUARD) — recovered NON-root agents whose per-tick re-warm via the single launch
+   * authority THREW (`ensureHosted → hostSession → recordSession` refuses a recovered agent that still
+   * owns its durable session row: "already has an active session"). Tracked so the daemon attempts each
+   * at most ONCE and never churns a pane every tick. In-memory only — a fresh daemon legitimately
+   * re-attempts once; deterministic (no wall clock).
+   */
+  private readonly reWarmFailed = new Set<string>();
 
   constructor(deps: ConductorDaemonDeps) {
     if (!Number.isInteger(deps.reconcileEvery) || deps.reconcileEvery < 1) {
@@ -393,6 +401,13 @@ export class ConductorDaemon {
    * selection is the pure `candidates` order ({@link buildCandidates} → session creation order); the
    * same injected `now()` + same recovered state ⇒ the same re-warm selection (replay-stable).
    *
+   * GUARD (review-375): the per-tick `ensureHosted` is wrapped. In production a recovered agent still
+   * owns its durable session row, so the launch authority THROWS (`recordSession`: "already has an active
+   * session"; the real session-reconciling relaunch is deferred [host-live] glue). An UNCAUGHT throw here
+   * would reject the whole tick — starving `runCycle` — and spawn+kill a pane every tick. So a throw is
+   * caught and the agent recorded in {@link reWarmFailed}: attempted at most once, then left a cold
+   * candidate. The tick ALWAYS proceeds to `runCycle`.
+   *
    * SELECTION ONLY: the real binary relaunch (re-spawning the crashed provider, reconciling its existing
    * session row) stays `[host-live]` glue, exactly as this module's docstring notes — this is the
    * in-sandbox SELECTION that drives that handoff. Returns the ids re-warmed this tick (for the
@@ -405,8 +420,19 @@ export class ConductorDaemon {
     for (const identity of candidates) {
       if (this.engine.isHosted(identity.projectId, identity.agent)) continue; // warm — single launch authority
       if (this.isRootIdentity(identity)) continue; // roots stay with the cold-start path (re-warm is non-root)
-      await this.engine.ensureHosted(identity);
-      reWarmed.push(identity.agent);
+      const key = `${identity.projectId} ${identity.agent}`;
+      if (this.reWarmFailed.has(key)) continue; // already refused — never churn a pane every tick (review-375)
+      try {
+        await this.engine.ensureHosted(identity);
+        reWarmed.push(identity.agent);
+      } catch {
+        // GUARD (review-375): the recovered agent still owns its durable session row, so the single
+        // launch authority refuses it (`ensureHosted → hostSession → recordSession`: "already has an
+        // active session"). The real session-reconciling relaunch is [host-live] glue (deferred). Catch
+        // so a throw can NEVER stall `runCycle` or churn a pane every tick; record it so the agent is
+        // attempted at most once and stays a cold candidate, exactly as before P-E.
+        this.reWarmFailed.add(key);
+      }
     }
     return reWarmed;
   }
