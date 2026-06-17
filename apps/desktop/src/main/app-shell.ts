@@ -148,11 +148,14 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   const socketPath = deps.socketPath ?? defaultOperatorSocketPath(deps.projectId);
 
   // Open the mail store for the app's lifetime (D5 hybrid: static reads go direct,
-  // daemon-down-safe). Only opened when no readers are injected (production mode).
-  // Tests that inject actionablesReader get ownedStore=null; mail reads return [] safely.
-  const ownedStore = deps.actionablesReader == null ? openMailStore(deps.projectId) : null;
+  // daemon-down-safe). Only opened in production mode. Tests commonly inject only
+  // the operator IPC client, so an injected client defaults static readers to [].
+  const testMode = deps.client != null;
+  const ownedStore =
+    !testMode && deps.actionablesReader == null ? openMailStore(deps.projectId) : null;
   const readActionables: () => readonly DeliveredMail[] =
-    deps.actionablesReader ?? (() => ownedStore!.outstanding('@operator'));
+    deps.actionablesReader ??
+    (ownedStore != null ? () => ownedStore.outstanding('@operator') : () => []);
   // Reuse ownedStore for mail reads in production; fall back to empty arrays in test mode.
   const readInbox: (r: string) => readonly DeliveredMail[] =
     deps.inboxReader ?? (ownedStore != null ? (r) => ownedStore.inbox(r) : () => []);
@@ -160,8 +163,9 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     deps.outboxReader ?? (ownedStore != null ? (s) => ownedStore.sentBy(s) : () => []);
 
   // Open the dispatch store for usage/cost static reads (D5: daemon-down-safe pure reads).
-  // Opened when no readers are injected (production mode); tests inject reader fns directly.
-  const ownedDispatchStore = deps.bucketsReader == null ? openDispatchStore(deps.projectId) : null;
+  // Opened in production mode only; injected-client tests default to empty readers.
+  const ownedDispatchStore =
+    !testMode && deps.bucketsReader == null ? openDispatchStore(deps.projectId) : null;
   const readBuckets: () => readonly UsageBucket[] =
     deps.bucketsReader ??
     (ownedDispatchStore != null ? () => ownedDispatchStore.readBuckets() : () => []);

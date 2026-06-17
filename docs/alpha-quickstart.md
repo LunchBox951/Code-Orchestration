@@ -10,10 +10,11 @@ for the primary flow.
 
 ## Primary flow — desktop app (no terminal)
 
-### Step 1 — Install the app
+### Step 1 — Build the app
 
-Download and install the `co` desktop app for your platform. The app bundles `co-mcp` and manages
-the Conductor daemon for you — you do not need to start it manually.
+From a fresh checkout, run `pnpm install && pnpm build`, then start the desktop app from the built
+desktop package. A polished installer is post-v1; the app still manages `co-mcp` and the Conductor
+daemon for you — you do not need to start it manually.
 
 ### Step 2 — Open your project
 
@@ -128,7 +129,7 @@ Operator host-live acceptance (run before merging):
 [ ] Auth: co doctor --live → [ok] provider-compatibility for the provider(s) you will use.
 [ ] Session started: used "Start from demo spec" or "Start session" in the Dashboard.
 [ ] Plan-with-operator: the coordinator mails a clarify/brainstorm; you reply in-app; it drafts a spec.
-[ ] Lock: you approve the spec (co_spec_lock via the coordinator's tool call).
+[ ] Lock: you approve the spec with the operator-only `co_spec_lock` path; agents cannot lock it.
 [ ] Autonomous drive: WITHOUT manual tool calls, co spawns lead/implementer, runs turns, and a
     review_request lands in the Review view.
 [ ] Approve: click PASS in the Review view; confirm the gated merge lands on the integration branch.

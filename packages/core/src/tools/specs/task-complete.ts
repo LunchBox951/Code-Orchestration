@@ -24,9 +24,10 @@ type TaskCompleteInput = z.infer<typeof taskCompleteInput>;
  * coordinator records that phase `merged`, it completes the task.
  *
  * SAFETY GATE (deterministic, Principle 9 — fail loud): it REFUSES unless EVERY phase status is
- * `merged`. This makes premature completion impossible — a task whose plan still has an un-merged phase
- * cannot be closed. The check is a pure store read (no clock); the event's completion timestamp comes
- * from `event.ts` on replay (freeze #6 — never a wall clock).
+ * `merged` AND has a green `phase.verified` record. This makes premature completion impossible — a
+ * task whose plan still has an un-merged or unverified phase cannot be closed. The check is a pure
+ * store read (no clock); the event's completion timestamp comes from `event.ts` on replay (freeze #6
+ * — never a wall clock).
  */
 export const taskCompleteTool: ToolSpec<TaskCompleteInput, PlanRecordOutput> = {
   name: 'co_task_complete',
@@ -62,6 +63,18 @@ export const taskCompleteTool: ToolSpec<TaskCompleteInput, PlanRecordOutput> = {
       throw new Error(
         `co_task_complete: refusing to complete task '${input.task_id}' — ${unmerged.length} ` +
           `phase(s) not 'merged': ${detail}. Every phase must merge before the task can close.`,
+      );
+    }
+
+    const unverified = plan.phases.filter((p) => p.verifiedPass !== true);
+    if (unverified.length > 0) {
+      const detail = unverified
+        .map((p) => `'${p.phaseId}' (${p.verifiedPass === false ? 'failed' : 'missing'})`)
+        .join(', ');
+      throw new Error(
+        `co_task_complete: refusing to complete task '${input.task_id}' — ${unverified.length} ` +
+          `phase(s) not verified green: ${detail}. Every phase must have phase.verified(pass=true) ` +
+          'before the task can close.',
       );
     }
 

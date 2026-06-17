@@ -7,10 +7,12 @@
 
 ## Purpose
 
-Stage 15 is the **last prototype `co` session**. It makes `co` **v1-complete in-sandbox** and defers
-exactly one thing: **the live host-run against real `claude`/`codex`.** This document is the bridge
-across that handoff — so when Stage 15 lands and the operator runs the live proof, **`co`
-(self-hosting) can pick up exactly where the prototype left off**, with no lost context.
+Stage 15 is the **last prototype `co` implementation session**. It completes the remaining
+agent-buildable **in-sandbox** spine and defers the host-only evidence bucket: **the live host-run
+against real `claude`/`codex`.** After that live run, the `dev → main` promotion and `SH-3`
+prototype-footprint teardown still remain. This document is the bridge across that handoff — so when
+Stage 15 lands and the operator runs the live proof, **`co` (self-hosting) can pick up exactly where
+the prototype left off**, with no lost context.
 
 The deferral is *intentional and irreducible*: a green `FakePty` sandbox is, by construction, **not**
 host-live evidence (Principle 9, Principle 2). Every `[host-live]` item below can only be discharged
@@ -33,13 +35,14 @@ Built + `FakePty`/vitest-proven, landed on `co/stage-15` → `dev`:
 - **Desktop is the one-stop surface** — app owns/supervises the daemon, repo/directory picker,
   in-app session launch from a predesigned spec; the live terminal fits + renders the raw pty stream;
   mail typing is correct; observe-loop failures surface; typed per-audience mail cards; a read-only
-  Source minimum (Branches + PRs). → spine for `SF-1/4/5/6`, `ST-3`.
+  Source minimum (Branches; PRs honestly deferred). → spine for `SF-1/4/5/6`, `ST-3`.
 - **Switchable proof harness** (`runProof({fake|claude|codex})` + a reusable `FakeProvider` + a
   "fake ≠ live" provenance guard). → raises `SF-1`/`PV-2` *proof confidence*.
 - **v1 scorecard reconciled** — [`v1-acceptance-criteria.md`](v1-acceptance-criteria.md) reflects the
   true `dev` state, with `SH-1` advanced `☐ → ◐`.
 
-> None of the above flips a v1 `☑`. They make every `☑` **one host-run away.**
+> None of the above flips a v1 `☑`. They make the host-live `☑` evidence collectible; promotion and
+> teardown remain after the run.
 
 ## 2. What is DEFERRED to the live host-run (the operator-gated bucket)
 
@@ -52,7 +55,7 @@ already proved.
 | **`SF-1`** | Real `claude`/`codex` reach an authenticated `ready` prompt in a real node-pty; the in-app terminal is legible at the live geometry (#40 PTY width-agreement). | `co-mcp host-proof claude\|codex`; the app console | FakePty startup classify; xterm FitAddon + raw-stream render |
 | **`SF-2`** | A real mid-turn **interrupt actually halts** a live turn (per-provider key verified). | host-proof steer step; app steer controls | byte-written-before-settle (`steerMidTurn`) |
 | **`PV-2`** / `PV-1` | Interactive **subscription auth works for BOTH providers**, and both run real worker turns (**Codex parity** — the load-bearing unknown). | `co doctor --live`; host-proof per provider | spawn/transport seam, provider-neutral dispatch |
-| **`ST-2`** | Crash/restart **recovery against the real daemon** (host-side handoff); zombies reconciled to WAITING. | host-proof SIGKILL → recover; `co-mcp serve` restart | `recoverProjectStore` replay; reconcile loop |
+| **`ST-2`** | Crash/restart **recovery against the real daemon** (host-side handoff); zombies reconciled to WAITING. | host-proof SIGKILL → recover; app-supervised daemon restart | `recoverProjectStore` replay; reconcile loop |
 | **`ST-3`** | **Live-stream monitoring** catches a real silent-stop; no silent failures under real traffic. | host-proof; watchdog under live load | watchdog seam-injected silent-stop test |
 | **`SH-4`** | `co` operates on **a real stranger repo**, including a **local-only Offline** one (no remote). | app: choose any repo; [Offline runbook](offline-runbook.md) | offline path in `sh1-dry-run` |
 | **`SH-5`** | A blocked raw command (`git push` / `gh pr create\|merge`) **fails closed in a real provider pane** (`AC-L7-6 [host-live]`). | host-proof; run a blocked cmd in a pane | static source guard + runtime block-list |

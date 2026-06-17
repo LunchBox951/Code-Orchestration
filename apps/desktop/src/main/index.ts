@@ -8,6 +8,7 @@ import { createDaemonSupervisor } from './daemon-supervisor.js';
 import { createProjectController } from './open-project.js';
 import { resolveSourceState } from './source-ipc.js';
 import { readBundledDemoSpec, startFromDemoSpec } from './demo-spec.js';
+import { desktopErrorMessage } from './desktop-errors.js';
 import {
   requireComposerField,
   requireFiniteSeq,
@@ -289,7 +290,7 @@ ipcMain.handle('mail:reply', async (_event, target: unknown, draft: unknown) => 
     shell.refreshMail();
     return { ok: true };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = desktopErrorMessage(e, 'send mail');
     sendToRenderer('mail:error', msg);
     return { ok: false, error: msg };
   }
@@ -307,7 +308,7 @@ ipcMain.handle('mail:approve', async (_event, approvalSeq: unknown, reply: unkno
     await shell.connection.refresh();
     return { ok: true };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = desktopErrorMessage(e, 'approve or decline');
     sendToRenderer('mail:error', msg);
     return { ok: false, error: msg };
   }
@@ -360,7 +361,7 @@ ipcMain.handle('mail:markRead', async (_event, recipient: unknown, seq: unknown)
     shell.refreshMail();
     return { ok: true };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = desktopErrorMessage(e, 'mark mail read');
     sendToRenderer('mail:error', msg);
     return { ok: false, error: msg };
   }
@@ -398,7 +399,7 @@ ipcMain.handle('agents:steer', async (_event, agentId: unknown, steer: unknown) 
     await shell.client.steer(requireAgentId(agentId), requireSteer(steer));
     return { ok: true };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = desktopErrorMessage(e, 'steer the agent');
     return { ok: false, error: msg };
   }
 });
@@ -410,7 +411,7 @@ ipcMain.handle('agent:stop', async (_event, agentId: unknown) => {
     await shell.client.stop(requireAgentId(agentId));
     return { ok: true };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = desktopErrorMessage(e, 'stop the agent');
     sendToRenderer('agentsConsole:error', msg);
     return { ok: false, error: msg };
   }
@@ -423,7 +424,7 @@ ipcMain.handle('agent:unstick', async (_event, agentId: unknown) => {
     await shell.client.unstick(requireAgentId(agentId));
     return { ok: true };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = desktopErrorMessage(e, 'unstick the agent');
     sendToRenderer('agentsConsole:error', msg);
     return { ok: false, error: msg };
   }
@@ -445,7 +446,7 @@ ipcMain.handle('session:start', async (_event, prompt: unknown, specBody: unknow
     });
     return { ok: true };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = desktopErrorMessage(e, 'start a session');
     return { ok: false, error: msg };
   }
 });

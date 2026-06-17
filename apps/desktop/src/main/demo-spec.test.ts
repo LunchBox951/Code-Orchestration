@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StartSessionParams } from '@co/core';
+import { ConductorUnavailableError } from '@co/mcp';
 import { bundledDemoSpecPath, startFromDemoSpec } from './demo-spec.js';
 
 /**
@@ -72,6 +73,20 @@ describe('startFromDemoSpec (P-ON3 demo-spec launch)', () => {
     };
     const result = await startFromDemoSpec({ client, readDemoSpec: () => 'spec body' });
     expect(result).toEqual({ ok: false, error: 'conductor unavailable' });
+  });
+
+  it('maps conductor-down startSession rejection to app-owned daemon guidance', async () => {
+    const client = {
+      startSession: async (): Promise<unknown> => {
+        throw new ConductorUnavailableError('Conductor unavailable; run `co-mcp serve test`.');
+      },
+    };
+    const result = await startFromDemoSpec({ client, readDemoSpec: () => 'spec body' });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('the app manages the daemon');
+    expect(result.error).toContain('to start from the demo spec');
+    expect(result.error).not.toContain('co-mcp serve');
   });
 
   it('derives the bundled spec path from the main bundle dir (dist/main → dist/renderer)', () => {

@@ -14,8 +14,9 @@ import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
 
 // Stage 15 P-D — co_task_complete: coordinator records the terminal task.completed once EVERY phase
-// has merged; refuses premature completion (a phase not 'merged'), an unknown plan, and a
-// non-coordinator caller; loud-fails when ctx.plans / ctx.roster are absent.
+// has merged with green verification; refuses premature completion (a phase not 'merged' or not
+// verified), an unknown plan, and a non-coordinator caller; loud-fails when ctx.plans / ctx.roster are
+// absent.
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -88,6 +89,8 @@ describe('co_task_complete — records task.completed when every phase has merge
     const ctx = makeCtx('tc-all-merged', 'coord-1');
     ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
     seedPlan(ctx, 'task-tc-1', ['phase1', 'phase2']);
+    ctx.plans!.recordPhaseVerified('task-tc-1', 'phase1', 'base-a', true, 'coord-1');
+    ctx.plans!.recordPhaseVerified('task-tc-1', 'phase2', 'base-b', true, 'coord-1');
 
     expect(ctx.plans!.getPlan('task-tc-1')?.completedTs).toBeUndefined();
 
@@ -120,6 +123,30 @@ describe('co_task_complete — premature-completion guard (deterministic safety)
     await expect(
       invokeTool(registry, ctx, 'co_task_complete', { task_id: 'ghost' }),
     ).rejects.toThrow(/no plan recorded/i);
+  });
+
+  it('refuses a merged phase that has no green verification record', async () => {
+    const ctx = makeCtx('tc-merged-unverified', 'coord-1');
+    ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+    seedPlan(ctx, 'task-tc-2b', ['phase1', 'phase2']);
+
+    await expect(
+      invokeTool(registry, ctx, 'co_task_complete', { task_id: 'task-tc-2b' }),
+    ).rejects.toThrow(/not verified.*phase1.*phase2/i);
+    expect(ctx.plans!.getPlan('task-tc-2b')?.completedTs).toBeUndefined();
+  });
+
+  it('refuses a merged phase whose latest verification failed', async () => {
+    const ctx = makeCtx('tc-merged-failed-verification', 'coord-1');
+    ctx.roster!.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+    seedPlan(ctx, 'task-tc-2c', ['phase1', 'phase2']);
+    ctx.plans!.recordPhaseVerified('task-tc-2c', 'phase1', 'base-a', true, 'coord-1');
+    ctx.plans!.recordPhaseVerified('task-tc-2c', 'phase2', 'base-b', false, 'coord-1');
+
+    await expect(
+      invokeTool(registry, ctx, 'co_task_complete', { task_id: 'task-tc-2c' }),
+    ).rejects.toThrow(/not verified.*phase2/i);
+    expect(ctx.plans!.getPlan('task-tc-2c')?.completedTs).toBeUndefined();
   });
 });
 

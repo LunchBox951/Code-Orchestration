@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { StartSessionParams } from '@co/core';
+import { desktopErrorMessage } from './desktop-errors.js';
 
 /**
  * P-ON3 — "Start from demo spec" (AC-S15-6, the operator MERGE BAR: launch a coordinator from a
@@ -67,6 +68,6 @@ export async function startFromDemoSpec(
     await deps.client.startSession({ specBody });
     return { ok: true };
   } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    return { ok: false, error: desktopErrorMessage(e, 'start from the demo spec') };
   }
 }

@@ -312,15 +312,6 @@ function liveRunningAgents(projectId: ProjectId, engine: ConductorEngine): reado
   }
 }
 
-function hasOutstandingActionable(projectId: ProjectId, agentId: string): boolean {
-  const mail = openMailStore(projectId);
-  try {
-    return mail.outstanding(agentId).length > 0;
-  } finally {
-    mail.close();
-  }
-}
-
 function hasWaitingItems(projectId: ProjectId, agentId: string): boolean {
   const mail = openMailStore(projectId);
   try {
@@ -567,8 +558,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         ...obs,
         pidAlive: pidAliveFor(agent),
         hasWaitingItems: hasWaitingItems(projectId, agent.agentId),
-        hasOutstandingActionable:
-          obs.turnStartedAt !== undefined && hasOutstandingActionable(projectId, agent.agentId),
+        hasOutstandingActionable: obs.turnStartedAt !== undefined,
       };
     },
     now,

@@ -72,7 +72,8 @@ The app-driven on-ramp makes this the same flow as any other run (the CLI is the
 2. `co doctor --live` → confirm `[ok] provider-compatibility` for the provider(s) you will use.
 3. **Open the desktop app** (it owns/supervises the daemon).
 4. **Choose the local-only repo/directory** in the app. With no remote, it registers and resolves to
-   **Offline** automatically; the app shows the mode. (CLI: confirm with `co status`.)
+   **Offline** automatically. The current desktop surface does not yet render the repo mode directly;
+   confirm with `co status`.
 5. **Launch a coordinator from a predesigned spec**; watch it cold-start in the Agents Console.
 6. Plan-with-operator → `/lock` → autonomous drive → **PASS in the Review view** → confirm the gated
    **local** merge lands on the integration branch.
@@ -83,7 +84,7 @@ The app-driven on-ramp makes this the same flow as any other run (the CLI is the
 
 | Evidence item | How to capture |
 |---|---|
-| Offline auto-detect | `co status` (or the app) shows the project in Offline mode for the no-remote repo |
+| Offline auto-detect | `co status` shows the project in Offline mode for the no-remote repo |
 | Push/PR disabled | `co_push` / `co_pr_merge` each refuse loud with the Offline reason |
 | Gated local merge landed | `git log <integration-branch> --oneline -1` after a Review-view PASS |
 | Prototype-free runtime | the run was driven by built `co` / `co-mcp` against program-data, not `.co/` state |

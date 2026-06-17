@@ -117,6 +117,14 @@ export function createProjectController(deps: ProjectControllerDeps): ProjectCon
     deps.onCurrentProject(currentProject);
   }
 
+  function pushNoProjectState(): void {
+    currentProjectId = null;
+    currentPath = null;
+    latestDaemonStatus = { status: 'stopped', detail: null };
+    deps.onDaemonStatus(latestDaemonStatus);
+    pushCurrentProject();
+  }
+
   /**
    * Resolve a project's absolute path from the registry — a purely LOCAL read (no network, SH-4 offline-safe).
    * Used on the env-startup path where only the id is known; a lookup failure degrades to `null`, never throws.
@@ -171,19 +179,25 @@ export function createProjectController(deps: ProjectControllerDeps): ProjectCon
     currentPath = path !== undefined ? path : resolveProjectPath(projectId);
     pushCurrentProject();
 
-    // 3. Build a fresh supervisor + shell for the new project (createAppShell binds per-project stores at
-    //    construction, so a switch genuinely requires a new shell — not a re-point of the old one).
-    const newSupervisor = deps.createSupervisor({ onStatus: handleDaemonStatus });
-    supervisor = newSupervisor;
-    const newShell = deps.createShell(projectId);
-    shell = newShell;
+    try {
+      // 3. Build a fresh supervisor + shell for the new project (createAppShell binds per-project stores at
+      //    construction, so a switch genuinely requires a new shell — not a re-point of the old one).
+      const newSupervisor = deps.createSupervisor({ onStatus: handleDaemonStatus });
+      supervisor = newSupervisor;
+      const newShell = deps.createShell(projectId);
+      shell = newShell;
 
-    // 4. Start the daemon BEFORE the shell connects (it attaches to a healthy socket). A failed start is
-    //    surfaced as a visible status + Retry via handleDaemonStatus; the shell still comes up degraded so
-    //    the operator keeps a working window and can retry from inside the app (the P-ON1 invariant).
-    await newSupervisor.start(projectId);
-    await newShell.start();
-    shellStarted = true;
+      // 4. Start the daemon BEFORE the shell connects (it attaches to a healthy socket). A failed start is
+      //    surfaced as a visible status + Retry via handleDaemonStatus; the shell still comes up degraded so
+      //    the operator keeps a working window and can retry from inside the app (the P-ON1 invariant).
+      await newSupervisor.start(projectId);
+      await newShell.start();
+      shellStarted = true;
+    } catch (e) {
+      await teardownActive();
+      pushNoProjectState();
+      throw e;
+    }
   }
 
   // Serialize opens through one tail promise so a second open (e.g. the picker fired while the env project
@@ -232,12 +246,8 @@ export function createProjectController(deps: ProjectControllerDeps): ProjectCon
   }
 
   function showNoProject(error?: string): void {
-    currentProjectId = null;
-    currentPath = null;
     // No project ⇒ no daemon: report `stopped` so the header badge is accurate (not a perpetual "starting…").
-    latestDaemonStatus = { status: 'stopped', detail: null };
-    deps.onDaemonStatus(latestDaemonStatus);
-    pushCurrentProject();
+    pushNoProjectState();
     if (error != null) deps.onError(error);
   }
 

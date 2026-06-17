@@ -58,10 +58,11 @@ function walkSource(root: string): string[] {
 
 /**
  * Detect raw publish-command CONSTRUCTION that survives comment stripping. Matches both the
- * arg-array form an exec seam is handed (`['push', …]`, `['pr', 'create'|'merge', …]` — whitespace /
- * newline tolerant so a multi-line array still trips) and the shell-string form (`git push …`,
- * `gh pr create|merge …`). Strip order: block comments first (removes JSDoc mentions), then line
- * comments — so a doc comment that merely *mentions* `gh pr create` is never a violation.
+ * arg-array form an exec seam is handed (`['push', …]`, `['pr', 'create'|'merge', …]`, including
+ * leading global args like `['-C', repo, 'push']` / `['--repo', repo, 'pr', 'create']`) and the
+ * shell-string form (`git push …`, `gh pr create|merge …`). Strip order: block comments first
+ * (removes JSDoc mentions), then line comments — so a doc comment that merely *mentions*
+ * `gh pr create` is never a violation.
  */
 export function detectRawPublish(source: string): string[] {
   const stripped = source
@@ -69,11 +70,11 @@ export function detectRawPublish(source: string): string[] {
     .replace(/\/\/[^\n]*/g, ''); // line comments
   const hits: string[] = [];
   // Raw `git push`: a push-subcommand arg-array, or a `git push` / `git-push` command string.
-  const gitPushArrayRe = /\[\s*['"`]push['"`]/g;
+  const gitPushArrayRe = /\[[^\]]*['"`]push['"`][^\]]*\]/g;
   const gitPushStringRe = /\bgit[\s-]+push\b/g;
   // Raw `gh pr create|merge`: a ['pr', 'create'|'merge', …] arg-array (newline tolerant via \s*), or
   // a `gh pr create|merge` command string.
-  const ghPrArrayRe = /\[\s*['"`]pr['"`]\s*,\s*['"`](create|merge)['"`]/g;
+  const ghPrArrayRe = /\[[^\]]*['"`]pr['"`][^\]]*['"`](create|merge)['"`][^\]]*\]/g;
   const ghPrStringRe = /\bgh\s+pr\s+(create|merge)\b/g;
   let m: RegExpExecArray | null;
   while ((m = gitPushArrayRe.exec(stripped)) !== null) hits.push(`git push (arg-array): ${m[0]}`);
@@ -166,6 +167,12 @@ describe('SH-5 — detectRawPublish goes RED on raw publish constructions', () =
     expect(detectRawPublish("execFileSync('git', ['push', 'origin', branch]);")).not.toEqual([]);
   });
 
+  it('flags a git push arg-array with leading global args', () => {
+    expect(
+      detectRawPublish("execFileSync('git', ['-C', repo, 'push', 'origin', branch]);"),
+    ).not.toEqual([]);
+  });
+
   it('flags a force git push command string', () => {
     expect(detectRawPublish('await sh(`git push --force origin ${b}`);')).not.toEqual([]);
   });
@@ -178,8 +185,20 @@ describe('SH-5 — detectRawPublish goes RED on raw publish constructions', () =
     expect(detectRawPublish("ghExec(cwd, ['pr', 'create', '--base', into]);")).not.toEqual([]);
   });
 
+  it('flags a gh pr create arg-array with leading global args', () => {
+    expect(
+      detectRawPublish("ghExec(cwd, ['--repo', repo, 'pr', 'create', '--base', into]);"),
+    ).not.toEqual([]);
+  });
+
   it('flags a gh pr merge arg-array', () => {
     expect(detectRawPublish("ghExec(cwd, ['pr', 'merge', String(num)]);")).not.toEqual([]);
+  });
+
+  it('flags a gh pr merge arg-array with leading global args', () => {
+    expect(detectRawPublish("ghExec(cwd, ['-R', repo, 'pr', 'merge', String(num)]);")).not.toEqual(
+      [],
+    );
   });
 
   it('flags a multi-line gh pr create arg-array (newline between elements)', () => {

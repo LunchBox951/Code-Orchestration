@@ -28,12 +28,14 @@ class FakeSupervisor implements SupervisorLike {
     private readonly events: string[],
     private readonly onStatus: (status: DaemonStatus) => void,
     private readonly startResult: (projectId: ProjectId, attempt: number) => DaemonStatus,
+    private readonly startError?: Error,
   ) {}
 
   async start(projectId: ProjectId): Promise<DaemonStatus> {
     this.startCalls.push(projectId);
     this.lastProjectId = projectId;
     this.events.push(`supervisor.start:${projectId}`);
+    if (this.startError != null) throw this.startError;
     this.onStatus('starting');
     const result = this.startResult(projectId, this.startCalls.length);
     this.detail = result === 'failed' ? 'fake daemon did not become healthy' : null;
@@ -67,9 +69,11 @@ class FakeShell {
   constructor(
     private readonly label: string,
     private readonly events: string[],
+    private readonly startError?: Error,
   ) {}
 
   async start(): Promise<void> {
+    if (this.startError != null) throw this.startError;
     this.started = true;
     this.events.push(`shell.start:${this.label}`);
   }
@@ -127,6 +131,9 @@ interface HarnessOptions {
   registerImpl?: (absPath: string) => ProjectId;
   pathForImpl?: (projectId: ProjectId) => string | undefined;
   startResult?: (projectId: ProjectId, attempt: number) => DaemonStatus;
+  supervisorStartThrows?: boolean;
+  createShellThrows?: boolean;
+  shellStartThrows?: boolean;
   openRegistryThrows?: boolean;
 }
 
@@ -142,12 +149,22 @@ function makeHarness(opts: HarnessOptions = {}) {
 
   const deps: ProjectControllerDeps = {
     createSupervisor: ({ onStatus }) => {
-      const sup = new FakeSupervisor(events, onStatus, startResult);
+      const sup = new FakeSupervisor(
+        events,
+        onStatus,
+        startResult,
+        opts.supervisorStartThrows === true ? new Error('daemon spawn exploded') : undefined,
+      );
       supervisors.push(sup);
       return sup;
     },
     createShell: (projectId) => {
-      const shell = new FakeShell(projectId, events);
+      if (opts.createShellThrows === true) throw new Error('shell factory exploded');
+      const shell = new FakeShell(
+        projectId,
+        events,
+        opts.shellStartThrows === true ? new Error('shell start exploded') : undefined,
+      );
       shells.push(shell);
       return shell as unknown as AppShell;
     },
@@ -366,6 +383,56 @@ describe('open-project — failures are visible (Principle 9) and leave the app 
     expect(h.registries).toHaveLength(0);
     expect(h.shells).toHaveLength(0);
     expect(h.controller.currentProject).toBeNull();
+  });
+
+  it('a shell factory failure cleans up the partial supervisor and resets to no-project', async () => {
+    const h = makeHarness({ createShellThrows: true });
+
+    await expect(
+      h.controller.openProject('pid-bad-shell' as ProjectId, '/repo/bad'),
+    ).rejects.toThrow(/shell factory exploded/);
+
+    expect(h.supervisors).toHaveLength(1);
+    expect(h.supervisors[0]!.stopCount).toBe(1);
+    expect(h.shells).toHaveLength(0);
+    expect(h.controller.shell).toBeNull();
+    expect(h.controller.currentProject).toBeNull();
+    expect(h.currentProjects.at(-1)).toBeNull();
+    expect(h.daemonStatuses.at(-1)).toEqual({ status: 'stopped', detail: null });
+  });
+
+  it('a daemon start exception closes the new shell and resets to no-project', async () => {
+    const h = makeHarness({ supervisorStartThrows: true });
+
+    await expect(
+      h.controller.openProject('pid-bad-daemon' as ProjectId, '/repo/bad'),
+    ).rejects.toThrow(/daemon spawn exploded/);
+
+    expect(h.supervisors).toHaveLength(1);
+    expect(h.supervisors[0]!.stopCount).toBe(1);
+    expect(h.shells).toHaveLength(1);
+    expect(h.shells[0]!.closed).toBe(true);
+    expect(h.controller.shell).toBeNull();
+    expect(h.controller.currentProject).toBeNull();
+    expect(h.currentProjects.at(-1)).toBeNull();
+    expect(h.daemonStatuses.at(-1)).toEqual({ status: 'stopped', detail: null });
+  });
+
+  it('a shell start exception stops the daemon, closes the shell, and resets to no-project', async () => {
+    const h = makeHarness({ shellStartThrows: true });
+
+    await expect(
+      h.controller.openProject('pid-bad-start' as ProjectId, '/repo/bad'),
+    ).rejects.toThrow(/shell start exploded/);
+
+    expect(h.supervisors).toHaveLength(1);
+    expect(h.supervisors[0]!.stopCount).toBe(1);
+    expect(h.shells).toHaveLength(1);
+    expect(h.shells[0]!.closed).toBe(true);
+    expect(h.controller.shell).toBeNull();
+    expect(h.controller.currentProject).toBeNull();
+    expect(h.currentProjects.at(-1)).toBeNull();
+    expect(h.daemonStatuses.at(-1)).toEqual({ status: 'stopped', detail: null });
   });
 });
 

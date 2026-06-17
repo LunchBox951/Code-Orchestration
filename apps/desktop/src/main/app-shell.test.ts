@@ -133,6 +133,8 @@ describe('createAppShell — view-model bridge wiring', () => {
     const dir = mkdtempSync(join(tmpdir(), 'co-desktop-opipc-'));
     const blockedParent = join(dir, 'not-a-directory');
     writeFileSync(blockedParent, '');
+    const previousDataDir = process.env.CO_DATA_DIR;
+    process.env.CO_DATA_DIR = join(dir, 'data');
     const onConnectionError = vi.fn();
     const shell = createAppShell({
       projectId: FAKE_PROJECT_ID,
@@ -150,6 +152,11 @@ describe('createAppShell — view-model bridge wiring', () => {
       await shell.start();
     } finally {
       await shell.close();
+      if (previousDataDir == null) {
+        delete process.env.CO_DATA_DIR;
+      } else {
+        process.env.CO_DATA_DIR = previousDataDir;
+      }
       rmSync(dir, { recursive: true, force: true });
     }
 

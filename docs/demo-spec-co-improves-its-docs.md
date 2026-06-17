@@ -45,7 +45,9 @@ here.
   invented.
 - Every verb listed in `co-mcp --help` appears in the reference; no extras.
 - The preamble links to `docs/alpha-quickstart.md`.
-- `pnpm format:check` passes (prettier formats `.md`).
+- `pnpm format:check` passes for the tracked product tree. Because `docs/` is currently
+  prettier-ignored, the reviewer must also inspect `docs/cli-reference.md` directly for readable
+  Markdown formatting.
 - Full 5-command gate green (`pnpm test · pnpm lint · pnpm typecheck · pnpm build ·
   pnpm format:check`).
 

@@ -340,6 +340,70 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
     await runner.stop();
   });
 
+  it('an unfinished yielded turn remains silent-stop eligible after its triggering mail is retracted', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const scheduler = new FakeScheduler();
+
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const stuck: string[] = [];
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      autoStart: false,
+      pidAliveFor: () => true,
+      injectNudge: async () => {},
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: (agent) => stuck.push(agent),
+    });
+
+    try {
+      const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+      const reconcile = (runner as unknown as { daemon: { reconcile: ReconcileLoop } }).daemon
+        .reconcile;
+
+      seedActionableMail(projectId, 'impl-retracted');
+      const pane = await hostPane(engine, pty, makeIdentity('impl-retracted', projectId, cwd));
+      const hosted = engine.getHosted(projectId, 'impl-retracted')!;
+      const item = outstandingItem(projectId, 'impl-retracted');
+
+      clock.set(0);
+      const turnP = engine.runOneTurn(hosted, item);
+      await driveTurnToIdle(pane, item, clock, qw);
+      await turnP;
+
+      const mail = openMailStore(projectId);
+      try {
+        mail.retract(item.sender, item.seq);
+        expect(mail.outstanding('impl-retracted')).toHaveLength(0);
+      } finally {
+        mail.close();
+      }
+
+      await reconcile.tick();
+
+      expect(breaks).toHaveLength(1);
+      expect(breaks[0]).toMatchObject({
+        agent: 'impl-retracted',
+        info: { kind: 'silent_stop', triggerId: SILENT_STOP_TRIGGER },
+      });
+      expect(stuck).toEqual([]);
+    } finally {
+      qw.settle();
+      await runner.stop();
+    }
+  });
+
   it('a paused hosted agent with outstanding mail is excluded from watchdog escalation', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);

@@ -11,12 +11,13 @@ runbook builds on and assumes familiarity with [`docs/host-proof.md`](host-proof
 the lower-level Conductor plumbing proof (`co doctor --live`, `co-mcp host-proof`). Complete that
 proof first if you have not already.
 
-> **Current Stage 14 boundary:** the deterministic dry-run harness in
+> **Current Stage 15 boundary:** the deterministic dry-run harness in
 > `packages/mcp/src/conductor/sh1-dry-run.test.ts` proves orchestration plumbing only. A green dry-run
-> is not SH-1 evidence. `co-mcp serve <projectId>` now cold-starts registered root coordinators and
-> drives the live Stage 14 self-drive loop, but SH-1 still requires host-live evidence from real
-> provider binaries and the desktop review gate. Treat any manual tool calls that remain necessary
-> during the host run as evidence to capture, not as hidden automation.
+> is not SH-1 evidence. The desktop app now owns and supervises the Conductor daemon, cold-starts
+> registered root coordinators, and drives the live self-drive loop through the app on-ramp; SH-1
+> still requires host-live evidence from real provider binaries and the desktop review gate. Treat
+> any manual tool calls that remain necessary during the host run as evidence to capture, not as
+> hidden automation.
 >
 > **A green `fake` proof is likewise NOT SH-1 evidence.** The unified host-proof driver
 > `runProof({fake|claude|codex})` (`packages/mcp/src/conductor/host-proof.ts`) runs the same sequence
@@ -51,19 +52,14 @@ proof first if you have not already.
 
 4. **Desktop app built and running with the Reviews view available.** The Review view is required
    for SH-1 evidence because it displays the diff and locked acceptance criteria before verdict
-   submission (see Step 3). Build the app (`pnpm build` from `apps/desktop`, or the appropriate
-   desktop build command for your environment), launch it with `CO_PROJECT_ID="$PROJECT_ID"` in its
-   environment, and confirm the **Reviews** nav item is visible before starting.
+   submission (see Step 3). Build the app (`pnpm build` from the repo root, or the appropriate
+   desktop build command for your environment), open it, choose the repo in the in-app project picker,
+   and confirm the **Reviews** nav item plus daemon status badge are visible before starting.
 
-5. **Conductor daemon running.** Start it with:
-
-   ```sh
-   co-mcp serve "$PROJECT_ID"
-   ```
-
-   > **Host-live note:** `co-mcp serve` requires an explicit `<projectId>` (unlike
-   > `co-mcp host-proof`, which auto-detects from CWD). `co-mcp project-id` registers the current repo
-   > if needed and prints the id you pass to `serve`.
+5. **Conductor daemon supervised by the app.** Do **not** start `co-mcp serve` by hand for the primary
+   SH-1 run. The desktop app owns the daemon lifecycle; use the header badge and **Retry** control if
+   it fails to become healthy. Manual `co-mcp serve <projectId>` remains an advanced/headless
+   diagnostic path, not the acceptance path.
 
 ---
 
@@ -73,11 +69,9 @@ proof first if you have not already.
 tool; the operator cannot call it directly). Ask a coordinator agent to draft a small, self-contained
 change to the `co` repo — a documentation clarification, a minor fix, or a small enhancement. The
 change must be real (it will actually land on the repo via the gated merge), so keep scope minimal.
-If you do not already have a coordinator for this run, start one after the daemon is running:
-
-```sh
-co-mcp start-session "$PROJECT_ID" --prompt "Draft a small doc clarification for co."
-```
+If you do not already have a coordinator for this run, start one from the desktop Dashboard. For the
+standard proof, click **Start from demo spec**; for a custom proof, use **Start session** with a small
+prompt such as "Draft a small doc clarification for co."
 
 Once the coordinator has drafted the spec and mailed you the task id:
 
@@ -200,8 +194,8 @@ proof is valid.
 For SH-1 evidence, also capture live-binary proof:
 
 - `pnpm build` output for the exact commit being proven.
-- `co-mcp --help` showing `co-mcp serve <projectId>`.
-- The `co-mcp serve <projectId>` terminal transcript for the run.
+- `co-mcp --help` showing the built daemon/session verbs are present.
+- Desktop daemon-status and Agents Console evidence for the app-supervised run.
 - Process/store evidence showing the run was driven by built `co` / `co-mcp` against program-data,
   not by `.co/` prototype state.
 
@@ -218,7 +212,7 @@ Collect the following artifacts and record them as the evidence bundle for `SH-1
 | Review view evidence | Screenshot of the Review view before submit, showing the diff, locked criteria, and selected PASS verdict; pair it with the recorded verdict / merge evidence below |
 | Gated-merge commit | `git log <integration-branch> --oneline -1` |
 | SH-2 guard green | Terminal output from Step 5 |
-| Live-binary transcript | `co-mcp serve <projectId>` terminal output plus `co-mcp --help` |
+| Live-binary transcript | Desktop daemon-status / Agents Console transcript plus `co-mcp --help` |
 | Prototype-free runtime evidence | Process/store notes from Step 5 |
 
 Only after the live run is end-to-end and the manual-gap notes above are closed should `SH-1` be
