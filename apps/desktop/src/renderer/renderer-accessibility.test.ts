@@ -285,3 +285,53 @@ describe('no silent failures (AC-S15-11 [ST-3], Principle 9)', () => {
     expect(rendererSource).not.toMatch(/void bridge\.reviewRefresh\(\);/);
   });
 });
+
+describe('open project on-ramp (P-ON2)', () => {
+  const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+
+  it('header exposes the current-project pill + an Open project control', () => {
+    expect(htmlSource).toContain('id="current-project-label"');
+    expect(htmlSource).toContain('id="open-project-btn"');
+    expect(htmlSource).toContain('aria-label="Open project"');
+  });
+
+  it('a "no project open" empty state is present and offers Open project', () => {
+    expect(htmlSource).toContain('id="no-project-overlay"');
+    expect(htmlSource).toContain('id="no-project-open-btn"');
+    expect(htmlSource).toContain('aria-label="No project open"');
+  });
+
+  it('renderer wires both Open project buttons to the bridge and reflects current-project state', () => {
+    expect(rendererSource).toContain('bridge.openProject(');
+    expect(rendererSource).toContain('bridge.onCurrentProject(');
+    expect(rendererSource).toContain("getElementById('open-project-btn')");
+    expect(rendererSource).toContain("getElementById('no-project-open-btn')");
+    // The overlay reveals when there is no project (payload == null) and hides once one is open.
+    expect(rendererSource).toContain("getElementById('no-project-overlay')");
+    expect(rendererSource).toContain('overlay.hidden = payload != null');
+  });
+
+  it('register/open failures surface as a visible toast (Principle 9)', () => {
+    expect(rendererSource).toContain('bridge.onAppError(');
+  });
+
+  it('bridge + IPC expose the openProject + current-project + app-error channels end-to-end', () => {
+    expect(preloadSource).toContain('openProject(');
+    expect(preloadSource).toContain("'project:open'");
+    expect(preloadSource).toContain("'project:current'");
+    expect(preloadSource).toContain("'app:error'");
+    expect(mainSource).toContain("ipcMain.handle('project:open'");
+    expect(mainSource).toContain('controller.pickAndOpenProject(');
+  });
+
+  it('main replaces the CO_PROJECT_ID-required throw with the no-project on-ramp', () => {
+    // The old hard requirement is gone: a missing env now shows the empty state instead of throwing.
+    expect(mainSource).not.toContain('CO_PROJECT_ID environment variable is required');
+    expect(mainSource).toContain('controller.showNoProject(');
+  });
+
+  it('the directory picker requests an OS directory selection (openDirectory)', () => {
+    expect(mainSource).toContain('showOpenDialog');
+    expect(mainSource).toContain("'openDirectory'");
+  });
+});

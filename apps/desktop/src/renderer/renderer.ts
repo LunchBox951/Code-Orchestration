@@ -119,6 +119,32 @@ function setDaemonStatus(payload: DaemonStatusPayload): void {
   if (statusChanged && latestDashboardState != null) renderDashboard(latestDashboardState);
 }
 
+// The leaf segment of a path, used as the short label in the project pill (full path goes in the tooltip).
+function projectBasename(path: string): string {
+  const parts = path.split(/[\\/]/).filter((p) => p.length > 0);
+  return parts.length > 0 ? parts[parts.length - 1]! : path;
+}
+
+// Surface which project the app currently has open (P-ON2). `null` ⇒ the "no project open" on-ramp: the
+// overlay is revealed and the cockpit beneath it is inert until the operator opens a project.
+function setCurrentProject(payload: CurrentProjectPayload): void {
+  const label = document.getElementById('current-project-label');
+  const pill = document.getElementById('project-pill');
+  const overlay = document.getElementById('no-project-overlay');
+
+  if (overlay) overlay.hidden = payload != null;
+
+  if (payload == null) {
+    if (label) label.textContent = 'No project open';
+    if (pill) pill.setAttribute('title', 'No project open');
+    return;
+  }
+
+  const full = payload.path ?? payload.projectId;
+  if (label) label.textContent = payload.path != null ? projectBasename(payload.path) : full;
+  if (pill) pill.setAttribute('title', full);
+}
+
 function showAppError(message: string): void {
   const toast = document.createElement('div');
   toast.className = 'app-error-toast';
@@ -984,6 +1010,26 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!r.ok) showAppError(r.error ?? 'Failed to restart the Conductor daemon');
     });
   });
+
+  // ── Open project (the on-ramp) ───────────────────────────────────────────────
+  // The current-project pill + the "No project open" overlay both reflect this state.
+  bridge.onCurrentProject((payload) => {
+    setCurrentProject(payload);
+  });
+
+  // A main-process register/open failure surfaces here as a toast (Principle 9 — never swallowed).
+  bridge.onAppError((message) => {
+    showAppError(message);
+  });
+
+  function openProject(): void {
+    void bridge.openProject().catch((e: unknown) => {
+      showAppError(`Failed to open project: ${errorMessage(e)}`);
+    });
+  }
+
+  document.getElementById('open-project-btn')?.addEventListener('click', openProject);
+  document.getElementById('no-project-open-btn')?.addEventListener('click', openProject);
 
   bridge.onDashboardState((state) => {
     latestDashboardState = state;

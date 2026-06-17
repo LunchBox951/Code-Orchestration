@@ -11,6 +11,9 @@ interface DaemonStatusPayload {
   detail: string | null;
 }
 
+// Which project the app currently has open (surfaced in the top bar); null = no project open (the on-ramp).
+type CurrentProjectPayload = { projectId: string; path: string | null } | null;
+
 interface ConnectionObservation {
   kind: 'live' | 'static';
   snapshot: unknown;
@@ -288,6 +291,10 @@ interface CoShellBridge {
   // ── Daemon ────────────────────────────────────────────────────────────────
   onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;
   daemonRetry(): Promise<{ ok: boolean; error?: string }>;
+  // ── Project (the in-app "Open project" on-ramp) ─────────────────────────────
+  openProject(): Promise<void>;
+  onCurrentProject(listener: (payload: CurrentProjectPayload) => void): () => void;
+  onAppError(listener: (message: string) => void): () => void;
 }
 
 interface Window {
