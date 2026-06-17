@@ -269,10 +269,14 @@ export class DaemonSupervisor {
 
   /** Spawn one child and wire its `exit`/`error` to the supervision path (guarded by generation). */
   private spawnChild(generation: number): DaemonSpawnHandle {
-    const descriptor = buildDaemonSpawnDescriptor(
-      this.projectId as ProjectId,
-      this.resolveBinPath(),
-    );
+    // start() always sets projectId before any spawn; assert the invariant loudly (Principle 9) rather
+    // than leaning on a cast, so a future caller that spawns without a project fails clearly, not silently.
+    if (this.projectId == null) {
+      throw new Error(
+        'DaemonSupervisor.spawnChild: no projectId — start(projectId) must run first.',
+      );
+    }
+    const descriptor = buildDaemonSpawnDescriptor(this.projectId, this.resolveBinPath());
     const child = this.spawnFn(descriptor);
     this.child = child;
     let settled = false;
