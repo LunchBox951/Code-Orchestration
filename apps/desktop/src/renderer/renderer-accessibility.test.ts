@@ -211,6 +211,60 @@ describe('session start (P4)', () => {
   });
 });
 
+describe('source read surface (P-ON4) + demo-spec launch (P-ON3)', () => {
+  const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+
+  it('replaces the Source stub with a labelled Branches container + a deferred-PR panel', () => {
+    expect(htmlSource).toContain('id="view-source"');
+    expect(htmlSource).not.toContain('Coming in a later stage.');
+    // Read-only Branches list + an HONEST, clearly-labelled deferred-PR panel (not a fake/empty PR list).
+    expect(htmlSource).toContain('id="source-branches"');
+    expect(htmlSource).toContain('aria-label="Branches"');
+    expect(htmlSource).toContain('aria-label="Pull requests"');
+    expect(htmlSource).toContain('deferred');
+    expect(htmlSource).toContain('id="source-refresh-btn"');
+    expect(htmlSource).toContain('aria-label="Refresh branches"');
+  });
+
+  it('renderer renders the branch list read-only and wires sourceRefresh on activation + Refresh', () => {
+    expect(rendererSource).toContain('function renderSource(state: SourceState)');
+    // Source is pulled on view activation (no push channel) and via the Refresh/Retry controls. The
+    // activation hook lives in module-scope activateView, so it calls the bridge via window.coShell.
+    expect(rendererSource).toContain("if (view === 'source')");
+    expect(rendererSource).toContain('.sourceRefresh(');
+    expect(rendererSource).toContain("getElementById('view-source')");
+    expect(rendererSource).toContain('data-source-action="retry"');
+  });
+
+  it('renderer renders explicit no-project + error states for Source (Principle 9)', () => {
+    expect(rendererSource).toContain("state.kind === 'no-project'");
+    expect(rendererSource).toContain("state.kind === 'error'");
+    expect(rendererSource).toContain('No project open');
+    expect(rendererSource).toContain('aria-label="Retry loading branches"');
+  });
+
+  it('exposes the "Start from demo spec" button wired to the bridge alongside Start session', () => {
+    expect(rendererSource).toContain('id="session-start-demo-btn"');
+    expect(rendererSource).toContain('aria-label="Start coordinator session from demo spec"');
+    expect(rendererSource).toContain('bridge.startFromDemoSpec(');
+    // The existing free-form Start session button stays wired + unchanged.
+    expect(rendererSource).toContain('id="session-start-btn"');
+    expect(rendererSource).toContain('bridge.sessionStart(');
+  });
+
+  it('bridge + IPC expose sourceRefresh + startFromDemoSpec end-to-end', () => {
+    expect(preloadSource).toContain('sourceRefresh(');
+    expect(preloadSource).toContain("'source:refresh'");
+    expect(preloadSource).toContain('startFromDemoSpec(');
+    expect(preloadSource).toContain("'session:startFromDemoSpec'");
+    expect(mainSource).toContain("ipcMain.handle('source:refresh'");
+    expect(mainSource).toContain("ipcMain.handle('session:startFromDemoSpec'");
+    // Source consumes @co/core's listBranches via the helper — the adapter does not re-read git itself.
+    expect(mainSource).toContain('resolveSourceState(');
+    expect(mainSource).toContain('startFromDemoSpec(');
+  });
+});
+
 describe('agents stop / unstick (P4)', () => {
   it('per-agent Stop and Unstick buttons render in agents roster with correct aria-labels', () => {
     expect(rendererSource).toContain('data-agent-action="stop"');

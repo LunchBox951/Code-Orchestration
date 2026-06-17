@@ -13,6 +13,24 @@ type DaemonStatusPayload = {
 // Which project the app currently has open (surfaced in the top bar); null = no project open (the on-ramp).
 type CurrentProjectPayload = { projectId: string; path: string | null } | null;
 
+// Mirrors @co/core's BranchInfo (preload is CJS-isolated from the workspace ESM — inline like the rest).
+interface BranchInfo {
+  readonly name: string;
+  readonly isCurrent: boolean;
+  readonly upstream?: string;
+  readonly lastCommit: {
+    readonly sha: string;
+    readonly subject: string;
+    readonly committedAt?: string;
+    readonly author?: string;
+  };
+}
+// The read-only Source view state (P-ON4) — a branch list, "no project open", or a visible error.
+type SourceState =
+  | { kind: 'branches'; branches: readonly BranchInfo[] }
+  | { kind: 'no-project' }
+  | { kind: 'error'; message: string };
+
 interface ContextBridgeLike {
   exposeInMainWorld(key: string, api: unknown): void;
 }
@@ -83,6 +101,9 @@ interface CoShellBridge {
     prompt: string | null,
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
+  startFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
+  // ── Source (read-only Branches; P-ON4) ──────────────────────────────────────
+  sourceRefresh(): Promise<SourceState>;
   // ── Daemon ────────────────────────────────────────────────────────────────
   onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;
   daemonRetry(): Promise<{ ok: boolean; error?: string }>;
@@ -248,6 +269,13 @@ const bridge: CoShellBridge = {
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:start', prompt, specBody);
+  },
+  async startFromDemoSpec(): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:startFromDemoSpec');
+  },
+  // ── Source (read-only Branches; P-ON4) ──────────────────────────────────────
+  async sourceRefresh(): Promise<SourceState> {
+    return ipcRenderer.invoke<SourceState>('source:refresh');
   },
   // ── Daemon ────────────────────────────────────────────────────────────────
   onDaemonStatus(listener: (payload: DaemonStatusPayload) => void) {

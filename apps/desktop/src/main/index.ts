@@ -6,6 +6,8 @@ import { openRegistry } from '@co/core';
 import { createAppShell } from './app-shell.js';
 import { createDaemonSupervisor } from './daemon-supervisor.js';
 import { createProjectController } from './open-project.js';
+import { resolveSourceState } from './source-ipc.js';
+import { readBundledDemoSpec, startFromDemoSpec } from './demo-spec.js';
 import {
   requireComposerField,
   requireFiniteSeq,
@@ -447,6 +449,25 @@ ipcMain.handle('session:start', async (_event, prompt: unknown, specBody: unknow
     return { ok: false, error: msg };
   }
 });
+
+// Launch a coordinator from the BUNDLED predesigned demo spec (AC-S15-6 — no terminal). Reads
+// dist/renderer/demo-spec.md behind an injectable seam and starts a session via the same
+// `startSession({ specBody })` path as the free-form form. Every failure is a visible result.
+ipcMain.handle('session:startFromDemoSpec', () =>
+  startFromDemoSpec({
+    client: controller.shell?.client ?? null,
+    readDemoSpec: () => readBundledDemoSpec(__dirname),
+  }),
+);
+
+// ── Source IPC channels ──────────────────────────────────────────────────────
+
+// The read-only Source view's branch surface (AC-S15-7): a direct, offline-safe LOCAL read in main
+// (no daemon, no operator-IPC verb) that consumes `@co/core`'s `listBranches`. `currentProject?.path`
+// is the open repo's absolute path; `null` ⇒ the visible "no project open" state.
+ipcMain.handle('source:refresh', () =>
+  resolveSourceState({ currentProjectPath: () => controller.currentProject?.path ?? null }),
+);
 
 // ── Project + Daemon IPC channels ────────────────────────────────────────────
 
