@@ -10,6 +10,8 @@ type DaemonStatusPayload = {
   status: 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
   detail: string | null;
 };
+// Which project the app currently has open (surfaced in the top bar); null = no project open (the on-ramp).
+type CurrentProjectPayload = { projectId: string; path: string | null } | null;
 
 interface ContextBridgeLike {
   exposeInMainWorld(key: string, api: unknown): void;
@@ -84,6 +86,10 @@ interface CoShellBridge {
   // ── Daemon ────────────────────────────────────────────────────────────────
   onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;
   daemonRetry(): Promise<{ ok: boolean; error?: string }>;
+  // ── Project (the in-app "Open project" on-ramp) ─────────────────────────────
+  openProject(): Promise<void>;
+  onCurrentProject(listener: (payload: CurrentProjectPayload) => void): () => void;
+  onAppError(listener: (message: string) => void): () => void;
 }
 
 const bridge: CoShellBridge = {
@@ -251,6 +257,20 @@ const bridge: CoShellBridge = {
   },
   async daemonRetry(): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('daemon:retry');
+  },
+  // ── Project (the in-app "Open project" on-ramp) ─────────────────────────────
+  async openProject(): Promise<void> {
+    await ipcRenderer.invoke('project:open');
+  },
+  onCurrentProject(listener: (payload: CurrentProjectPayload) => void) {
+    const handler = (_event: unknown, payload: CurrentProjectPayload): void => listener(payload);
+    ipcRenderer.on('project:current', handler);
+    return () => ipcRenderer.removeListener('project:current', handler);
+  },
+  onAppError(listener: (message: string) => void) {
+    const handler = (_event: unknown, message: string): void => listener(message);
+    ipcRenderer.on('app:error', handler);
+    return () => ipcRenderer.removeListener('app:error', handler);
   },
 };
 
