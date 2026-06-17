@@ -18,6 +18,7 @@ export interface ReviewRow {
 export type SelectedContext =
   | { readonly status: 'loading' }
   | { readonly status: 'loaded'; readonly value: ReviewContext }
+  | { readonly status: 'error'; readonly reviewId: string; readonly message: string }
   | null;
 
 export interface VerdictComposer {
@@ -126,6 +127,18 @@ export class ReviewVM {
   setReviewContext(reviewId: string, value: ReviewContext): void {
     if (reviewId !== this._state.selectedReviewId) return;
     this._state = { ...this._state, context: { status: 'loaded', value } };
+    this.emit();
+  }
+
+  /**
+   * Move the selected review's context into a terminal error state (Principle 9 — no-silent-failures): a
+   * rejected/timed-out `reviewContext` fetch must surface an in-pane error + Retry instead of leaving the
+   * pane stuck on "Loading…". Guarded on `selectedReviewId` (mirrors `setReviewContext`) so a stale request
+   * cannot clobber a newer selection.
+   */
+  setReviewContextError(reviewId: string, message: string): void {
+    if (reviewId !== this._state.selectedReviewId) return;
+    this._state = { ...this._state, context: { status: 'error', reviewId, message } };
     this.emit();
   }
 

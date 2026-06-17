@@ -710,6 +710,39 @@
         font-family: 'IBM Plex Mono', ui-monospace, monospace;
       }
 
+      /* ── Typed card key/value rows (SF-6) ────────────────── */
+      .mail-card-fields {
+        display: flex;
+        flex-direction: column;
+        padding: 12px 16px;
+        gap: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .mail-card-field {
+        display: flex;
+        gap: 12px;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+
+      .mail-card-field-label {
+        flex: 0 0 96px;
+        color: var(--muted);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        text-transform: uppercase;
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        padding-top: 1px;
+      }
+
+      .mail-card-field-value {
+        flex: 1;
+        color: var(--text);
+        font-weight: 500;
+        word-break: break-word;
+      }
+
       .mail-card-body {
         padding: 16px;
         font-size: 13px;
@@ -1202,6 +1235,30 @@
         background: oklch(0.12 0.005 262);
       }
 
+      /* Persistent transcript-fetch error banner (Principle 9 — no-silent-failures). */
+      .agents-transcript-error {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 14px;
+        border-bottom: 1px solid oklch(0.45 0.15 25);
+        background: oklch(0.25 0.07 25);
+        color: oklch(0.88 0.18 25);
+        font-size: 12px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+
+      .agents-transcript-error[hidden] {
+        display: none;
+      }
+
+      .agents-transcript-error-msg {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
       .steer-composer {
         flex-shrink: 0;
         border-top: 1px solid var(--border);
@@ -1326,6 +1383,22 @@
         display: flex;
         flex-direction: column;
         gap: 16px;
+      }
+
+      /* In-pane review-context error + Retry (Principle 9 — no-silent-failures): replaces an eternal
+         "Loading review context…" when the fetch rejects or times out. */
+      .review-context-error {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 14px 16px;
+        border: 1px solid oklch(0.45 0.15 25);
+        border-radius: var(--radius);
+        background: oklch(0.25 0.07 25);
+        color: oklch(0.88 0.18 25);
+        font-size: 12px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
       }
 
       .review-diff-block {
@@ -1623,6 +1696,14 @@
             </div>
             <!-- Right: transcript pane + steer composer -->
             <div class="agents-main">
+              <!-- Persistent transcript-fetch error + Retry (Principle 9 — no-silent-failures);
+                   populated by renderTranscriptError() when state.transcriptError != null. -->
+              <div
+                id="agents-transcript-error"
+                class="agents-transcript-error"
+                role="alert"
+                hidden
+              ></div>
               <div
                 id="agents-transcript"
                 class="agents-transcript"
@@ -1746,6 +1827,7 @@
       </main>
     </div>
     <script src="./vendor/xterm.js"></script>
+    <script src="./vendor/addon-fit.js"></script>
     <script type="module" src="./renderer.js"></script>
   </body>
 </html>

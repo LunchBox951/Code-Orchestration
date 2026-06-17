@@ -7,11 +7,17 @@ import {
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
   MAIL_CHAT,
+  MAIL_ESCALATION,
+  MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   type DeliveredMail,
   type MailType,
 } from './events.js';
-import { createRendererRegistry, defaultMailRenderer } from './renderer.js';
+import {
+  createRendererRegistry,
+  defaultMailCardRenderer,
+  defaultMailRenderer,
+} from './renderer.js';
 
 // Renderer is pure/in-memory, so most tests need no fixtures; the pristine test needs a
 // throwaway repo-like tree (mirrors mail.test.ts / pristine.test.ts).
@@ -100,5 +106,127 @@ describe('AC-L1-9 — rendering is pure/in-memory (does no I/O)', () => {
     const registry = createRendererRegistry();
     const out = assertRepoPristine(repo, () => registry.render(mailOf(MAIL_CHAT)));
     expect(out).toContain('subject for chat');
+  });
+
+  it('renderCard inside assertRepoPristine does not write the repo', () => {
+    const repo = makeRepo();
+    const registry = createRendererRegistry();
+    const card = assertRepoPristine(repo, () => registry.renderCard(mailOf(MAIL_CHAT)));
+    expect(card.title).toBe('subject for chat');
+  });
+});
+
+// ── SF-6 / AC-S15-12 — typed payload CARDS (key/value fields + body), per-type logic in CORE ──
+
+/** Collapse a card's key/value rows to a `Map` for label-keyed assertions. */
+function fieldMap(fields: readonly { label: string; value: string }[]): Map<string, string> {
+  return new Map(fields.map((f) => [f.label, f.value]));
+}
+
+describe('AC-S15-12 [SF-6] — the generic default card is data-driven (presence, not per-type)', () => {
+  it('builds title/body + From/To, surfacing structured fields only when present', () => {
+    const card = defaultMailCardRenderer(mailOf(MAIL_CHAT, { sender: 'alice', recipient: 'bob' }));
+    expect(card.title).toBe('subject for chat');
+    expect(card.body).toBe('body for chat');
+    const fields = fieldMap(card.fields);
+    expect(fields.get('From')).toBe('alice');
+    expect(fields.get('To')).toBe('bob');
+    // A chat carries no decision/verdict, so the generic card must not invent those rows.
+    expect(fields.has('Decision')).toBe(false);
+    expect(fields.has('Verdict')).toBe(false);
+  });
+
+  it('surfaces a decision generically when the envelope carries one', () => {
+    const card = defaultMailCardRenderer(mailOf(MAIL_APPROVAL_RESPONSE, { decision: 'approve' }));
+    expect(fieldMap(card.fields).get('Decision')).toBe('approve');
+  });
+});
+
+describe('AC-S15-12 [SF-6] — registry.renderCard returns per-type cards from CORE', () => {
+  it('approval → an approve/decline card surfacing the ask (and a decision when present)', () => {
+    const registry = createRendererRegistry();
+    const card = registry.renderCard(
+      mailOf(MAIL_APPROVAL, { subject: 'Publish v1?', body: 'may we ship?', sender: 'lead-7' }),
+    );
+    expect(card.title).toBe('Publish v1?');
+    expect(card.body).toBe('may we ship?');
+    const fields = fieldMap(card.fields);
+    expect(fields.get('From')).toBe('lead-7');
+    // The ask is laid out: a decision is required.
+    expect([...fields.values()].some((v) => /approve/i.test(v) && /decline/i.test(v))).toBe(true);
+
+    const decided = registry.renderCard(mailOf(MAIL_APPROVAL, { decision: 'decline' }));
+    expect(fieldMap(decided.fields).get('Decision')).toBe('decline');
+  });
+
+  it('escalation → a readable problem summary surfacing the resolve-or-forward obligation', () => {
+    const registry = createRendererRegistry();
+    const card = registry.renderCard(
+      mailOf(MAIL_ESCALATION, {
+        subject: 'Blocked on auth',
+        body: 'context here',
+        sender: 'lead-3',
+      }),
+    );
+    expect(card.title).toBe('Blocked on auth');
+    expect(card.body).toBe('context here');
+    const fields = fieldMap(card.fields);
+    expect(fields.get('From')).toBe('lead-3');
+    expect([...fields.values()].some((v) => /resolve|forward/i.test(v))).toBe(true);
+  });
+
+  it('review_response → the verdict card surfacing reviewVerdict prominently', () => {
+    const registry = createRendererRegistry();
+    const passed = registry.renderCard(
+      mailOf(MAIL_REVIEW_RESPONSE, {
+        subject: 'Re: review',
+        reviewVerdict: 'PASS',
+        sender: 'rev-1',
+      }),
+    );
+    expect(passed.title).toBe('Re: review');
+    const passedFields = fieldMap(passed.fields);
+    expect(passedFields.get('Verdict')).toBe('PASS');
+    expect(passedFields.get('From')).toBe('rev-1');
+    // The verdict is the FIRST field (most prominent).
+    expect(passed.fields[0]?.label).toBe('Verdict');
+
+    const issues = registry.renderCard(mailOf(MAIL_REVIEW_RESPONSE, { reviewVerdict: 'ISSUES' }));
+    expect(fieldMap(issues.fields).get('Verdict')).toBe('ISSUES');
+  });
+
+  it('an UNREGISTERED type falls back to the generic default card', () => {
+    const registry = createRendererRegistry();
+    const card = registry.renderCard(mailOf(MAIL_CHAT, { sender: 'alice', recipient: 'bob' }));
+    expect(card.title).toBe('subject for chat');
+    expect(card.body).toBe('body for chat');
+    const fields = fieldMap(card.fields);
+    expect(fields.get('From')).toBe('alice');
+    expect(fields.get('To')).toBe('bob');
+    // No per-type 'Action' row for a plain chat — that is the approval/escalation card's job.
+    expect(fields.has('Action')).toBe(false);
+  });
+
+  it('a custom registered card overrides the built-in for its type only', () => {
+    const registry = createRendererRegistry();
+    registry.registerCard(MAIL_APPROVAL, (mail) => ({
+      title: `CUSTOM ${mail.subject}`,
+      fields: [],
+      body: mail.body,
+    }));
+    expect(registry.renderCard(mailOf(MAIL_APPROVAL)).title).toBe('CUSTOM subject for approval');
+    // Every other type keeps its built-in / default card.
+    expect(
+      registry.renderCard(mailOf(MAIL_REVIEW_RESPONSE, { reviewVerdict: 'PASS' })).fields[0]?.label,
+    ).toBe('Verdict');
+  });
+
+  it('honors a custom defaultCard passed at construction (built-ins still win for their type)', () => {
+    const registry = createRendererRegistry({
+      defaultCard: (mail) => ({ title: `FALLBACK:${mail.type}`, fields: [], body: mail.body }),
+    });
+    expect(registry.renderCard(mailOf(MAIL_CHAT)).title).toBe('FALLBACK:chat');
+    // A pre-registered built-in card still wins over the custom default.
+    expect(registry.renderCard(mailOf(MAIL_APPROVAL)).title).toBe('subject for approval');
   });
 });
