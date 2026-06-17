@@ -30,6 +30,14 @@ import {
   selectPlan,
 } from './plans-projector.js';
 
+function assertPlanOpenForMutation(operation: string, plan: PlanRecord): void {
+  if (plan.completedTs != null) {
+    throw new Error(
+      `${operation}: plan '${plan.taskId}' is already completed — task.completed is terminal`,
+    );
+  }
+}
+
 export interface PlanStore {
   /** Record a plan draft (append `plan.drafted` + fold); returns the read-back record. */
   recordDraft(rec: {
@@ -167,6 +175,13 @@ export function openPlanStore(projectId: string): PlanStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
+        const existing = selectPlan(db, taskId);
+        if (existing == null) {
+          throw new Error(
+            `openPlanStore.changePhaseStatus: phase.status.changed for unknown plan '${taskId}' — draft it first`,
+          );
+        }
+        assertPlanOpenForMutation('openPlanStore.changePhaseStatus', existing);
         const [stored] = tx.append([
           makePhaseStatusChangedEvent(projectId, { taskId, phaseId, status }, actor),
         ]);
@@ -191,6 +206,13 @@ export function openPlanStore(projectId: string): PlanStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
+        const existing = selectPlan(db, taskId);
+        if (existing == null) {
+          throw new Error(
+            `openPlanStore.recordPhaseVerified: phase.verified for unknown plan '${taskId}' — draft it first`,
+          );
+        }
+        assertPlanOpenForMutation('openPlanStore.recordPhaseVerified', existing);
         const [stored] = tx.append([
           makePhaseVerifiedEvent(projectId, { taskId, phaseId, baselineSha, pass }, actor),
         ]);
@@ -214,6 +236,13 @@ export function openPlanStore(projectId: string): PlanStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
+        const existing = selectPlan(db, taskId);
+        if (existing == null) {
+          throw new Error(
+            `openPlanStore.recordReplan: plan.replanned for unknown plan '${taskId}' — draft it first`,
+          );
+        }
+        assertPlanOpenForMutation('openPlanStore.recordReplan', existing);
         const [stored] = tx.append([
           makePlanReplannedEvent(
             projectId,

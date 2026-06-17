@@ -98,6 +98,11 @@ export const phaseUpdateTool: ToolSpec<PhaseUpdateInput, PlanRecordOutput> = {
     if (plan == null) {
       throw new Error(`co_phase_update: no plan recorded for task '${input.task_id}'.`);
     }
+    if (plan.completedTs != null) {
+      throw new Error(
+        `co_phase_update: plan '${input.task_id}' is already completed — task.completed is terminal.`,
+      );
+    }
     if (!plan.phases.some((p) => p.phaseId === input.phase_id)) {
       throw new Error(`co_phase_update: no phase '${input.phase_id}' in plan '${input.task_id}'.`);
     }

@@ -244,6 +244,49 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
     }
   });
 
+  it('refuses phase mutations and replans after task.completed', () => {
+    const projectId = 'p-plans-completed-terminal';
+    const store = openPlanStore(projectId);
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      const completed = store.recordTaskCompleted('task-1', 'coord-done');
+
+      expect(() => store.changePhaseStatus('task-1', 'ph-1', 'building', ACTOR)).toThrow(
+        /already completed.*terminal/i,
+      );
+      expect(() => store.recordPhaseVerified('task-1', 'ph-1', 'abc123', true, ACTOR)).toThrow(
+        /already completed.*terminal/i,
+      );
+      expect(() =>
+        store.recordReplan(
+          'task-1',
+          'late scope change',
+          [{ phaseId: 'ph-new', name: 'New', deps: [], criteria: [WIRED_CRITERION] }],
+          ACTOR,
+        ),
+      ).toThrow(/already completed.*terminal/i);
+
+      expect(store.getPlan('task-1')).toEqual(completed);
+      const audit = openProjectStore(projectId);
+      try {
+        expect(audit.readStream(planScope('task-1')).map((event) => event.type)).toEqual([
+          EVENT_PLAN_DRAFTED,
+          EVENT_TASK_COMPLETED,
+        ]);
+      } finally {
+        audit.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
   it('task.completed for an unknown plan fails loud (Principle 9)', () => {
     const store = openPlanStore('p-plans-completed-unknown');
     try {
@@ -570,6 +613,32 @@ describe('PlanStore — replay-equal: live fold → rebuildAll → byte-equal', 
       expect(() =>
         rebuildAll(store, [new PlansProjector()], (e) => decode(e, plansUpcasters, plansSchemas)),
       ).toThrow(/conflicting re-draft/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay fails loud when an event mutates a completed task', () => {
+    const projectId = 'p-plans-replay-completed-terminal';
+    const store = openProjectStore(projectId);
+    const events = [
+      makePlanDraftedEvent(
+        projectId,
+        { taskId: 'task-1', goal: 'original', taskCriteria: [], phases: SAMPLE_PHASES },
+        'coord-1',
+      ),
+      makeTaskCompletedEvent(projectId, { taskId: 'task-1' }, 'coord-1'),
+      makePhaseStatusChangedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-1', status: 'building' },
+        'coord-1',
+      ),
+    ];
+    try {
+      store.append(events);
+      expect(() =>
+        rebuildAll(store, [new PlansProjector()], (e) => decode(e, plansUpcasters, plansSchemas)),
+      ).toThrow(/after task\.completed.*terminal/i);
     } finally {
       store.close();
     }

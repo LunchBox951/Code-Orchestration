@@ -1349,8 +1349,8 @@ export {
   OPERATOR_IPC_TRANSCRIPT,
 } from './operator-ipc/contract.js';
 
-// AC-S15-7 — read-only local branch data surface for the desktop Source view (offline-safe).
-// Uses refs/heads only — no network, no gh, no remotes. PRs deliberately deferred (CSP + SH-4).
+// AC-S15-7 — read-only local branch + locally fetched PR-ref data for the desktop Source view.
+// Offline-safe: uses local git refs only — no gh and no network.
 export type { BranchInfo } from './source/list-branches.js';
 export { listBranches } from './source/list-branches.js';
 export type { PullRequestInfo } from './source/list-pull-requests.js';

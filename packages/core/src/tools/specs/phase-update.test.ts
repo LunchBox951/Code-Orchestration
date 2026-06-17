@@ -159,6 +159,21 @@ describe('co_phase_update — input + existence guards', () => {
       }),
     ).rejects.toThrow(/no phase 'ghost-phase'/i);
   });
+
+  it('refuses to mutate a completed task plan', async () => {
+    const ctx = coordCtx('pu-completed-terminal');
+    seedPlan(ctx, 'task-pu-completed');
+    ctx.plans!.recordTaskCompleted('task-pu-completed', 'coord-1');
+
+    await expect(
+      invokeTool(registry, ctx, 'co_phase_update', {
+        task_id: 'task-pu-completed',
+        phase_id: 'phase1',
+        status: 'building',
+      }),
+    ).rejects.toThrow(/task-pu-completed.*already completed.*terminal/i);
+    expect(ctx.plans!.getPlan('task-pu-completed')?.phases[0]?.status).toBe('planned');
+  });
 });
 
 describe('co_phase_update — caller must be a coordinator', () => {

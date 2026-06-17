@@ -325,6 +325,38 @@ describe('daemon-supervisor — bounded restart on crash', () => {
     expect(spawn.spy).toHaveBeenCalledTimes(3); // 1 initial + 2 failed restarts
   });
 
+  it('emits repeated "restarting" updates when the operator-visible detail changes', async () => {
+    const spawn = recordingSpawn();
+    const details: Array<{ status: DaemonStatus; detail: string | null }> = [];
+    // Healthy on the initial start, then every respawn fails its health-wait.
+    const probeHealth = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+    const supervisor = createDaemonSupervisor({
+      spawn: spawn.seam,
+      probeHealth,
+      delay: immediateDelay,
+      maxRetries: 2,
+      healthTimeoutMs: 10,
+      healthIntervalMs: 10,
+      onStatus: (status) => details.push({ status, detail: supervisor.detail }),
+    });
+
+    await supervisor.start(PROJECT_ID);
+    spawn.current().crash();
+    await flush();
+
+    const restartingDetails = details
+      .filter((entry) => entry.status === 'restarting')
+      .map((entry) => entry.detail);
+    expect(restartingDetails).toEqual([
+      'Conductor daemon exited (code=1 signal=null). Restart attempt 1/2.',
+      'Conductor daemon exited (code=1 signal=null). Restart attempt 2/2.',
+    ]);
+    expect(details.at(-1)).toEqual({
+      status: 'failed',
+      detail: 'Conductor daemon exited (code=1 signal=null). Exhausted 2 restart attempts.',
+    });
+  });
+
   it('preserves the specific child-exit detail when the initial daemon dies before health', async () => {
     const spawn = recordingSpawn();
     const supervisor = createDaemonSupervisor({

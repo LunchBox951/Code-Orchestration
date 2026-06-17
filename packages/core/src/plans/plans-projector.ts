@@ -160,6 +160,14 @@ function upsertPhases(db: DatabaseSync, taskId: string, phases: readonly PhaseNo
   });
 }
 
+function assertPlanOpenForFold(eventType: string, plan: PlanRecord): void {
+  if (plan.completedTs != null) {
+    throw new Error(
+      `plans: ${eventType} for plan '${plan.taskId}' after task.completed — task.completed is terminal`,
+    );
+  }
+}
+
 interface PlanDraftedEvent extends StoredEvent {
   readonly type: typeof EVENT_PLAN_DRAFTED;
   readonly payload: PlanDrafted;
@@ -242,6 +250,7 @@ export class PlansProjector implements Projector {
             `plans: phase.status.changed for unknown plan '${taskId}' — draft it first`,
           );
         }
+        assertPlanOpenForFold('phase.status.changed', existing);
         const phaseExists = db
           .prepare(`SELECT 1 FROM plan_phases WHERE task_id = ? AND phase_id = ?`)
           .get(taskId, phaseId);
@@ -263,6 +272,7 @@ export class PlansProjector implements Projector {
         if (existing == null) {
           throw new Error(`plans: phase.verified for unknown plan '${taskId}' — draft it first`);
         }
+        assertPlanOpenForFold('phase.verified', existing);
         const phaseExists = db
           .prepare(`SELECT 1 FROM plan_phases WHERE task_id = ? AND phase_id = ?`)
           .get(taskId, phaseId);
@@ -282,6 +292,7 @@ export class PlansProjector implements Projector {
         if (existing == null) {
           throw new Error(`plans: plan.replanned for unknown plan '${taskId}' — draft it first`);
         }
+        assertPlanOpenForFold('plan.replanned', existing);
         db.prepare(`UPDATE plans SET replan_count = replan_count + 1 WHERE task_id = ?`).run(
           taskId,
         );

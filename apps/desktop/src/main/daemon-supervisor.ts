@@ -173,6 +173,8 @@ export class DaemonSupervisor {
   private retries = 0;
   private generation = 0;
   private starting: Promise<DaemonStatus> | null = null;
+  private lastEmittedStatus: DaemonStatus = 'stopped';
+  private lastEmittedDetail: string | null = null;
 
   constructor(options: DaemonSupervisorOptions = {}) {
     this.emitStatus = options.onStatus;
@@ -392,8 +394,13 @@ export class DaemonSupervisor {
   }
 
   private setStatus(status: DaemonStatus): void {
-    if (this._status === status) return;
+    const detail = this._detail;
+    const visibleStateChanged =
+      this.lastEmittedStatus !== status || this.lastEmittedDetail !== detail;
     this._status = status;
+    if (!visibleStateChanged) return;
+    this.lastEmittedStatus = status;
+    this.lastEmittedDetail = detail;
     if (this.emitStatus == null) return;
     try {
       this.emitStatus(status);
