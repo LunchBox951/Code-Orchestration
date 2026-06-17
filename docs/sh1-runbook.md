@@ -17,6 +17,16 @@ proof first if you have not already.
 > drives the live Stage 14 self-drive loop, but SH-1 still requires host-live evidence from real
 > provider binaries and the desktop review gate. Treat any manual tool calls that remain necessary
 > during the host run as evidence to capture, not as hidden automation.
+>
+> **A green `fake` proof is likewise NOT SH-1 evidence.** The unified host-proof driver
+> `runProof({fake|claude|codex})` (`packages/mcp/src/conductor/host-proof.ts`) runs the same sequence
+> against a `FakePty` (`runProof('fake')`, tagged `fidelity: 'sandbox-fake'`) or a real provider in a
+> real pty (`runProof('claude')` / `runProof('codex')`, tagged `fidelity: 'host-live'`). A
+> `sandbox-fake` result proves only the harness wiring — never that a real `claude`/`codex` binary
+> reached `ready` and routed mail through a real terminal (Principle 2 — authentic-terminal). The
+> `assertHostLiveProof(result)` gate throws on anything other than `fidelity: 'host-live'`; any future
+> SH-1-evidence recorder MUST call it first, so a sandbox-fake run can never be banked as SH-1
+> evidence. See [`host-proof.md`](host-proof.md) for the fidelity tiers and the forward gate.
 
 ---
 

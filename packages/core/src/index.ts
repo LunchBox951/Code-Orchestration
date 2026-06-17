@@ -1179,6 +1179,27 @@ export { classifyStartup, normalizeStartupOutput } from './pty/startup-classifie
 export type { StartupOutcome } from './pty/startup-driver.js';
 export { driveToReady } from './pty/startup-driver.js';
 
+// Stage 15 P-F — shared provider startup-byte fixtures (the B1 signatures, with `[documented]` /
+// `[synthesized]` / `[host-live]` provenance tags). Lifted out of `startup-classifier.test.ts` so
+// BOTH the classifier tests AND the mcp host-proof / FakeProvider harness drive ONE source of truth
+// (no divergent re-declared copies). Non-test module: shipped in `src` like FakePty.
+export {
+  CLAUDE_TRUST,
+  CLAUDE_READY,
+  CLAUDE_READY_CURSOR_POSITIONED,
+  CLAUDE_READY_STATUS_STRIP,
+  CLAUDE_THEME,
+  CLAUDE_LOGIN,
+  CLAUDE_OAUTH_LOGIN,
+  CODEX_UPDATE,
+  CODEX_TRUST,
+  CODEX_HOOKS_REVIEW,
+  CODEX_READY,
+  CODEX_READY_CURRENT,
+  CODEX_MCP_STARTING,
+  CODEX_SIGNIN,
+} from './pty/startup-fixtures.js';
+
 // L7 B1 — NodePtyHost: the one real-binary adapter, implementing PtyHost over node-pty. node-pty is
 // reached only via a lazy injected loader behind a local type shim, so the gate is green without the
 // native module present; the live binary reaching ready is the operator's host-side proof.
