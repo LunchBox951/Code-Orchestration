@@ -92,6 +92,7 @@ export interface AppShell {
   refreshMail(busId?: string): void;
   refreshLimitsCost(): void;
   selectAgent(agentId: string | null): void;
+  refreshTranscript(): void;
   reviewSelect(reviewId: string): ReviewState;
   reviewBeginVerdict(verdict: 'PASS' | 'ISSUES'): ReviewState;
   reviewUpdateComposerBody(text: string): ReviewState;
@@ -128,6 +129,20 @@ function buildRegistry(override?: RendererRegistry): RendererRegistry {
 function safeError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
+
+/** Map a fetch failure to operator-facing copy: the conductor-down guidance, else the raw message. */
+function conductorOrError(e: unknown): string {
+  return e instanceof ConductorUnavailableError
+    ? 'Conductor not running — start `co-mcp serve <projectId>` to load review context.'
+    : safeError(e);
+}
+
+/**
+ * How long a review-context fetch may stay pending before the pane gives up and shows an in-pane error +
+ * Retry (Principle 9 — no-silent-failures). A hung fetch would otherwise leave "Loading review context…"
+ * on screen forever. Main-process code, so a real timer is fine; it is always cleared once the fetch settles.
+ */
+const REVIEW_CONTEXT_TIMEOUT_MS = 10_000;
 
 export function createAppShell(deps: AppShellDeps): AppShell {
   const socketPath = deps.socketPath ?? defaultOperatorSocketPath(deps.projectId);
@@ -178,7 +193,16 @@ export function createAppShell(deps: AppShellDeps): AppShell {
           agentsConsoleVm.setTranscriptTail(tail);
         }
       })
-      .catch(() => {});
+      .catch((e: unknown) => {
+        // Never swallow (Principle 9): surface a persistent in-pane error + Retry. Guard on the
+        // request-seq + selected agent so a stale or again-switched request cannot clobber a newer pane.
+        if (
+          requestSeq === transcriptRequestSeq &&
+          agentsConsoleVm.state.selectedAgentId === agentId
+        ) {
+          agentsConsoleVm.setTranscriptError(agentId, safeError(e));
+        }
+      });
   }
 
   function updateAgentsConsole(
@@ -286,12 +310,33 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   const reviewVm = new ReviewVM({
     onFetchReviewContext: (reviewId) => {
       const seq = ++reviewContextRequestSeq;
+      // Race the fetch against a timeout so a hung conductor cannot leave the pane on "Loading…" forever
+      // (Site 4). The timer only acts while this request is still the latest AND still loading; it is
+      // always cleared once the fetch settles, so no dangling timer survives.
+      const timer = setTimeout(() => {
+        if (seq === reviewContextRequestSeq && reviewVm.state.context?.status === 'loading') {
+          reviewVm.setReviewContextError(
+            reviewId,
+            'Timed out loading review context — the conductor may be busy or unreachable.',
+          );
+        }
+      }, REVIEW_CONTEXT_TIMEOUT_MS);
       void client
         .reviewContext(reviewId)
         .then((ctx) => {
           if (seq === reviewContextRequestSeq) reviewVm.setReviewContext(reviewId, ctx);
         })
-        .catch(() => {});
+        .catch((e: unknown) => {
+          // Never swallow (Principle 9): surface BOTH the in-pane error state AND the existing toast.
+          if (seq === reviewContextRequestSeq) {
+            const message = conductorOrError(e);
+            reviewVm.setReviewContextError(reviewId, message);
+            deps.onReviewError?.(message);
+          }
+        })
+        .finally(() => {
+          clearTimeout(timer);
+        });
     },
     onSubmitVerdict: async (target, draft) => {
       try {
@@ -355,6 +400,11 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     refreshLimitsCost: doRefreshLimitsCost,
     selectAgent(agentId: string | null): void {
       agentsConsoleVm.selectAgent(agentId);
+      refreshSelectedTranscript();
+    },
+    refreshTranscript(): void {
+      // Retry for the in-pane transcript error: re-invoke the same fetch. A plain re-select of the same
+      // agent is a no-op (selectAgent guards same-id), so the renderer routes Retry through here.
       refreshSelectedTranscript();
     },
     reviewSelect(reviewId: string): ReviewState {

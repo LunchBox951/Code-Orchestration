@@ -22,6 +22,12 @@ export interface AgentsConsoleState {
   readonly selectedAgentId: string | null;
   readonly selectedStatus: AgentStatus | null;
   readonly transcript: string;
+  /**
+   * A persistent transcript-fetch error for the selected agent (Principle 9 — no-silent-failures).
+   * Non-null after a `transcript()` fetch rejects; the renderer shows it with a Retry button instead of
+   * leaving the pane empty. Cleared on agent switch, an explicit transcript clear, or a successful fetch.
+   */
+  readonly transcriptError: string | null;
   readonly connection: 'live' | 'degraded';
 }
 
@@ -102,6 +108,7 @@ export class AgentsConsoleVM {
     selectedAgentId: null,
     selectedStatus: null,
     transcript: '',
+    transcriptError: null,
     connection: 'degraded',
   };
   private readonly listeners = new Set<(state: AgentsConsoleState) => void>();
@@ -176,6 +183,7 @@ export class AgentsConsoleVM {
       selectedAgentId: agentId,
       selectedStatus,
       transcript: '',
+      transcriptError: null,
     };
     this.transcriptSegments = [];
     this.emit();
@@ -187,12 +195,33 @@ export class AgentsConsoleVM {
     this._state = {
       ...this._state,
       transcript: '',
+      transcriptError: null,
     };
+    this.emit();
+  }
+
+  /**
+   * Record a transcript-fetch failure for the selected agent. Ignored when `agentId` is not the current
+   * selection (a stale/again-switched request must never clobber a fresh pane). Pairs with the renderer's
+   * in-pane error + Retry (Principle 9 — no-silent-failures).
+   */
+  setTranscriptError(agentId: string, message: string): void {
+    if (agentId !== this._state.selectedAgentId) return;
+    this._state = { ...this._state, transcriptError: message };
     this.emit();
   }
 
   setTranscriptTail(tail: TranscriptTail): void {
     if (tail.agentId !== this._state.selectedAgentId) return;
+    // A successful fetch clears any stale error. Empty tails still resolve the error (the fetch
+    // succeeded) but `applyTranscriptSegment` short-circuits on empty text and would not emit — so
+    // clear + emit here, then let `applyTranscriptSegment` emit the segment when there is text.
+    const hadError = this._state.transcriptError != null;
+    if (hadError) this._state = { ...this._state, transcriptError: null };
+    if (tail.tail.length === 0) {
+      if (hadError) this.emit();
+      return;
+    }
     this.applyTranscriptSegment(tail.offset, tail.tail);
   }
 

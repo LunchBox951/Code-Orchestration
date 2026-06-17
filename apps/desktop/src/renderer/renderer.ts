@@ -95,6 +95,10 @@ function showAppError(message: string): void {
   setTimeout(() => toast.remove(), 7000);
 }
 
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 // ── Dashboard rendering ────────────────────────────────────────────────────────
 
 function statusDotHtml(status: AgentStatus): string {
@@ -635,7 +639,28 @@ function renderAgents(state: AgentsConsoleState): void {
     state.selectedAgentId != null && state.connection === 'live' && state.selectedStatus === 'warm';
   setComposerEnabled(composerEnabled);
 
+  renderTranscriptError(state.transcriptError);
   renderAgentsTranscript(state);
+}
+
+// Persistent in-pane transcript-fetch error + Retry (Principle 9 — no-silent-failures). Unlike the
+// vanishing `showTranscriptError` toast, this is a retry STATE: it stays until the operator retries or
+// switches agents. Retry routes through `agentsRefreshTranscript` (a plain re-select of the same agent is
+// a no-op — selectAgent guards same-id — so a dedicated refresh channel is required).
+function renderTranscriptError(message: string | null): void {
+  const banner = document.getElementById('agents-transcript-error');
+  if (!banner) return;
+  if (message == null) {
+    banner.innerHTML = '';
+    banner.hidden = true;
+    return;
+  }
+  banner.innerHTML = [
+    `<span class="agents-transcript-error-msg">${esc(message)}</span>`,
+    `<button class="btn btn-secondary" data-agents-action="retry-transcript" type="button"`,
+    ` aria-label="Retry loading transcript">Retry</button>`,
+  ].join('');
+  banner.hidden = false;
 }
 
 function renderAgentsTranscript(state: AgentsConsoleState): void {
@@ -687,6 +712,17 @@ function renderReviewDetail(context: SelectedContext, composer: VerdictComposer)
   }
   if (context.status === 'loading') {
     return `<div class="empty-state">Loading review context…</div>`;
+  }
+  if (context.status === 'error') {
+    // No silent failure (Principle 9): a rejected/timed-out fetch shows the message + a Retry button
+    // instead of an eternal "Loading…". Retry re-selects the review (re-enters loading → re-fetches).
+    return [
+      `<div class="review-context-error">`,
+      `<div class="review-context-error-msg">${esc(context.message)}</div>`,
+      `<button class="btn btn-secondary" data-review-action="retry-context"`,
+      ` aria-label="Retry loading review context">Retry</button>`,
+      `</div>`,
+    ].join('');
   }
 
   const { value } = context;
@@ -911,7 +947,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Request initial mail state on load
-  void bridge.mailRefresh();
+  void bridge
+    .mailRefresh()
+    .catch((e: unknown) => showAppError(`Failed to load mail: ${errorMessage(e)}`));
 
   // ── Limits / Cost ──────────────────────────────────────────────────────────
 
@@ -920,7 +958,9 @@ document.addEventListener('DOMContentLoaded', () => {
     renderCostView(state);
   });
 
-  void bridge.refreshLimitsCost();
+  void bridge
+    .refreshLimitsCost()
+    .catch((e: unknown) => showAppError(`Failed to load limits / cost: ${errorMessage(e)}`));
 
   function selectMailRow(row: HTMLElement): void {
     const seq = row.dataset['seq'];
@@ -964,7 +1004,9 @@ document.addEventListener('DOMContentLoaded', () => {
     showAppError(message);
   });
 
-  void bridge.reviewRefresh();
+  void bridge
+    .reviewRefresh()
+    .catch((e: unknown) => showAppError(`Failed to load reviews: ${errorMessage(e)}`));
 
   // ── Session start ──────────────────────────────────────────────────────────
 
@@ -1017,6 +1059,17 @@ document.addEventListener('DOMContentLoaded', () => {
           if (s != null) renderReview(s);
         });
         break;
+      case 'retry-context': {
+        // Retry the failed review-context fetch by re-selecting the review (reviewSelect has no same-id
+        // guard, so it re-enters loading and re-fetches — surfacing fresh content, error, or timeout).
+        const reviewId = latestReviewState?.selectedReviewId;
+        if (reviewId != null) {
+          void bridge.reviewSelect(reviewId).then((s) => {
+            if (s != null) renderReview(s);
+          });
+        }
+        break;
+      }
     }
   });
 
@@ -1051,6 +1104,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('view-agents')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
+
+    // In-pane transcript Retry — re-runs the failed transcript fetch through the dedicated channel.
+    const retryBtn = target.closest<HTMLElement>('[data-agents-action="retry-transcript"]');
+    if (retryBtn) {
+      void bridge.agentsRefreshTranscript();
+      return;
+    }
 
     // Stop / Unstick per-agent buttons — check before row selection so clicks on the buttons
     // do not also trigger agent selection.

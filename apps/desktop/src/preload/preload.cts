@@ -59,6 +59,7 @@ interface CoShellBridge {
   // ── Agents Console ────────────────────────────────────────────────────────
   onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
+  agentsRefreshTranscript(): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
   agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
@@ -186,6 +187,9 @@ const bridge: CoShellBridge = {
   },
   async agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null> {
     return ipcRenderer.invoke<AgentsConsoleState | null>('agents:select', agentId);
+  },
+  async agentsRefreshTranscript(): Promise<AgentsConsoleState | null> {
+    return ipcRenderer.invoke<AgentsConsoleState | null>('agents:refreshTranscript');
   },
   async agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agents:steer', agentId, steer);
