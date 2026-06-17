@@ -322,6 +322,15 @@ function hasWaitingItems(projectId: ProjectId, agentId: string): boolean {
   }
 }
 
+function hasOutstandingActionableMail(projectId: ProjectId, agentId: string): boolean {
+  const mail = openMailStore(projectId);
+  try {
+    return mail.outstanding(agentId).length > 0;
+  } finally {
+    mail.close();
+  }
+}
+
 function requiresFinishBeforeYield(projectId: ProjectId, agentId: string): boolean {
   const roster = openRosterStore(projectId);
   try {
@@ -569,7 +578,8 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         ...obs,
         pidAlive: pidAliveFor(agent),
         hasWaitingItems: hasWaitingItems(projectId, agent.agentId),
-        hasOutstandingActionable:
+        hasOutstandingActionable: hasOutstandingActionableMail(projectId, agent.agentId),
+        requiresFinishBeforeYield:
           obs.turnStartedAt !== undefined && requiresFinishBeforeYield(projectId, agent.agentId),
       };
     },

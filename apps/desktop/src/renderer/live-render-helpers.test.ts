@@ -5,6 +5,7 @@ import {
   needsRebuild,
   restoreInteractionState,
   signaturesEqual,
+  createLatestAsyncRequest,
   type CapturedInteractionState,
   type MailRowView,
   type MailStateView,
@@ -52,6 +53,76 @@ describe('signaturesEqual', () => {
     expect(signaturesEqual({ a: 1, b: 'x' }, { a: 1, b: 'y' })).toBe(false);
     expect(signaturesEqual({ a: 1 }, { a: 1, b: 'x' })).toBe(false);
     expect(signaturesEqual({ a: 1, b: 'x' }, { a: 1 })).toBe(false);
+  });
+});
+
+// ── latest-only async request gate ───────────────────────────────────────────────
+
+describe('createLatestAsyncRequest', () => {
+  it('ignores a stale earlier success that resolves after a newer request', async () => {
+    const gate = createLatestAsyncRequest<string>();
+    const rendered: string[] = [];
+    const errors: unknown[] = [];
+    let resolveFirst!: (value: string) => void;
+    let resolveSecond!: (value: string) => void;
+
+    gate.run(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveFirst = resolve;
+        }),
+      (value) => rendered.push(value),
+      (error) => errors.push(error),
+    );
+    gate.run(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSecond = resolve;
+        }),
+      (value) => rendered.push(value),
+      (error) => errors.push(error),
+    );
+
+    resolveSecond('project-b');
+    await Promise.resolve();
+    resolveFirst('project-a');
+    await Promise.resolve();
+
+    expect(rendered).toEqual(['project-b']);
+    expect(errors).toEqual([]);
+  });
+
+  it('ignores a stale earlier failure that resolves after a newer request', async () => {
+    const gate = createLatestAsyncRequest<string>();
+    const rendered: string[] = [];
+    const errors: unknown[] = [];
+    let rejectFirst!: (error: unknown) => void;
+    let resolveSecond!: (value: string) => void;
+
+    gate.run(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectFirst = reject;
+        }),
+      (value) => rendered.push(value),
+      (error) => errors.push(error),
+    );
+    gate.run(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSecond = resolve;
+        }),
+      (value) => rendered.push(value),
+      (error) => errors.push(error),
+    );
+
+    resolveSecond('project-b');
+    await Promise.resolve();
+    rejectFirst(new Error('stale project-a'));
+    await Promise.resolve();
+
+    expect(rendered).toEqual(['project-b']);
+    expect(errors).toEqual([]);
   });
 });
 

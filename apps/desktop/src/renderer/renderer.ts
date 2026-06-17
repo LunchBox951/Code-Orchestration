@@ -4,6 +4,7 @@
 import { reviewDetailNeedsRebuild, reviewDetailSignature } from './review-render-helpers.js';
 import {
   captureInteractionState,
+  createLatestAsyncRequest,
   mailDetailSignature,
   needsRebuild,
   restoreInteractionState,
@@ -34,6 +35,7 @@ let latestMailState: MailState | null = null;
 // Cached so a daemon:status change can re-render the dashboard's degraded banner with the right copy.
 let latestDashboardState: DashboardState | null = null;
 let latestDaemonStatus: DaemonStatus | null = null;
+const sourceRefreshGate = createLatestAsyncRequest<SourceState | null>();
 
 function collectAgentIds(nodes: readonly TreeNode[], out: string[] = []): string[] {
   for (const node of nodes) {
@@ -1042,12 +1044,13 @@ function renderSource(state: SourceState): void {
 // Pull the latest branches for the read-only Source view. Source has no push channel (it is a direct
 // main-process read), so it is refreshed on view activation + the manual Refresh/Retry controls.
 function refreshSource(): void {
-  void window.coShell
-    .sourceRefresh()
-    .then((s) => {
+  sourceRefreshGate.run(
+    () => window.coShell.sourceRefresh(),
+    (s) => {
       if (s != null) renderSource(s);
-    })
-    .catch((e: unknown) => showAppError(`Failed to load branches: ${errorMessage(e)}`));
+    },
+    (e: unknown) => showAppError(`Failed to load branches: ${errorMessage(e)}`),
+  );
 }
 
 // ── Session start form rendering ───────────────────────────────────────────────

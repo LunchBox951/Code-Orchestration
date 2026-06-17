@@ -163,6 +163,28 @@ describe('classifyLiveness — silent-stop (must-not-regress: NOT a reap, NOT mi
     expect(v.break?.triggerId).toBe('finish-before-yield');
   });
 
+  it('requiresFinishBeforeYield is separate from currently outstanding actionable mail', () => {
+    const pane = new FakePty().spawn(SPEC);
+    const rec = record(pane);
+    for (let t = 0; t <= 1000; t += 250) rec.emitAt(t, SPINNER);
+
+    const v = classifyLiveness(
+      {
+        trace: rec.trace,
+        exited: rec.exited(),
+        pidAlive: true,
+        turnActive: false,
+        hasOutstandingActionable: false,
+        requiresFinishBeforeYield: true,
+      },
+      1000 + QUIET_WINDOW_MS + 1,
+      { provider: 'claude' },
+    );
+
+    expect(v.liveness).toBe('alive');
+    expect(v.break?.kind).toBe('silent_stop');
+  });
+
   it('a yielded turn is NEVER wedged — even when quiet far past 8 s (turnActive separates them)', () => {
     const pane = new FakePty().spawn(SPEC);
     const rec = record(pane);

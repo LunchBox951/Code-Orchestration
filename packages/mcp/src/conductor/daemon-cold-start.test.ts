@@ -463,16 +463,16 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
 // ── Stage 15 · P-E (AC-S15-2 / ST-2) — RE-WARM recovered NON-root agents ─────────────────────────────
 //
 // GENERALIZES the root cold-start to the recovered live set: after a daemon restart the RUNNING set is
-// reconstructed but the NON-root agents (implementers/leads) are COLD in this fresh engine process and
-// today are only REPORTED (`coldCandidates`), never driven. The daemon now SELECTS them and re-warms each
-// through the SAME single launch authority (`engine.ensureHosted`, MNR-5) — no second launcher.
+// reconstructed but the NON-root agents (implementers/leads) are COLD in this fresh engine process. The
+// daemon now SELECTS them and offers each to the SAME single launch authority (`engine.ensureHosted`,
+// MNR-5) — no second launcher.
 //
 // SELECTION-ONLY harness: a recovered agent ALREADY has an active session, so the real
 // `ensureHosted → hostSession → recordSession` REFUSES to re-record it ("already has an active session")
 // — re-spawning the crashed provider + reconciling its session row is `[host-live]` glue (host.ts), not
-// in-sandbox. So these prove the in-sandbox SELECTION against a SPY launch authority (exactly what the
-// brief calls for): the spy records each `ensureHosted` identity and marks the agent hosted, so the
-// `isHosted` no-double-dispatch gate is exercised against real daemon code + real recovery stores.
+// in-sandbox. So these prove two distinct things: the in-sandbox SELECTION against an accepting SPY
+// launch authority, and the default duplicate-session refusal path that leaves recovered agents cold
+// without starving `runCycle`.
 
 /** A spy standing in for the engine's launch authority: records every `ensureHosted` identity + the
  *  `drivable` set each `runCycle` saw, and tracks hosted state so `isHosted` reflects a re-warm. The
@@ -609,7 +609,7 @@ function makeReWarmDaemon(
 }
 
 describe('ConductorDaemon — Stage 15 P-E re-warm recovered NON-root agents (AC-S15-2 / ST-2)', () => {
-  it('re-warms a cold recovered NON-root agent via the single launch authority (becomes hosted, joins drivable)', async () => {
+  it('records a recovered NON-root re-warm only when the injected launch authority accepts it', async () => {
     const { projectId, repo } = makeProject();
     seedLeadChain(projectId);
     recordRecoveredAgent(projectId, repo, 'impl-cold', 'implementer', 'lead-1');
@@ -618,13 +618,13 @@ describe('ConductorDaemon — Stage 15 P-E re-warm recovered NON-root agents (AC
     const spy = makeSpyEngine();
     const out = await makeReWarmDaemon(projectId, spy.engine, clock).tick();
 
-    // SELECTED + re-warmed through the SAME launch authority, now hosted — distinct from a cold-start.
+    // SELECTED + accepted by the SAME injected launch authority, now hosted — distinct from a cold-start.
     expect(out.reWarmed).toEqual(['impl-cold']);
     expect(out.coldStarted).toEqual([]); // it had a recovered session ⇒ not a cold-start
     expect(spy.engine.isHosted(projectId, 'impl-cold')).toBe(true);
-    expect(out.coldCandidates).toEqual([]); // re-warmed ⇒ no longer reported as cold
+    expect(out.coldCandidates).toEqual([]); // accepted re-warm ⇒ no longer reported as cold
 
-    // Re-warm ran BEFORE the cycle: the re-warmed agent joined the drivable set THIS tick (mirrors step 0).
+    // Accepted re-warm ran BEFORE the cycle: the agent joined the drivable set THIS tick.
     expect(spy.drivableSeen.at(-1)?.map((i) => i.agent)).toEqual(['impl-cold']);
 
     // The launch authority was invoked ONCE, with impl-cold's RECOVERED identity (pane/cwd/provider) —
@@ -639,7 +639,7 @@ describe('ConductorDaemon — Stage 15 P-E re-warm recovered NON-root agents (AC
     });
   });
 
-  it('no double-dispatch: a re-warmed agent is NOT re-warmed again on the next tick (ensureHosted called exactly once for it)', async () => {
+  it('no double-dispatch: an accepted re-warm is NOT attempted again on the next tick', async () => {
     const { projectId, repo } = makeProject();
     seedLeadChain(projectId);
     recordRecoveredAgent(projectId, repo, 'impl-cold', 'implementer', 'lead-1');
@@ -659,26 +659,26 @@ describe('ConductorDaemon — Stage 15 P-E re-warm recovered NON-root agents (AC
     expect(spy.ensureHostedCalls.map((i) => i.agent)).toEqual(['impl-cold']);
   });
 
-  it('cold-starts the root AND re-warms a recovered child in ONE tick — the dispatch split (cold-start root-only, re-warm non-root)', async () => {
+  it('cold-starts the root AND accepts a recovered child re-warm in ONE tick — the dispatch split', async () => {
     const { projectId, repo } = makeProject();
     // A registered-but-unhosted ROOT (worktree provisioned, NO session) → cold-start target (step 0).
     const { coordinator } = startCoordinatorSession(
       { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
       { slingDeps: SLING_DEPS },
     );
-    // A recovered CHILD under it (active session, cold in this engine) → re-warm target (step 1a).
+    // A recovered CHILD under it (active session, cold in this engine) → re-warm-attempt target.
     recordRecoveredAgent(projectId, repo, 'impl-cold', 'implementer', coordinator);
 
     const clock = makeClock();
     const spy = makeSpyEngine();
     const out = await makeReWarmDaemon(projectId, spy.engine, clock).tick();
 
-    // The SPLIT: cold-start stays ROOT-only; re-warm handles the NON-root recovered child.
+    // The SPLIT: cold-start stays ROOT-only; accepted re-warm handles the NON-root recovered child.
     expect(out.coldStarted).toEqual([coordinator]);
     expect(out.reWarmed).toEqual(['impl-cold']);
     expect(out.coldStarted).not.toContain('impl-cold');
     expect(out.reWarmed).not.toContain(coordinator);
-    // BOTH went through the SAME single launch authority — root first (step 0), then child (step 1a).
+    // BOTH went through the SAME injected launch authority — root first (step 0), then child (step 1a).
     expect(spy.ensureHostedCalls.map((i) => i.agent)).toEqual([coordinator, 'impl-cold']);
   });
 
@@ -715,7 +715,7 @@ describe('ConductorDaemon — Stage 15 P-E re-warm recovered NON-root agents (AC
     expect(run1).toEqual(['impl-a', 'impl-b']); // candidates order = session creation order
   });
 
-  it('GUARDS a throwing per-tick relaunch (review-375): a recovered agent that still owns its session row makes ensureHosted→recordSession THROW — the tick survives (runCycle still runs) and does not churn (attempted once)', async () => {
+  it('leaves the default duplicate recovered session cold when ensureHosted→recordSession refuses it', async () => {
     const { projectId, repo } = makeProject();
     seedLeadChain(projectId);
     recordRecoveredAgent(projectId, repo, 'impl-cold', 'implementer', 'lead-1');

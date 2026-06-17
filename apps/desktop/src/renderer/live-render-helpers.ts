@@ -61,6 +61,30 @@ export function needsRebuild<S extends object>(
   return !signaturesEqual(prev, next);
 }
 
+// ── Latest-only async rendering ─────────────────────────────────────────────────
+
+/**
+ * Gate async view refreshes so only the newest request may render or surface an error. This prevents a
+ * stale response from a previous project/view state overwriting a newer pane after it resolves later.
+ */
+export function createLatestAsyncRequest<T>(): {
+  run(load: () => Promise<T>, onValue: (value: T) => void, onError: (error: unknown) => void): void;
+} {
+  let seq = 0;
+  return {
+    run(load, onValue, onError): void {
+      const requestSeq = ++seq;
+      void load()
+        .then((value) => {
+          if (requestSeq === seq) onValue(value);
+        })
+        .catch((error: unknown) => {
+          if (requestSeq === seq) onError(error);
+        });
+    },
+  };
+}
+
 // ── Scroll / caret / focus preservation ──────────────────────────────────────────
 
 /**

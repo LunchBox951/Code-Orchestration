@@ -214,6 +214,36 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
     }
   });
 
+  it('recordTaskCompleted is idempotent after the terminal event is recorded', () => {
+    const projectId = 'p-plans-completed-idempotent';
+    const store = openPlanStore(projectId);
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      const first = store.recordTaskCompleted('task-1', 'coord-done');
+      const second = store.recordTaskCompleted('task-1', 'coord-retry');
+      expect(second.completedTs).toBe(first.completedTs);
+
+      const audit = openProjectStore(projectId);
+      try {
+        const completedEvents = audit
+          .readStream(planScope('task-1'))
+          .filter((event) => event.type === EVENT_TASK_COMPLETED);
+        expect(completedEvents).toHaveLength(1);
+        expect(completedEvents[0]?.actor).toBe('coord-done');
+      } finally {
+        audit.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
   it('task.completed for an unknown plan fails loud (Principle 9)', () => {
     const store = openPlanStore('p-plans-completed-unknown');
     try {

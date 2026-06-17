@@ -7,6 +7,7 @@ import { renderCoMcpHelp } from './bin-help.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const runbook = readFileSync(join(process.cwd(), 'docs', 'sh1-runbook.md'), 'utf8');
 const hostProof = readFileSync(join(process.cwd(), 'docs', 'host-proof.md'), 'utf8');
+const offlineRunbook = readFileSync(join(process.cwd(), 'docs', 'offline-runbook.md'), 'utf8');
 const demoSpec = readFileSync(
   join(process.cwd(), 'docs', 'demo-spec-co-improves-its-docs.md'),
   'utf8',
@@ -62,5 +63,11 @@ describe('co-mcp binary help', () => {
   it('keeps the bundled demo spec pointed at the existing CLI reference doc', () => {
     expect(demoSpec).toContain('docs/architecture/cli-reference.md');
     expect(demoSpec).not.toContain('docs/cli-reference.md');
+  });
+
+  it('keeps the Offline runbook honest about repo-mode evidence', () => {
+    expect(offlineRunbook).toContain('mode: "offline"');
+    expect(offlineRunbook).toContain('`co status` do not yet render repo mode');
+    expect(offlineRunbook).not.toContain('`co status` shows the project in Offline mode');
   });
 });

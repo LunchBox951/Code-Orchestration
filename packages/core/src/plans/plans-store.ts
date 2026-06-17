@@ -246,6 +246,15 @@ export function openPlanStore(projectId: string): PlanStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
+        const existing = selectPlan(db, taskId);
+        if (existing == null) {
+          throw new Error(
+            `openPlanStore.recordTaskCompleted: task.completed for unknown plan '${taskId}' — draft it first`,
+          );
+        }
+        if (existing.completedTs != null) {
+          return existing;
+        }
         const [stored] = tx.append([makeTaskCompletedEvent(projectId, { taskId }, actor)]);
         applyEvent(tx, decode(stored!, plansUpcasters, plansSchemas), projectors);
         const row = selectPlan(db, taskId);

@@ -294,6 +294,9 @@ export class PlansProjector implements Projector {
         if (existing == null) {
           throw new Error(`plans: task.completed for unknown plan '${taskId}' — draft it first`);
         }
+        if (existing.completedTs != null) {
+          return;
+        }
         // `event.ts` is the completion mark (freeze #6 — never a wall clock).
         db.prepare(`UPDATE plans SET completed_ts = ? WHERE task_id = ?`).run(event.ts, taskId);
         return;

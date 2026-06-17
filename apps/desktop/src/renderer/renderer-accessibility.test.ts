@@ -232,6 +232,8 @@ describe('source read surface (P-ON4) + demo-spec launch (P-ON3)', () => {
     // activation hook lives in module-scope activateView, so it calls the bridge via window.coShell.
     expect(rendererSource).toContain("if (view === 'source')");
     expect(rendererSource).toContain("if (isViewActive('source')) refreshSource();");
+    expect(rendererSource).toContain('createLatestAsyncRequest<SourceState | null>()');
+    expect(rendererSource).toContain('sourceRefreshGate.run(');
     expect(rendererSource).toContain('.sourceRefresh(');
     expect(rendererSource).toContain("getElementById('view-source')");
     expect(rendererSource).toContain('data-source-action="retry"');

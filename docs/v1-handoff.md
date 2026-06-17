@@ -109,6 +109,10 @@ Once the live run passes and the operator records evidence:
 - **Codex parity:** `PV-1` / `PV-2` ("both providers run real worker turns") is unproven and
   un-provable in sandbox; the live run may surface real provider-neutrality bugs that *generate new
   agent work*.
+- **ST-2 recovered-session handoff:** sandbox currently proves recovery selection and guarded failure,
+  not full live re-host. A recovered stale non-root session row must be END/RECONCILE'd before
+  re-hosting, and a recovered ROOT-with-session is still a cold candidate rather than automatically
+  re-driven. Capture this explicitly during host-live recovery testing.
 - **#40's dominant cause is the stream model** (an alternate-screen redraw replayed as append-only)
   plus geometry; the renderer half is built, but the live width-agreement may reveal more.
 - **Branch-protection filter-up:** the `dev → main` admin-merge after a CO PASS is operator-gated by
