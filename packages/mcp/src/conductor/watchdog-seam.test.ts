@@ -170,13 +170,23 @@ function makeIdentity(agent: string, projectId: ProjectId, cwd: string): HostedI
   };
 }
 
-function seedActionableMail(projectId: ProjectId, agent: string): void {
+function makeCoordinatorIdentity(projectId: ProjectId, cwd: string): HostedIdentity {
+  return {
+    ...makeIdentity('coord-1', projectId, cwd),
+    role: 'coordinator',
+    parent: '@operator',
+    pane: 'pane-coord-1',
+    resume: { provider: 'claude', sessionId: 'session-coord-1' },
+  };
+}
+
+function seedActionableMail(projectId: ProjectId, agent: string, from = 'lead-1'): void {
   const mail = openMailStore(projectId);
   try {
     mail.send({
       type: 'clarify_request',
       to: agent,
-      from: 'lead-1',
+      from,
       subject: 'work',
       body: 'do it',
     });
@@ -397,6 +407,58 @@ describe('AC-S14-6 — watchdog liveness seam: silent-stop detection via engine-
         agent: 'impl-retracted',
         info: { kind: 'silent_stop', triggerId: SILENT_STOP_TRIGGER },
       });
+      expect(stuck).toEqual([]);
+    } finally {
+      qw.settle();
+      await runner.stop();
+    }
+  });
+
+  it('a yielded coordinator turn is not treated as missing co_finish', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const scheduler = new FakeScheduler();
+
+    const breaks: Array<{ agent: string; info: BreakInfo }> = [];
+    const stuck: string[] = [];
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      autoStart: false,
+      pidAliveFor: () => true,
+      injectNudge: async () => {},
+      onBreak: (agent, info) => breaks.push({ agent, info }),
+      markStuck: (agent) => stuck.push(agent),
+    });
+
+    try {
+      const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+      const reconcile = (runner as unknown as { daemon: { reconcile: ReconcileLoop } }).daemon
+        .reconcile;
+
+      seedActionableMail(projectId, 'coord-1', '@operator');
+      const pane = await hostPane(engine, pty, makeCoordinatorIdentity(projectId, cwd));
+      const hosted = engine.getHosted(projectId, 'coord-1')!;
+      const item = outstandingItem(projectId, 'coord-1');
+
+      clock.set(0);
+      const turnP = engine.runOneTurn(hosted, item);
+      await driveTurnToIdle(pane, item, clock, qw);
+      await turnP;
+
+      await reconcile.tick();
+
+      expect(breaks).toEqual([]);
       expect(stuck).toEqual([]);
     } finally {
       qw.settle();

@@ -28,8 +28,8 @@ this spec.
 1. **One table or list per top-level `co` subcommand** — verb, one-line description, key
    flags/args. Pull the descriptions directly from `run.ts` HELP_TEXT; do not invent or paraphrase
    beyond what the source says.
-2. **One table or list for `co-mcp` verbs** (`project-id`, `serve`, `start-session`) with the same
-   format.
+2. **One table or list for every `co-mcp --help` entry** with the same format, including the stdio
+   default entry plus `serve`, `host-proof`, `bridge`, `start-session`, and `project-id`.
 3. **A short preamble** (2–4 sentences) explaining that this is the product CLI reference and
    pointing to `docs/alpha-quickstart.md` for step-by-step flows.
 4. **No terminal-session examples** — the quickstart already covers those. Flags and one-liners are

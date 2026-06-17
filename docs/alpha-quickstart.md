@@ -1,14 +1,15 @@
 # Alpha Quickstart
 
-Get the `co` orchestration loop running on your machine using the desktop app — no terminal required
-for the primary flow.
+Get the `co` orchestration loop running on your machine using the desktop app. The primary flow is
+app-first, with one temporary host-live gap: locking a drafted spec still requires the operator-only
+MCP `co_spec_lock` path until the app exposes that control.
 
 > **A green sandbox run is NOT SH-1 acceptance evidence — SH-1 ☑ requires the full host run
 > described in [`docs/sh1-runbook.md`](sh1-runbook.md).**
 
 ---
 
-## Primary flow — desktop app (no terminal)
+## Primary flow — desktop app first
 
 ### Step 1 — Build the app
 
@@ -61,8 +62,9 @@ triggers the gated merge onto the integration branch.
 
 ## Power-user tooling — CLI
 
-The commands below are for operators who want scripted control, CI integration, or need to debug
-without the app. The app handles all of this automatically in the primary flow.
+The commands below are for operators who want scripted control, CI integration, need to debug
+without the app, or need to bridge the temporary `co_spec_lock` app-surface gap. The app handles the
+daemon, session launch, mail, review, and live monitoring in the primary flow.
 
 ### Auth check
 
@@ -130,13 +132,14 @@ Operator host-live acceptance (run before merging):
 [ ] Session started: used "Start from demo spec" or "Start session" in the Dashboard.
 [ ] Plan-with-operator: the coordinator mails a clarify/brainstorm; you reply in-app; it drafts a spec.
 [ ] Lock: you approve the spec with the operator-only `co_spec_lock` path; agents cannot lock it.
+    Until the app exposes spec lock, record this as a remaining host-live automation gap.
 [ ] Autonomous drive: WITHOUT manual tool calls, co spawns lead/implementer, runs turns, and a
     review_request lands in the Review view.
 [ ] Approve: click PASS in the Review view; confirm the gated merge lands on the integration branch.
 [ ] Source: the Branches view reflects the new/merged worktree branch.
-[ ] Capture: note any step that still needed a manual tool call (remaining SH-1 automation gaps),
-    per docs/sh1-runbook.md Step 6.
-[ ] Sign-off: if the loop self-drove end-to-end (modulo noted gaps), approve the merge.
+[ ] Capture: note any step that still needed a manual tool call, per docs/sh1-runbook.md Step 6.
+[ ] Sign-off: approve the merge only if the loop self-drove end-to-end with no manual tool calls
+    after spec lock; otherwise record the run as evidence with remaining SH-1 automation gaps.
 ```
 
 **A green sandbox build is not SH-1 evidence — SH-1 ☑ requires the host run (see

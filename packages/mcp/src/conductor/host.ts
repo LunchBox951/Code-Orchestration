@@ -25,6 +25,7 @@ import {
   openMailStore,
   openRegistry,
   openReviewStore,
+  openRosterStore,
   openSessionStore,
   openSpecStore,
   openWorktreeStore,
@@ -321,6 +322,16 @@ function hasWaitingItems(projectId: ProjectId, agentId: string): boolean {
   }
 }
 
+function requiresFinishBeforeYield(projectId: ProjectId, agentId: string): boolean {
+  const roster = openRosterStore(projectId);
+  try {
+    const role = roster.getAgent(agentId)?.role;
+    return role == null || role === 'lead' || role === 'implementer';
+  } finally {
+    roster.close();
+  }
+}
+
 /** Options for {@link serveConductor}. The genuinely host-live seams carry honest defaults. */
 export interface ServeConductorOptions {
   /** The project whose live set the conductor drives. */
@@ -558,7 +569,8 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         ...obs,
         pidAlive: pidAliveFor(agent),
         hasWaitingItems: hasWaitingItems(projectId, agent.agentId),
-        hasOutstandingActionable: obs.turnStartedAt !== undefined,
+        hasOutstandingActionable:
+          obs.turnStartedAt !== undefined && requiresFinishBeforeYield(projectId, agent.agentId),
       };
     },
     now,

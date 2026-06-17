@@ -15,9 +15,11 @@ proof first if you have not already.
 > `packages/mcp/src/conductor/sh1-dry-run.test.ts` proves orchestration plumbing only. A green dry-run
 > is not SH-1 evidence. The desktop app now owns and supervises the Conductor daemon, cold-starts
 > registered root coordinators, and drives the live self-drive loop through the app on-ramp; SH-1
-> still requires host-live evidence from real provider binaries and the desktop review gate. Treat
-> any manual tool calls that remain necessary during the host run as evidence to capture, not as
-> hidden automation.
+> still requires host-live evidence from real provider binaries and the desktop review gate.
+> `co_spec_lock` is a known temporary gap in the app surface: the operator MCP tool exists, but the
+> desktop app and public CLI do not expose it yet. Treat that lock invocation and any other manual
+> tool calls that remain necessary during the host run as evidence to capture, not as hidden
+> automation.
 >
 > **A green `fake` proof is likewise NOT SH-1 evidence.** The unified host-proof driver
 > `runProof({fake|claude|codex})` (`packages/mcp/src/conductor/host-proof.ts`) runs the same sequence
@@ -81,13 +83,15 @@ Once the coordinator has drafted the spec and mailed you the task id:
 
    ```sh
    co spec <taskId>
-   # confirm the spec content, then invoke operator-only tool:
-   # co_spec_lock { "task_id": "<taskId>" }
+   # confirm the spec content, then from an operator MCP client invoke:
+   # tool: co_spec_lock
+   # input: { "task_id": "<taskId>" }
    ```
 
-   The lock verb is `co_spec_lock`, and it is operator-only on the MCP surface. There is no public
-   `co spec lock` CLI command yet, and an agent persona cannot lock a spec. Once locked, the spec id
-   is fixed — record it.
+   The lock verb is `co_spec_lock`, and it is operator-only on the MCP surface. There is no desktop
+   app button and no public `co spec lock` CLI command yet, and an agent persona cannot lock a spec.
+   This lock invocation is therefore a known manual gap for the host-live evidence bundle. Once
+   locked, the spec id is fixed — record it.
 
 3. Note the **task id** (shown by `co spec <taskId>` after lock). You will need it in Step 6.
 
@@ -112,7 +116,9 @@ surfaces:
 If any of these steps require a manual operator/coordinator tool invocation because the live daemon
 does not yet select the next transition on its own, record that invocation in the evidence bundle.
 Those notes are not failures of the Stage 13 review view, but they are remaining SH-1 automation
-work before the acceptance criterion can be marked complete.
+work before the acceptance criterion can be marked complete. In particular, the current
+`co_spec_lock` manual gap means a run can collect useful host-live evidence, but SH-1 must stay
+incomplete until a no-ad-hoc-tool-call path exists.
 
 ### Watching progress
 
