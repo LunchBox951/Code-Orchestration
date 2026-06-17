@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { createRendererRegistry } from '@co/core';
 import type { DeliveredMail, MailType, ReplyDraft } from '@co/core';
@@ -138,6 +141,81 @@ describe('MailVM — update and per-type rendering', () => {
     expect(vm.state.inbox).toHaveLength(1);
     vm.update([makeMail({ seq: 1 }), makeMail({ seq: 2 })], []);
     expect(vm.state.inbox).toHaveLength(2);
+  });
+});
+
+// ── MailVM — typed payload cards (SF-6 / AC-S15-12) ────────────────────────────
+
+describe('MailVM — toRow populates MailRow.card from the core renderer (SF-6)', () => {
+  function fieldMap(fields: readonly { label: string; value: string }[]): Map<string, string> {
+    return new Map(fields.map((f) => [f.label, f.value]));
+  }
+
+  it('a default-type row carries the generic card (title/body + From/To)', () => {
+    const vm = new MailVM({ registry: createRendererRegistry() });
+    vm.update([makeInfoMail({ seq: 1, sender: 'lead-1', recipient: '@operator' })], []);
+    const card = vm.state.inbox[0]!.card;
+    expect(card.title).toBe('Hello');
+    expect(card.body).toBe('just a note');
+    const fields = fieldMap(card.fields);
+    expect(fields.get('From')).toBe('lead-1');
+    expect(fields.get('To')).toBe('@operator');
+  });
+
+  it('a review_response row card surfaces the verdict (per-type card from core)', () => {
+    const vm = new MailVM({ registry: createRendererRegistry() });
+    const verdictMail = makeMail({
+      seq: 30,
+      type: 'review_response' as MailType,
+      subject: 'Re: review',
+      body: 'looks good',
+      reviewVerdict: 'PASS',
+    });
+    vm.update([verdictMail], []);
+    const card = vm.state.inbox[0]!.card;
+    expect(card.title).toBe('Re: review');
+    expect(card.fields[0]).toEqual({ label: 'Verdict', value: 'PASS' });
+  });
+
+  it('an approval row card lays out the approve/decline ask', () => {
+    const vm = new MailVM({ registry: createRendererRegistry() });
+    vm.update([makeApprovalMail({ seq: 20, subject: 'Publish?', body: 'merge it?' })], []);
+    const card = vm.state.inbox[0]!.card;
+    expect(card.title).toBe('Publish?');
+    expect(card.body).toBe('merge it?');
+    expect(card.fields.some((f) => /approve/i.test(f.value) && /decline/i.test(f.value))).toBe(
+      true,
+    );
+  });
+
+  it('selected row exposes the card so the detail pane can paint it', () => {
+    const vm = new MailVM({ registry: createRendererRegistry() });
+    const verdictMail = makeMail({
+      seq: 31,
+      type: 'review_response' as MailType,
+      reviewVerdict: 'ISSUES',
+    });
+    vm.update([verdictMail], []);
+    vm.selectMail(31);
+    expect(vm.state.selected?.card.fields[0]).toEqual({ label: 'Verdict', value: 'ISSUES' });
+  });
+});
+
+describe('renderMailDetail paints the typed card generically (SF-6)', () => {
+  const rendererSource = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../renderer/renderer.ts'),
+    'utf8',
+  );
+
+  it('renders selected.card.fields as key/value rows (no per-type logic in the adapter)', () => {
+    // The detail pane reads the structured card from the row and lays out its fields — the per-type
+    // field/label LOGIC lives in @co/core (registry.renderCard), so the renderer references the card
+    // data, not any mail type. Source-presence is the headless proxy (no DOM env in this suite).
+    expect(rendererSource).toContain('selected.card.fields');
+    expect(rendererSource).toContain('mail-card-field');
+    expect(rendererSource).toContain('esc(selected.card.body)');
+    // The old single renderedBody block is gone from the detail markup.
+    expect(rendererSource).not.toContain('esc(selected.renderedBody)');
   });
 });
 
