@@ -83,7 +83,7 @@ function activateView(view: NavView): void {
   if (view === 'review' && latestReviewState != null) {
     renderReview(latestReviewState);
   }
-  // Source is a pull-only read surface: fetch the branch list whenever the view becomes active.
+  // Source is a pull-only read surface: fetch branches + local PR refs whenever the view becomes active.
   if (view === 'source') {
     refreshSource();
   }
@@ -153,6 +153,50 @@ function setCurrentProject(payload: CurrentProjectPayload): void {
   const full = payload.path ?? payload.projectId;
   if (label) label.textContent = payload.path != null ? projectBasename(payload.path) : full;
   if (pill) pill.setAttribute('title', full);
+}
+
+function setHtml(id: string, html: string): void {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
+function hideBadge(id: string): void {
+  const badge = document.getElementById(id);
+  if (badge) badge.style.display = 'none';
+}
+
+function resetProjectScopedState(payload: CurrentProjectPayload): void {
+  sourceRefreshGate.invalidate();
+
+  latestDashboardState = null;
+  latestMailState = null;
+  latestReviewState = null;
+  latestAgentsState = null;
+  knownMailBuses.clear();
+  knownMailBuses.add(OPERATOR_BUS);
+  lastAgentId = null;
+  lastTranscript = '';
+  agentsTerm?.reset();
+
+  const label = payload == null ? 'No project open' : 'Loading project state…';
+  setHtml('dashboard-content', `<div class="empty-state">${label}</div>`);
+  setHtml('mail-list', `<div class="empty-state">No messages</div>`);
+  setHtml('mail-detail-pane', `<div class="empty-state">Select a message to read it</div>`);
+  setHtml('review-list', `<div class="empty-state">No pending reviews</div>`);
+  setHtml('review-detail-pane', `<div class="empty-state">Select a review to inspect it</div>`);
+  setHtml('agents-roster', `<div class="empty-state">No agents</div>`);
+  setHtml('cost-content', `<div class="empty-state">No cost data yet</div>`);
+  hideBadge('mail-badge');
+  hideBadge('review-badge');
+  renderTranscriptError(null);
+  setComposerEnabled(false);
+
+  if (payload == null) {
+    renderSource({ kind: 'no-project' });
+  } else {
+    setHtml('source-branches', `<div class="empty-state">Loading branches…</div>`);
+    setHtml('source-pull-requests', `<div class="empty-state">Loading pull requests…</div>`);
+  }
 }
 
 function showAppError(message: string): void {
@@ -963,7 +1007,7 @@ function renderReview(state: ReviewState): void {
   }
 }
 
-// ── Source view rendering (read-only Branches; P-ON4) ──────────────────────────
+// ── Source view rendering (read-only Branches + PR refs; P-ON4) ────────────────
 
 // The date portion (YYYY-MM-DD) of an ISO-8601 commit date; '' when absent. Plain slice (no Date
 // parse) so it is deterministic + offline, and the substring is HTML-safe (digits + dashes only).
@@ -972,15 +1016,53 @@ function shortCommitDate(iso: string | undefined): string {
   return iso.slice(0, 10);
 }
 
-// Render the read-only Source branch list. Every state is explicit (Principle 9): a no-project notice,
-// a visible error + Retry, an empty-repo notice, or the branch rows. Rows are NON-interactive — Source
-// is a read surface (§⊘ not-an-IDE): no editing, no file browser, just branches + the deferred-PR panel.
+function sourceMetaHtml(commit: {
+  readonly sha: string;
+  readonly committedAt?: string;
+  readonly author?: string;
+}): string {
+  const date = shortCommitDate(commit.committedAt);
+  const author = commit.author ?? '';
+  const metaParts = [commit.sha, date, author].filter((p) => p.length > 0);
+  return metaParts
+    .map((p) => `<span class="source-meta-item">${esc(p)}</span>`)
+    .join('<span class="source-meta-sep" aria-hidden="true">·</span>');
+}
+
+function renderPullRequests(pullRequests: readonly PullRequestInfo[]): void {
+  const container = document.getElementById('source-pull-requests');
+  if (!container) return;
+  if (pullRequests.length === 0) {
+    container.innerHTML = `<div class="empty-state">No local pull-request refs fetched.</div>`;
+    return;
+  }
+  container.innerHTML = pullRequests
+    .map((pr) =>
+      [
+        `<div class="source-pr-row">`,
+        `<div class="source-pr-head">`,
+        `<span class="source-pr-number">#${pr.number}</span>`,
+        `<span class="source-pr-source">${esc(pr.source)}</span>`,
+        `</div>`,
+        `<div class="source-branch-subject">${esc(pr.lastCommit.subject)}</div>`,
+        `<div class="source-branch-meta">${sourceMetaHtml(pr.lastCommit)}</div>`,
+        `<div class="source-branch-meta">${esc(pr.ref)}</div>`,
+        `</div>`,
+      ].join(''),
+    )
+    .join('');
+}
+
+// Render the read-only Source data. Every state is explicit (Principle 9): a no-project notice, a
+// visible error + Retry, empty notices, or the rows. Rows are NON-interactive — Source is a read surface
+// (§⊘ not-an-IDE): no editing, no file browser, just branches + local PR refs.
 function renderSource(state: SourceState): void {
   const container = document.getElementById('source-branches');
   if (!container) return;
 
   if (state.kind === 'no-project') {
     container.innerHTML = `<div class="empty-state">No project open — open a repository to view its branches.</div>`;
+    renderPullRequests([]);
     return;
   }
 
@@ -992,6 +1074,7 @@ function renderSource(state: SourceState): void {
       ` aria-label="Retry loading branches">Retry</button>`,
       `</div>`,
     ].join('');
+    renderPullRequests([]);
     return;
   }
 
@@ -1003,8 +1086,11 @@ function renderSource(state: SourceState): void {
       ` aria-label="Retry loading branches">Retry</button>`,
       `</div>`,
     ].join('');
+    renderPullRequests([]);
     return;
   }
+
+  renderPullRequests(state.pullRequests);
 
   if (state.branches.length === 0) {
     container.innerHTML = `<div class="empty-state">No branches in this repository.</div>`;
@@ -1020,12 +1106,6 @@ function renderSource(state: SourceState): void {
         b.upstream != null
           ? `<span class="source-branch-upstream">↑ ${esc(b.upstream)}</span>`
           : '';
-      const date = shortCommitDate(b.lastCommit.committedAt);
-      const author = b.lastCommit.author ?? '';
-      const metaParts = [b.lastCommit.sha, date, author].filter((p) => p.length > 0);
-      const metaHtml = metaParts
-        .map((p) => `<span class="source-meta-item">${esc(p)}</span>`)
-        .join('<span class="source-meta-sep" aria-hidden="true">·</span>');
       return [
         `<div class="source-branch-row">`,
         `<div class="source-branch-head">`,
@@ -1034,15 +1114,15 @@ function renderSource(state: SourceState): void {
         upstream,
         `</div>`,
         `<div class="source-branch-subject">${esc(b.lastCommit.subject)}</div>`,
-        `<div class="source-branch-meta">${metaHtml}</div>`,
+        `<div class="source-branch-meta">${sourceMetaHtml(b.lastCommit)}</div>`,
         `</div>`,
       ].join('');
     })
     .join('');
 }
 
-// Pull the latest branches for the read-only Source view. Source has no push channel (it is a direct
-// main-process read), so it is refreshed on view activation + the manual Refresh/Retry controls.
+// Pull the latest branches + local PR refs for the read-only Source view. Source has no push channel (it
+// is a direct main-process read), so it is refreshed on view activation + manual Refresh/Retry controls.
 function refreshSource(): void {
   sourceRefreshGate.run(
     () => window.coShell.sourceRefresh(),
@@ -1118,6 +1198,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Open project (the on-ramp) ───────────────────────────────────────────────
   // The current-project pill + the "No project open" overlay both reflect this state.
   bridge.onCurrentProject((payload) => {
+    resetProjectScopedState(payload);
     setCurrentProject(payload);
     if (isViewActive('source')) refreshSource();
   });
@@ -1247,8 +1328,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // ── Source (read-only Branches) ──────────────────────────────────────────────
-  // Both the header Refresh button and the in-pane error Retry re-pull the branch list.
+  // ── Source (read-only Branches + PR refs) ────────────────────────────────────
+  // Both the header Refresh button and the in-pane error Retry re-pull the Source data.
   document.getElementById('view-source')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
     const trigger = target.closest<HTMLElement>(

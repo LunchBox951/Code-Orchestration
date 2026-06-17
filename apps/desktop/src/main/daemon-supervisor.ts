@@ -265,7 +265,7 @@ export class DaemonSupervisor {
     // The initial daemon never became healthy within the budget — fail VISIBLY (never hang).
     this.killChild(child);
     if (this.child === child) this.child = null;
-    this._detail = `Conductor daemon did not become healthy within ${this.healthTimeoutMs}ms.`;
+    this._detail ??= `Conductor daemon did not become healthy within ${this.healthTimeoutMs}ms.`;
     this.setStatus('failed');
     return 'failed';
   }

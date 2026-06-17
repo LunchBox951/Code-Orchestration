@@ -1739,7 +1739,7 @@
         justify-content: flex-end;
       }
 
-      /* ── Source view (read-only Branches; P-ON4) ──────────── */
+      /* ── Source view (read-only Branches + PR refs; P-ON4) ── */
       .source-header {
         display: flex;
         align-items: center;
@@ -1831,20 +1831,36 @@
         opacity: 0.5;
       }
 
-      .source-pr-deferred {
+      .source-pull-requests {
         padding: 16px 14px;
         font-size: 12px;
         color: var(--muted);
         line-height: 1.5;
       }
 
-      .source-pr-deferred code {
-        font-family: 'IBM Plex Mono', ui-monospace, monospace;
-        font-size: 11px;
+      .source-pr-row {
+        border-top: 1px solid var(--border);
+        padding: 12px 0;
+      }
+
+      .source-pr-row:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      .source-pr-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
         color: var(--text);
-        background: var(--surface);
-        padding: 1px 5px;
-        border-radius: 4px;
+      }
+
+      .source-pr-number {
+        font-weight: 700;
+      }
+
+      .source-pr-source {
+        color: var(--muted);
       }
 
       /* In-pane Source error + Retry (Principle 9 — not a git repo / git unavailable). */
@@ -2145,8 +2161,8 @@
           </div>
           <div class="section-card">
             <div class="section-heading">Pull requests</div>
-            <div class="source-pr-deferred" aria-label="Pull requests">
-              Pull requests — requires <code>gh</code> + network; deferred.
+            <div id="source-pull-requests" class="source-pull-requests" aria-label="Pull requests">
+              <div class="empty-state">Open the Source view to load pull requests.</div>
             </div>
           </div>
         </div>

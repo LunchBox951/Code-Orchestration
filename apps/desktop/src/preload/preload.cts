@@ -25,9 +25,20 @@ interface BranchInfo {
     readonly author?: string;
   };
 }
-// The read-only Source view state (P-ON4) — a branch list, "no project open", or a visible error.
+interface PullRequestInfo {
+  readonly number: number;
+  readonly ref: string;
+  readonly source: string;
+  readonly lastCommit: {
+    readonly sha: string;
+    readonly subject: string;
+    readonly committedAt?: string;
+    readonly author?: string;
+  };
+}
+// The read-only Source view state (P-ON4) — local branches + PR refs, or a visible empty/error state.
 type SourceState =
-  | { kind: 'branches'; branches: readonly BranchInfo[] }
+  | { kind: 'source'; branches: readonly BranchInfo[]; pullRequests: readonly PullRequestInfo[] }
   | { kind: 'no-project' }
   | { kind: 'path-missing'; projectId: string; message: string }
   | { kind: 'error'; message: string };

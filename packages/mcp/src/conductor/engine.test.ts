@@ -902,6 +902,30 @@ describe('ConductorEngine — P1b classifies post-turn liveness and yields warm'
     expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // healthy liveness ⇒ the pane stays WARM
   });
 
+  it('a yielded coordinator turn is not classified as missing co_finish post-turn', async () => {
+    const { projectId, cwd } = makeProject();
+    seedActionableMail(projectId, 'coord-1', '@operator');
+    const identity = makeIdentity({
+      agent: 'coord-1',
+      projectId,
+      cwd,
+      role: 'coordinator',
+      parent: '@operator',
+    });
+    const { engine, pty, clock, qw } = makeEngine();
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    const item = outstandingItem(projectId, 'coord-1');
+    const turnP = engine.runOneTurn(hosted, item);
+    await driveTurnToIdle(pane, item, clock, qw);
+    const outcome = await turnP;
+
+    expect(outcome.turnEnd?.idle).toBe(true);
+    expect(outcome.turnEnd?.sawCompletionVerb).toBe(false);
+    expect(outcome.liveness?.liveness).toBe('alive');
+    expect(outcome.liveness?.break).toBeUndefined();
+  });
+
   it('a turn that ends with a completion verb is healthy (no break)', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');

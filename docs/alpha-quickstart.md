@@ -50,7 +50,7 @@ Use the left-nav views to monitor the running session:
 | **Agents** | All running agents with live status; per-agent **Stop** and **Unstick** controls |
 | **Mail** | Your operator inbox — coordinators mail you for clarification and approvals |
 | **Review** | Pending review requests: diff + acceptance criteria → click **PASS** or **ISSUES** |
-| **Source** | Read-only **Branches** list showing active worktree branches (PRs: deferred) |
+| **Source** | Read-only **Branches** and local **Pull request refs** for fetched PR heads |
 | **Cost** | Cumulative token spend and per-session cost rollup |
 
 When the coordinator mails you a clarification or brainstorm request it lands in **Mail** — reply
@@ -136,7 +136,7 @@ Operator host-live acceptance (run before merging):
 [ ] Autonomous drive: WITHOUT manual tool calls, co spawns lead/implementer, runs turns, and a
     review_request lands in the Review view.
 [ ] Approve: click PASS in the Review view; confirm the gated merge lands on the integration branch.
-[ ] Source: the Branches view reflects the new/merged worktree branch.
+[ ] Source: the Branches view reflects the new/merged worktree branch; Pull requests shows any locally-fetched PR refs.
 [ ] Capture: note any step that still needed a manual tool call, per docs/sh1-runbook.md Step 6.
 [ ] Sign-off: approve the merge only if the loop self-drove end-to-end with no manual tool calls
     after spec lock; otherwise record the run as evidence with remaining SH-1 automation gaps.

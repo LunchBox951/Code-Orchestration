@@ -18,7 +18,7 @@ see [`docs/research/language-and-stack.md`](../../docs/research/language-and-sta
 - **Cost** — usage headroom popover and cost rollups from the dispatch store.
 - **Review** — pending review requests with diff + locked criteria and PASS/ISSUES verdict
   submission through operator IPC.
-- **Source** — read-only local branches plus an honest deferred-PR panel.
+- **Source** — read-only local branches plus locally-fetched pull-request refs.
 - **Main process** (`src/main/`) — Node/Electron context. Imports `@co/core` (static
   reads), supervises the app-owned `co-mcp serve` child, and uses the P1 `OperatorIpcClient` from
   `@co/mcp` (live conductor IPC). Creates the `BrowserWindow` and exposes the typed view-model bridge

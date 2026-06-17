@@ -124,6 +124,29 @@ describe('createLatestAsyncRequest', () => {
     expect(rendered).toEqual(['project-b']);
     expect(errors).toEqual([]);
   });
+
+  it('invalidates a pending request even when no newer request is started', async () => {
+    const gate = createLatestAsyncRequest<string>();
+    const rendered: string[] = [];
+    const errors: unknown[] = [];
+    let resolveFirst!: (value: string) => void;
+
+    gate.run(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveFirst = resolve;
+        }),
+      (value) => rendered.push(value),
+      (error) => errors.push(error),
+    );
+    gate.invalidate();
+
+    resolveFirst('project-a');
+    await Promise.resolve();
+
+    expect(rendered).toEqual([]);
+    expect(errors).toEqual([]);
+  });
 });
 
 // ── Mail detail signature + multi-tick typing behaviour ──────────────────────────
@@ -172,7 +195,7 @@ describe('mailDetailSignature', () => {
     expect(sig['sender']).toBe('lead-s15');
     expect(sig['recipient']).toBe('impl-s15');
     expect(sig['card']).toBe(
-      '{"title":"Re: host proof","fields":[["From","lead-s15"]],"body":"please run host proof"}',
+      '{"title":"14:Re: host proof","fields":[["4:From","8:lead-s15"]],"body":"21:please run host proof"}',
     );
     expect(sig['kind']).toBe('actionable');
     expect(sig['composerActive']).toBe(true);
@@ -192,6 +215,20 @@ describe('mailDetailSignature', () => {
       mailView({ selected: { idempotencyKey: 'review-request:r-1' } }),
     );
     expect(sig['idempotencyKey']).toBe('review-request:r-1');
+  });
+
+  it('uses a bounded card body fingerprint instead of serialising a giant body verbatim', () => {
+    const giantBody = `${'a'.repeat(250)}SECRET-TAIL`;
+    const sig = mailDetailSignature(
+      mailView({
+        selected: {
+          card: { ...BASE_ROW.card, body: giantBody },
+        },
+      }),
+    );
+
+    expect(String(sig['card'])).not.toContain(giantBody);
+    expect(String(sig['card'])).toContain('SECRET-TAIL');
   });
 });
 

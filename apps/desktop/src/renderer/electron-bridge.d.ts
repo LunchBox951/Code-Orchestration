@@ -28,9 +28,21 @@ interface BranchInfo {
   };
 }
 
-// The read-only Source view state: a branch list, "no project open", or a visible error (Principle 9).
+interface PullRequestInfo {
+  number: number;
+  ref: string;
+  source: string;
+  lastCommit: {
+    sha: string;
+    subject: string;
+    committedAt?: string;
+    author?: string;
+  };
+}
+
+// The read-only Source view state: branches + local PR refs, or a visible error (Principle 9).
 type SourceState =
-  | { kind: 'branches'; branches: readonly BranchInfo[] }
+  | { kind: 'source'; branches: readonly BranchInfo[]; pullRequests: readonly PullRequestInfo[] }
   | { kind: 'no-project' }
   | { kind: 'path-missing'; projectId: string; message: string }
   | { kind: 'error'; message: string };

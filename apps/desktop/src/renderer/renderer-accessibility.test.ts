@@ -217,11 +217,12 @@ describe('source read surface (P-ON4) + demo-spec launch (P-ON3)', () => {
   it('replaces the Source stub with a labelled Branches container + a deferred-PR panel', () => {
     expect(htmlSource).toContain('id="view-source"');
     expect(htmlSource).not.toContain('Coming in a later stage.');
-    // Read-only Branches list + an HONEST, clearly-labelled deferred-PR panel (not a fake/empty PR list).
+    // Read-only Branches list + local pull-request refs (offline-safe; no gh/network dependency).
     expect(htmlSource).toContain('id="source-branches"');
     expect(htmlSource).toContain('aria-label="Branches"');
+    expect(htmlSource).toContain('id="source-pull-requests"');
     expect(htmlSource).toContain('aria-label="Pull requests"');
-    expect(htmlSource).toContain('deferred');
+    expect(htmlSource).not.toContain('deferred.');
     expect(htmlSource).toContain('id="source-refresh-btn"');
     expect(htmlSource).toContain('aria-label="Refresh branches"');
   });
@@ -235,8 +236,25 @@ describe('source read surface (P-ON4) + demo-spec launch (P-ON3)', () => {
     expect(rendererSource).toContain('createLatestAsyncRequest<SourceState | null>()');
     expect(rendererSource).toContain('sourceRefreshGate.run(');
     expect(rendererSource).toContain('.sourceRefresh(');
+    expect(rendererSource).toContain('function renderPullRequests(');
+    expect(rendererSource).toContain('state.pullRequests');
+    expect(rendererSource).toContain('No local pull-request refs fetched.');
     expect(rendererSource).toContain("getElementById('view-source')");
     expect(rendererSource).toContain('data-source-action="retry"');
+  });
+
+  it('clears project-scoped renderer state and invalidates pending Source refreshes on project switch', () => {
+    expect(rendererSource).toContain('function resetProjectScopedState(');
+    expect(rendererSource).toContain('sourceRefreshGate.invalidate()');
+    expect(rendererSource).toContain('latestDashboardState = null');
+    expect(rendererSource).toContain('latestMailState = null');
+    expect(rendererSource).toContain('latestReviewState = null');
+    expect(rendererSource).toContain('latestAgentsState = null');
+    expect(rendererSource).toContain('bridge.onCurrentProject((payload) => {');
+    const handler = rendererSource.slice(rendererSource.indexOf('bridge.onCurrentProject'));
+    expect(handler.indexOf('resetProjectScopedState(payload)')).toBeLessThan(
+      handler.indexOf('setCurrentProject(payload)'),
+    );
   });
 
   it('renderer renders explicit no-project + error states for Source (Principle 9)', () => {

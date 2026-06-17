@@ -741,4 +741,37 @@ describe('ConductorDaemon — Stage 15 P-E re-warm recovered NON-root agents (AC
     expect(engine.runCycleCount()).toBe(2); // runCycle ran again
     expect(t2.coldCandidates).toEqual(['impl-cold']);
   });
+
+  it('surfaces unexpected re-warm launch failures instead of hiding them as cold candidates', async () => {
+    const { projectId, repo } = makeProject();
+    seedLeadChain(projectId);
+    recordRecoveredAgent(projectId, repo, 'impl-cold', 'implementer', 'lead-1');
+
+    const attempts: HostedIdentity[] = [];
+    let runCycleCount = 0;
+    const engine = {
+      isHosted: (): boolean => false,
+      ensureHosted: async (identity: HostedIdentity): Promise<void> => {
+        attempts.push(identity);
+        throw new Error('provider auth failed');
+      },
+      runCycle: async (): Promise<null> => {
+        runCycleCount += 1;
+        return null;
+      },
+      tickClarifyTimeouts: async (): Promise<readonly DeliveredMail[]> => [],
+    };
+    const clock = makeClock();
+    const out = await makeReWarmDaemon(
+      projectId,
+      engine as unknown as ConductorEngine,
+      clock,
+    ).tick();
+
+    expect(out.reWarmed).toEqual([]);
+    expect(out.coldCandidates).toEqual(['impl-cold']);
+    expect(attempts.map((i) => i.agent)).toEqual(['impl-cold']);
+    expect(runCycleCount).toBe(1);
+    expect(out.reWarmErrors).toEqual([{ agent: 'impl-cold', message: 'provider auth failed' }]);
+  });
 });

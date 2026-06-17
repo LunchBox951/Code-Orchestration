@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { BranchInfo } from '@co/core';
+import type { BranchInfo, PullRequestInfo } from '@co/core';
 import { resolveSourceState } from './source-ipc.js';
 
 /**
@@ -27,6 +27,15 @@ const FAKE_BRANCHES: readonly BranchInfo[] = [
   },
 ];
 
+const FAKE_PULL_REQUESTS: readonly PullRequestInfo[] = [
+  {
+    number: 41,
+    ref: 'refs/pull/41/head',
+    source: 'local',
+    lastCommit: { sha: 'abc1234', subject: 'Stage 15' },
+  },
+];
+
 describe('resolveSourceState (P-ON4 Source read surface)', () => {
   it('returns the reader branches verbatim and passes the open repo path through', () => {
     const cwdCalls: string[] = [];
@@ -36,17 +45,43 @@ describe('resolveSourceState (P-ON4 Source read surface)', () => {
         cwdCalls.push(repoCwd);
         return FAKE_BRANCHES;
       },
+      listPullRequests: () => [],
     });
-    expect(state).toEqual({ kind: 'branches', branches: FAKE_BRANCHES });
+    expect(state).toEqual({ kind: 'source', branches: FAKE_BRANCHES, pullRequests: [] });
     // Assert the VALUE handed to the reader, not merely that it was called (review craft).
     expect(cwdCalls).toEqual(['/repo/co']);
   });
 
-  it('returns no-project when no project is open and never calls the reader', () => {
+  it('returns branches + pull requests verbatim and passes the open repo path through', () => {
+    const cwdCalls: string[] = [];
+    const state = resolveSourceState({
+      currentProject: () => ({ projectId: 'pid-source', path: '/repo/co' }),
+      listBranches: (repoCwd) => {
+        cwdCalls.push(`branches:${repoCwd}`);
+        return FAKE_BRANCHES;
+      },
+      listPullRequests: (repoCwd) => {
+        cwdCalls.push(`prs:${repoCwd}`);
+        return FAKE_PULL_REQUESTS;
+      },
+    });
+    expect(state).toEqual({
+      kind: 'source',
+      branches: FAKE_BRANCHES,
+      pullRequests: FAKE_PULL_REQUESTS,
+    });
+    expect(cwdCalls).toEqual(['branches:/repo/co', 'prs:/repo/co']);
+  });
+
+  it('returns no-project when no project is open and never calls the readers', () => {
     let readerCalled = false;
     const state = resolveSourceState({
       currentProject: () => null,
       listBranches: () => {
+        readerCalled = true;
+        return [];
+      },
+      listPullRequests: () => {
         readerCalled = true;
         return [];
       },
@@ -89,7 +124,8 @@ describe('resolveSourceState (P-ON4 Source read surface)', () => {
     const state = resolveSourceState({
       currentProject: () => ({ projectId: 'pid-empty', path: '/empty-repo' }),
       listBranches: () => [],
+      listPullRequests: () => [],
     });
-    expect(state).toEqual({ kind: 'branches', branches: [] });
+    expect(state).toEqual({ kind: 'source', branches: [], pullRequests: [] });
   });
 });

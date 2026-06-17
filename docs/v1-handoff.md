@@ -35,7 +35,7 @@ Built + `FakePty`/vitest-proven, landed on `co/stage-15` → `dev`:
 - **Desktop is the one-stop surface** — app owns/supervises the daemon, repo/directory picker,
   in-app session launch from a predesigned spec; the live terminal fits + renders the raw pty stream;
   mail typing is correct; observe-loop failures surface; typed per-audience mail cards; a read-only
-  Source minimum (Branches; PRs honestly deferred). → spine for `SF-1/4/5/6`, `ST-3`.
+  Source minimum (Branches + local PR refs). → spine for `SF-1/4/5/6`, `ST-3`.
 - **Switchable proof harness** (`runProof({fake|claude|codex})` + a reusable `FakeProvider` + a
   "fake ≠ live" provenance guard). → raises `SF-1`/`PV-2` *proof confidence*.
 - **v1 scorecard reconciled** — [`v1-acceptance-criteria.md`](v1-acceptance-criteria.md) reflects the

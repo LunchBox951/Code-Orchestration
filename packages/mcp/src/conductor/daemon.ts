@@ -133,6 +133,12 @@ export interface DaemonTickOutcome {
    */
   readonly reWarmed: readonly string[];
   /**
+   * Unexpected re-warm launch failures surfaced this tick. The expected duplicate active-session
+   * refusal remains a guarded cold candidate; any other launch failure is reported here and retried on a
+   * later tick rather than being silently converted into a permanent cold candidate.
+   */
+  readonly reWarmErrors: readonly ReWarmError[];
+  /**
    * Recovered RUNNING sessions STILL cold in this engine process after this tick's re-warm attempt —
    * therefore not driven. Post-{@link reWarmed}: an accepted re-warm has left this set (it is now warm);
    * a refused duplicate active session and a recovered ROOT-with-session remain here for host-live
@@ -149,6 +155,19 @@ export interface DaemonTickOutcome {
   readonly clarifyForwarded: readonly DeliveredMail[];
   /** The reconcile sweep result, or `null` unless `cadenceFired`. */
   readonly reconcile: ReconcileTickResult | null;
+}
+
+export interface ReWarmError {
+  readonly agent: string;
+  readonly message: string;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isDuplicateActiveSessionError(error: unknown): boolean {
+  return /already has an active session|duplicate/i.test(errorMessage(error));
 }
 
 /**
@@ -313,7 +332,7 @@ export class ConductorDaemon {
     // the agent drivable THIS tick; the real duplicate recovered-session path refuses and remains a
     // cold candidate for host-live reconciliation. The isHosted gate + wrapped ensureHosted call attempt
     // a cold agent AT MOST ONCE.
-    const reWarmed = await this.reWarmRecoveredAgents(candidates);
+    const { reWarmed, reWarmErrors } = await this.reWarmRecoveredAgents(candidates);
 
     // Recovered sessions are durable inputs, not launch authority. A fresh daemon can reconstruct them
     // for reconcile/reattach handoff; panes warm in THIS engine process (INCLUDING any accepted re-warm
@@ -341,6 +360,7 @@ export class ConductorDaemon {
       candidateCount: candidates.length,
       coldStarted,
       reWarmed,
+      reWarmErrors,
       coldCandidates,
       cycle,
       selected: cycle?.hosted.identity.agent ?? null,
@@ -409,17 +429,20 @@ export class ConductorDaemon {
    * has an active session"; the real session-reconciling relaunch is deferred [host-live] glue). An
    * UNCAUGHT throw here would reject the whole tick — starving `runCycle` — and spawn+kill a pane every
    * tick. So a throw is caught and the agent recorded in {@link reWarmFailed}: attempted at most once,
-   * then left a cold candidate. The tick ALWAYS proceeds to `runCycle`.
+   * then left a cold candidate. Unexpected launch failures are surfaced in `reWarmErrors` and retried
+   * on a later tick. The tick ALWAYS proceeds to `runCycle`.
    *
    * SELECTION ONLY: the real binary relaunch (re-spawning the crashed provider, reconciling its existing
    * session row) stays `[host-live]` glue, exactly as this module's docstring notes. Returns only the ids
    * accepted by the launch authority this tick (for the {@link DaemonTickOutcome.reWarmed} mirror + host
    * log); refused duplicates remain in {@link DaemonTickOutcome.coldCandidates}.
    */
-  private async reWarmRecoveredAgents(
-    candidates: readonly HostedIdentity[],
-  ): Promise<readonly string[]> {
+  private async reWarmRecoveredAgents(candidates: readonly HostedIdentity[]): Promise<{
+    readonly reWarmed: readonly string[];
+    readonly reWarmErrors: readonly ReWarmError[];
+  }> {
     const reWarmed: string[] = [];
+    const reWarmErrors: ReWarmError[] = [];
     for (const identity of candidates) {
       if (this.engine.isHosted(identity.projectId, identity.agent)) continue; // warm — single launch authority
       if (this.isRootIdentity(identity)) continue; // roots stay with the cold-start path (re-warm is non-root)
@@ -428,16 +451,20 @@ export class ConductorDaemon {
       try {
         await this.engine.ensureHosted(identity);
         reWarmed.push(identity.agent);
-      } catch {
-        // GUARD (review-375): the recovered agent still owns its durable session row, so the single
-        // launch authority refuses it (`ensureHosted → hostSession → recordSession`: "already has an
-        // active session"). The real session-reconciling relaunch is [host-live] glue (deferred). Catch
-        // so a throw can NEVER stall `runCycle` or churn a pane every tick; record it so the agent is
-        // attempted at most once and stays a cold candidate, exactly as before P-E.
-        this.reWarmFailed.add(key);
+      } catch (error: unknown) {
+        if (isDuplicateActiveSessionError(error)) {
+          // GUARD (review-375): the recovered agent still owns its durable session row, so the single
+          // launch authority refuses it (`ensureHosted → hostSession → recordSession`: "already has an
+          // active session"). The real session-reconciling relaunch is [host-live] glue (deferred). Catch
+          // so a throw can NEVER stall `runCycle` or churn a pane every tick; record it so the agent is
+          // attempted at most once and stays a cold candidate, exactly as before P-E.
+          this.reWarmFailed.add(key);
+        } else {
+          reWarmErrors.push({ agent: identity.agent, message: errorMessage(error) });
+        }
       }
     }
-    return reWarmed;
+    return { reWarmed, reWarmErrors };
   }
 
   /**

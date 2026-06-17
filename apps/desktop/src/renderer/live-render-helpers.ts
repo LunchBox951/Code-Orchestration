@@ -69,6 +69,7 @@ export function needsRebuild<S extends object>(
  */
 export function createLatestAsyncRequest<T>(): {
   run(load: () => Promise<T>, onValue: (value: T) => void, onError: (error: unknown) => void): void;
+  invalidate(): void;
 } {
   let seq = 0;
   return {
@@ -81,6 +82,9 @@ export function createLatestAsyncRequest<T>(): {
         .catch((error: unknown) => {
           if (requestSeq === seq) onError(error);
         });
+    },
+    invalidate(): void {
+      seq += 1;
     },
   };
 }
@@ -191,10 +195,16 @@ export type MailDetailSignature = RenderSignature;
 
 function cardSignature(card: MailCardView): string {
   return JSON.stringify({
-    title: card.title,
-    fields: card.fields.map((field) => [field.label, field.value]),
-    body: card.body,
+    title: sampleString(card.title),
+    fields: card.fields.map((field) => [sampleString(field.label), sampleString(field.value)]),
+    body: sampleString(card.body),
   });
+}
+
+function sampleString(value: string): string {
+  const max = 96;
+  if (value.length <= max * 2) return `${value.length}:${value}`;
+  return `${value.length}:${value.slice(0, max)}:${value.slice(-max)}`;
 }
 
 export function mailDetailSignature(state: MailStateView): MailDetailSignature {

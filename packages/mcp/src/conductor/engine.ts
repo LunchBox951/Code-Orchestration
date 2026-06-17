@@ -329,6 +329,10 @@ function defaultClarifyTimeoutSeconds(projectId: ProjectId): number {
   }
 }
 
+function requiresFinishBeforeYield(identity: HostedIdentity): boolean {
+  return identity.role === 'lead' || identity.role === 'implementer';
+}
+
 /**
  * The Conductor engine. Owns the single-turn cycle and the MNR-5 launch authority. Stateful: it holds
  * the warm hosted panes it has launched. NOT a tool and NOT agent-callable (Principle D4).
@@ -778,10 +782,20 @@ export class ConductorEngine {
   ): LivenessVerdict {
     const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
     const exited = this.paneExited.get(agentKey) ?? false;
-    return classifyLiveness({ trace, exited, pidAlive: !exited, turnActive: false }, observedAt, {
-      ...this.deps.turnConfig,
-      provider: hosted.identity.provider,
-    });
+    return classifyLiveness(
+      {
+        trace,
+        exited,
+        pidAlive: !exited,
+        turnActive: false,
+        requiresFinishBeforeYield: requiresFinishBeforeYield(hosted.identity),
+      },
+      observedAt,
+      {
+        ...this.deps.turnConfig,
+        provider: hosted.identity.provider,
+      },
+    );
   }
 
   /**

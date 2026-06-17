@@ -1353,6 +1353,8 @@ export {
 // Uses refs/heads only — no network, no gh, no remotes. PRs deliberately deferred (CSP + SH-4).
 export type { BranchInfo } from './source/list-branches.js';
 export { listBranches } from './source/list-branches.js';
+export type { PullRequestInfo } from './source/list-pull-requests.js';
+export { listPullRequests } from './source/list-pull-requests.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

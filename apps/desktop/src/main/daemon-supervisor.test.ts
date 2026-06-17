@@ -324,6 +324,26 @@ describe('daemon-supervisor — bounded restart on crash', () => {
     expect(supervisor.status).toBe('failed');
     expect(spawn.spy).toHaveBeenCalledTimes(3); // 1 initial + 2 failed restarts
   });
+
+  it('preserves the specific child-exit detail when the initial daemon dies before health', async () => {
+    const spawn = recordingSpawn();
+    const supervisor = createDaemonSupervisor({
+      spawn: spawn.seam,
+      probeHealth: vi.fn().mockImplementation(async () => {
+        spawn.current().crash(127, null);
+        return false;
+      }),
+      delay: immediateDelay,
+      healthTimeoutMs: 10,
+      healthIntervalMs: 10,
+    });
+
+    await supervisor.start(PROJECT_ID);
+
+    expect(supervisor.status).toBe('failed');
+    expect(supervisor.detail).toContain('Conductor daemon exited (code=127 signal=null).');
+    expect(supervisor.detail).not.toContain('did not become healthy');
+  });
 });
 
 // ── stop() disarms restart ───────────────────────────────────────────────────────────────────────────
