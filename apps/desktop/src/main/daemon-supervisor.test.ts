@@ -73,7 +73,7 @@ function deferredDelay(): {
 } {
   const pending: Array<() => void> = [];
   const delay = vi.fn(
-    (_ms: number) =>
+    () =>
       new Promise<void>((resolve) => {
         pending.push(resolve);
       }),
