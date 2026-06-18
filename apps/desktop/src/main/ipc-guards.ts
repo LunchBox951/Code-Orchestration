@@ -71,3 +71,15 @@ export function requireSteer(value: unknown): Steer {
   }
   throw new Error(`Invalid steer kind: ${String(kind)}`);
 }
+
+export function requireInputData(value: unknown, label: string): string {
+  if (typeof value === 'string') return value;
+  throw new Error(`Invalid ${label}: expected a string.`);
+}
+
+export function requirePositiveDim(value: unknown, label: string): number {
+  if (typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  throw new Error(`Invalid ${label}: expected a positive integer.`);
+}

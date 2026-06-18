@@ -305,6 +305,12 @@ interface CoShellBridge {
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
   agentsRefreshTranscript(): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
+  agentsSendInput(agentId: string, data: string): Promise<{ ok: boolean; error?: string }>;
+  agentsResize(
+    agentId: string,
+    cols: number,
+    rows: number,
+  ): Promise<{ ok: boolean; error?: string }>;
   agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
   // ── Review ────────────────────────────────────────────────────────────────

@@ -708,6 +708,128 @@ describe('AC-S11-1 — cross-process observe + control over a 0o600 operator-onl
   });
 });
 
+// ── Stage 15 §7: sendInput + resize cross-process over the operator IPC ──────────────────────────
+describe('Stage 15 §7 — sendInput / resize: keystroke passthrough + PTY resize cross-process', () => {
+  it('sendInput forwards raw data bytes to the warm pane cross-process', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { pane } = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const before = pane.written.length;
+    await client.sendInput('impl-x', 'hello\r');
+
+    expect(pane.written.slice(before)).toEqual(['hello\r']);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // pane still warm
+  });
+
+  it('sendInput (non-hosted) fails loud: error crosses the socket, connection stays alive', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.sendInput('ghost', 'x')).rejects.toThrow(/not hosted/i);
+    expect(client.connected).toBe(true);
+  });
+
+  it('sendInput rejects bad data (non-string) with an error', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const rawConn = await OperatorIpcConnection.connect(socketPath);
+    // Bypass the typed client to send a raw bad-payload call
+    const raw = rawConn as unknown as { call: (m: string, p: unknown) => Promise<unknown> };
+    const result = await raw
+      .call('session:input', { agentId: 'impl-x', data: 42 })
+      .catch((e: Error) => e.message);
+    expect(String(result)).toMatch(/string/i);
+    await rawConn.close();
+  });
+
+  it('resize resizes the warm PTY cross-process to the given dims', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    const pane = pty.panes[pty.panes.length - 1]!;
+
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.resize('impl-x', 120, 40);
+
+    expect(pane.resizes).toEqual([[120, 40]]);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // pane still warm
+  });
+
+  it('resize (non-hosted) fails loud: error crosses the socket, connection stays alive', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.resize('ghost', 120, 40)).rejects.toThrow(/not hosted/i);
+    expect(client.connected).toBe(true);
+  });
+
+  it('resize rejects non-positive dims with an error', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const rawConn = await OperatorIpcConnection.connect(socketPath);
+    const raw = rawConn as unknown as { call: (m: string, p: unknown) => Promise<unknown> };
+    const result = await raw
+      .call('session:resize', { agentId: 'impl-x', cols: -1, rows: 40 })
+      .catch((e: Error) => e.message);
+    expect(String(result)).toMatch(/positive integer/i);
+    await rawConn.close();
+  });
+});
+
 // ── Stage 12 C-P1 (TRANSCRIPT-SEAM) — the live transcript stream over the operator IPC ──
 describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process (default client↔server path)', () => {
   it('bounds server-side transcript push backpressure by coalescing while a write is in flight', async () => {

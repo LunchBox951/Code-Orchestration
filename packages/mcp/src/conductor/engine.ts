@@ -959,6 +959,38 @@ export class ConductorEngine {
   }
 
   /**
+   * Write raw input bytes into a warm hosted pane (SF-2 companion for keystroke passthrough). Look up
+   * the agent's warm pane and call {@link Pane.write} directly. Never spawns or relaunches — throws
+   * fail-loud (Principle 9) if the agent is not hosted. Operator-initiated only (Principle D4).
+   */
+  writeInput(projectId: ProjectId, agent: string, data: string): void {
+    const hosted = this.getHosted(projectId, agent);
+    if (hosted == null) {
+      throw new Error(
+        `ConductorEngine.writeInput: agent '${agent}' is not hosted in project '${projectId}' — ` +
+          'cannot write input to a pane that is not warm (Principle 1 — never spawns or relaunches).',
+      );
+    }
+    hosted.pane.write(data);
+  }
+
+  /**
+   * Resize the PTY of a warm hosted pane to `cols` × `rows` (xterm fit → PTY sync). Look up the
+   * agent's warm pane and call {@link Pane.resize} directly. Never spawns or relaunches — throws
+   * fail-loud (Principle 9) if the agent is not hosted. Operator-initiated only (Principle D4).
+   */
+  resizePty(projectId: ProjectId, agent: string, cols: number, rows: number): void {
+    const hosted = this.getHosted(projectId, agent);
+    if (hosted == null) {
+      throw new Error(
+        `ConductorEngine.resizePty: agent '${agent}' is not hosted in project '${projectId}' — ` +
+          'cannot resize a pane that is not warm (Principle 1 — never spawns or relaunches).',
+      );
+    }
+    hosted.pane.resize(cols, rows);
+  }
+
+  /**
    * Fire the deferred clarify-timeout policy (Q4 / P1b). For each `candidate` that is WAITING on a
    * `clarify_request` it raised ({@link waitingItems}), age the unanswered item against the project's
    * `clarify_timeout_seconds`: on the FIRST observation the engine marks `now()`; once `now()` has

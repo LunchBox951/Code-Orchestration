@@ -54,6 +54,10 @@ export const OPERATOR_IPC_METHODS = {
    * cold-starts the root on its next tick. Exactly one of `prompt` / `specBody` is required.
    */
   startSession: 'startSession',
+  /** Send raw keystroke bytes into a hosted agent's PTY stdin (live xterm → PTY passthrough). */
+  sendInput: 'session:input',
+  /** Resize a hosted agent's PTY to the given cols × rows (xterm fit → PTY width sync). */
+  resize: 'session:resize',
 } as const;
 
 /** The set of operator-IPC request method names. */
@@ -162,6 +166,10 @@ export interface OperatorIpcSurface {
    * `specBody` is supplied (Principle 9).
    */
   startSession(params: StartSessionParams): Promise<StartSessionResult>;
+  /** Send raw keystroke bytes into `agentId`'s warm PTY stdin (live xterm → PTY passthrough). */
+  sendInput(agentId: string, data: string): Promise<void>;
+  /** Resize `agentId`'s warm PTY to `cols` × `rows` (xterm fit → PTY width sync). */
+  resize(agentId: string, cols: number, rows: number): Promise<void>;
 }
 
 /**

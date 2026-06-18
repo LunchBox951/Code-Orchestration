@@ -148,6 +148,29 @@ function requireSteer(params: WirePayload): Steer {
   throw new InvalidParamsError(`operator IPC steer: invalid kind '${String(kind)}'.`);
 }
 
+function requirePositiveDim(obj: WirePayload, key: string): number {
+  const value = obj[key];
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value <= 0 ||
+    !Number.isInteger(value)
+  ) {
+    throw new InvalidParamsError(
+      `operator IPC: missing/invalid '${key}' (expected a positive integer dimension).`,
+    );
+  }
+  return value;
+}
+
+function requireInputData(obj: WirePayload, key: string): string {
+  const value = obj[key];
+  if (typeof value !== 'string') {
+    throw new InvalidParamsError(`operator IPC: missing/invalid '${key}' (expected a string).`);
+  }
+  return value;
+}
+
 function requireDecision(obj: WirePayload, key: string): ApprovalDecision {
   const decision = requireString(obj, key);
   if (decision !== 'approve' && decision !== 'decline') {
@@ -343,6 +366,18 @@ export class OperatorIpcServer {
         // Resolve the project's repo path via the registry exactly as `runStartSessionCommand` does,
         // then delegate to the same core primitive (single source of truth; never duplicated here).
         return (await this.handleStartSession(params)) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.sendInput:
+        // Stage 15 §7 — raw keystroke passthrough: operator writes into the agent's warm PTY stdin.
+        await router.sendInput(requireString(params, 'agentId'), requireInputData(params, 'data'));
+        return {};
+      case OPERATOR_IPC_METHODS.resize:
+        // Stage 15 §7 — PTY resize sync: xterm fit dispatches the terminal dimensions to the PTY.
+        await router.resize(
+          requireString(params, 'agentId'),
+          requirePositiveDim(params, 'cols'),
+          requirePositiveDim(params, 'rows'),
+        );
+        return {};
       default:
         return assertNever(method);
     }

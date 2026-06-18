@@ -167,6 +167,20 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     } as unknown as WirePayload)) as unknown as StartSessionResult;
   }
 
+  /** Stage 15 §7 — send raw keystroke bytes into `agentId`'s warm PTY stdin. */
+  async sendInput(agentId: string, data: string): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.sendInput, { agentId, data } as unknown as WirePayload);
+  }
+
+  /** Stage 15 §7 — resize `agentId`'s warm PTY to `cols` × `rows`. */
+  async resize(agentId: string, cols: number, rows: number): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.resize, {
+      agentId,
+      cols,
+      rows,
+    } as unknown as WirePayload);
+  }
+
   /** Subscribe to the per-tick `tick` push; returns an unsubscribe fn. */
   onTick(listener: (tick: OperatorIpcTick) => void): () => void {
     this.tickListeners.add(listener);
@@ -459,6 +473,16 @@ export class OperatorIpcClient {
    */
   async startSession(params: StartSessionParams): Promise<StartSessionResult> {
     return this.withConnection((c) => c.startSession(params));
+  }
+
+  /** Stage 15 §7 — send raw keystroke bytes into `agentId`'s warm PTY stdin. */
+  async sendInput(agentId: string, data: string): Promise<void> {
+    await this.withConnection((c) => c.sendInput(agentId, data));
+  }
+
+  /** Stage 15 §7 — resize `agentId`'s warm PTY to `cols` × `rows`. */
+  async resize(agentId: string, cols: number, rows: number): Promise<void> {
+    await this.withConnection((c) => c.resize(agentId, cols, rows));
   }
 
   /** Subscribe to the per-tick push; survives reconnects. Returns an unsubscribe fn. */

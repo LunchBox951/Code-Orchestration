@@ -13,10 +13,12 @@ import {
   requireComposerField,
   requireFiniteSeq,
   requireAgentId,
+  requireInputData,
   requireMailTab,
   requireMailType,
   requireNavView,
   requireNonEmptyString,
+  requirePositiveDim,
   requireReviewVerdict,
   requireSteer,
 } from './ipc-guards.js';
@@ -400,6 +402,34 @@ ipcMain.handle('agents:steer', async (_event, agentId: unknown, steer: unknown) 
     return { ok: true };
   } catch (e: unknown) {
     const msg = desktopErrorMessage(e, 'steer the agent');
+    return { ok: false, error: msg };
+  }
+});
+
+ipcMain.handle('agents:input', async (_event, agentId: unknown, data: unknown) => {
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  try {
+    await shell.client.sendInput(requireAgentId(agentId), requireInputData(data, 'input data'));
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = desktopErrorMessage(e, 'send keystroke input');
+    return { ok: false, error: msg };
+  }
+});
+
+ipcMain.handle('agents:resize', async (_event, agentId: unknown, cols: unknown, rows: unknown) => {
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  try {
+    await shell.client.resize(
+      requireAgentId(agentId),
+      requirePositiveDim(cols, 'cols'),
+      requirePositiveDim(rows, 'rows'),
+    );
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = desktopErrorMessage(e, 'resize agent PTY');
     return { ok: false, error: msg };
   }
 });

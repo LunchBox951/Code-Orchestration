@@ -1172,6 +1172,53 @@ describe('ConductorEngine — SF-2 steer: route a mid-turn steer to the warm pan
   });
 });
 
+// ── Stage 15 §7: writeInput + resizePty on the warm hosted pane ─────────────────────────────────
+describe('ConductorEngine — writeInput / resizePty: pass raw input and PTY resize to the warm pane', () => {
+  it('writeInput writes the data bytes directly to the warm pane', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    const before = pane.written.length;
+    engine.writeInput(projectId, 'impl-x', 'hello\r');
+
+    expect(pane.written.slice(before)).toEqual(['hello\r']);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // still warm
+  });
+
+  it('writeInput throws fail-loud when the agent is not hosted', () => {
+    const { projectId } = makeProject();
+    const { engine } = makeEngine();
+    expect(() => engine.writeInput(projectId, 'ghost', 'x')).toThrow(/not hosted/i);
+  });
+
+  it('resizePty calls resize on the warm pane with the correct dims', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    await hostPane(engine, pty, identity);
+
+    const pane = pty.panes[pty.panes.length - 1]!;
+    engine.resizePty(projectId, 'impl-x', 120, 40);
+    engine.resizePty(projectId, 'impl-x', 200, 50);
+
+    expect(pane.resizes).toEqual([
+      [120, 40],
+      [200, 50],
+    ]);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // still warm
+  });
+
+  it('resizePty throws fail-loud when the agent is not hosted', () => {
+    const { projectId } = makeProject();
+    const { engine } = makeEngine();
+    expect(() => engine.resizePty(projectId, 'ghost', 120, 40)).toThrow(/not hosted/i);
+  });
+});
+
 // ── Stage 12 C-P1 (TRANSCRIPT-SEAM) — the persistent transcript ring buffer ──────
 describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring buffer per agent', () => {
   it('captures startup interstitial bytes in both the tail and live stream', async () => {
