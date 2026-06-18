@@ -75,6 +75,22 @@ describe('listPullRequests — local git PR refs', () => {
     );
   });
 
+  it('sorts offset-bearing ISO dates chronologically instead of lexically', () => {
+    const raw = [
+      cannedLine('refs/pull/41/head', 'abc1234', 'older', '2024-01-01T09:00:00+02:00', 'A'),
+      cannedLine(
+        'refs/remotes/origin/pull/42/head',
+        'def5678',
+        'newer',
+        '2024-01-01T08:30:00+00:00',
+        'B',
+      ),
+    ].join('\n');
+
+    const result = listPullRequests('/fake', { readGit: cannedReader(raw) });
+    expect(result.map((pr) => pr.number)).toEqual([42, 41]);
+  });
+
   it('throws instead of silently dropping a malformed for-each-ref row', () => {
     const raw = cannedLine(
       'refs/pull/41/head',

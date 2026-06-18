@@ -58,13 +58,18 @@ function parseRaw(raw: string): BranchInfo[] {
   return branches;
 }
 
+function dateSortKey(value: string | undefined): number {
+  if (!value) return Number.NEGATIVE_INFINITY;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
 // Stable sort: current branch first, then committedAt desc, then name asc.
-// ISO-8601 strings compare correctly as plain strings for chronological order.
 function sortBranches(branches: BranchInfo[]): readonly BranchInfo[] {
   return [...branches].sort((a, b) => {
     if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-    const dateA = a.lastCommit.committedAt ?? '';
-    const dateB = b.lastCommit.committedAt ?? '';
+    const dateA = dateSortKey(a.lastCommit.committedAt);
+    const dateB = dateSortKey(b.lastCommit.committedAt);
     if (dateA !== dateB) return dateA > dateB ? -1 : 1;
     return a.name.localeCompare(b.name);
   });

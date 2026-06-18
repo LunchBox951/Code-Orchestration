@@ -214,7 +214,7 @@ describe('session start (P4)', () => {
 describe('source read surface (P-ON4) + demo-spec launch (P-ON3)', () => {
   const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
 
-  it('replaces the Source stub with a labelled Branches container + a deferred-PR panel', () => {
+  it('replaces the Source stub with labelled Branches + local PR-ref containers', () => {
     expect(htmlSource).toContain('id="view-source"');
     expect(htmlSource).not.toContain('Coming in a later stage.');
     // Read-only Branches list + local pull-request refs (offline-safe; no gh/network dependency).

@@ -64,10 +64,16 @@ function parseRaw(raw: string): PullRequestInfo[] {
   return pullRequests;
 }
 
+function dateSortKey(value: string | undefined): number {
+  if (!value) return Number.NEGATIVE_INFINITY;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
 function sortPullRequests(pullRequests: PullRequestInfo[]): readonly PullRequestInfo[] {
   return [...pullRequests].sort((a, b) => {
-    const dateA = a.lastCommit.committedAt ?? '';
-    const dateB = b.lastCommit.committedAt ?? '';
+    const dateA = dateSortKey(a.lastCommit.committedAt);
+    const dateB = dateSortKey(b.lastCommit.committedAt);
     if (dateA !== dateB) return dateA > dateB ? -1 : 1;
     if (a.number !== b.number) return b.number - a.number;
     return a.ref.localeCompare(b.ref);

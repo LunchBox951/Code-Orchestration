@@ -95,6 +95,31 @@ describe('listBranches — canned reader (>=3 branches)', () => {
     const result = listBranches('/fake', { readGit: cannedReader(raw) });
     expect(result.map((b) => b.name)).toEqual(['current', 'alpha', 'zebra']);
   });
+
+  it('sorts offset-bearing ISO dates chronologically instead of lexically', () => {
+    const raw = [
+      cannedLine(
+        false,
+        'older-lexically-high',
+        '',
+        'aaa',
+        'older',
+        '2024-01-01T09:00:00+02:00',
+        'A',
+      ),
+      cannedLine(
+        false,
+        'newer-lexically-low',
+        '',
+        'bbb',
+        'newer',
+        '2024-01-01T08:30:00+00:00',
+        'B',
+      ),
+    ].join('\n');
+    const result = listBranches('/fake', { readGit: cannedReader(raw) });
+    expect(result.map((b) => b.name)).toEqual(['newer-lexically-low', 'older-lexically-high']);
+  });
 });
 
 // ── (ii) zero branches ────────────────────────────────────────────────────────────────────────────

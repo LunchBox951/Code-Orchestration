@@ -153,6 +153,7 @@ export function openPlanStore(projectId: string): PlanStore {
             JSON.stringify(existing.taskCriteria) === JSON.stringify(rec.taskCriteria) &&
             existingPhasesSerialized === newPhasesSerialized
           ) {
+            assertPlanOpenForMutation('openPlanStore.recordDraft', existing);
             return existing;
           }
           throw new Error(

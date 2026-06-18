@@ -114,7 +114,7 @@ interface CoShellBridge {
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
   startFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
-  // ── Source (read-only Branches; P-ON4) ──────────────────────────────────────
+  // ── Source (read-only Branches + local PR refs; P-ON4) ──────────────────────
   sourceRefresh(): Promise<SourceState>;
   // ── Daemon ────────────────────────────────────────────────────────────────
   onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;

@@ -14,7 +14,7 @@ interface DaemonStatusPayload {
 // Which project the app currently has open (surfaced in the top bar); null = no project open (the on-ramp).
 type CurrentProjectPayload = { projectId: string; path: string | null } | null;
 
-// ── Source view (read-only Branches; P-ON4) ──────────────────────────────────
+// ── Source view (read-only Branches + local PR refs; P-ON4) ───────────────────
 // Mirrors @co/core's BranchInfo (renderer is isolated from Node — inline, like MailCardView/MailRow).
 interface BranchInfo {
   name: string;

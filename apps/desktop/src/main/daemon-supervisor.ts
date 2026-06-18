@@ -175,6 +175,7 @@ export class DaemonSupervisor {
   private starting: Promise<DaemonStatus> | null = null;
   private lastEmittedStatus: DaemonStatus = 'stopped';
   private lastEmittedDetail: string | null = null;
+  private readonly exitedChildren = new WeakSet<DaemonSpawnHandle>();
 
   constructor(options: DaemonSupervisorOptions = {}) {
     this.emitStatus = options.onStatus;
@@ -316,6 +317,7 @@ export class DaemonSupervisor {
    * `healthy` drives the bounded restart loop.
    */
   private onChildGone(handle: DaemonSpawnHandle, generation: number, detail: string): void {
+    this.exitedChildren.add(handle);
     if (generation !== this.generation || this.stopping) return;
     if (handle !== this.child) return;
     this.child = null;
@@ -382,6 +384,7 @@ export class DaemonSupervisor {
 
   /** SIGTERM the child; escalate to SIGKILL after the grace if it has not exited. Never throws. */
   private async terminateChild(child: DaemonSpawnHandle): Promise<void> {
+    if (this.exitedChildren.has(child)) return;
     let exited = false;
     const exitedPromise = new Promise<void>((resolve) => {
       try {

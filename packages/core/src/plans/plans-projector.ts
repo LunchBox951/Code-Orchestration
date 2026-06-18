@@ -252,7 +252,10 @@ export class PlansProjector implements Projector {
         const { taskId, goal, taskCriteria, phases } = planEvent.payload;
         const existing = selectPlan(db, taskId);
         if (existing != null) {
-          if (sameDraft(existing, planEvent.payload)) return;
+          if (sameDraft(existing, planEvent.payload)) {
+            assertPlanOpenForFold('plan.drafted', existing);
+            return;
+          }
           throw new Error(
             `plans: plan '${taskId}' already exists with different content — refusing conflicting re-draft`,
           );
