@@ -81,8 +81,9 @@ describe('agents console', () => {
     expect(htmlSource).toContain('role="listbox"');
     expect(htmlSource).toContain('aria-label="Agents"');
     expect(htmlSource).toContain('id="steer-input"');
-    expect(htmlSource).toContain('aria-label="Answer agent"');
-    expect(htmlSource).toContain('aria-label="Redirect agent"');
+    // The steer bar is "Interrupt / Send" (design §5): one Send that reaches the agent whether it is
+    // warm (steered mid-turn) or idle (an operator message that wakes it) — no separate Answer/Redirect.
+    expect(htmlSource).toContain('aria-label="Send message to agent"');
     expect(htmlSource).toContain('aria-label="Interrupt agent"');
   });
 

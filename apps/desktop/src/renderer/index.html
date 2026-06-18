@@ -154,8 +154,22 @@
       }
 
       .header-title {
-        font-size: 13px;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--heading);
+        white-space: nowrap;
+      }
+      .header-sub {
+        font-weight: 400;
         color: var(--muted);
+      }
+      .header-div {
+        width: 1px;
+        height: 20px;
+        background: var(--border);
+        flex-shrink: 0;
+      }
+      .header-spacer {
         flex: 1;
       }
 
@@ -453,6 +467,45 @@
         border-radius: 99px;
         min-width: 18px;
         text-align: center;
+      }
+
+      /* ── Vellum buddy dock (design §5) — pinned to the bottom of the rail, static + decorative. ── */
+      .buddy-dock {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        margin: auto 8px 4px;
+        padding: 8px 10px;
+        border-radius: 11px;
+        background: var(--card);
+        border: 1px solid var(--border);
+      }
+      .buddy-avatar {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
+        background: color-mix(in oklch, var(--role-coordinator) 28%, transparent);
+        color: var(--role-coordinator);
+        font-size: 13px;
+        flex-shrink: 0;
+      }
+      .buddy-meta {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.25;
+      }
+      .buddy-name {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .buddy-status {
+        font-size: 10px;
+        color: var(--muted);
       }
 
       /* ── Main panel ──────────────────────────────────────────── */
@@ -1528,66 +1581,81 @@
       }
 
       /* ── Cost view ────────────────────────────────────── */
-      .cost-sections {
+      /* ── Usage & limits page ─────────────────────────────────────────────── */
+      .usage-head {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .usage-sub {
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+      .usage-providers {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 16px;
+        gap: 14px;
         align-items: start;
       }
-
-      .cost-section {
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        overflow: hidden;
+      /* The provider cards reuse the Limits popover card, scaled up for the full page. */
+      .usage-providers .limits-provider-card {
+        padding: 14px 16px;
       }
-
-      .cost-section-heading {
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0;
-        text-transform: uppercase;
-        color: var(--muted);
-        padding: 10px 14px;
-        border-bottom: 1px solid var(--border);
-      }
-
-      .cost-list {
-        padding: 4px 0;
-        max-height: 400px;
-        overflow-y: auto;
-      }
-
-      .cost-row {
+      .usage-activity-list {
         display: flex;
+        flex-direction: column;
+      }
+      .usage-activity-row {
+        display: grid;
+        grid-template-columns: 220px 1fr 70px;
         align-items: center;
-        justify-content: space-between;
+        gap: 12px;
         padding: 7px 14px;
         border-bottom: 1px solid var(--border);
-        gap: 12px;
       }
-
-      .cost-row:last-child {
+      .usage-activity-row:last-child {
         border-bottom: none;
       }
-
-      .cost-row-id {
+      .usage-activity-id {
         font-family: 'IBM Plex Mono', ui-monospace, monospace;
-        font-size: 11px;
+        font-size: 11.5px;
         color: var(--text);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        flex: 1;
-        min-width: 0;
       }
-
-      .cost-row-usd {
+      .usage-activity-track {
+        height: 8px;
+        background: var(--input);
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .usage-activity-fill {
+        height: 100%;
+        border-radius: 4px;
+        background: var(--accent);
+      }
+      .usage-activity-fill.role-coordinator {
+        background: var(--role-coordinator);
+      }
+      .usage-activity-fill.role-lead {
+        background: var(--role-lead);
+      }
+      .usage-activity-fill.role-implementer {
+        background: var(--role-implementer);
+      }
+      .usage-activity-fill.role-reviewer {
+        background: var(--role-reviewer);
+      }
+      .usage-activity-fill.role-researcher {
+        background: var(--role-researcher);
+      }
+      .usage-activity-val {
         font-family: 'IBM Plex Mono', ui-monospace, monospace;
-        font-size: 12px;
+        font-size: 11.5px;
         font-weight: 600;
         color: var(--heading);
-        flex-shrink: 0;
+        text-align: right;
       }
 
       /* ── Agents Console ─────────────────────────────────────────────────── */
@@ -2228,6 +2296,10 @@
     <!-- Header -->
     <header>
       <span class="logo-tile">co</span>
+      <span class="header-title"
+        >Code Orchestration <span class="header-sub">· Conductor</span></span
+      >
+      <span class="header-div" aria-hidden="true"></span>
       <div class="project-pill" id="project-pill" title="Currently open project">
         <span class="project-pill-glyph" aria-hidden="true">⊞</span>
         <span id="current-project-label">No project open</span>
@@ -2240,7 +2312,7 @@
       >
         Open project
       </button>
-      <span class="header-title">Code Orchestration · Conductor</span>
+      <span class="header-spacer"></span>
       <div class="live-pill">
         <span class="live-dot" id="live-dot"></span>
         <span id="live-label">offline</span>
@@ -2290,7 +2362,7 @@
         <div class="rail-title">Cockpit</div>
         <button class="nav-item active" data-view="dashboard" type="button">
           <span class="nav-glyph">◈</span>
-          Dashboard
+          Mission Control
         </button>
         <button class="nav-item" data-view="agents" type="button">
           <span class="nav-glyph">⊕</span>
@@ -2301,19 +2373,25 @@
           Mail
           <span class="nav-badge" id="mail-badge" style="display: none">0</span>
         </button>
-        <button class="nav-item" data-view="review" type="button">
-          <span class="nav-glyph">◎</span>
-          Review
-          <span class="nav-badge" id="review-badge" style="display: none">0</span>
-        </button>
         <button class="nav-item" data-view="source" type="button">
           <span class="nav-glyph">⊞</span>
           Source
         </button>
         <button class="nav-item" data-view="cost" type="button">
           <span class="nav-glyph">§</span>
-          Cost
+          Usage
         </button>
+        <!-- Review folds out of the v1 rail (design IA §2): it stays reachable from a review_request
+             mail's "Open in Reviews" action. The hidden badge keeps renderer.ts's null-safe lookups happy. -->
+        <span class="nav-badge" id="review-badge" hidden>0</span>
+        <!-- Vellum buddy dock (design §5 — companion, never in the critical path; static, no action). -->
+        <div class="buddy-dock" aria-hidden="true">
+          <span class="buddy-avatar">&#x25C6;</span>
+          <div class="buddy-meta">
+            <span class="buddy-name">Vellum</span>
+            <span class="buddy-status">idle</span>
+          </div>
+        </div>
       </nav>
 
       <!-- Main content area -->
@@ -2361,32 +2439,17 @@
                 aria-label="Agent transcript"
               ></div>
               <div class="steer-composer">
-                <label for="steer-input" class="steer-label">Steer</label>
-                <textarea
-                  id="steer-input"
-                  class="composer-textarea"
-                  placeholder="Type your steer…"
-                  disabled
-                ></textarea>
-                <div class="steer-buttons">
-                  <button
-                    class="btn btn-reply steer-btn"
-                    data-action="answer"
-                    type="button"
-                    aria-label="Answer agent"
+                <div class="steer-head">
+                  <span class="steer-label">Steer</span>
+                  <span class="steer-hint">pushes a message into this session</span>
+                </div>
+                <div class="steer-row">
+                  <textarea
+                    id="steer-input"
+                    class="composer-textarea steer-input"
+                    placeholder="Message this agent…"
                     disabled
-                  >
-                    Answer
-                  </button>
-                  <button
-                    class="btn btn-reply steer-btn"
-                    data-action="redirect"
-                    type="button"
-                    aria-label="Redirect agent"
-                    disabled
-                  >
-                    Redirect
-                  </button>
+                  ></textarea>
                   <button
                     class="btn btn-secondary steer-btn"
                     data-action="interrupt"
@@ -2394,7 +2457,16 @@
                     aria-label="Interrupt agent"
                     disabled
                   >
-                    ⊗
+                    Interrupt
+                  </button>
+                  <button
+                    class="btn btn-reply steer-btn"
+                    data-action="send"
+                    type="button"
+                    aria-label="Send message to agent"
+                    disabled
+                  >
+                    Send
                   </button>
                 </div>
               </div>
@@ -2491,9 +2563,14 @@
           </div>
         </div>
         <div class="view" id="view-cost">
-          <div class="view-heading">Cost</div>
+          <div class="usage-head">
+            <div class="view-heading">Usage &amp; limits</div>
+            <div class="usage-sub">
+              Subscription-only — the number that matters is headroom; the balancer paces on it.
+            </div>
+          </div>
           <div id="cost-content">
-            <div class="empty-state">Loading cost data…</div>
+            <div class="empty-state">Loading usage…</div>
           </div>
         </div>
       </main>

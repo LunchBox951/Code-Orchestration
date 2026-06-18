@@ -142,6 +142,10 @@ function setCurrentProject(payload: CurrentProjectPayload): void {
   const label = document.getElementById('current-project-label');
   const pill = document.getElementById('project-pill');
   const overlay = document.getElementById('no-project-overlay');
+  // The header "Open project" button is the registry entry point — shown ONLY in the no-project state
+  // (design §5); once a project is open the pill alone represents it.
+  const openBtn = document.getElementById('open-project-btn');
+  if (openBtn) openBtn.hidden = payload != null;
 
   if (overlay) overlay.hidden = payload != null;
 
@@ -190,7 +194,7 @@ function resetProjectScopedState(payload: CurrentProjectPayload): void {
   hideBadge('mail-badge');
   hideBadge('review-badge');
   renderTranscriptError(null);
-  setComposerEnabled(false);
+  setComposerEnabled(false, false);
 
   if (payload == null) {
     renderSource({ kind: 'no-project' });
@@ -615,18 +619,12 @@ function resetEta(resetAt: string): string {
   return `resets in ${m}m`;
 }
 
-function renderLimitsPopover(state: LimitsCostState): void {
-  const body = document.getElementById('limits-popover-body');
-  if (!body) return;
-
-  if (state.headroomRows.length === 0) {
-    body.innerHTML = `<div class="empty-state">No usage data</div>`;
-    return;
-  }
-
+// Build the per-provider headroom cards (5-hour / weekly bars + reset timers) shared by the header Limits
+// popover and the Usage page. Returns '' for no rows (callers render their own empty state).
+function buildHeadroomCardsHtml(headroomRows: readonly LimitsCostHeadroomRow[]): string {
   // Group rows by (provider, account)
   const groups = new Map<string, LimitsCostHeadroomRow[]>();
-  for (const row of state.headroomRows) {
+  for (const row of headroomRows) {
     const key = `${row.provider}:${row.account}`;
     let arr = groups.get(key);
     if (arr == null) {
@@ -636,7 +634,7 @@ function renderLimitsPopover(state: LimitsCostState): void {
     arr.push(row);
   }
 
-  const cards = [...groups.entries()]
+  return [...groups.entries()]
     .map(([key, rows]) => {
       const [provider, account] = key.split(':') as [string, string];
 
@@ -687,43 +685,70 @@ function renderLimitsPopover(state: LimitsCostState): void {
       `;
     })
     .join('');
-
-  body.innerHTML = cards;
 }
 
+function renderLimitsPopover(state: LimitsCostState): void {
+  const body = document.getElementById('limits-popover-body');
+  if (!body) return;
+  body.innerHTML =
+    state.headroomRows.length === 0
+      ? `<div class="empty-state">No usage data</div>`
+      : buildHeadroomCardsHtml(state.headroomRows);
+}
+
+// Walk the live fleet tree into an agentId→role map (for role-coloring the activity bars).
+function collectAgentRoles(
+  nodes: readonly TreeNode[],
+  out: Map<string, string> = new Map(),
+): Map<string, string> {
+  for (const node of nodes) {
+    out.set(node.agentId, node.role.toLowerCase());
+    collectAgentRoles(node.children, out);
+  }
+  return out;
+}
+
+// The Usage page (design §5): the two provider headroom cards up top (the number that matters), then an
+// activity-by-agent breakdown. v1 is subscription-only — no per-token billing — so the activity bars
+// show RELATIVE engagement (the per-agent cost rollup is the only per-agent signal core exposes today;
+// turns/tokens/throughput remain a deferred VM→core addition, surfaced honestly rather than faked).
 function renderCostView(state: LimitsCostState): void {
   const container = document.getElementById('cost-content');
   if (!container) return;
 
-  if (state.agentCosts.length === 0 && state.taskCosts.length === 0) {
-    container.innerHTML = `<div class="empty-state">No cost data yet</div>`;
-    return;
-  }
+  const providerCards =
+    state.headroomRows.length === 0
+      ? `<div class="empty-state">No provider headroom data yet</div>`
+      : buildHeadroomCardsHtml(state.headroomRows);
 
-  function costRowsHtml(rows: readonly LimitsCostCostRow[]): string {
-    if (rows.length === 0) return `<div class="empty-state">No entries</div>`;
-    return rows
-      .map(
-        (r) => `
-          <div class="cost-row">
-            <span class="cost-row-id" title="${esc(r.id)}">${esc(r.id)}</span>
-            <span class="cost-row-usd">$${r.totalCostUsd.toFixed(4)}</span>
-          </div>
-        `,
-      )
-      .join('');
-  }
+  const roles = latestDashboardState ? collectAgentRoles(latestDashboardState.tree) : new Map();
+  const maxCost = state.agentCosts.reduce((m, r) => Math.max(m, r.totalCostUsd), 0);
+  const activityRows =
+    state.agentCosts.length === 0
+      ? `<div class="empty-state">No activity yet</div>`
+      : [...state.agentCosts]
+          .sort((a, b) => b.totalCostUsd - a.totalCostUsd)
+          .map((r) => {
+            const role = roles.get(r.id);
+            const roleClass = role != null && ROLE_BADGE_CLASSES.has(role) ? ` role-${role}` : '';
+            const pct = maxCost > 0 ? Math.round((r.totalCostUsd / maxCost) * 100) : 0;
+            return [
+              `<div class="usage-activity-row">`,
+              `<span class="usage-activity-id" title="${esc(r.id)}">${esc(r.id)}</span>`,
+              `<div class="usage-activity-track">`,
+              `<div class="usage-activity-fill${roleClass}" style="width:${pct}%"></div>`,
+              `</div>`,
+              `<span class="usage-activity-val">$${r.totalCostUsd.toFixed(2)}</span>`,
+              `</div>`,
+            ].join('');
+          })
+          .join('');
 
   container.innerHTML = `
-    <div class="cost-sections">
-      <div class="cost-section">
-        <div class="cost-section-heading">Per agent</div>
-        <div class="cost-list">${costRowsHtml(state.agentCosts)}</div>
-      </div>
-      <div class="cost-section">
-        <div class="cost-section-heading">Per task</div>
-        <div class="cost-list">${costRowsHtml(state.taskCosts)}</div>
-      </div>
+    <div class="usage-providers">${providerCards}</div>
+    <div class="section-card usage-activity">
+      <div class="section-heading">Activity by agent<span class="section-hint">relative engagement</span></div>
+      <div class="usage-activity-list">${activityRows}</div>
     </div>
   `;
 }
@@ -837,12 +862,22 @@ function showTranscriptError(message: string | undefined): void {
   setTimeout(() => toast.remove(), 5000);
 }
 
-function setComposerEnabled(enabled: boolean): void {
+// The steer bar is the operator's "message this agent" surface. `canMessage` (an agent is selected and
+// the conductor is live) gates the input + Send: a WAITING/idle coordinator CAN be messaged — Send
+// routes to `agentsMessage` (an operator clarify_request that wakes it next tick), not steer. `canInterrupt`
+// (the agent is additionally WARM) gates Interrupt, which only means anything mid-turn. Fixes the prior
+// gate that disabled the whole bar unless warm, leaving an idle coordinator unreachable.
+function setComposerEnabled(canMessage: boolean, canInterrupt: boolean): void {
   const steerInput = document.getElementById('steer-input') as HTMLTextAreaElement | null;
-  if (steerInput) steerInput.disabled = !enabled;
-  for (const btn of document.querySelectorAll<HTMLButtonElement>('#view-agents .steer-btn')) {
-    btn.disabled = !enabled;
-  }
+  if (steerInput) steerInput.disabled = !canMessage;
+  const sendBtn = document.querySelector<HTMLButtonElement>(
+    '#view-agents .steer-btn[data-action="send"]',
+  );
+  if (sendBtn) sendBtn.disabled = !canMessage;
+  const interruptBtn = document.querySelector<HTMLButtonElement>(
+    '#view-agents .steer-btn[data-action="interrupt"]',
+  );
+  if (interruptBtn) interruptBtn.disabled = !canInterrupt;
 }
 
 function renderAgents(state: AgentsConsoleState): void {
@@ -881,9 +916,11 @@ function renderAgents(state: AgentsConsoleState): void {
 
   renderConsoleHeader(state);
 
-  const composerEnabled =
-    state.selectedAgentId != null && state.connection === 'live' && state.selectedStatus === 'warm';
-  setComposerEnabled(composerEnabled);
+  // An agent can be MESSAGED whenever one is selected and the conductor is live (even when idle/WAITING —
+  // the message wakes it). INTERRUPT only applies to a warm, mid-turn pane.
+  const canMessage = state.selectedAgentId != null && state.connection === 'live';
+  const canInterrupt = canMessage && state.selectedStatus === 'warm';
+  setComposerEnabled(canMessage, canInterrupt);
 
   renderTranscriptError(state.transcriptError);
   renderAgentsTranscript(state);
@@ -1640,22 +1677,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const steerInput = document.getElementById('steer-input') as HTMLTextAreaElement | null;
     const text = steerInput?.value.trim() ?? '';
+    const isWarm = latestAgentsState?.selectedStatus === 'warm';
 
     switch (action) {
-      case 'answer':
+      case 'send': {
         if (!text) return;
-        void bridge.agentsSteer(selectedAgentId, { kind: 'answer', text }).then((r) => {
+        // A WARM agent is steered mid-turn (the message injects into the live pane). A non-warm/idle agent
+        // (e.g. a coordinator between turns) is reached via an operator message — a clarify_request that
+        // the daemon delivers + wakes it for next tick. Either way the operator's text reaches the agent.
+        const send = isWarm
+          ? bridge.agentsSteer(selectedAgentId, { kind: 'answer', text })
+          : bridge.agentsMessage(selectedAgentId, 'Operator message', text);
+        void send.then((r) => {
           if (!r.ok) showTranscriptError(r.error);
           else if (steerInput) steerInput.value = '';
         });
         break;
-      case 'redirect':
-        if (!text) return;
-        void bridge.agentsSteer(selectedAgentId, { kind: 'redirect', text }).then((r) => {
-          if (!r.ok) showTranscriptError(r.error);
-          else if (steerInput) steerInput.value = '';
-        });
-        break;
+      }
       case 'interrupt':
         void bridge.agentsSteer(selectedAgentId, { kind: 'interrupt' }).then((r) => {
           if (!r.ok) showTranscriptError(r.error);
