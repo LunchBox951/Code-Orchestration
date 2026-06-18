@@ -70,7 +70,8 @@ The on-ramp Stage 15 builds makes this **app-first** (the CLI is the power-user 
 gap remains: spec lock uses the operator-only `co_spec_lock` MCP path until the app exposes it.
 
 1. `pnpm install && pnpm build` (dev install — a packaged installer is the `⊘` post-v1 non-goal).
-2. `co doctor --live` → `[ok] provider-compatibility` for the provider(s) used.
+2. `co doctor --live` → `[ok] provider-compatibility` for both monitored providers (`claude`,
+   `codex`).
 3. **Open the desktop app** (it owns/supervises the daemon).
 4. **Choose a repo/directory** in the app (registers + targets it).
 5. **Launch a coordinator from the predesigned spec** in the app; watch it cold-start in the Agents
@@ -92,8 +93,8 @@ Once the live run passes and the operator records evidence:
    partial run. Flip `SH-1` to `☑` only after the lock path is in-app or public-CLI driven and the
    run has no ad-hoc operator tool calls. `SH-4` / `SH-5` may be flipped independently if their live
    evidence is complete and linked in [`v1-acceptance-criteria.md`](v1-acceptance-criteria.md).
-2. **Gated `dev → main` promotion** — a `release/*` → `main` PR through the review gate (`origin/main`
-   is 103 commits behind `dev`).
+2. **Gated `dev → main` promotion** — a `release/*` → `main` PR through the review gate. Check the
+   current delta with `git rev-list --count origin/main..origin/dev`.
 3. **`SH-3` prototype-footprint teardown** (the `migration` issue, [`migration.md`](migration.md)) —
    **the first action `co` performs while self-hosting, not the prototype**: `git rm -r .co .claude
    .codex`, remove the prototype-era root docs (`PORTING-CO.md`, `PRINCIPLES.md`, `.goals/`,

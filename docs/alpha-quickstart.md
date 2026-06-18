@@ -128,7 +128,7 @@ summary gate; the full host-live SH-1 proof lives in [`docs/sh1-runbook.md`](sh1
 ```
 Operator host-live acceptance (run before merging):
 [ ] App healthy: daemon status indicator shows "healthy" for the project.
-[ ] Auth: co doctor --live → [ok] provider-compatibility for the provider(s) you will use.
+[ ] Auth: co doctor --live → [ok] provider-compatibility for both monitored providers (claude, codex).
 [ ] Session started: used "Start from demo spec" or "Start session" in the Dashboard.
 [ ] Plan-with-operator: the coordinator mails a clarify/brainstorm; you reply in-app; it drafts a spec.
 [ ] Lock: you approve the spec with the operator-only `co_spec_lock` path; agents cannot lock it.

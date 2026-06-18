@@ -71,7 +71,8 @@ Spec lock is the same temporary manual gap as SH-1: use the operator-only `co_sp
 until the app exposes it.
 
 1. `pnpm install && pnpm build`.
-2. `co doctor --live` → confirm `[ok] provider-compatibility` for the provider(s) you will use.
+2. `co doctor --live` → confirm `[ok] provider-compatibility` for both monitored providers
+   (`claude`, `codex`).
 3. **Open the desktop app** (it owns/supervises the daemon).
 4. **Choose the local-only repo/directory** in the app. With no remote, it registers and resolves to
    **Offline** automatically. The current desktop surface and `co status` do not yet render repo mode
