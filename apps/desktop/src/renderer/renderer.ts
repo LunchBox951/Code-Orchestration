@@ -685,14 +685,57 @@ let agentsResizeObserver: ResizeObserver | null = null;
 let lastAgentId: string | null = null;
 let lastTranscript = '';
 let latestAgentsState: AgentsConsoleState | null = null;
+// Gate xterm construction on the bundled IBM Plex Mono being loaded — a mismeasured fallback font is a
+// classic warp source, so we only build the terminal once the fixed monospace metric is available.
+let fontsReady = false;
+// Resize de-dupe + debounce so a drag doesn't spam PTY.resize; reset on agent-switch to force a resend.
+let lastSentCols = 0;
+let lastSentRows = 0;
+let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
+
+// The selected agent that interactive input/resize should route to — but ONLY when the conductor is live
+// (an offline pane has no pty to receive bytes).
+function liveTerminalAgentId(): string | null {
+  if (latestAgentsState == null || latestAgentsState.connection !== 'live') return null;
+  return latestAgentsState.selectedAgentId;
+}
+
+// Forward a raw keystroke chunk from xterm to the selected live agent's pty stdin (the operator answers
+// prompts / steers in-pane). Quietly dropped (console, not a per-key toast) when no agent is hosted.
+function forwardTerminalInput(data: string): void {
+  const agentId = liveTerminalAgentId();
+  if (agentId == null) return;
+  void window.coShell.agentsSendInput(agentId, data).then((r) => {
+    if (!r.ok && r.error != null) console.warn(`terminal input dropped: ${r.error}`);
+  });
+}
+
+// Drive PTY.resize(cols, rows) so the hosted pty grid matches the in-app xterm grid (width-agreement, #40).
+function sendTerminalResize(cols: number, rows: number): void {
+  const agentId = liveTerminalAgentId();
+  if (agentId == null || cols <= 0 || rows <= 0) return;
+  if (cols === lastSentCols && rows === lastSentRows) return;
+  lastSentCols = cols;
+  lastSentRows = rows;
+  void window.coShell.agentsResize(agentId, cols, rows).then((r) => {
+    if (!r.ok && r.error != null) console.warn(`terminal resize failed: ${r.error}`);
+  });
+}
+
+function scheduleTerminalResize(cols: number, rows: number): void {
+  if (resizeDebounce != null) clearTimeout(resizeDebounce);
+  resizeDebounce = setTimeout(() => sendTerminalResize(cols, rows), 120);
+}
 
 // Construct the xterm lazily, on first render while the Agents pane is active+sized (the
-// isAgentsViewActive() gate in renderAgentsTranscript). The terminal is built WITHOUT convertEol (the
-// stream is raw, cursor-addressed pty bytes — converting \n→\r\n corrupts it), with the fit addon loaded
-// so it sizes to its pane on open and on every resize (GitHub #40). Returns null only when the static
-// transcript element is somehow absent — the caller then skips the feed for this tick.
+// isAgentsViewActive() gate in renderAgentsTranscript) AND the bundled font is ready. The terminal is
+// INTERACTIVE (stdin enabled): onData forwards keystrokes to the hosted pty, and the fitted grid drives
+// PTY.resize so cursor-addressed redraws never warp (GitHub #40). Built WITHOUT convertEol (the stream is
+// raw, cursor-addressed pty bytes). Returns null when the font isn't ready yet or the element is absent —
+// the caller then skips the feed for this tick (a later tick / the fonts-ready handler re-renders).
 function getOrCreateTerm(): XtermTerminal | null {
   if (agentsTerm != null) return agentsTerm;
+  if (!fontsReady) return null;
   const el = document.getElementById('agents-transcript');
   if (el == null) return null;
   const { term } = createAgentsTerminal<XtermTerminal>(el, {
@@ -705,9 +748,29 @@ function getOrCreateTerm(): XtermTerminal | null {
       agentsResizeObserver = new ResizeObserver(() => onResize());
       agentsResizeObserver.observe(target);
     },
+    onInput: forwardTerminalInput,
+    onResize: scheduleTerminalResize,
   });
   agentsTerm = term;
   return term;
+}
+
+// Preload the bundled IBM Plex Mono, then build/refresh the terminal once it's measured. Called once at
+// bootstrap. document.fonts always exists in Electron's Chromium; the guard is belt-and-suspenders.
+function preloadTerminalFont(): void {
+  const ready = (): void => {
+    fontsReady = true;
+    if (isAgentsViewActive() && latestAgentsState != null)
+      renderAgentsTranscript(latestAgentsState);
+  };
+  try {
+    void Promise.allSettled([
+      document.fonts.load('12px "IBM Plex Mono"'),
+      document.fonts.load('600 12px "IBM Plex Mono"'),
+    ]).then(() => document.fonts.ready.then(ready, ready));
+  } catch {
+    ready();
+  }
 }
 
 function isAgentsViewActive(): boolean {
@@ -799,6 +862,7 @@ function renderAgentsTranscript(state: AgentsConsoleState): void {
 
   const term = getOrCreateTerm();
   if (term == null) return;
+  const switched = state.selectedAgentId !== lastAgentId;
   // Feed xterm the RAW bytes verbatim: append the new delta while the transcript only grows, reset +
   // rewrite on agent-switch or a non-prefix change. No EOL conversion, no sanitization — xterm's emulator
   // reproduces the final screen from the intact control bytes.
@@ -813,6 +877,13 @@ function renderAgentsTranscript(state: AgentsConsoleState): void {
   );
   lastAgentId = state.selectedAgentId;
   lastTranscript = state.transcript;
+  // On agent-switch, the newly-selected agent's pty must be told the current xterm grid (its width may
+  // differ from the previous agent's). Force a resend past the de-dupe.
+  if (switched && state.selectedAgentId != null) {
+    lastSentCols = 0;
+    lastSentRows = 0;
+    sendTerminalResize(term.cols, term.rows);
+  }
 }
 
 // ── Review rendering ──────────────────────────────────────────────────────────
@@ -1161,6 +1232,9 @@ function renderSessionStartForm(): void {
 
 document.addEventListener('DOMContentLoaded', () => {
   const bridge = window.coShell;
+
+  // Preload IBM Plex Mono so the live terminal builds on a stable monospace grid (anti-warp, #40).
+  preloadTerminalFont();
 
   // Nav clicks → bridge
   document.getElementById('nav-rail')?.addEventListener('click', (e) => {

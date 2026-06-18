@@ -168,6 +168,11 @@ interface XtermTerminal {
   dispose(): void;
   // Load an xterm addon (e.g. the fit addon) — `unknown` keeps the renderer free of an xterm type import.
   loadAddon(addon: unknown): void;
+  // Interactive stdin: fires for every keystroke/paste chunk the operator types into the pane.
+  onData(cb: (data: string) => void): void;
+  // The fitted grid dimensions (read AFTER fit) — drive PTY.resize(cols, rows) for width-agreement.
+  readonly cols: number;
+  readonly rows: number;
 }
 
 // The vendored `@xterm/addon-fit` UMD build assigns `globalThis.FitAddon = { FitAddon: <constructor> }`.

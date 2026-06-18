@@ -41,3 +41,22 @@ cpSync(
   require.resolve('@xterm/addon-fit/lib/addon-fit.js'),
   join(dstDir, 'vendor', 'addon-fit.js'),
 );
+
+// Bundle IBM Plex (Sans + Mono) woff2 — the cockpit design's typeface. The strict CSP (font-src
+// falls back to default-src 'self') only permits self-hosted fonts, and `connect-src 'none'` blocks
+// any Google-Fonts fetch, so we copy the latin woff2 weights we use into vendor/fonts and @font-face
+// them locally. A fixed, preloaded monospace (IBM Plex Mono) is also what lets xterm measure a stable
+// cell grid (the design's anti-warp requirement) instead of a mismeasured system fallback.
+const fontsDir = join(dstDir, 'vendor', 'fonts');
+mkdirSync(fontsDir, { recursive: true });
+const FONT_WEIGHTS = [
+  ['@fontsource/ibm-plex-sans', 'ibm-plex-sans', ['400', '600', '700']],
+  ['@fontsource/ibm-plex-mono', 'ibm-plex-mono', ['400', '500', '600']],
+];
+for (const [pkg, family, weights] of FONT_WEIGHTS) {
+  const pkgDir = dirname(require.resolve(`${pkg}/package.json`));
+  for (const weight of weights) {
+    const file = `${family}-latin-${weight}-normal.woff2`;
+    cpSync(join(pkgDir, 'files', file), join(fontsDir, file));
+  }
+}

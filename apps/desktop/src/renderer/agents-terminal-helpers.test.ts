@@ -21,6 +21,9 @@ class FakeTerminal implements FitTerminalLike, TermWriter {
   readonly writes: string[] = [];
   resets = 0;
   opened = false;
+  cols = 80;
+  rows = 24;
+  dataCb: ((data: string) => void) | null = null;
   constructor(private readonly order: string[]) {}
   loadAddon(addon: FitAddonLike): void {
     this.loadedAddons.push(addon);
@@ -29,6 +32,10 @@ class FakeTerminal implements FitTerminalLike, TermWriter {
   open(): void {
     this.opened = true;
     this.order.push('open');
+  }
+  onData(cb: (data: string) => void): void {
+    this.dataCb = cb;
+    this.order.push('onData');
   }
   write(data: string): void {
     this.writes.push(data);
@@ -49,7 +56,10 @@ class FakeFitAddon implements FitAddonLike {
   }
 }
 
-function setup() {
+function setup(io?: {
+  onInput?: (data: string) => void;
+  onResize?: (cols: number, rows: number) => void;
+}) {
   const order: string[] = [];
   const term = new FakeTerminal(order);
   const fit = new FakeFitAddon(order);
@@ -69,6 +79,8 @@ function setup() {
       observedEl = target;
       resizeCb = onResize;
     },
+    ...(io?.onInput ? { onInput: io.onInput } : {}),
+    ...(io?.onResize ? { onResize: io.onResize } : {}),
   });
 
   return {
@@ -94,17 +106,53 @@ describe('AGENTS_TERMINAL_OPTIONS', () => {
     expect('convertEol' in AGENTS_TERMINAL_OPTIONS).toBe(false);
   });
 
-  it('disables stdin (the pane is read-only)', () => {
-    expect(AGENTS_TERMINAL_OPTIONS.disableStdin).toBe(true);
+  it('ENABLES stdin (the pane is interactive — the operator types/answers/steers in-pane)', () => {
+    expect(AGENTS_TERMINAL_OPTIONS.disableStdin).toBe(false);
+  });
+
+  it('pins a fixed IBM Plex Mono cell grid (stable measurement — the anti-warp requirement)', () => {
+    expect(AGENTS_TERMINAL_OPTIONS.fontFamily).toMatch(/IBM Plex Mono/);
+    expect(AGENTS_TERMINAL_OPTIONS.fontSize).toBeGreaterThan(0);
+    expect(AGENTS_TERMINAL_OPTIONS.lineHeight).toBeGreaterThan(0);
   });
 });
 
 describe('createAgentsTerminal', () => {
-  it('constructs the Terminal WITHOUT convertEol', () => {
+  it('constructs the Terminal WITHOUT convertEol, with stdin enabled', () => {
     const s = setup();
     expect(s.optionsSeen).not.toBeNull();
     expect(s.optionsSeen && 'convertEol' in s.optionsSeen).toBe(false);
-    expect(s.optionsSeen?.disableStdin).toBe(true);
+    expect(s.optionsSeen?.disableStdin).toBe(false);
+  });
+
+  it('forwards xterm keystrokes to onInput (interactive stdin → hosted pty)', () => {
+    const typed: string[] = [];
+    const s = setup({ onInput: (d) => typed.push(d) });
+    expect(s.term.dataCb).not.toBeNull();
+    s.term.dataCb?.('1');
+    s.term.dataCb?.('\r');
+    expect(typed).toEqual(['1', '\r']);
+  });
+
+  it('does NOT wire onData when no onInput is provided (stays read-only)', () => {
+    const s = setup();
+    expect(s.term.dataCb).toBeNull();
+    expect(s.order).not.toContain('onData');
+  });
+
+  it('reports the fitted grid via onResize — initially and on every pane resize (width-agreement)', () => {
+    const dims: Array<[number, number]> = [];
+    const s = setup({ onResize: (cols, rows) => dims.push([cols, rows]) });
+    // Initial report uses the terminal's measured cols/rows after fit().
+    expect(dims).toEqual([[80, 24]]);
+    // A pane resize re-fits AND re-reports the (possibly new) grid.
+    s.term.cols = 120;
+    s.term.rows = 30;
+    s.resizeCb?.();
+    expect(dims).toEqual([
+      [80, 24],
+      [120, 30],
+    ]);
   });
 
   it('loads the fit addon onto the terminal', () => {

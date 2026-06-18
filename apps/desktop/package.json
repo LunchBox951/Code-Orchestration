@@ -22,6 +22,8 @@
     "@xterm/xterm": "^6.0.0"
   },
   "devDependencies": {
+    "@fontsource/ibm-plex-mono": "^5.2.7",
+    "@fontsource/ibm-plex-sans": "^5.2.8",
     "electron": "^39.8.5",
     "electron-builder": "^26.0.0"
   }
