@@ -62,8 +62,9 @@ pnpm test   # vitest discovers apps/desktop/src/**/*.test.ts
 ```
 
 The native-addon ABI proof (`native-abi.test.ts`) asserts version compatibility
-in-sandbox (Electron 39 / Node ≥22.5 / `node:sqlite` available). When the
-Electron binary is installed, the host proof is:
+in-sandbox (Electron 39's bundled Node runtime is ≥22.5 with `node:sqlite`
+available; repo setup still uses the root Node version). When the Electron binary
+is installed, the host proof is:
 
 ```sh
 ELECTRON_RUN_AS_NODE=1 pnpm --filter @co/desktop exec electron -e "require('node:sqlite'); const { createRequire } = require('node:module'); createRequire(require.resolve('@co/core'))('node-pty'); console.log('native-abi: ok')"

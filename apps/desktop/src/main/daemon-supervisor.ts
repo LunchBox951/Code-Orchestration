@@ -210,23 +210,33 @@ export class DaemonSupervisor {
     if (this._status === 'healthy' && this.projectId === projectId && this.child != null) {
       return Promise.resolve('healthy');
     }
-    // Re-arming (Retry, or a direct project switch): reap any child left from a prior/failed episode so
-    // we never leak an orphaned `co-mcp serve`. The generation bump below disarms its exit handler.
-    if (this.child != null) {
-      this.killChild(this.child);
+    const generation = ++this.generation;
+    const run = this.startAfterTeardown(projectId, generation).finally(() => {
+      if (this.starting === run) this.starting = null;
+    });
+    this.starting = run;
+    return run;
+  }
+
+  private async startAfterTeardown(
+    projectId: ProjectId,
+    generation: number,
+  ): Promise<DaemonStatus> {
+    // Re-arming (Retry, or a direct project switch): reap any child left from a prior/failed episode and
+    // wait for its exit before spawning the replacement. A real daemon may unlink its socket during exit,
+    // so spawning before termination can race and remove the fresh daemon's healthy socket.
+    const oldChild = this.child;
+    if (oldChild != null) {
       this.child = null;
+      await this.terminateChild(oldChild);
+      if (generation !== this.generation) return this._status;
     }
     this.stopping = false;
     this.projectId = projectId;
     this.socketPath = this.socketPathFor(projectId);
     this.retries = 0;
     this._detail = null;
-    const generation = ++this.generation;
-    const run = this.doStart(generation).finally(() => {
-      if (this.starting === run) this.starting = null;
-    });
-    this.starting = run;
-    return run;
+    return this.doStart(generation);
   }
 
   /**
@@ -240,7 +250,7 @@ export class DaemonSupervisor {
     this.starting = null;
     const child = this.child;
     this.child = null;
-    if (child != null) this.killChild(child);
+    if (child != null) await this.terminateChild(child);
     this._detail = null;
     this.setStatus('stopped');
     await Promise.resolve();
@@ -265,8 +275,9 @@ export class DaemonSupervisor {
       return 'healthy';
     }
     // The initial daemon never became healthy within the budget — fail VISIBLY (never hang).
-    this.killChild(child);
     if (this.child === child) this.child = null;
+    await this.terminateChild(child);
+    if (generation !== this.generation || this.stopping) return this._status;
     this._detail ??= `Conductor daemon did not become healthy within ${this.healthTimeoutMs}ms.`;
     this.setStatus('failed');
     return 'failed';
@@ -336,8 +347,9 @@ export class DaemonSupervisor {
         return;
       }
       // The respawn never became healthy — discard it and consume another attempt.
-      this.killChild(child);
       if (this.child === child) this.child = null;
+      await this.terminateChild(child);
+      if (generation !== this.generation || this.stopping) return;
     }
   }
 
@@ -369,28 +381,41 @@ export class DaemonSupervisor {
   }
 
   /** SIGTERM the child; escalate to SIGKILL after the grace if it has not exited. Never throws. */
-  private killChild(child: DaemonSpawnHandle): void {
+  private async terminateChild(child: DaemonSpawnHandle): Promise<void> {
     let exited = false;
-    try {
-      child.on('exit', () => {
+    const exitedPromise = new Promise<void>((resolve) => {
+      try {
+        child.on('exit', () => {
+          if (exited) return;
+          exited = true;
+          resolve();
+        });
+      } catch {
+        // A handle without a usable emitter — escalation simply proceeds.
         exited = true;
-      });
-    } catch {
-      // A handle without a usable emitter — escalation simply proceeds.
-    }
+        resolve();
+      }
+    });
     try {
       child.kill('SIGTERM');
     } catch (err) {
       process.stderr.write(`[daemon-supervisor] SIGTERM failed: ${String(err)}\n`);
     }
-    void this.delay(this.killGraceMs).then(() => {
-      if (exited) return;
+    await Promise.race([exitedPromise, this.delay(this.killGraceMs)]);
+    if (exited) return;
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // Already gone.
+    }
+    await Promise.race([exitedPromise, this.delay(this.killGraceMs)]);
+    if (!exited) {
       try {
         child.kill('SIGKILL');
       } catch {
         // Already gone.
       }
-    });
+    }
   }
 
   private setStatus(status: DaemonStatus): void {

@@ -121,6 +121,13 @@ describe('listBranches — fail-loud (Principle 9)', () => {
   it('error message includes the cwd for diagnostics', () => {
     expect(() => listBranches('/some/path', { readGit: cannedReader(null) })).toThrow('/some/path');
   });
+
+  it('throws instead of silently dropping a malformed for-each-ref row', () => {
+    const raw = cannedLine(false, 'feature', '', 'abc1234', `bad${SEP}subject`, DATE_NEWEST, 'A');
+    expect(() => listBranches('/fake', { readGit: cannedReader(raw) })).toThrow(
+      /co listBranches: malformed git for-each-ref row/i,
+    );
+  });
 });
 
 // ── (iv) integration — real git repo with pinned dates ────────────────────────────────────────────
@@ -188,5 +195,24 @@ describe('listBranches — real git integration (pinned dates)', () => {
     expect(result[1]!.isCurrent).toBe(false);
     expect(result[1]!.lastCommit.subject).toBe('first commit');
     expect(result[1]!.lastCommit.committedAt).toMatch(/^2024-01-10/u);
+  });
+
+  it('fails loud when a real commit subject contains the internal field separator', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'co-list-branches-malformed-'));
+    tmpDirs.push(dir);
+
+    execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'ignore' });
+    const date1 = '2024-01-10T10:00:00+00:00';
+    writeFileSync(join(dir, 'a.txt'), 'alpha\n');
+    git(dir, { GIT_AUTHOR_DATE: date1, GIT_COMMITTER_DATE: date1 }, 'add', '.');
+    git(
+      dir,
+      { GIT_AUTHOR_DATE: date1, GIT_COMMITTER_DATE: date1 },
+      'commit',
+      '-m',
+      `bad${SEP}subject`,
+    );
+
+    expect(() => listBranches(dir)).toThrow(/co listBranches: malformed git for-each-ref row/i);
   });
 });

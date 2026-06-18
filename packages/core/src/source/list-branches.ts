@@ -12,7 +12,7 @@ export interface BranchInfo {
   };
 }
 
-// Field separator: SOH (\x01) is safe — git ref names and commit subjects never contain it.
+// Field separator: SOH (\x01). Ref names cannot contain it; malformed subject rows fail loud below.
 const FIELD_SEP = '\x01';
 
 const FOR_EACH_REF_FORMAT = [
@@ -30,7 +30,12 @@ function parseRaw(raw: string): BranchInfo[] {
   for (const line of raw.split('\n')) {
     if (!line) continue;
     const parts = line.split(FIELD_SEP);
-    if (parts.length !== 7) continue;
+    if (parts.length !== 7) {
+      throw new Error(
+        `co listBranches: malformed git for-each-ref row (${parts.length} fields, expected 7) — ` +
+          'commit subject may contain the internal field separator.',
+      );
+    }
     const headMarker = parts[0]!;
     const name = parts[1]!;
     const upstream = parts[2]!;

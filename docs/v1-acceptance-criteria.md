@@ -92,8 +92,9 @@ These are the top-level conditions that, all met, *are* v1.
   hood, clean human view on top; provider voice stays out of artifacts (Principle 3). L1 ships the
   renderer-registry seam + a generic default renderer; L3 ships provider-deterministic commit /
   merge / PR message renderers and `co_finish` consumes the commit renderer. L6a wires merge / PR
-  renderers into the gated `co_merge` and `co_pr_merge` tools. Remaining: per-type human mail
-  renderers are the app (L9).
+  renderers into the gated `co_merge` and `co_pr_merge` tools. Stage 15 ships typed mail payload
+  cards in core + desktop so decision, patch, CI, artifact, and summary mail render as per-audience
+  human cards. Remaining: broader artifact coverage beyond the Stage 15 card set.
 
 ## C. Roles, dispatch & escalation (P8, P11, P13)
 

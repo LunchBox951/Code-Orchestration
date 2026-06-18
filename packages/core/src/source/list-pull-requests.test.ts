@@ -74,6 +74,19 @@ describe('listPullRequests — local git PR refs', () => {
       /co listPullRequests.*not a repository or git is unavailable/i,
     );
   });
+
+  it('throws instead of silently dropping a malformed for-each-ref row', () => {
+    const raw = cannedLine(
+      'refs/pull/41/head',
+      'abc1234',
+      `bad${SEP}subject`,
+      '2026-06-17T12:00:00+00:00',
+      'A',
+    );
+    expect(() => listPullRequests('/fake', { readGit: cannedReader(raw) })).toThrow(
+      /co listPullRequests: malformed git for-each-ref row/i,
+    );
+  });
 });
 
 const tmpDirs: string[] = [];

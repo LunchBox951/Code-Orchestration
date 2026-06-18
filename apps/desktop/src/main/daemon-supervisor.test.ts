@@ -17,7 +17,13 @@ const PROJECT_ID = 'a1b2c3d4-0000-0000-0000-000000000000' as ProjectId;
 /** A bare child stand-in: an EventEmitter + `kill()` + `pid` — NO real process, NO real Electron. */
 class FakeChild extends EventEmitter implements DaemonSpawnHandle {
   readonly pid = 4242;
-  readonly kill = vi.fn((): boolean => true);
+  readonly kill = vi.fn((signal?: NodeJS.Signals | number): boolean => {
+    if (this.exitOnKill) this.crash(null, typeof signal === 'string' ? signal : null);
+    return true;
+  });
+  constructor(private readonly exitOnKill = true) {
+    super();
+  }
   /** Simulate an UNEXPECTED crash (the daemon process going away on its own). */
   crash(code: number | null = 1, signal: NodeJS.Signals | null = null): void {
     this.emit('exit', code, signal);
@@ -30,7 +36,7 @@ async function flush(): Promise<void> {
 }
 
 /** A spawn seam that records descriptors and hands back fresh fake children. */
-function recordingSpawn(): {
+function recordingSpawn(options: { readonly exitOnKill?: boolean } = {}): {
   seam: (descriptor: SpawnDescriptor) => DaemonSpawnHandle;
   spy: ReturnType<typeof vi.fn>;
   children: FakeChild[];
@@ -41,7 +47,7 @@ function recordingSpawn(): {
   const descriptors: SpawnDescriptor[] = [];
   const spy = vi.fn((descriptor: SpawnDescriptor): DaemonSpawnHandle => {
     descriptors.push(descriptor);
-    const child = new FakeChild();
+    const child = new FakeChild(options.exitOnKill ?? true);
     children.push(child);
     return child;
   });
@@ -59,6 +65,29 @@ function recordingSpawn(): {
 }
 
 const immediateDelay = (): Promise<void> => Promise.resolve();
+
+function deferredDelay(): {
+  delay: (ms: number) => Promise<void>;
+  resolveOne: () => void;
+  pendingCount: () => number;
+} {
+  const pending: Array<() => void> = [];
+  const delay = vi.fn(
+    (_ms: number) =>
+      new Promise<void>((resolve) => {
+        pending.push(resolve);
+      }),
+  );
+  return {
+    delay,
+    resolveOne: () => {
+      const resolve = pending.shift();
+      if (resolve == null) throw new Error('no pending delay');
+      resolve();
+    },
+    pendingCount: () => pending.length,
+  };
+}
 
 // ── DEFAULT-PATH correctness (guards the PRODUCTION default, not just an injected seam) ─────────────
 
@@ -186,6 +215,42 @@ describe('daemon-supervisor — start() health-wait', () => {
     expect(probeHealth).toHaveBeenCalledTimes(3);
     expect(spawn.current().kill).toHaveBeenCalled(); // the unhealthy child is reaped
     expect(supervisor.detail).toMatch(/did not become healthy/i);
+  });
+
+  it('waits for an unhealthy child to exit before failed status and retry replacement', async () => {
+    const spawn = recordingSpawn({ exitOnKill: false });
+    const delays = deferredDelay();
+    const statuses: DaemonStatus[] = [];
+    const supervisor = createDaemonSupervisor({
+      spawn: spawn.seam,
+      probeHealth: vi.fn().mockResolvedValue(false),
+      delay: delays.delay,
+      healthTimeoutMs: 10,
+      healthIntervalMs: 10,
+      killGraceMs: 100,
+      onStatus: (s) => statuses.push(s),
+    });
+
+    const firstStart = supervisor.start(PROJECT_ID);
+    await flush();
+
+    expect(spawn.spy).toHaveBeenCalledTimes(1);
+    expect(spawn.current().kill).toHaveBeenCalledWith('SIGTERM');
+    expect(statuses).toEqual(['starting']);
+    expect(delays.pendingCount()).toBe(1);
+    expect(supervisor.start(PROJECT_ID)).toBe(firstStart); // retry is still serialized behind cleanup
+    expect(spawn.spy).toHaveBeenCalledTimes(1);
+
+    spawn.current().crash(null, 'SIGTERM');
+    await expect(firstStart).resolves.toBe('failed');
+    expect(statuses).toEqual(['starting', 'failed']);
+
+    const retry = supervisor.start(PROJECT_ID);
+    await flush();
+    expect(spawn.spy).toHaveBeenCalledTimes(2);
+    expect(spawn.current().kill).toHaveBeenCalledWith('SIGTERM');
+    spawn.current().crash(null, 'SIGTERM');
+    await expect(retry).resolves.toBe('failed');
   });
 
   it('clears stale failure detail before a retry emits "starting"', async () => {

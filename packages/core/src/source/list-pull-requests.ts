@@ -12,6 +12,7 @@ export interface PullRequestInfo {
   };
 }
 
+// Field separator: SOH (\x01). Ref names cannot contain it; malformed subject rows fail loud below.
 const FIELD_SEP = '\x01';
 
 const FOR_EACH_REF_FORMAT = [
@@ -35,7 +36,12 @@ function parseRaw(raw: string): PullRequestInfo[] {
   for (const line of raw.split('\n')) {
     if (!line) continue;
     const parts = line.split(FIELD_SEP);
-    if (parts.length !== 5) continue;
+    if (parts.length !== 5) {
+      throw new Error(
+        `co listPullRequests: malformed git for-each-ref row (${parts.length} fields, expected 5) — ` +
+          'commit subject may contain the internal field separator.',
+      );
+    }
     const ref = parts[0]!;
     const parsed = parsePullRef(ref);
     if (parsed == null) continue;

@@ -71,6 +71,7 @@ function reviewIdFromMailRow(row: MailRow): string | null {
 }
 
 function activateView(view: NavView): void {
+  const wasActive = isViewActive(view);
   for (const el of document.querySelectorAll('.nav-item')) {
     el.classList.toggle('active', el.getAttribute('data-view') === view);
   }
@@ -84,7 +85,7 @@ function activateView(view: NavView): void {
     renderReview(latestReviewState);
   }
   // Source is a pull-only read surface: fetch branches + local PR refs whenever the view becomes active.
-  if (view === 'source') {
+  if (view === 'source' && !wasActive) {
     refreshSource();
   }
 }

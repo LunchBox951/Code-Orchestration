@@ -38,6 +38,28 @@ function assertPlanOpenForMutation(operation: string, plan: PlanRecord): void {
   }
 }
 
+function assertPlanReadyToComplete(operation: string, plan: PlanRecord): void {
+  const unmerged = plan.phases.filter((p) => p.status !== 'merged');
+  if (unmerged.length > 0) {
+    const detail = unmerged.map((p) => `'${p.phaseId}' (${p.status})`).join(', ');
+    throw new Error(
+      `${operation}: refusing task.completed for plan '${plan.taskId}' — ${unmerged.length} ` +
+        `phase(s) not 'merged': ${detail}. Every phase must merge before the task can close.`,
+    );
+  }
+  const unverified = plan.phases.filter((p) => p.verifiedPass !== true);
+  if (unverified.length > 0) {
+    const detail = unverified
+      .map((p) => `'${p.phaseId}' (${p.verifiedPass === false ? 'failed' : 'missing'})`)
+      .join(', ');
+    throw new Error(
+      `${operation}: refusing task.completed for plan '${plan.taskId}' — ${unverified.length} ` +
+        `phase(s) not verified green: ${detail}. Every phase must have phase.verified(pass=true) ` +
+        'before the task can close.',
+    );
+  }
+}
+
 export interface PlanStore {
   /** Record a plan draft (append `plan.drafted` + fold); returns the read-back record. */
   recordDraft(rec: {
@@ -284,6 +306,7 @@ export function openPlanStore(projectId: string): PlanStore {
         if (existing.completedTs != null) {
           return existing;
         }
+        assertPlanReadyToComplete('openPlanStore.recordTaskCompleted', existing);
         const [stored] = tx.append([makeTaskCompletedEvent(projectId, { taskId }, actor)]);
         applyEvent(tx, decode(stored!, plansUpcasters, plansSchemas), projectors);
         const row = selectPlan(db, taskId);

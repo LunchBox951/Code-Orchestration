@@ -168,6 +168,28 @@ function assertPlanOpenForFold(eventType: string, plan: PlanRecord): void {
   }
 }
 
+function assertPlanReadyToComplete(plan: PlanRecord): void {
+  const unmerged = plan.phases.filter((p) => p.status !== 'merged');
+  if (unmerged.length > 0) {
+    const detail = unmerged.map((p) => `'${p.phaseId}' (${p.status})`).join(', ');
+    throw new Error(
+      `plans: refusing task.completed for plan '${plan.taskId}' — ${unmerged.length} ` +
+        `phase(s) not 'merged': ${detail}. Every phase must merge before the task can close.`,
+    );
+  }
+  const unverified = plan.phases.filter((p) => p.verifiedPass !== true);
+  if (unverified.length > 0) {
+    const detail = unverified
+      .map((p) => `'${p.phaseId}' (${p.verifiedPass === false ? 'failed' : 'missing'})`)
+      .join(', ');
+    throw new Error(
+      `plans: refusing task.completed for plan '${plan.taskId}' — ${unverified.length} ` +
+        `phase(s) not verified green: ${detail}. Every phase must have phase.verified(pass=true) ` +
+        'before the task can close.',
+    );
+  }
+}
+
 interface PlanDraftedEvent extends StoredEvent {
   readonly type: typeof EVENT_PLAN_DRAFTED;
   readonly payload: PlanDrafted;
@@ -308,6 +330,7 @@ export class PlansProjector implements Projector {
         if (existing.completedTs != null) {
           return;
         }
+        assertPlanReadyToComplete(existing);
         // `event.ts` is the completion mark (freeze #6 — never a wall clock).
         db.prepare(`UPDATE plans SET completed_ts = ? WHERE task_id = ?`).run(event.ts, taskId);
         return;

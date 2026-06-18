@@ -163,6 +163,8 @@ describe('co_phase_update — input + existence guards', () => {
   it('refuses to mutate a completed task plan', async () => {
     const ctx = coordCtx('pu-completed-terminal');
     seedPlan(ctx, 'task-pu-completed');
+    ctx.plans!.changePhaseStatus('task-pu-completed', 'phase1', 'merged', 'coord-1');
+    ctx.plans!.recordPhaseVerified('task-pu-completed', 'phase1', 'base-a', true, 'coord-1');
     ctx.plans!.recordTaskCompleted('task-pu-completed', 'coord-1');
 
     await expect(
@@ -172,7 +174,7 @@ describe('co_phase_update — input + existence guards', () => {
         status: 'building',
       }),
     ).rejects.toThrow(/task-pu-completed.*already completed.*terminal/i);
-    expect(ctx.plans!.getPlan('task-pu-completed')?.phases[0]?.status).toBe('planned');
+    expect(ctx.plans!.getPlan('task-pu-completed')?.phases[0]?.status).toBe('merged');
   });
 });
 
