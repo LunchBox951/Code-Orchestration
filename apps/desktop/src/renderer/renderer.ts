@@ -222,19 +222,61 @@ function statusDotHtml(status: AgentStatus): string {
     paused: 'dot-paused',
     unknown: 'dot-unknown',
   };
-  return `<span class="status-dot ${cls[status]}" title="${esc(status)}"></span>`;
+  return `<span class="status-dot ${cls[status]}" title="${esc(displayState(status))}"></span>`;
+}
+
+// The product lifecycle vocabulary (docs/concepts.md) — not the desktop's transient warm/unknown.
+function displayState(status: AgentStatus): string {
+  switch (status) {
+    case 'warm':
+      return 'RUNNING';
+    case 'waiting':
+      return 'WAITING';
+    case 'stuck':
+      return 'STUCK';
+    case 'paused':
+      return 'PAUSED';
+    default:
+      return 'IDLE';
+  }
+}
+
+const ROLE_BADGE_CLASSES = new Set([
+  'coordinator',
+  'lead',
+  'implementer',
+  'reviewer',
+  'researcher',
+]);
+
+// A role-colored pill (coordinator violet / lead blue / implementer green / reviewer amber /
+// researcher cyan); subRole rides as `role:subRole` (e.g. implementer:code).
+function roleBadgeHtml(role: string, subRole?: string): string {
+  const base = role.toLowerCase();
+  const roleClass = ROLE_BADGE_CLASSES.has(base) ? ` role-${base}` : '';
+  const label = subRole ? `${role}:${subRole}` : role;
+  return `<span class="role-badge${roleClass}">${esc(label)}</span>`;
+}
+
+// Map an actionable mail type to its typed-card kind (border + tag color).
+function actionKindClass(type: string): string {
+  const t = type.toLowerCase();
+  if (t.includes('approval') || t.includes('approve')) return 'approval';
+  if (t.includes('escal')) return 'escalation';
+  if (t.includes('review')) return 'review';
+  return 'clarify';
 }
 
 function renderTreeNodes(nodes: readonly TreeNode[], depth: number): string {
   return nodes
     .map((node) => {
-      const indent = depth * 20;
-      const label = node.subRole ? `${esc(node.role)}:${esc(node.subRole)}` : esc(node.role);
+      const indent = 14 + depth * 18;
       return `
-        <div class="tree-node" style="padding-left:${indent}px">
+        <div class="tree-node" style="padding-left:${indent}px" data-agent-id="${esc(node.agentId)}" role="button" tabindex="0" aria-label="Open ${esc(node.agentId)} console">
           ${statusDotHtml(node.status)}
-          <span class="tree-role">${label}</span>
+          ${roleBadgeHtml(node.role, node.subRole)}
           <span class="tree-id">${esc(node.agentId)}</span>
+          <span class="tree-state state-${esc(node.status)}">${displayState(node.status)}</span>
         </div>
         ${renderTreeNodes(node.children, depth + 1)}
       `;
@@ -256,17 +298,23 @@ function renderDashboard(state: DashboardState): void {
       : `<div class="degraded-banner">Conductor not running — showing last known state</div>`;
 
   const tiles = [
-    { label: 'TOTAL', value: s.total, cls: '' },
-    { label: 'WARM', value: s.warm, cls: 'tile-warm' },
-    { label: 'WAITING', value: s.waiting, cls: 'tile-waiting' },
-    { label: 'STUCK', value: s.stuck, cls: 'tile-stuck' },
-    { label: 'PAUSED', value: s.paused, cls: 'tile-paused' },
+    { label: 'TOTAL', value: s.total, cls: 'tile-total', cap: 'across the fleet' },
+    { label: 'RUNNING', value: s.warm, cls: 'tile-running', cap: 'executing turns' },
+    { label: 'WAITING', value: s.waiting, cls: 'tile-waiting', cap: 'eligible to wake' },
+    { label: 'STUCK', value: s.stuck, cls: 'tile-stuck', cap: 'needs decision' },
+    {
+      label: 'ACTION REQ.',
+      value: state.actionables.length,
+      cls: 'tile-action',
+      cap: 'in your inbox',
+    },
   ]
     .map(
       (t) => `
       <div class="stat-tile ${esc(t.cls)}">
-        <div class="stat-label">${esc(t.label)}</div>
-        <div class="stat-value">${t.value}</div>
+        <div class="stat-tile-head"><span class="stat-dot"></span><span class="stat-label">${esc(t.label)}</span></div>
+        <div class="stat-value${t.value === 0 ? ' is-zero' : ''}">${t.value}</div>
+        <div class="stat-caption">${esc(t.cap)}</div>
       </div>
     `,
     )
@@ -285,20 +333,22 @@ function renderDashboard(state: DashboardState): void {
   const actionableRows =
     state.actionables.length === 0
       ? `<div class="empty-state">No outstanding actions</div>`
-      : state.actionables
+      : `<div class="action-cards">` +
+        state.actionables
           .map((a) => {
             const age = Math.floor((Date.now() - a.ts) / 60000);
             const ageStr = age < 60 ? `${age}m` : `${Math.floor(age / 60)}h`;
             return `
-          <div class="actionable-row">
-            <span class="action-type">${esc(a.type)}</span>
-            <span class="action-subject">${esc(a.subject)}</span>
-            <span class="action-sender">${esc(a.sender)}</span>
-            <span class="action-age">${esc(ageStr)}</span>
+          <div class="action-card kind-${actionKindClass(a.type)}" data-seq="${a.seq}" role="button" tabindex="0" aria-label="Open ${esc(a.subject)} in Mail">
+            <span class="ac-tag">${esc(a.type)}</span>
+            <span class="ac-sender">${esc(a.sender)}</span>
+            <span class="ac-age">${esc(ageStr)}</span>
+            <span class="ac-subject">${esc(a.subject)}</span>
           </div>
         `;
           })
-          .join('');
+          .join('') +
+        `</div>`;
 
   // Preserve scroll across the rebuild (AC-S15-9 [SF-4]): the Dashboard rebuilds its content on every
   // tick; <main> is the scroll container, so snapshot + restore its scrollTop instead of jumping the
@@ -314,7 +364,7 @@ function renderDashboard(state: DashboardState): void {
     ${degradedBanner}
     <div class="stat-tiles">${tiles}</div>
     <div class="section-card">
-      <div class="section-heading">Fleet</div>
+      <div class="section-heading">Fleet<span class="section-hint">spawn tree · click to open console</span></div>
       <div class="tree-view">${treeHtml}</div>
     </div>
     <div class="section-card action-panel">
@@ -1297,6 +1347,38 @@ document.addEventListener('DOMContentLoaded', () => {
     rememberMailBuses(state);
     renderDashboard(state);
     if (latestMailState != null) renderMail(latestMailState);
+  });
+
+  // Dashboard interaction contract (design §4 — "a click should be logical"): a fleet row opens that
+  // agent's console; an actionable card opens it in Mail. Keyboard (Enter/Space) mirrors the click.
+  function openAgentConsole(agentId: string): void {
+    activateView('agents');
+    bridge.navigate('agents');
+    void bridge.agentsSelect(agentId);
+  }
+  function openActionableInMail(seq: number): void {
+    activateView('mail');
+    bridge.navigate('mail');
+    void bridge.mailSelect(seq);
+  }
+  function handleDashboardActivate(target: HTMLElement): void {
+    const card = target.closest<HTMLElement>('.action-card');
+    if (card?.dataset['seq'] != null) {
+      openActionableInMail(Number(card.dataset['seq']));
+      return;
+    }
+    const node = target.closest<HTMLElement>('.tree-node');
+    if (node?.dataset['agentId'] != null) openAgentConsole(node.dataset['agentId']);
+  }
+  document.getElementById('view-dashboard')?.addEventListener('click', (e) => {
+    handleDashboardActivate(e.target as HTMLElement);
+  });
+  document.getElementById('view-dashboard')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const el = e.target as HTMLElement;
+    if (el.closest('.tree-node, .action-card') == null) return;
+    e.preventDefault();
+    handleDashboardActivate(el);
   });
 
   // ── Mail ────────────────────────────────────────────────────────────────────

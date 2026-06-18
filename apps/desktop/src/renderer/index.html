@@ -9,28 +9,111 @@
     />
     <title>co · Code Orchestration</title>
     <style>
-      /* Design palette: dark oklch theme */
+      /* ── Bundled IBM Plex (Sans = UI, Mono = anything machine). Self-hosted woff2 (the strict CSP
+         blocks Google Fonts); copied to vendor/fonts at build by copy-renderer-assets.mjs. ───────── */
+      @font-face {
+        font-family: 'IBM Plex Sans';
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('./vendor/fonts/ibm-plex-sans-latin-400-normal.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Sans';
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url('./vendor/fonts/ibm-plex-sans-latin-600-normal.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Sans';
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: url('./vendor/fonts/ibm-plex-sans-latin-700-normal.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Mono';
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('./vendor/fonts/ibm-plex-mono-latin-400-normal.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Mono';
+        font-style: normal;
+        font-weight: 500;
+        font-display: swap;
+        src: url('./vendor/fonts/ibm-plex-mono-latin-500-normal.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Mono';
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url('./vendor/fonts/ibm-plex-mono-latin-600-normal.woff2') format('woff2');
+      }
+
+      /* ── Cockpit design tokens (OKLCH, hue 262 near-neutral cool gray + a shared-chroma accent set).
+         Lifted from the Cockpit v1 design handoff (IMPLEMENTATION-NOTES §1). ────────────────────────── */
       :root {
-        --bg: oklch(0.165 0.006 262);
-        --surface: oklch(0.185 0.007 262);
-        --card: oklch(0.205 0.007 262);
-        --border: oklch(0.31 0.009 262);
+        /* Surfaces */
+        --bg: oklch(0.145 0.005 262);
+        --surface: oklch(0.174 0.006 262);
+        --card: oklch(0.188 0.007 262);
+        --raised: oklch(0.208 0.007 262);
+        --input: oklch(0.14 0.005 262);
+        --border: oklch(0.27 0.008 262);
+        --border-strong: oklch(0.34 0.01 262);
+        /* Text */
+        --heading: oklch(0.95 0.003 262);
         --text: oklch(0.83 0.006 262);
-        --heading: oklch(0.96 0.003 262);
-        --muted: oklch(0.65 0.009 262);
+        --muted: oklch(0.6 0.009 262);
+        --faint: oklch(0.48 0.009 262);
+        /* Accents (shared chroma so they read as one family) */
         --accent: oklch(0.71 0.14 255);
-        --live: oklch(0.8 0.17 150);
-        --warm: oklch(0.8 0.17 150);
-        --waiting: oklch(0.8 0.15 85);
-        --stuck: oklch(0.65 0.22 25);
-        --paused: oklch(0.6 0.01 262);
+        --accent-on: oklch(0.16 0.02 255);
+        --success: oklch(0.78 0.16 150);
+        --warn: oklch(0.81 0.13 80);
+        --danger: oklch(0.67 0.21 25);
+        /* Agent role colors */
+        --role-coordinator: oklch(0.75 0.14 300);
+        --role-lead: oklch(0.71 0.14 255);
+        --role-implementer: oklch(0.77 0.15 158);
+        --role-reviewer: oklch(0.81 0.13 80);
+        --role-researcher: oklch(0.79 0.12 200);
+        /* Lifecycle state colors (product vocabulary) */
+        --st-running: oklch(0.8 0.17 150);
+        --st-waiting: oklch(0.66 0.02 260);
+        --st-done: oklch(0.69 0.1 255);
+        --st-stuck: oklch(0.67 0.21 25);
+        --st-paused: oklch(0.81 0.13 80);
+        /* Back-compat aliases for existing component CSS */
+        --live: var(--st-running);
+        --warm: var(--st-running);
+        --waiting: var(--st-waiting);
+        --stuck: var(--st-stuck);
+        --paused: var(--st-paused);
+        /* Shape + layout */
         --header-h: 52px;
         --rail-w: 224px;
-        --radius: 8px;
+        --radius: 9px;
+        --radius-card: 12px;
         font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
         font-size: 14px;
         color: var(--text);
         background: var(--bg);
+      }
+
+      /* Honor the operator's reduced-motion preference (IMPLEMENTATION-NOTES §1 — gate all motion). */
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.001ms !important;
+        }
       }
 
       *,
@@ -499,6 +582,16 @@
         gap: 8px;
       }
 
+      .section-hint {
+        margin-left: auto;
+        font-weight: 400;
+        color: var(--faint);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        letter-spacing: 0;
+        text-transform: none;
+      }
+
       .action-count {
         background: var(--accent);
         color: #fff;
@@ -565,7 +658,198 @@
       }
 
       .dot-unknown {
-        background: var(--border);
+        background: var(--faint);
+      }
+
+      .dot-done {
+        background: var(--st-done);
+      }
+
+      /* ── Agent role badges (colored pills, one shared-chroma family) ───────────── */
+      .role-badge {
+        display: inline-flex;
+        align-items: center;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        padding: 1px 7px;
+        border-radius: 5px;
+        white-space: nowrap;
+        flex-shrink: 0;
+        color: var(--rb, var(--muted));
+        background: color-mix(in oklch, var(--rb, var(--muted)) 16%, transparent);
+        border: 1px solid color-mix(in oklch, var(--rb, var(--muted)) 32%, transparent);
+      }
+      .role-coordinator {
+        --rb: var(--role-coordinator);
+      }
+      .role-lead {
+        --rb: var(--role-lead);
+      }
+      .role-implementer {
+        --rb: var(--role-implementer);
+      }
+      .role-reviewer {
+        --rb: var(--role-reviewer);
+      }
+      .role-researcher {
+        --rb: var(--role-researcher);
+      }
+
+      /* ── Stat tiles: head row with a state dot + a caption under the metric ─────── */
+      .stat-tile {
+        gap: 6px;
+      }
+      .stat-tile-head {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .stat-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        background: var(--td, var(--muted));
+      }
+      .stat-caption {
+        font-size: 11px;
+        color: var(--faint);
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      }
+      .tile-total .stat-dot {
+        --td: var(--accent);
+      }
+      .tile-running .stat-dot {
+        --td: var(--st-running);
+        animation: pulse 2s ease-in-out infinite;
+      }
+      .tile-running .stat-label {
+        color: var(--st-running);
+      }
+      .tile-waiting .stat-dot {
+        --td: var(--st-waiting);
+      }
+      .tile-stuck .stat-dot {
+        --td: var(--st-stuck);
+      }
+      .tile-stuck .stat-label {
+        color: var(--st-stuck);
+      }
+      .tile-action .stat-dot {
+        --td: var(--warn);
+      }
+      .tile-action .stat-label {
+        color: var(--warn);
+      }
+      /* A zeroed metric reads dimmed, not bright (design honesty rule). */
+      .stat-value.is-zero {
+        color: var(--faint);
+      }
+
+      /* ── Fleet spawn-tree rows (indent = depth; whole row opens the console) ────── */
+      .tree-node {
+        gap: 8px;
+        padding: 6px 14px;
+        cursor: pointer;
+      }
+      .tree-node:hover {
+        background: var(--raised);
+      }
+      .tree-state {
+        margin-left: auto;
+        font-size: 10px;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+      .tree-state.state-warm {
+        color: var(--st-running);
+      }
+      .tree-state.state-stuck {
+        color: var(--st-stuck);
+      }
+
+      /* ── Typed action-required cards (per mail kind) ───────────────────────────── */
+      .action-cards {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 12px;
+      }
+      .action-card {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 5px 10px;
+        border: 1px solid var(--border);
+        border-left-width: 3px;
+        border-radius: 9px;
+        padding: 10px 13px;
+        background: var(--surface);
+        cursor: pointer;
+        align-items: center;
+      }
+      .action-card:hover {
+        background: var(--raised);
+      }
+      .ac-sender {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .ac-age {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--faint);
+        text-align: right;
+      }
+      .ac-subject {
+        grid-column: 1 / -1;
+        color: var(--heading);
+        font-weight: 500;
+        font-size: 13px;
+        line-height: 1.4;
+      }
+      .ac-tag {
+        display: inline-block;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace;
+        font-size: 10px;
+        font-weight: 600;
+        padding: 2px 7px;
+        border-radius: 5px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--act, var(--muted));
+        background: color-mix(in oklch, var(--act, var(--muted)) 18%, transparent);
+      }
+      .action-card.kind-approval {
+        border-left-color: var(--success);
+      }
+      .kind-approval .ac-tag {
+        --act: var(--success);
+      }
+      .action-card.kind-clarify {
+        border-left-color: var(--accent);
+      }
+      .kind-clarify .ac-tag {
+        --act: var(--accent);
+      }
+      .action-card.kind-escalation {
+        border-left-color: var(--danger);
+      }
+      .kind-escalation .ac-tag {
+        --act: var(--danger);
+      }
+      .action-card.kind-review {
+        border-left-color: var(--role-reviewer);
+      }
+      .kind-review .ac-tag {
+        --act: var(--role-reviewer);
       }
 
       /* ── Action-required panel ───────────────────────────────── */
