@@ -1142,7 +1142,11 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
     });
 
     expect(spec.command).toBe('codex');
-    expect(spec.args).toEqual(['--add-dir', `${dataDir}/sockets`]);
+    expect(spec.args).toEqual([
+      '--dangerously-bypass-hook-trust',
+      '--add-dir',
+      `${dataDir}/sockets`,
+    ]);
     expect(spec.env['CODEX_HOME']).toBe(`${dataDir}/isolated/host-proof-codex`);
     const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
     expect(configToml).toBeDefined();
