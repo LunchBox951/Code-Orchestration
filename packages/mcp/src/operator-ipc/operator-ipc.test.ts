@@ -822,10 +822,15 @@ describe('Stage 15 §7 — sendInput / resize: keystroke passthrough + PTY resiz
     await startServer(control, projectId, socketPath);
     const rawConn = await OperatorIpcConnection.connect(socketPath);
     const raw = rawConn as unknown as { call: (m: string, p: unknown) => Promise<unknown> };
-    const result = await raw
+    const badCols = await raw
       .call('session:resize', { agentId: 'impl-x', cols: -1, rows: 40 })
       .catch((e: Error) => e.message);
-    expect(String(result)).toMatch(/positive integer/i);
+    expect(String(badCols)).toMatch(/positive integer/i);
+    // rows must be validated independently of cols (both dimensions, not just the first).
+    const badRows = await raw
+      .call('session:resize', { agentId: 'impl-x', cols: 80, rows: 0 })
+      .catch((e: Error) => e.message);
+    expect(String(badRows)).toMatch(/positive integer/i);
     await rawConn.close();
   });
 });

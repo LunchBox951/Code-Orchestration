@@ -163,10 +163,19 @@ function requirePositiveDim(obj: WirePayload, key: string): number {
   return value;
 }
 
+// A terminal keystroke/paste chunk. Bounded so a buggy renderer can't push an unbounded string
+// straight through to node-pty's write (the operator-uid socket is the only caller, but fail closed).
+const MAX_INPUT_CHARS = 1024 * 1024;
+
 function requireInputData(obj: WirePayload, key: string): string {
   const value = obj[key];
   if (typeof value !== 'string') {
     throw new InvalidParamsError(`operator IPC: missing/invalid '${key}' (expected a string).`);
+  }
+  if (value.length > MAX_INPUT_CHARS) {
+    throw new InvalidParamsError(
+      `operator IPC: '${key}' exceeds the ${MAX_INPUT_CHARS}-character input limit.`,
+    );
   }
   return value;
 }

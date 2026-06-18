@@ -72,9 +72,18 @@ export function requireSteer(value: unknown): Steer {
   throw new Error(`Invalid steer kind: ${String(kind)}`);
 }
 
+// A terminal keystroke/paste chunk; bounded so the renderer can't forward an unbounded string to the
+// daemon (matched on the daemon side by the operator-IPC server's MAX_INPUT_CHARS).
+const MAX_INPUT_CHARS = 1024 * 1024;
+
 export function requireInputData(value: unknown, label: string): string {
-  if (typeof value === 'string') return value;
-  throw new Error(`Invalid ${label}: expected a string.`);
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid ${label}: expected a string.`);
+  }
+  if (value.length > MAX_INPUT_CHARS) {
+    throw new Error(`Invalid ${label}: exceeds the ${MAX_INPUT_CHARS}-character input limit.`);
+  }
+  return value;
 }
 
 export function requirePositiveDim(value: unknown, label: string): number {

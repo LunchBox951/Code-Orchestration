@@ -333,6 +333,10 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
     // Without this key, `--permission-mode bypassPermissions` blocks on the one-time interactive
     // "Yes, I accept" warning on a fresh CLAUDE_CONFIG_DIR — deadlocking the unattended agent.
     expect(settings['skipDangerousModePermissionPrompt']).toBe(true);
+    // The other two suppress first-session nag dialogs that would also block an unattended startup;
+    // lock all three so neither can silently regress out of the settings builder.
+    expect(settings['skipWorkflowUsageWarning']).toBe(true);
+    expect(settings['skipAutoPermissionPrompt']).toBe(true);
     expect(config.prelaunchFiles).toContainEqual({
       path: `${ISOLATED_HOME}/settings.json`,
       contents: config.claudeSettingsJson,
