@@ -862,7 +862,7 @@ function renderAgents(state: AgentsConsoleState): void {
             ` role="option" tabindex="0"`,
             ` aria-selected="${isSelected ? 'true' : 'false'}">`,
             statusDotHtml(agent.status),
-            `<span class="agents-row-role">${esc(agent.role)}</span>`,
+            roleBadgeHtml(agent.role),
             `<span class="agents-row-id">${esc(agent.agentId)}</span>`,
             `<div class="agents-row-actions">`,
             `<button class="btn btn-secondary agents-agent-btn" data-agent-action="stop"`,
@@ -879,12 +879,35 @@ function renderAgents(state: AgentsConsoleState): void {
     }
   }
 
+  renderConsoleHeader(state);
+
   const composerEnabled =
     state.selectedAgentId != null && state.connection === 'live' && state.selectedStatus === 'warm';
   setComposerEnabled(composerEnabled);
 
   renderTranscriptError(state.transcriptError);
   renderAgentsTranscript(state);
+}
+
+// The terminal-header chip (design §5): state dot · full agent id · role badge · lifecycle state for
+// the selected session. Hidden when no agent is selected.
+function renderConsoleHeader(state: AgentsConsoleState): void {
+  const header = document.getElementById('agents-console-header');
+  if (!header) return;
+  const selected = state.roster.find((a) => a.agentId === state.selectedAgentId) ?? null;
+  if (selected == null) {
+    header.innerHTML = '';
+    header.hidden = true;
+    return;
+  }
+  header.hidden = false;
+  const status = state.selectedStatus ?? selected.status;
+  header.innerHTML = [
+    statusDotHtml(status),
+    `<span class="ach-id">${esc(selected.agentId)}</span>`,
+    roleBadgeHtml(selected.role),
+    `<span class="ach-state state-${esc(status)}">${displayState(status)}</span>`,
+  ].join('');
 }
 
 // Persistent in-pane transcript-fetch error + Retry (Principle 9 — no-silent-failures). Unlike the
