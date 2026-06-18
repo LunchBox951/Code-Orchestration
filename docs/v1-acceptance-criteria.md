@@ -93,8 +93,8 @@ These are the top-level conditions that, all met, *are* v1.
   renderer-registry seam + a generic default renderer; L3 ships provider-deterministic commit /
   merge / PR message renderers and `co_finish` consumes the commit renderer. L6a wires merge / PR
   renderers into the gated `co_merge` and `co_pr_merge` tools. Stage 15 ships typed mail payload
-  cards in core + desktop so decision, patch, CI, artifact, and summary mail render as per-audience
-  human cards. Remaining: broader artifact coverage beyond the Stage 15 card set.
+  cards in core + desktop for the current typed payloads (`approval`, `escalation`, and
+  `review_response`). Remaining: broader artifact/card coverage beyond the Stage 15 card set.
 
 ## C. Roles, dispatch & escalation (P8, P11, P13)
 
