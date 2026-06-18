@@ -88,6 +88,18 @@ export const CLAUDE_READY_STATUS_STRIP =
   '❯ Try "how do I log an error?"\r\n' +
   "⏵⏵ don't ask on (shift+tab to cycle) · ← for agents                 0 tokens\r\n";
 
+// [host-live] Claude Code 2.1.181 launched with `--permission-mode bypassPermissions`: the status strip
+// reads "bypass permissions on" in place of the don't-ask/token-count region, so the ready footer is
+// detected on `shift+tab` + `agents` alone (NOT a token count). Without this the conductor never
+// classifies a bypass-mode coordinator as ready and times out at startup.
+export const CLAUDE_READY_BYPASS_STRIP =
+  ESC +
+  ']0;✳ Claude Code' +
+  BEL +
+  '▐▛███▜▌ Claude Code v2.1.181\r\n' +
+  '❯ Try "how do I log an error?"\r\n' +
+  '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\r\n';
+
 // [synthesized] first-run theme/onboarding picker: "Choose the text style…".
 export const CLAUDE_THEME =
   ESC +

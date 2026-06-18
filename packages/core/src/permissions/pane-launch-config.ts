@@ -90,6 +90,10 @@ export interface PaneLaunchConfig {
   readonly claudeMcpConfigJson?: string;
   /** Claude only: generated stdio MCP config destination path. */
   readonly claudeMcpConfigPath?: string;
+  /** Claude only: isolated `settings.json` content that pre-accepts the bypassPermissions warning. */
+  readonly claudeSettingsJson?: string;
+  /** Claude only: isolated `settings.json` destination path under `CLAUDE_CONFIG_DIR`. */
+  readonly claudeSettingsPath?: string;
   /** Files the real host must materialize before spawning the pane. */
   readonly prelaunchFiles?: readonly PrelaunchFile[];
 }
@@ -377,10 +381,25 @@ function buildClaudeLaunchConfig(
   if (claudeMcpConfigPath != null) {
     args.push('--mcp-config', claudeMcpConfigPath);
   }
+  // Pre-accept the bypassPermissions acknowledgment in the isolated settings.json so the pane starts
+  // STRAIGHT TO READY instead of blocking on the one-time interactive "Yes, I accept" warning that
+  // `--permission-mode bypassPermissions` raises on a fresh CLAUDE_CONFIG_DIR. (Onboarding state —
+  // hasCompletedOnboarding — is seeded separately from the operator's ~/.claude.json via the conductor's
+  // CLAUDE_STATE_ALLOWLIST.) Without this companion file the keystone deadlocks every agent on the
+  // warning screen — verified against real claude 2.1.181.
+  const claudeSettingsPath = `${identity.isolatedHomeDir.replace(/\/+$/u, '')}/settings.json`;
+  const claudeSettingsJson = buildClaudeSettingsJson();
+  const settingsPrelaunch: PrelaunchFile = {
+    path: claudeSettingsPath,
+    contents: claudeSettingsJson,
+  };
   const base = {
     provider: 'claude',
     args,
     env: { CLAUDE_CONFIG_DIR: identity.isolatedHomeDir },
+    claudeSettingsJson,
+    claudeSettingsPath,
+    prelaunchFiles: [settingsPrelaunch],
   } satisfies PaneLaunchConfig;
   if (claudeMcpConfigPath == null) return base;
   const claudeMcpConfigJson = buildClaudeMcpConfigJson(identity);
@@ -388,8 +407,28 @@ function buildClaudeLaunchConfig(
     ...base,
     claudeMcpConfigJson,
     claudeMcpConfigPath,
-    prelaunchFiles: [{ path: claudeMcpConfigPath, contents: claudeMcpConfigJson }],
+    prelaunchFiles: [
+      settingsPrelaunch,
+      { path: claudeMcpConfigPath, contents: claudeMcpConfigJson },
+    ],
   };
+}
+
+// The isolated `settings.json` that makes a fresh-config-dir agent non-interactive: pre-accept the
+// bypassPermissions warning + suppress the first-session nag dialogs. Deny rules (`--disallowedTools`)
+// are unaffected — they apply in every mode, including bypassPermissions.
+function buildClaudeSettingsJson(): string {
+  return (
+    JSON.stringify(
+      {
+        skipDangerousModePermissionPrompt: true,
+        skipWorkflowUsageWarning: true,
+        skipAutoPermissionPrompt: true,
+      },
+      null,
+      2,
+    ) + '\n'
+  );
 }
 
 function buildCodexLaunchConfig(

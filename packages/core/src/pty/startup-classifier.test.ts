@@ -12,6 +12,7 @@ import {
   CLAUDE_READY,
   CLAUDE_READY_CURSOR_POSITIONED,
   CLAUDE_READY_STATUS_STRIP,
+  CLAUDE_READY_BYPASS_STRIP,
   CLAUDE_THEME,
   CLAUDE_LOGIN,
   CLAUDE_OAUTH_LOGIN,
@@ -66,6 +67,15 @@ describe('classifyStartup — claude', () => {
 
   it('classifies the current live Claude status strip as ready', () => {
     expect(classifyStartup('claude', norm(CLAUDE_READY_STATUS_STRIP))).toEqual({
+      kind: 'ready',
+    });
+  });
+
+  it('classifies the bypassPermissions status strip as ready (no idle token count)', () => {
+    // Regression: bypassPermissions replaces the token count with "bypass permissions on", so a
+    // `tokens` anchor would never match and the conductor would time out at startup.
+    expect(norm(CLAUDE_READY_BYPASS_STRIP)).not.toContain('tokens');
+    expect(classifyStartup('claude', norm(CLAUDE_READY_BYPASS_STRIP))).toEqual({
       kind: 'ready',
     });
   });
