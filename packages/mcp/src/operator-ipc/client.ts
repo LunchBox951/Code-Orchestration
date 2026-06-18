@@ -129,6 +129,15 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     return result as unknown as DeliveredMail;
   }
 
+  async operatorMessage(agentId: string, subject: string, body: string): Promise<DeliveredMail> {
+    const result = await this.call(OPERATOR_IPC_METHODS.operatorMessage, {
+      agentId,
+      subject,
+      body,
+    } as unknown as WirePayload);
+    return result as unknown as DeliveredMail;
+  }
+
   async approve(approvalSeq: number, reply: ApprovalReply): Promise<DeliveredMail> {
     const result = await this.call(OPERATOR_IPC_METHODS.approve, {
       approvalSeq,
@@ -416,6 +425,15 @@ export class OperatorIpcClient {
 
   reply(target: OperatorMailRef, draft: ReplyDraft): Promise<DeliveredMail> {
     return this.withConnection((c) => c.reply(target, draft));
+  }
+
+  /**
+   * Send a fresh operator message to `agentId` (a `clarify_request` from `@operator`). A WRITE verb that
+   * needs the socket — if the Conductor is down it throws a clear {@link ConductorUnavailableError}
+   * (Principle 9). The daemon wakes the recipient on its next tick even when it is idle/cold.
+   */
+  operatorMessage(agentId: string, subject: string, body: string): Promise<DeliveredMail> {
+    return this.withConnection((c) => c.operatorMessage(agentId, subject, body));
   }
 
   approve(approvalSeq: number, reply: ApprovalReply): Promise<DeliveredMail> {

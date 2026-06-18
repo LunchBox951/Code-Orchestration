@@ -406,6 +406,28 @@ ipcMain.handle('agents:steer', async (_event, agentId: unknown, steer: unknown) 
   }
 });
 
+// "Message the coordinator" (or any agent): post a fresh actionable operator message that wakes an
+// idle/WAITING recipient on the daemon's next tick. Unlike steer, this does NOT require a warm pane —
+// it is the path that reaches a coordinator sitting between turns (the user's top blocker).
+ipcMain.handle(
+  'agents:message',
+  async (_event, agentId: unknown, subject: unknown, body: unknown) => {
+    const shell = controller.shell;
+    if (shell == null) return { ok: false, error: 'shell not ready' };
+    try {
+      await shell.client.operatorMessage(
+        requireAgentId(agentId),
+        requireNonEmptyString(subject, 'message subject'),
+        requireNonEmptyString(body, 'message body'),
+      );
+      return { ok: true };
+    } catch (e: unknown) {
+      const msg = desktopErrorMessage(e, 'send the message');
+      return { ok: false, error: msg };
+    }
+  },
+);
+
 ipcMain.handle('agents:input', async (_event, agentId: unknown, data: unknown) => {
   const shell = controller.shell;
   if (shell == null) return { ok: false, error: 'shell not ready' };

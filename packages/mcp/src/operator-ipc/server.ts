@@ -25,6 +25,7 @@ import {
   assertNever,
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_CLARIFY_REQUEST,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   OPERATOR,
@@ -354,6 +355,10 @@ export class OperatorIpcServer {
         return {};
       case OPERATOR_IPC_METHODS.reply:
         return (await this.handleReply(params)) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.operatorMessage:
+        // The operator's "message an agent" verb: a fresh actionable `clarify_request` from @operator
+        // that wakes an idle recipient on the next tick (steer needs a warm pane — this does not).
+        return (await this.handleOperatorMessage(params)) as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.approve:
         return (await this.handleApprove(params)) as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.markRead:
@@ -423,6 +428,32 @@ export class OperatorIpcServer {
       repoCwd,
       ...(fromPrompt ? { prompt } : { specBody }),
     });
+  }
+
+  /**
+   * Send a FRESH operator message to an agent (the "message the coordinator" verb). Posts an actionable
+   * `clarify_request` from {@link OPERATOR} to `agentId` through the daemon's own store (single writer —
+   * MNR #2), the SAME shape the kickoff seeds (`start-coordinator-session`). Because the item is
+   * outstanding + actionable, the daemon's `selectEligible` wakes the recipient on its next tick even
+   * when it is cold/idle — which `steer` (warm-pane-only) and an informational `operator_message`
+   * (never a wake item) cannot do.
+   */
+  private async handleOperatorMessage(params: WirePayload): Promise<DeliveredMail> {
+    const agentId = requireString(params, 'agentId');
+    const subject = requireString(params, 'subject');
+    const body = requireString(params, 'body');
+    const mail = this.openMail(this.projectId);
+    try {
+      return mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: agentId,
+        from: OPERATOR,
+        subject,
+        body,
+      });
+    } finally {
+      mail.close();
+    }
   }
 
   /** Reply to an actionable mail named by `target`, through the daemon's own store (single writer). */

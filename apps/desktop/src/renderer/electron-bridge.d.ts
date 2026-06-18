@@ -310,6 +310,13 @@ interface CoShellBridge {
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
   agentsRefreshTranscript(): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
+  // Send a fresh operator message to an agent (a clarify_request that wakes an idle/WAITING recipient).
+  // The "message the coordinator" path that works when the agent is NOT warm (steer cannot reach it).
+  agentsMessage(
+    agentId: string,
+    subject: string,
+    body: string,
+  ): Promise<{ ok: boolean; error?: string }>;
   agentsSendInput(agentId: string, data: string): Promise<{ ok: boolean; error?: string }>;
   agentsResize(
     agentId: string,

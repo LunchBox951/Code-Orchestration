@@ -1279,6 +1279,37 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     expect(lead.outstanding('lead-1')).toHaveLength(0);
   });
 
+  it('operatorMessage posts an actionable clarify_request from @operator that an idle agent wakes on', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    // The operator messages the coordinator while it is idle/WAITING (no warm pane) — the path steer
+    // cannot take. It must arrive as an actionable clarify_request from @operator so the daemon's
+    // selectEligible wakes the recipient on its next tick.
+    const delivered = await client.operatorMessage(
+      'coord-1',
+      'Operator message',
+      'please fix the unstick bug',
+    );
+    expect(delivered.type).toBe('clarify_request');
+    expect(delivered.sender).toBe('@operator');
+    expect(delivered.recipient).toBe('coord-1');
+
+    // It is an OUTSTANDING ACTIONABLE item in coord-1's inbox — exactly what wakes a waiting agent.
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    expect(mail.outstanding('coord-1').some((m) => m.seq === delivered.seq)).toBe(true);
+  });
+
   it('reply treats an exact same-key retry after resolution as idempotent', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);

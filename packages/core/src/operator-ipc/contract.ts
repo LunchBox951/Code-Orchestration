@@ -39,6 +39,14 @@ export const OPERATOR_IPC_METHODS = {
   steer: 'steer',
   /** Reply to an actionable mail (routed through the daemon — single writer). */
   reply: 'reply',
+  /**
+   * Send a FRESH operator message to an agent (the operator's "message the coordinator" action). Posts
+   * an actionable `clarify_request` from `@operator`, so the daemon wakes a WAITING/idle recipient on its
+   * next tick (an informational `operator_message` would never drive a turn — see {@link selectEligible}).
+   * Distinct from {@link OPERATOR_IPC_METHODS.steer}, which needs an already-warm pane; this is the path
+   * that reaches an idle agent. Single writer (daemon-side store).
+   */
+  operatorMessage: 'operatorMessage',
   /** Approve/decline an outstanding `approval` as a structured `approval_response`. */
   approve: 'approve',
   /** Mark `recipient`'s informational mail at `seq` read (event-sourced — single writer). */
@@ -151,6 +159,13 @@ export interface OperatorIpcSurface {
   steer(agentId: string, steer: Steer): Promise<void>;
   /** Reply to the mail named by `target` with `draft` (single writer — daemon-side). */
   reply(target: OperatorMailRef, draft: ReplyDraft): Promise<DeliveredMail>;
+  /**
+   * Send a fresh operator message to `agentId` as an actionable `clarify_request` from `@operator`
+   * (single writer — daemon-side). Unlike {@link steer} (which requires a warm pane), this reaches an
+   * idle/WAITING agent: the daemon selects it on the next tick because the message is outstanding +
+   * actionable. The operator's "message the coordinator" affordance routes here when the agent is cold.
+   */
+  operatorMessage(agentId: string, subject: string, body: string): Promise<DeliveredMail>;
   /** Approve/decline the `approval` at `approvalSeq` (operator-terminal; single writer). */
   approve(approvalSeq: number, reply: ApprovalReply): Promise<DeliveredMail>;
   /** Mark `recipient`'s mail at `seq` read (event-sourced read-state — single writer, MNR #2). */

@@ -97,6 +97,11 @@ interface CoShellBridge {
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
   agentsRefreshTranscript(): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
+  agentsMessage(
+    agentId: string,
+    subject: string,
+    body: string,
+  ): Promise<{ ok: boolean; error?: string }>;
   agentsSendInput(agentId: string, data: string): Promise<{ ok: boolean; error?: string }>;
   agentsResize(
     agentId: string,
@@ -245,6 +250,18 @@ const bridge: CoShellBridge = {
   },
   async agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agents:steer', agentId, steer);
+  },
+  async agentsMessage(
+    agentId: string,
+    subject: string,
+    body: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>(
+      'agents:message',
+      agentId,
+      subject,
+      body,
+    );
   },
   async agentsSendInput(agentId: string, data: string): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agents:input', agentId, data);
