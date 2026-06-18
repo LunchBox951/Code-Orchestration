@@ -195,7 +195,7 @@ describe('mailDetailSignature', () => {
     expect(sig['sender']).toBe('lead-s15');
     expect(sig['recipient']).toBe('impl-s15');
     expect(sig['card']).toBe(
-      '{"title":"14:Re: host proof","fields":[["4:From","8:lead-s15"]],"body":"21:please run host proof"}',
+      '{"title":"14:605a77ba","fields":[["4:18743595","8:46b36d3d"]],"body":"21:e221dc32"}',
     );
     expect(sig['kind']).toBe('actionable');
     expect(sig['composerActive']).toBe(true);
@@ -217,7 +217,7 @@ describe('mailDetailSignature', () => {
     expect(sig['idempotencyKey']).toBe('review-request:r-1');
   });
 
-  it('uses a bounded card body fingerprint instead of serialising a giant body verbatim', () => {
+  it('uses a full-string bounded card body fingerprint instead of serialising a giant body verbatim', () => {
     const giantBody = `${'a'.repeat(250)}SECRET-TAIL`;
     const sig = mailDetailSignature(
       mailView({
@@ -228,7 +228,28 @@ describe('mailDetailSignature', () => {
     );
 
     expect(String(sig['card'])).not.toContain(giantBody);
-    expect(String(sig['card'])).toContain('SECRET-TAIL');
+    expect(String(sig['card'])).not.toContain('SECRET-TAIL');
+    expect(String(sig['card'])).toContain(`${giantBody.length}:`);
+  });
+
+  it('detects same-length changes in the middle of a long card body', () => {
+    const before = mailDetailSignature(
+      mailView({
+        selected: {
+          card: { ...BASE_ROW.card, body: `${'a'.repeat(150)}MIDDLE-A${'z'.repeat(150)}` },
+        },
+      }),
+    );
+    const after = mailDetailSignature(
+      mailView({
+        selected: {
+          card: { ...BASE_ROW.card, body: `${'a'.repeat(150)}MIDDLE-B${'z'.repeat(150)}` },
+        },
+      }),
+    );
+
+    expect(before['card']).not.toBe(after['card']);
+    expect(needsRebuild(before, after, true)).toBe(true);
   });
 });
 

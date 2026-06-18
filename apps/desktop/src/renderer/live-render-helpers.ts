@@ -195,16 +195,22 @@ export type MailDetailSignature = RenderSignature;
 
 function cardSignature(card: MailCardView): string {
   return JSON.stringify({
-    title: sampleString(card.title),
-    fields: card.fields.map((field) => [sampleString(field.label), sampleString(field.value)]),
-    body: sampleString(card.body),
+    title: fingerprintString(card.title),
+    fields: card.fields.map((field) => [
+      fingerprintString(field.label),
+      fingerprintString(field.value),
+    ]),
+    body: fingerprintString(card.body),
   });
 }
 
-function sampleString(value: string): string {
-  const max = 96;
-  if (value.length <= max * 2) return `${value.length}:${value}`;
-  return `${value.length}:${value.slice(0, max)}:${value.slice(-max)}`;
+function fingerprintString(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${value.length}:${(hash >>> 0).toString(16).padStart(8, '0')}`;
 }
 
 export function mailDetailSignature(state: MailStateView): MailDetailSignature {
