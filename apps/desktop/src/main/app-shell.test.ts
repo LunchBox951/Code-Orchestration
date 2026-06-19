@@ -172,13 +172,13 @@ describe('createAppShell — view-model bridge wiring', () => {
     expect(shell.connection.state.status).toBe('live');
   });
 
-  it('all 6 nav views are reachable', () => {
+  it('all 5 nav views are reachable', () => {
     const shell = createAppShell({
       projectId: FAKE_PROJECT_ID,
       socketPath: FAKE_SOCKET,
       client: makeClient(),
     });
-    const views = ['dashboard', 'agents', 'mail', 'review', 'source', 'cost'] as const;
+    const views = ['dashboard', 'agents', 'mail', 'source', 'usage'] as const;
     for (const view of views) {
       shell.nav.navigate(view);
       expect(shell.nav.state.activeView).toBe(view);

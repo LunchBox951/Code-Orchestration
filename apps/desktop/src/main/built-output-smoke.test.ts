@@ -16,10 +16,10 @@ describe('desktop built-output script modes', () => {
     const renderer = distFile('renderer', 'renderer.js');
 
     expect(html).toContain('<script type="module" src="./renderer.js"></script>');
-    // renderer.ts is an ES module — it statically imports the review-render helpers — so tsc emits an
-    // ESM `import` the browser loads (no bundler), and the sibling helper module is emitted alongside it.
-    expect(renderer).toMatch(/^import .* from '\.\/review-render-helpers\.js';/m);
-    expect(distFile('renderer', 'review-render-helpers.js')).toContain('reviewDetailNeedsRebuild');
+    // renderer.ts is loaded as an ES module (no bundler): tsc emits browser-loadable JS that wires
+    // the cockpit to the coShell bridge. Assert the emitted file is the real renderer, not a stub.
+    expect(renderer).toContain('coShell');
+    expect(renderer).toContain('addEventListener');
   });
 
   it('vendors xterm assets referenced by the renderer HTML', () => {

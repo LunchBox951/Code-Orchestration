@@ -1,5 +1,6 @@
-type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'cost';
+type NavView = 'dashboard' | 'agents' | 'mail' | 'source' | 'usage';
 type NavState = { readonly activeView: NavView };
+type ProjectInfo = { id: string };
 type ConnectionState = unknown;
 type DashboardState = unknown;
 type LimitsCostState = unknown;
@@ -27,6 +28,7 @@ type ReviewState = unknown;
 
 interface CoShellBridge {
   navigate(view: NavView): void;
+  projectInfo(): Promise<ProjectInfo | null>;
   refreshConnection(): Promise<ConnectionState | null>;
   onNavState(listener: (state: NavState) => void): () => void;
   onConnectionState(listener: (state: ConnectionState) => void): () => void;
@@ -81,6 +83,9 @@ interface CoShellBridge {
 const bridge: CoShellBridge = {
   navigate(view: NavView) {
     void ipcRenderer.invoke('nav:navigate', view);
+  },
+  async projectInfo(): Promise<ProjectInfo | null> {
+    return ipcRenderer.invoke<ProjectInfo | null>('project:info');
   },
   async refreshConnection(): Promise<ConnectionState | null> {
     return ipcRenderer.invoke<ConnectionState | null>('connection:refresh');

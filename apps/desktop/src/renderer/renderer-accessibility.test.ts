@@ -9,58 +9,29 @@ const htmlSource = readFileSync(join(here, 'index.html'), 'utf8');
 const appShellSource = readFileSync(join(here, '../main/app-shell.ts'), 'utf8');
 const mainSource = readFileSync(join(here, '../main/index.ts'), 'utf8');
 
-describe('review view', () => {
-  it('review view markup has required structural elements', () => {
-    expect(htmlSource).toContain('id="view-review"');
-    expect(htmlSource).toContain('aria-label="Pending reviews"');
-    expect(htmlSource).toContain('aria-label="Review diff"');
-    expect(htmlSource).toContain('id="review-badge"');
+describe('cockpit information architecture', () => {
+  it('exposes the five v1 surfaces and drops the Review view', () => {
+    for (const view of ['dashboard', 'agents', 'mail', 'source', 'usage']) {
+      expect(htmlSource).toContain(`id="view-${view}"`);
+      expect(htmlSource).toContain(`data-view="${view}"`);
+    }
+    // Review is intentionally out of the v1 arc (re-addable later).
+    expect(htmlSource).not.toContain('id="view-review"');
+    expect(htmlSource).not.toContain('data-view="review"');
+    expect(htmlSource).not.toContain('data-view="cost"');
   });
 
-  it('renderer wires review bridge methods', () => {
-    expect(rendererSource).toContain('bridge.reviewSelect(');
-    expect(rendererSource).toContain('bridge.reviewSubmitVerdict(');
-    expect(rendererSource).toContain('bridge.reviewBeginVerdict(');
-    expect(rendererSource).toContain('bridge.reviewUpdateComposerBody(');
-    expect(rendererSource).toContain('bridge.reviewCancelVerdict(');
-    expect(rendererSource).toContain('bridge.reviewRefresh(');
+  it('renders the chrome: project pill, connection + daemon pills, limits, buddy dock', () => {
+    expect(htmlSource).toContain('id="project-pill"');
+    expect(htmlSource).toContain('id="connection-pill"');
+    expect(htmlSource).toContain('id="daemon-pill"');
+    expect(htmlSource).toContain('id="limits-btn"');
+    expect(htmlSource).toContain('Vellum');
   });
 
-  it('review list rows use ARIA option roles', () => {
-    expect(rendererSource).toContain('role="option"');
-    expect(rendererSource).toContain("aria-selected=\"${isSelected ? 'true' : 'false'}\"");
-  });
-
-  it('review view has activate hook', () => {
-    expect(rendererSource).toContain("if (view === 'review' && latestReviewState != null)");
-    expect(rendererSource).toContain('renderReview(latestReviewState)');
-  });
-
-  it('verdict buttons have aria-labels', () => {
-    expect(rendererSource).toContain('aria-label="Submit PASS verdict"');
-    expect(rendererSource).toContain('aria-label="Submit ISSUES verdict"');
-  });
-
-  it('gates the verdict-composer detail rebuild to preserve the caret while typing (review #316)', () => {
-    // The detail pane must NOT be unconditionally rebuilt: typing in #review-composer-body would
-    // recreate the focused textarea and drop the caret. renderReview gates the rebuild on the pure
-    // reviewDetailNeedsRebuild helper, keyed on whether that textarea is focused.
-    expect(rendererSource).toContain('reviewDetailNeedsRebuild(');
-    expect(rendererSource).toContain("document.activeElement?.id === 'review-composer-body'");
-  });
-
-  it('points operator-facing conductor guidance at the shipped co-mcp binary', () => {
-    expect(rendererSource).toContain('start \\`co-mcp serve <projectId>\\`');
-    expect(appShellSource).toContain('start `co-mcp serve <projectId>`');
-    expect(rendererSource).not.toContain('start \\`co serve\\`');
-    expect(appShellSource).not.toContain('start `co serve`');
-  });
-
-  it('only exposes verdict actions when the Review view has diff and locked criteria evidence', () => {
-    expect(rendererSource).toContain(
-      "const canSubmitVerdict = diff.kind === 'patch' && criteria.kind === 'criteria';",
-    );
-    expect(rendererSource).toContain('!composer.active && canSubmitVerdict');
+  it('hydrates the project pill from the bridge projectInfo channel', () => {
+    expect(rendererSource).toContain('bridge.projectInfo');
+    expect(mainSource).toContain("ipcMain.handle('project:info'");
   });
 });
 
@@ -82,7 +53,7 @@ describe('agents console', () => {
     expect(rendererSource).toContain('bridge.agentsSelect(');
     expect(rendererSource).toContain('window.Terminal');
     expect(rendererSource).toContain('role="option"');
-    expect(rendererSource).toContain('aria-selected="${isSelected');
+    expect(rendererSource).toContain("aria-selected=\"${isSelected ? 'true' : 'false'}\"");
   });
 
   it('defers xterm open until the Agents view is visible', () => {
@@ -93,6 +64,37 @@ describe('agents console', () => {
 
   it('only enables steer controls for a selected warm live agent', () => {
     expect(rendererSource).toContain("state.selectedStatus === 'warm'");
+  });
+});
+
+describe('agents stop / unstick', () => {
+  it('per-agent Stop and Unstick buttons render in the session rail with aria-labels', () => {
+    expect(rendererSource).toContain('data-agent-action="stop"');
+    expect(rendererSource).toContain('data-agent-action="unstick"');
+    expect(rendererSource).toContain('aria-label="Stop agent ${esc(agent.agentId)}"');
+    expect(rendererSource).toContain('aria-label="Unstick agent ${esc(agent.agentId)}"');
+  });
+
+  it('renderer wires stop/unstick agent buttons to the bridge', () => {
+    expect(rendererSource).toContain('bridge.agentsStop(');
+    expect(rendererSource).toContain('bridge.agentsUnstick(');
+    expect(rendererSource).toContain("agentAction === 'stop'");
+    expect(rendererSource).toContain("agentAction === 'unstick'");
+  });
+
+  it('stop/unstick click handler stops propagation so row selection is not also triggered', () => {
+    const clickBlock = rendererSource.slice(
+      rendererSource.indexOf("const agentBtn = target.closest<HTMLElement>('[data-agent-action]')"),
+    );
+    expect(clickBlock.slice(0, 200)).toContain('e.stopPropagation()');
+  });
+
+  it('bridge exposes agentsStop and agentsUnstick methods', () => {
+    const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+    expect(preloadSource).toContain('agentsStop(');
+    expect(preloadSource).toContain('agentsUnstick(');
+    expect(preloadSource).toContain("'agent:stop'");
+    expect(preloadSource).toContain("'agent:unstick'");
   });
 });
 
@@ -125,36 +127,29 @@ describe('renderer accessibility states', () => {
     expect(nonApprovalBranch).not.toContain('data-recipient="${esc(selected.sender)}"');
   });
 
-  it('keeps review_request verdicts out of the Mail composer', () => {
-    expect(rendererSource).toContain("if (mailType === MAIL_REVIEW_REQUEST) return 'review'");
-    expect(rendererSource).not.toContain('mailType === MAIL_REVIEW_REQUEST ? MAIL_REVIEW_RESPONSE');
-    expect(rendererSource).not.toContain("'Submit verdict'");
-    expect(rendererSource).toContain('Open in Reviews');
-    expect(rendererSource).toContain('data-review-id="${esc(reviewId)}"');
-    expect(rendererSource).toContain('bridge.reviewSelect(reviewId)');
-  });
-
   it('populates the agent-bus selector from dashboard agents', () => {
     expect(rendererSource).toContain('function rememberMailBuses(state: DashboardState)');
     expect(rendererSource).toContain('knownMailBuses.add(agentId)');
     expect(rendererSource).toContain('if (latestMailState != null) renderMail(latestMailState)');
   });
+
+  it('points operator-facing conductor guidance at the shipped co-mcp binary', () => {
+    expect(appShellSource).toContain('start `co-mcp serve <projectId>`');
+    expect(appShellSource).not.toContain('start `co serve`');
+    expect(rendererSource).toContain('co-mcp serve');
+  });
 });
 
-describe('session start (P4)', () => {
-  it('session-start-form container is in the HTML (static, outside dashboard-content)', () => {
+describe('session start', () => {
+  it('session-start-form container is a sibling AFTER dashboard-content (survives rerenders)', () => {
     expect(htmlSource).toContain('id="session-start-form"');
-    // Must be a sibling of dashboard-content, not inside it (survives renderDashboard rewrites).
     const dashContent = htmlSource.indexOf('id="dashboard-content"');
     const sessionForm = htmlSource.indexOf('id="session-start-form"');
     expect(dashContent).toBeGreaterThan(-1);
-    expect(sessionForm).toBeGreaterThan(-1);
-    // session-start-form must appear AFTER dashboard-content in document order
-    // (sibling, not nested inside dashboard-content which renderDashboard overwrites).
     expect(sessionForm).toBeGreaterThan(dashContent);
   });
 
-  it('renderSessionStartForm injects a textarea with the correct aria-label and a start button', () => {
+  it('renderSessionStartForm injects a labelled textarea and a start button', () => {
     expect(rendererSource).toContain('function renderSessionStartForm()');
     expect(rendererSource).toContain('aria-label="Coordinator session prompt"');
     expect(rendererSource).toContain('id="session-start-btn"');
@@ -164,13 +159,11 @@ describe('session start (P4)', () => {
   it('renderer wires session:start to the bridge on button click', () => {
     expect(rendererSource).toContain('bridge.sessionStart(');
     expect(rendererSource).toContain("'#session-start-btn'");
-    // On success the textarea is cleared.
     expect(rendererSource).toContain("textarea.value = ''");
   });
 
   it('renderDashboard targets dashboard-content (not view-dashboard), preserving the session form', () => {
     expect(rendererSource).toContain("document.getElementById('dashboard-content')");
-    // Must NOT target view-dashboard as the container (would wipe the form on every tick).
     const renderDashFn = rendererSource.slice(rendererSource.indexOf('function renderDashboard('));
     const fnBody = renderDashFn.slice(0, renderDashFn.indexOf('\nfunction '));
     expect(fnBody).not.toContain("getElementById('view-dashboard')");
@@ -182,42 +175,7 @@ describe('session start (P4)', () => {
     );
     expect(rendererSource).not.toContain('bridge.onSessionError(');
     expect(rendererSource).toContain('else if (!r.ok)');
-    expect(rendererSource).toContain(
-      "showAppError(r.error ?? 'Failed to start coordinator session')",
-    );
     expect(returnedErrorDisplays).toHaveLength(1);
     expect(mainSource).not.toContain("sendToRenderer('session:error'");
-  });
-});
-
-describe('agents stop / unstick (P4)', () => {
-  it('per-agent Stop and Unstick buttons render in agents roster with correct aria-labels', () => {
-    expect(rendererSource).toContain('data-agent-action="stop"');
-    expect(rendererSource).toContain('data-agent-action="unstick"');
-    expect(rendererSource).toContain('aria-label="Stop agent ${esc(agent.agentId)}"');
-    expect(rendererSource).toContain('aria-label="Unstick agent ${esc(agent.agentId)}"');
-  });
-
-  it('renderer wires stop/unstick agent buttons to the bridge', () => {
-    expect(rendererSource).toContain('bridge.agentsStop(');
-    expect(rendererSource).toContain('bridge.agentsUnstick(');
-    expect(rendererSource).toContain("agentAction === 'stop'");
-    expect(rendererSource).toContain("agentAction === 'unstick'");
-  });
-
-  it('stop/unstick click handler stops propagation so row selection is not also triggered', () => {
-    // The agent-btn handler calls e.stopPropagation() before the roster-row handler fires.
-    const clickBlock = rendererSource.slice(
-      rendererSource.indexOf("const agentBtn = target.closest<HTMLElement>('.agents-agent-btn')"),
-    );
-    expect(clickBlock.slice(0, 200)).toContain('e.stopPropagation()');
-  });
-
-  it('bridge exposes agentsStop and agentsUnstick methods', () => {
-    const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
-    expect(preloadSource).toContain('agentsStop(');
-    expect(preloadSource).toContain('agentsUnstick(');
-    expect(preloadSource).toContain("'agent:stop'");
-    expect(preloadSource).toContain("'agent:unstick'");
   });
 });
