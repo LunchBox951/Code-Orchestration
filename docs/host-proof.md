@@ -7,6 +7,11 @@ a **real** `claude` or `codex` binary on the operator's host.
 Everything in this runbook executes on the **operator's host machine** — not in a sandbox. The
 in-sandbox proof (AC-S10-4 items 1–4) runs automatically as part of `pnpm test`.
 
+> **Companion:** the [worker benchmark](worker-benchmark.md) (`pnpm test:live`) reuses the same
+> host-live seam bundle but goes further than this scripted plumbing proof — it hosts a real
+> _implementer_ that writes code with its own tools and then objectively grades the artifact. Use this
+> host-proof for the fastest plumbing check; use the worker benchmark to measure real work.
+
 ---
 
 ## Proof fidelity: one `runProof({fake|claude|codex})` driver

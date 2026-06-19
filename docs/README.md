@@ -23,6 +23,17 @@ Start here. These docs are the "why" behind `co`; the code is the "how".
 9. [Research](research/) — decision records and remaining evidence-pending runtime questions.
 10. [Governance](governance/) — how this repo's GitHub structure mirrors `co`'s own model.
 
+## Operator runbooks (host-live)
+
+Run on an authenticated host, never in CI. The hermetic halves run under `pnpm test`.
+
+- [Host-proof](host-proof.md) — `co-mcp host-proof <provider>`: proves the Conductor's end-to-end
+  plumbing against a real `claude`/`codex` binary.
+- [Worker benchmark](worker-benchmark.md) — `pnpm test:live`: hosts a real implementer that writes
+  code and signals done, then **objectively grades** the artifact (the switchable sandbox→live test).
+- [SH-1 self-host](sh1-runbook.md) · [Offline](offline-runbook.md) — the full self-host + local-only
+  evidence bundles.
+
 ## Status
 
 `co` is in active development (pre-alpha). The substrate-independent design is settled; Electron is
