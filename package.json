@@ -18,7 +18,12 @@
   "pnpm": {
     "overrides": {
       "esbuild": "^0.28.1"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "electron",
+      "electron-winstaller",
+      "esbuild"
+    ]
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
