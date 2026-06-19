@@ -129,6 +129,15 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     return result as unknown as DeliveredMail;
   }
 
+  async operatorMessage(agentId: string, subject: string, body: string): Promise<DeliveredMail> {
+    const result = await this.call(OPERATOR_IPC_METHODS.operatorMessage, {
+      agentId,
+      subject,
+      body,
+    } as unknown as WirePayload);
+    return result as unknown as DeliveredMail;
+  }
+
   async approve(approvalSeq: number, reply: ApprovalReply): Promise<DeliveredMail> {
     const result = await this.call(OPERATOR_IPC_METHODS.approve, {
       approvalSeq,
@@ -165,6 +174,20 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
       ...(params.prompt != null ? { prompt: params.prompt } : {}),
       ...(params.specBody != null ? { specBody: params.specBody } : {}),
     } as unknown as WirePayload)) as unknown as StartSessionResult;
+  }
+
+  /** Stage 15 §7 — send raw keystroke bytes into `agentId`'s warm PTY stdin. */
+  async sendInput(agentId: string, data: string): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.sendInput, { agentId, data } as unknown as WirePayload);
+  }
+
+  /** Stage 15 §7 — resize `agentId`'s warm PTY to `cols` × `rows`. */
+  async resize(agentId: string, cols: number, rows: number): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.resize, {
+      agentId,
+      cols,
+      rows,
+    } as unknown as WirePayload);
   }
 
   /** Subscribe to the per-tick `tick` push; returns an unsubscribe fn. */
@@ -404,6 +427,15 @@ export class OperatorIpcClient {
     return this.withConnection((c) => c.reply(target, draft));
   }
 
+  /**
+   * Send a fresh operator message to `agentId` (a `clarify_request` from `@operator`). A WRITE verb that
+   * needs the socket — if the Conductor is down it throws a clear {@link ConductorUnavailableError}
+   * (Principle 9). The daemon wakes the recipient on its next tick even when it is idle/cold.
+   */
+  operatorMessage(agentId: string, subject: string, body: string): Promise<DeliveredMail> {
+    return this.withConnection((c) => c.operatorMessage(agentId, subject, body));
+  }
+
   approve(approvalSeq: number, reply: ApprovalReply): Promise<DeliveredMail> {
     return this.withConnection((c) => c.approve(approvalSeq, reply));
   }
@@ -459,6 +491,16 @@ export class OperatorIpcClient {
    */
   async startSession(params: StartSessionParams): Promise<StartSessionResult> {
     return this.withConnection((c) => c.startSession(params));
+  }
+
+  /** Stage 15 §7 — send raw keystroke bytes into `agentId`'s warm PTY stdin. */
+  async sendInput(agentId: string, data: string): Promise<void> {
+    await this.withConnection((c) => c.sendInput(agentId, data));
+  }
+
+  /** Stage 15 §7 — resize `agentId`'s warm PTY to `cols` × `rows`. */
+  async resize(agentId: string, cols: number, rows: number): Promise<void> {
+    await this.withConnection((c) => c.resize(agentId, cols, rows));
   }
 
   /** Subscribe to the per-tick push; survives reconnects. Returns an unsubscribe fn. */

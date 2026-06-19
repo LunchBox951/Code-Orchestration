@@ -511,7 +511,12 @@ describe('ConductorDaemon — deterministic: same injected inputs ⇒ same tick-
 
 // ── AC-S10-1 (5) / MNR #5: single launch authority — no duplicate host across ticks ─────────────
 describe('ConductorDaemon — single launch authority (MNR-5): warm reuse, never a second spawn', () => {
-  it('does not cold-launch a recovered session that is not warm in this engine process', async () => {
+  // Stage 15 P-E (AC-S15-2 / ST-2): a NON-skipped recovered cold NON-root agent is now RE-WARMED through
+  // the single launch authority (proven against a spy in daemon-cold-start.test.ts — the real
+  // `ensureHosted` refuses to re-record an already-active session). A SKIPPED one, by contrast, is filtered
+  // out of candidates entirely and is NEVER re-warmed — `spawnSpecFor` throwing proves no launch is even
+  // attempted (single launch authority respects the operator pause / STUCK suppression).
+  it('does NOT re-warm a SKIPPED recovered cold session (no launch attempted)', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
     const roster = openRosterStore(projectId);
@@ -532,17 +537,22 @@ describe('ConductorDaemon — single launch authority (MNR-5): warm reuse, never
     const qw = makeQuietWindow();
     const { engine, pty } = makeEngine(clock, qw, {
       spawnSpecFor: () => {
-        throw new Error('cold launch should not happen from a recovered session');
+        throw new Error('a skipped recovered agent must never be launched / re-warmed');
       },
     });
-    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock);
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      isSkipped: (_pid, agent) => agent === 'impl-cold',
+    });
 
     const out = await daemon.tick();
 
-    expect(out.candidateCount).toBe(1);
-    expect(out.coldCandidates).toEqual(['impl-cold']);
+    // Skipped ⇒ filtered from candidates entirely: not a candidate, not re-warmed, never launched.
+    expect(out.candidateCount).toBe(0);
+    expect(out.reWarmed).toEqual([]);
+    expect(out.coldCandidates).toEqual([]);
     expect(out.selected).toBeNull();
     expect(out.cycle).toBeNull();
+    expect(engine.isHosted(projectId, 'impl-cold')).toBe(false);
     expect(pty.panes).toHaveLength(0);
   });
 

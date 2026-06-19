@@ -52,6 +52,8 @@ export interface Pane {
   kill(signal?: string): void;
   /** Send an arbitrary signal (e.g. 'SIGSTOP' / 'SIGCONT'). */
   signal(sig: string): void;
+  /** Resize the pty to `cols` columns × `rows` rows (xterm fit → PTY sync). */
+  resize(cols: number, rows: number): void;
 }
 
 export interface PtyHost {

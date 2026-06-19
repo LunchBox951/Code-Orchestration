@@ -25,7 +25,7 @@ by topic — preserve them regardless of implementation choices.
 | 4 | `one-agent-surface` | Agents act through the **MCP server alone, no fallback**; the protocol is self-describing; a stubbed tool fails loudly (completeness gate). One core, thin adapters. | [MCP-TOOLS](architecture/mcp-tools.md) · [CLI-REFERENCE](architecture/cli-reference.md) · [PERMISSIONS](architecture/permissions.md) |
 | 5 | `self-describing` | Agents operate **any** repo without reading `co`'s source: `orient` teaches workflow, schemas teach syntax, native project memory teaches the repo, the locator maps unfamiliar code. | [PROMPTS-and-MEMORY](architecture/prompts-and-memory.md) · [RESEARCH](architecture/research.md) · [MCP-TOOLS](architecture/mcp-tools.md) |
 | 6 | `tools-do-the-work` | Ergonomic tools make the sanctioned path the easy path; the only hard blocks are the non-destructive boundary; protocol adherence is **reactive nudges** — trust, monitor, gently remind. | [PERMISSIONS](architecture/permissions.md) · [WORKTREES](architecture/worktrees.md) · [MCP-TOOLS](architecture/mcp-tools.md) |
-| 7 | `gated-by-default` | Nothing reaches master/remote/PR without a **PASS** (agent *or* human) or an explicit audited `@operator` override. Two verdicts; the blocker bar **tightens toward production**. Ruthless only *because* escalation gives an exit. | [REVIEW-GATES](architecture/review-gates.md) · [AGENT-ROLES](architecture/agent-roles.md) · [WORKTREES](architecture/worktrees.md) |
+| 7 | `gated-by-default` | Nothing reaches a protected target/remote/PR without a **PASS** (agent *or* human) or an explicit audited `@operator` override. Two verdicts; the blocker bar **tightens toward production**. Ruthless only *because* escalation gives an exit. | [REVIEW-GATES](architecture/review-gates.md) · [AGENT-ROLES](architecture/agent-roles.md) · [WORKTREES](architecture/worktrees.md) |
 | 8 | `filter-up` | Problems climb the spawn chain, resolved at the **lowest competent level**; only genuine intent + outward actions reach the operator. Actionable items are un-loseable. | [MAIL-BUS](architecture/mail-bus.md) · [AGENT-ROLES](architecture/agent-roles.md) · [REVIEW-GATES](architecture/review-gates.md) · [SPECS-and-ISSUES](architecture/specs-and-issues.md) |
 | 9 | `no-silent-failures` | Every failure is detected and surfaced — **pre-flight** (the doctor), **in-flight** (live monitoring), **post-hoc** (observability). Never-drop, fail-loud, degrade safely under pressure. | [HEALTH-and-DIAGNOSTICS](architecture/health-and-diagnostics.md) · [PERMISSIONS](architecture/permissions.md) · [STATE-and-RECOVERY](architecture/state-and-recovery.md) · [MAIL-BUS](architecture/mail-bus.md) |
 | 10 | `acceptance-criteria` | One concrete, checkable standard the spec **produces**, the plan **structures**, the implementer **targets**, the tests **encode**, the reviewer **enforces** — the cure for "everyone interpreted *done* differently." | [PHASES-and-PLANS](architecture/phases-and-plans.md) · [SPECS-and-ISSUES](architecture/specs-and-issues.md) · [REVIEW-GATES](architecture/review-gates.md) |
@@ -34,7 +34,7 @@ by topic — preserve them regardless of implementation choices.
 | 13 | `provider-neutral` | Claude and Codex are interchangeable behind one routing/gating/mail abstraction. Pinned roles + a rate-limit-aware balancer spread load; when tapped, **pace — don't sacrifice**. | [PROVIDERS](architecture/providers.md) · [DISPATCH](architecture/dispatch.md) · [COST-and-USAGE](architecture/cost-and-usage.md) |
 | 14 | `recoverable` | Everything is an **event** — durable, inspectable, replayable; the system can always be reconstructed and recovered from its own record. | [STATE-and-RECOVERY](architecture/state-and-recovery.md) · [CORE-CONCEPTS](concepts.md) · [HEALTH-and-DIAGNOSTICS](architecture/health-and-diagnostics.md) |
 | 15 | `one-stop-shop` | The desktop app absorbs the alt-tab: **observe and steer agents first**, light manual coding second. Deliberately *not* a new IDE — just enough to never leave the flow. | [TUI](architecture/tui.md) · [MAIL-BUS](architecture/mail-bus.md) · [REVIEW-GATES](architecture/review-gates.md) |
-| 16 | `decisions-deferred` | The runtime substrate is **parked for research, not guessed** — anchored on the authentic-terminal directive, validated at spec-execution time. Measure before committing. | [Authoritative prose](#authoritative-prose) · [EVENT-ROUTER](architecture/event-router.md) · [runtime-substrate](research/runtime-substrate.md) *(research open)* |
+| 16 | `decisions-deferred` | Deferred decisions resolve by evidence, not guesses. Electron and the sandbox Conductor pieces have landed; host-live provider proof, liveness, and recovery evidence remain. | [Authoritative prose](#authoritative-prose) · [EVENT-ROUTER](architecture/event-router.md) · [runtime-substrate](research/runtime-substrate.md) *(partly open)* |
 
 ---
 
@@ -77,11 +77,11 @@ implementation.
    trust, monitor silently, gently remind.
 
 7. **Gated by default; strict, made safe by escalation** (Principle 7 — gated-by-default). Nothing
-   reaches master/remote/PR without a PASS — agent *or* human (human review is a per-repo, per-scope
-   option) — except an explicit, audited `@operator` override with a recorded reason. Two verdicts
-   only (PASS / ISSUES); the **blocker bar tightens as code nears production** — nits ride as
-   suggestions into isolated branches but become blockers at the PR/master gate. The gate can be
-   ruthless only *because* escalation gives a stuck-but-honest worker an exit.
+   reaches a protected target/remote/PR without a PASS — agent *or* human (human review is a
+   per-repo, per-scope option) — except an explicit, audited `@operator` override with a recorded
+   reason. Two verdicts only (PASS / ISSUES); the **blocker bar tightens as code nears production** —
+   nits ride as suggestions into isolated branches but become blockers at the PR/release gate. The
+   gate can be ruthless only *because* escalation gives a stuck-but-honest worker an exit.
 
 8. **Filter up — the operator owns only the big decisions** (Principle 8 — filter-up). Problems and
    questions climb the spawn chain, resolved at the lowest competent level; only genuine intent and
@@ -116,6 +116,7 @@ implementation.
     absorbs the alt-tab: observe and steer the agents first, light manual coding second. Deliberately
     *not* a new IDE — just enough that the operator never has to leave the flow.
 
-16. **Decisions deferred to evidence** (Principle 16 — decisions-deferred). The runtime substrate is
-    *parked for research, not guessed* — anchored on the authentic-interactive-terminal directive
-    (principle 2) and validated at spec-execution time. Measure before committing.
+16. **Decisions deferred to evidence** (Principle 16 — decisions-deferred). Runtime choices are
+    *measured, not guessed* — anchored on the authentic-interactive-terminal directive (principle 2)
+    and validated at spec-execution time. Evidence has resolved the language, Electron shell, and
+    sandbox Conductor pieces; host-live provider proof, liveness, and recovery evidence remain open.

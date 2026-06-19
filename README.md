@@ -2,12 +2,14 @@
 
 > Autonomous multi-agent software engineering that stays auditable, gated, recoverable — and steerable.
 
-**Status: in active development (pre-alpha). Not yet installable.**
+**Status: in active development (pre-alpha). Linux AppImage automation exists; npm/package
+publishing, polished cross-platform installers, and public onboarding are not v1 goals.**
 
-`co` runs a team of AI coding agents (Claude by default, Codex optionally) as **live, interactive
-terminal sessions** you can watch and steer, while the agents coordinate among themselves through a
-**typed mail bus**. Every change passes a **strict review gate** before it can merge, push, or
-publish, and all state is durably recorded so the system can be inspected, replayed, and recovered.
+`co` runs a team of AI coding agents (Claude and Codex behind one provider-neutral dispatch model) as
+**live, interactive terminal sessions** you can watch and steer, while the agents coordinate among
+themselves through a **typed mail bus**. Every change passes a **strict review gate** before it can
+merge, push, or publish, and durable orchestration state is recorded so the system can be inspected,
+replayed, and recovered.
 
 `co` is being built **using its own model** — this repository is orchestrated by a prototype of the
 very system it describes, and will graduate to self-hosting once `co` can build `co`. That
@@ -27,7 +29,7 @@ This is a TypeScript monorepo (pnpm workspaces):
 - `packages/core` — the domain core (single source of truth).
 - `packages/cli` — the `co` command-line adapter.
 - `packages/mcp` — the agent-facing MCP server (the sole agent surface).
-- `apps/desktop` — the operator desktop app (shell choice parked).
+- `apps/desktop` — the Electron operator desktop app.
 
 ## Docs
 
@@ -37,6 +39,6 @@ throughout the code as `Principle N — handle`.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Work flows as specs → phases → tasks through a review gate,
-mirrored in GitHub Issues, the Project board, and branch protection. By participating you agree to
-the [Code of Conduct](CODE_OF_CONDUCT.md). Licensed [MIT](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Work flows from a task-owned spec into phases and reviewed
+changes, mirrored in GitHub Issues, the Project board, and branch protection. By participating you
+agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Licensed [MIT](LICENSE).

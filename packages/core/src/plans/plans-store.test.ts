@@ -12,10 +12,12 @@ import {
   EVENT_PHASE_VERIFIED,
   EVENT_PLAN_DRAFTED,
   EVENT_PLAN_REPLANNED,
+  EVENT_TASK_COMPLETED,
   makePlanDraftedEvent,
   makePhaseStatusChangedEvent,
   makePhaseVerifiedEvent,
   makePlanReplannedEvent,
+  makeTaskCompletedEvent,
   planScope,
   plansSchemas,
   plansUpcasters,
@@ -78,7 +80,7 @@ const ACTOR = 'coord-1';
 function snapshot(db: DatabaseSync): string {
   const plans = db
     .prepare(
-      'SELECT task_id, goal, replan_count, drafted_ts FROM plans ORDER BY drafted_ts, task_id',
+      'SELECT task_id, goal, replan_count, drafted_ts, completed_ts FROM plans ORDER BY drafted_ts, task_id',
     )
     .all();
   const phases = db
@@ -175,6 +177,187 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
       const ph1 = after.phases.find((p) => p.phaseId === 'ph-1')!;
       expect(ph1.verifiedPass).toBe(true);
       expect(ph1.baselineSha).toBe('abc123');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('records task.completed and sets completedTs from event.ts', () => {
+    const projectId = 'p-plans-completed';
+    const store = openPlanStore(projectId);
+    try {
+      const drafted = store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      expect(drafted.completedTs).toBeUndefined();
+      store.changePhaseStatus('task-1', 'ph-1', 'merged', ACTOR);
+      store.changePhaseStatus('task-1', 'ph-2', 'merged', ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a', true, ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-2', 'base-b', true, ACTOR);
+      const after = store.recordTaskCompleted('task-1', 'coord-done');
+      expect(after.completedTs).toBeGreaterThan(0);
+      // The fold sets completed_ts WITHOUT mutating phase status or replan count.
+      expect(after.replanCount).toBe(0);
+      expect(after.phases).toHaveLength(2);
+
+      // The terminal close is appended to the audit trail as task.completed by the recording actor.
+      const audit = openProjectStore(projectId);
+      try {
+        const events = audit.readStream(planScope('task-1'));
+        expect(events.at(-1)?.type).toBe(EVENT_TASK_COMPLETED);
+        expect(events.at(-1)?.actor).toBe('coord-done');
+      } finally {
+        audit.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it('recordTaskCompleted is idempotent after the terminal event is recorded', () => {
+    const projectId = 'p-plans-completed-idempotent';
+    const store = openPlanStore(projectId);
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      store.changePhaseStatus('task-1', 'ph-1', 'merged', ACTOR);
+      store.changePhaseStatus('task-1', 'ph-2', 'merged', ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a', true, ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-2', 'base-b', true, ACTOR);
+      const first = store.recordTaskCompleted('task-1', 'coord-done');
+      const second = store.recordTaskCompleted('task-1', 'coord-retry');
+      expect(second.completedTs).toBe(first.completedTs);
+
+      const audit = openProjectStore(projectId);
+      try {
+        const completedEvents = audit
+          .readStream(planScope('task-1'))
+          .filter((event) => event.type === EVENT_TASK_COMPLETED);
+        expect(completedEvents).toHaveLength(1);
+        expect(completedEvents[0]?.actor).toBe('coord-done');
+      } finally {
+        audit.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it('refuses even same-content re-draft after task.completed', () => {
+    const store = openPlanStore('p-plans-completed-redraft');
+    try {
+      const draft = {
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      };
+      store.recordDraft(draft);
+      store.changePhaseStatus('task-1', 'ph-1', 'merged', ACTOR);
+      store.changePhaseStatus('task-1', 'ph-2', 'merged', ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a', true, ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-2', 'base-b', true, ACTOR);
+      store.recordTaskCompleted('task-1', 'coord-done');
+
+      expect(() => store.recordDraft(draft)).toThrow(/already completed.*terminal/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('refuses phase mutations and replans after task.completed', () => {
+    const projectId = 'p-plans-completed-terminal';
+    const store = openPlanStore(projectId);
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      store.changePhaseStatus('task-1', 'ph-1', 'merged', ACTOR);
+      store.changePhaseStatus('task-1', 'ph-2', 'merged', ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a', true, ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-2', 'base-b', true, ACTOR);
+      const completed = store.recordTaskCompleted('task-1', 'coord-done');
+
+      expect(() => store.changePhaseStatus('task-1', 'ph-1', 'building', ACTOR)).toThrow(
+        /already completed.*terminal/i,
+      );
+      expect(() => store.recordPhaseVerified('task-1', 'ph-1', 'abc123', true, ACTOR)).toThrow(
+        /already completed.*terminal/i,
+      );
+      expect(() =>
+        store.recordReplan(
+          'task-1',
+          'late scope change',
+          [{ phaseId: 'ph-new', name: 'New', deps: [], criteria: [WIRED_CRITERION] }],
+          ACTOR,
+        ),
+      ).toThrow(/already completed.*terminal/i);
+
+      expect(store.getPlan('task-1')).toEqual(completed);
+      const audit = openProjectStore(projectId);
+      try {
+        expect(audit.readStream(planScope('task-1')).map((event) => event.type)).toEqual([
+          EVENT_PLAN_DRAFTED,
+          EVENT_PHASE_STATUS_CHANGED,
+          EVENT_PHASE_STATUS_CHANGED,
+          EVENT_PHASE_VERIFIED,
+          EVENT_PHASE_VERIFIED,
+          EVENT_TASK_COMPLETED,
+        ]);
+      } finally {
+        audit.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it('refuses task.completed until every phase is merged and verified green', () => {
+    const store = openPlanStore('p-plans-completed-preconditions');
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      expect(() => store.recordTaskCompleted('task-1', 'coord-done')).toThrow(
+        /not 'merged'.*ph-1.*ph-2/i,
+      );
+      store.changePhaseStatus('task-1', 'ph-1', 'merged', ACTOR);
+      store.changePhaseStatus('task-1', 'ph-2', 'merged', ACTOR);
+      expect(() => store.recordTaskCompleted('task-1', 'coord-done')).toThrow(
+        /not verified green.*ph-1.*ph-2/i,
+      );
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a', true, ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-2', 'base-b', false, ACTOR);
+      expect(() => store.recordTaskCompleted('task-1', 'coord-done')).toThrow(
+        /not verified green.*ph-2/i,
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it('task.completed for an unknown plan fails loud (Principle 9)', () => {
+    const store = openPlanStore('p-plans-completed-unknown');
+    try {
+      expect(() => store.recordTaskCompleted('ghost-task', ACTOR)).toThrow(/unknown plan/i);
     } finally {
       store.close();
     }
@@ -451,6 +634,7 @@ describe('PlanStore — replay-equal: live fold → rebuildAll → byte-equal', 
         { taskId: 'task-2', goal: 'Do Y', taskCriteria: [], phases: [] },
         'coord-1',
       ),
+      makeTaskCompletedEvent('p-plans-replay', { taskId: 'task-2' }, 'coord-1'),
     ];
     try {
       for (const e of events) {
@@ -470,6 +654,8 @@ describe('PlanStore — replay-equal: live fold → rebuildAll → byte-equal', 
       // ph-1 was replaced by replan → ph-new is the final phase; replanCount=1
       expect(live).toContain('"ph-new"');
       expect(live).toContain('"replan_count":1');
+      // task-2 was completed → its completed_ts survives the replay (non-vacuous; from event.ts).
+      expect(live).toMatch(/"completed_ts":\d+/);
     } finally {
       store.close();
     }
@@ -494,6 +680,118 @@ describe('PlanStore — replay-equal: live fold → rebuildAll → byte-equal', 
       expect(() =>
         rebuildAll(store, [new PlansProjector()], (e) => decode(e, plansUpcasters, plansSchemas)),
       ).toThrow(/conflicting re-draft/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay fails loud when an event mutates a completed task', () => {
+    const projectId = 'p-plans-replay-completed-terminal';
+    const store = openProjectStore(projectId);
+    const events = [
+      makePlanDraftedEvent(
+        projectId,
+        { taskId: 'task-1', goal: 'original', taskCriteria: [], phases: SAMPLE_PHASES },
+        'coord-1',
+      ),
+      makePhaseStatusChangedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-1', status: 'merged' },
+        'coord-1',
+      ),
+      makePhaseStatusChangedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-2', status: 'merged' },
+        'coord-1',
+      ),
+      makePhaseVerifiedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-1', baselineSha: 'base-a', pass: true },
+        'coord-1',
+      ),
+      makePhaseVerifiedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-2', baselineSha: 'base-b', pass: true },
+        'coord-1',
+      ),
+      makeTaskCompletedEvent(projectId, { taskId: 'task-1' }, 'coord-1'),
+      makePhaseStatusChangedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-1', status: 'building' },
+        'coord-1',
+      ),
+    ];
+    try {
+      store.append(events);
+      expect(() =>
+        rebuildAll(store, [new PlansProjector()], (e) => decode(e, plansUpcasters, plansSchemas)),
+      ).toThrow(/after task\.completed.*terminal/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay fails loud when a same-content plan.drafted arrives after task.completed', () => {
+    const projectId = 'p-plans-replay-completed-redraft';
+    const store = openProjectStore(projectId);
+    const draftPayload = {
+      taskId: 'task-1',
+      goal: 'original',
+      taskCriteria: [],
+      phases: SAMPLE_PHASES,
+    };
+    const drafted = makePlanDraftedEvent(projectId, draftPayload, 'coord-1');
+    const events = [
+      drafted,
+      makePhaseStatusChangedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-1', status: 'merged' },
+        'coord-1',
+      ),
+      makePhaseStatusChangedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-2', status: 'merged' },
+        'coord-1',
+      ),
+      makePhaseVerifiedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-1', baselineSha: 'base-a', pass: true },
+        'coord-1',
+      ),
+      makePhaseVerifiedEvent(
+        projectId,
+        { taskId: 'task-1', phaseId: 'ph-2', baselineSha: 'base-b', pass: true },
+        'coord-1',
+      ),
+      makeTaskCompletedEvent(projectId, { taskId: 'task-1' }, 'coord-1'),
+      makePlanDraftedEvent(projectId, draftPayload, 'coord-1'),
+    ];
+    try {
+      store.append(events);
+      expect(() =>
+        rebuildAll(store, [new PlansProjector()], (e) => decode(e, plansUpcasters, plansSchemas)),
+      ).toThrow(/after task\.completed.*terminal/i);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replay fails loud when task.completed arrives before all phases merged + verified', () => {
+    const projectId = 'p-plans-replay-completed-premature';
+    const store = openProjectStore(projectId);
+    const events = [
+      makePlanDraftedEvent(
+        projectId,
+        { taskId: 'task-1', goal: 'original', taskCriteria: [], phases: SAMPLE_PHASES },
+        'coord-1',
+      ),
+      makeTaskCompletedEvent(projectId, { taskId: 'task-1' }, 'coord-1'),
+    ];
+    try {
+      store.append(events);
+      expect(() =>
+        rebuildAll(store, [new PlansProjector()], (e) => decode(e, plansUpcasters, plansSchemas)),
+      ).toThrow(/not 'merged'.*ph-1.*ph-2/i);
     } finally {
       store.close();
     }

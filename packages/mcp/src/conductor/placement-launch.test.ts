@@ -383,7 +383,11 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
           `${isolatedHomeDir}/mcp/bridge.log`,
         );
       } else {
-        expect(spec.args).toEqual(['--add-dir', `${isolatedHomeDir}/mcp`]);
+        expect(spec.args).toEqual([
+          '--dangerously-bypass-hook-trust',
+          '--add-dir',
+          `${isolatedHomeDir}/mcp`,
+        ]);
         const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
         expect(configToml!.contents).toContain('args = ["dist/bin.js", "bridge", "');
         expect(configToml!.contents).toContain(`${isolatedHomeDir}/mcp/co-mcp.sock`);
@@ -419,7 +423,7 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     const bridgeDir = dirname(socketPath!);
     expect(bridgeDir).not.toBe(tmpdir());
     expect(socketPath).toBe(join(bridgeDir, 'bridge.sock'));
-    expect(spec.args).toEqual(['--add-dir', bridgeDir]);
+    expect(spec.args).toEqual(['--dangerously-bypass-hook-trust', '--add-dir', bridgeDir]);
     const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
     expect(configToml!.contents).toContain(`"bridge", "${socketPath}"`);
   });

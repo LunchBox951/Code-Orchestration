@@ -76,6 +76,8 @@ class ReplayOnSubscribePane implements Pane {
 
   kill(): void {}
   signal(): void {}
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  resize(cols: number, rows: number): void {}
 }
 
 describe('driveToReady — authed (reaches ready)', () => {

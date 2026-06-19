@@ -42,7 +42,7 @@ export type DetectorEvent =
   | { readonly kind: 'osc0'; readonly at: number; readonly title: string }
   | { readonly kind: 'mcp'; readonly at: number; readonly verb: string }
   | { readonly kind: 'mcp_start'; readonly at: number; readonly verb: string }
-  | { readonly kind: 'mcp_end'; readonly at: number; readonly verb: string };
+  | { readonly kind: 'mcp_end'; readonly at: number; readonly verb: string; readonly ok?: boolean };
 
 /** Why the detector believes the turn is idle (diagnostics for E1; reporting only — triggers nothing). */
 export type IdleSignal = 'byte-quiescence' | 'codex-osc0' | 'mcp-quiescence';
@@ -94,12 +94,11 @@ export function detectTurnEnd(
       case 'mcp_start':
         activeMcpCalls += 1;
         if (lastMcpAt === undefined || ev.at > lastMcpAt) lastMcpAt = ev.at;
-        if (COMPLETION_VERBS.includes(ev.verb)) sawCompletionVerb = true;
         break;
       case 'mcp_end':
         activeMcpCalls = Math.max(0, activeMcpCalls - 1);
         if (lastMcpAt === undefined || ev.at > lastMcpAt) lastMcpAt = ev.at;
-        if (COMPLETION_VERBS.includes(ev.verb)) sawCompletionVerb = true;
+        if (COMPLETION_VERBS.includes(ev.verb) && ev.ok !== false) sawCompletionVerb = true;
         break;
       case 'osc0':
         if (latestOsc0 === undefined || ev.at >= latestOsc0.at) {

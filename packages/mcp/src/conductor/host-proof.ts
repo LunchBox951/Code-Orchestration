@@ -15,8 +15,11 @@
 import {
   MAIL_CLARIFY_REQUEST,
   OPERATOR,
+  WEDGE_MS,
   buildPaneLaunchConfig,
   defaultMailRenderer,
+  FakePty,
+  NodePtyHost,
   normalizeStartupOutput,
   openMailStore,
   openRegistry,
@@ -26,6 +29,7 @@ import {
   type DeliveredMail,
   type InjectMailOptions,
   type MailRenderer,
+  type MailStore,
   type ProjectId,
   type PtyHost,
   type SessionRecord,
@@ -33,7 +37,17 @@ import {
 } from '@co/core';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ConductorEngine, type TransportPair } from './engine.js';
+import {
+  STEER_TURN_CLOCK_MS,
+  driveFakeProviderProof,
+  makeControllableQuietWindow,
+  makeCounterClock,
+  neverResolve,
+  routeProofMail,
+} from './fake-provider.js';
 import type { HostedIdentity } from '../live-session-host.js';
 import {
   CO_AGENT_ENV,
@@ -316,6 +330,226 @@ export async function runHostProof(
   }
 }
 
+// ── Unified runProof + Principle-2 provenance guard (Stage 15 P-F) ──────────────
+
+/**
+ * The provenance tier of a proof run. `sandbox-fake` is a green FakePty run (it proves the harness
+ * wiring, NOT a real provider); `host-live` is a run against a real `claude`/`codex` binary in a real
+ * node-pty. A `fake` run can NEVER carry `host-live` — see {@link deriveProofFidelity}.
+ */
+export type ProofFidelity = 'sandbox-fake' | 'host-live';
+
+/** The proof target: the in-sandbox FakeProvider, or a real provider binary. */
+export type ProofMode = 'fake' | 'claude' | 'codex';
+
+/** A {@link HostProofResult} stamped with its authentic provenance {@link ProofFidelity}. */
+export interface ProofResult extends HostProofResult {
+  readonly fidelity: ProofFidelity;
+}
+
+/** Host-live launch artifacts assembled by {@link runHostProofCommand}; ignored for the `fake` mode. */
+export interface HostLiveProofInputs {
+  /** The provider spawn spec (the isolated, scoped MCP config). */
+  readonly spawnSpec: SpawnSpec;
+  /** The smallest proof tool surface for the hosted session (the single `co_mail_send` tool). */
+  readonly sessionTools: (identity: HostedIdentity) => ReturnType<typeof toolsForRole> | undefined;
+  /** The nonce-bearing renderer (emits the tool-call prompt for the route-proof mail only). */
+  readonly renderMail: MailRenderer;
+  /** The Conductor-owned bridge socket path for the host-live transport pair. */
+  readonly socketPath: string;
+  /** The bridge diagnostic log path. */
+  readonly bridgeLogPath: string;
+  /** When true, attach the host-proof pane-trace diagnostic (`CO_HOST_PROOF_TRACE`). */
+  readonly trace?: boolean;
+}
+
+/** Options for {@link runProof}. The caller supplies the mode-independent "what to prove" inputs. */
+export interface RunProofOptions {
+  readonly projectId: ProjectId;
+  readonly identity: HostedIdentity;
+  /** The seeded actionable proof mail (the route-proof turn injects it). */
+  readonly mail: DeliveredMail;
+  /** The per-run nonce a routed proof mail must echo. */
+  readonly nonce: string;
+  /** Host-live launch artifacts — REQUIRED for `claude` | `codex`, ignored for `fake`. */
+  readonly hostLive?: HostLiveProofInputs;
+  /** fake-only: the mail store opener for the autonomous drive's steer-mail poll. Default: {@link openMailStore}. */
+  readonly openMail?: (projectId: ProjectId) => MailStore;
+  /** fake-only: register the fake MCP clients for cleanup. Default: closed internally after the run. */
+  readonly registerClient?: (client: Client) => void;
+}
+
+/**
+ * Principle 2 (authentic-terminal) + Principle 9 (fail-loud) — derive the provenance tier from the
+ * RESOLVED pty host, NEVER from a parameter. A {@link FakePty} ⇒ `sandbox-fake`; a {@link NodePtyHost} ⇒
+ * `host-live`. THROWS if the host is neither, or if its kind does not match the requested mode (a `fake`
+ * run must NEVER be able to carry `host-live`, even if mislabeled). This is the only place `fidelity`
+ * is set, and it is derived — not settable.
+ */
+export function deriveProofFidelity(mode: ProofMode, pty: PtyHost): ProofFidelity {
+  const isFake = pty instanceof FakePty;
+  const isNode = pty instanceof NodePtyHost;
+  if (!isFake && !isNode) {
+    throw new Error(
+      `runProof: cannot derive a provenance tier — the resolved pty host '${ptyHostLabel(pty)}' is ` +
+        'neither a FakePty (sandbox-fake) nor a NodePtyHost (host-live). Fail-loud (Principle 9): a ' +
+        'proof result must carry an authentic fidelity tier.',
+    );
+  }
+  if (mode === 'fake') {
+    if (!isFake) {
+      throw new Error(
+        "runProof: mode 'fake' resolved a non-FakePty host — refusing to tag a non-sandbox bundle as " +
+          "'sandbox-fake', and a fake run must NEVER be able to carry 'host-live' (Principle 2 — " +
+          'authentic-terminal; Principle 9 — fail-loud).',
+      );
+    }
+    return 'sandbox-fake';
+  }
+  // mode === 'claude' | 'codex' — host-live only.
+  if (!isNode) {
+    throw new Error(
+      `runProof: mode '${mode}' resolved a non-NodePtyHost host — a host-live proof must run against ` +
+        'the real node-pty adapter. Fail-loud (Principle 9).',
+    );
+  }
+  return 'host-live';
+}
+
+function ptyHostLabel(pty: unknown): string {
+  if (pty == null) return String(pty);
+  const ctor = (pty as { constructor?: { name?: string } }).constructor;
+  return ctor?.name ?? typeof pty;
+}
+
+/**
+ * Principle 2 (authentic-terminal) FORWARD GATE — throw (fail-loud) unless `result` is `host-live`.
+ *
+ * There is no programmatic SH-1 / host-live evidence sink today (host-proof prints to stderr + exits;
+ * SH-1 evidence is a manual bundle per `docs/sh1-runbook.md`). This assertion IS the forward gate: any
+ * FUTURE SH-1-evidence recorder MUST call it before recording a result as host-live / SH-1 evidence, so
+ * a `sandbox-fake` run can never be confused for the real thing.
+ */
+export function assertHostLiveProof(result: ProofResult): void {
+  if (result.fidelity !== 'host-live') {
+    throw new Error(
+      `assertHostLiveProof: refusing to treat a '${result.fidelity}' proof as host-live / SH-1 ` +
+        'evidence. A fake run is sandbox-fake — it proves the harness wiring, NOT that a real ' +
+        'claude/codex binary reached ready and routed mail through a real pty (Principle 2 — ' +
+        'authentic-terminal). Only a host-live result may be recorded as SH-1 evidence; any future ' +
+        'SH-1-evidence recorder MUST call this gate first (Principle 9 — fail-loud).',
+    );
+  }
+}
+
+/**
+ * The ONE unified proof entry: the in-sandbox vitest path and the operator host-live path are the SAME
+ * `runHostProof` driver, differing ONLY by the resolved seam bundle. `fake` builds {@link FakePty} +
+ * the {@link driveFakeProviderProof} autonomous drive + in-memory transport + injected clock/quiet-window
+ * and runs both concurrently; `claude`/`codex` build the host-live bundle (real node-pty + socket bridge
+ * transport + real timers). The returned {@link ProofResult} is stamped with the tamper-resistant
+ * {@link ProofFidelity} derived from the resolved pty host.
+ */
+export async function runProof(mode: ProofMode, opts: RunProofOptions): Promise<ProofResult> {
+  return mode === 'fake' ? runFakeProof(opts) : runHostLiveProof(mode, opts);
+}
+
+async function runFakeProof(opts: RunProofOptions): Promise<ProofResult> {
+  const { projectId, identity, mail, nonce } = opts;
+  const pty = new FakePty();
+  const fidelity = deriveProofFidelity('fake', pty); // 'sandbox-fake', or fail-loud on a forced mismatch
+  const clock = makeCounterClock();
+  const qw = makeControllableQuietWindow();
+  const ownedClients: Client[] = [];
+  const registerClient =
+    opts.registerClient ?? ((client: Client) => void ownedClients.push(client));
+
+  try {
+    const proofP = runHostProof(projectId, identity, mail, {
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: neverResolve },
+      separateSteerTurn: true,
+      steerTurnStartDelayMs: 0,
+      expectedRouteNonce: nonce,
+      // Route the proof mail through the live MCP surface (the FakePty pane can't itself make MCP calls).
+      awaitMailRouted: (clientTransport) =>
+        routeProofMail(clientTransport, {
+          to: identity.parent,
+          nonce,
+          register: registerClient,
+        }).then(() => undefined),
+      // Settle the SEPARATE steer turn (turn-2) AFTER the interrupt is sent (steerMidTurn=true) — the
+      // operator path. driveFakeProviderProof emits the turn-2 spinner at STEER_TURN_CLOCK_MS.
+      beforeSteer: async () => {
+        setTimeout(() => {
+          clock.set(STEER_TURN_CLOCK_MS + WEDGE_MS + 1);
+          qw.settle();
+        }, 0);
+      },
+    });
+    const driveP = driveFakeProviderProof({
+      pty,
+      clock,
+      quietWindow: qw,
+      mail,
+      nonce,
+      projectId,
+      steerRecipient: identity.agent,
+      ...(opts.openMail != null ? { openMail: opts.openMail } : {}),
+    });
+    const [result] = await Promise.all([proofP, driveP]);
+    return { ...result, fidelity };
+  } finally {
+    for (const client of ownedClients) {
+      try {
+        await client.close();
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  }
+}
+
+async function runHostLiveProof(
+  mode: 'claude' | 'codex',
+  opts: RunProofOptions,
+): Promise<ProofResult> {
+  const hostLive = opts.hostLive;
+  if (hostLive == null) {
+    throw new Error(
+      `runProof: mode '${mode}' requires host-live launch inputs (opts.hostLive: spawnSpec / ` +
+        'sessionTools / renderMail / socketPath / bridgeLogPath). Fail-loud (Principle 9).',
+    );
+  }
+  // [host-live] — import the real seams at call-time (node-pty native addon + real timers + socket
+  // bridge transport). NOT at module load, so the in-sandbox test import stays free of the host-only graph.
+  const { createSocketBridgeTransportPair } = await import('./real-transport.js');
+  const { monotonicNowMs, realQuietWindow } = await import('./host.js');
+  const pty = await NodePtyHost.create();
+  const fidelity = deriveProofFidelity(mode, pty); // 'host-live', or fail-loud
+
+  const result = await runHostProof(opts.projectId, opts.identity, opts.mail, {
+    pty,
+    makeTransport: () =>
+      createSocketBridgeTransportPair(hostLive.socketPath, hostLive.bridgeLogPath),
+    sessionTools: hostLive.sessionTools,
+    now: monotonicNowMs,
+    quietWindow: realQuietWindow,
+    injectOptions: { retryDelay: hostProofInjectRetryDelay, allowUnverifiedSubmit: true },
+    afterReady: hostProofReadySettle,
+    ...(hostLive.trace === true ? { onPaneData: hostProofTracePaneData } : {}),
+    renderMail: hostLive.renderMail,
+    spawnSpec: hostLive.spawnSpec,
+    expectedRouteNonce: opts.nonce,
+    separateSteerTurn: true,
+    routeTimeoutMs: DEFAULT_ROUTE_TIMEOUT_MS,
+  });
+  return { ...result, fidelity };
+}
+
 function seedSteerProofMail(
   projectId: ProjectId,
   identity: HostedIdentity,
@@ -553,14 +787,6 @@ export async function runHostProofCommand(argv: readonly string[]): Promise<void
       );
     }
   }
-  // [host-live] — import real seams at call-time (node-pty + real timers + socket bridge transport).
-  // These are NOT imported at module-load so the module is safe to import in-sandbox tests
-  // without side-effects (node-pty is a native addon; its absence in sandbox must not crash).
-  const { NodePtyHost } = await import('@co/core');
-  const { createSocketBridgeTransportPair } = await import('./real-transport.js');
-  const { monotonicNowMs, realQuietWindow } = await import('./host.js');
-
-  const pty = await NodePtyHost.create();
   const runId = randomUUID();
   const nonce = `host-proof-${provider}-${runId}`;
   const agent = `host-proof-${provider}-${runId}`;
@@ -623,20 +849,22 @@ export async function runHostProofCommand(argv: readonly string[]): Promise<void
 
   console.error(`[co host-proof] running against ${provider} in project '${projectId}'…`);
 
-  const result = await runHostProof(projectId, identity, mail, {
-    pty,
-    makeTransport: () => createSocketBridgeTransportPair(socketPath, bridgeLogPath),
-    sessionTools: () => proofTools,
-    now: monotonicNowMs,
-    quietWindow: realQuietWindow,
-    injectOptions: { retryDelay: hostProofInjectRetryDelay, allowUnverifiedSubmit: true },
-    afterReady: hostProofReadySettle,
-    ...(process.env.CO_HOST_PROOF_TRACE === '1' ? { onPaneData: hostProofTracePaneData } : {}),
-    renderMail: hostProofMailRenderer(nonce, proofToolName),
-    spawnSpec,
-    expectedRouteNonce: nonce,
-    separateSteerTurn: true,
-    routeTimeoutMs: DEFAULT_ROUTE_TIMEOUT_MS,
+  // Thin wrapper over the unified driver: this assembles the host-live launch artifacts; runProof
+  // resolves the host-live seam bundle (real node-pty + socket bridge transport + real timers) and
+  // stamps the tamper-resistant `host-live` fidelity. Output + pass-criteria below are unchanged.
+  const result = await runProof(provider, {
+    projectId,
+    identity,
+    mail,
+    nonce,
+    hostLive: {
+      spawnSpec,
+      sessionTools: () => proofTools,
+      renderMail: hostProofMailRenderer(nonce, proofToolName),
+      socketPath,
+      bridgeLogPath,
+      trace: process.env.CO_HOST_PROOF_TRACE === '1',
+    },
   });
 
   console.error(
@@ -676,6 +904,9 @@ function hostProofIsolatedHomeDir(projectId: ProjectId, agent: string): string {
   }
 }
 
+// TODO(host-live): the 2000ms inject-retry and 4000ms ready-settle below are wall-clock magic
+// numbers never tuned against a real claude/codex binary (this path is FakePty-proven only).
+// Make them env-overridable and calibrate on the first real host-live run.
 function hostProofInjectRetryDelay(signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, 2000);

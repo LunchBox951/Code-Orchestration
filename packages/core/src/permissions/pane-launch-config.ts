@@ -7,12 +7,19 @@
  * Isolation is the point (permissions.md:90-98): the produced env/args reference ONLY isolated
  * config homes — none of the user's allow-rules, hooks, or MCP servers ever reach the pane.
  *
- *   Claude — `--strict-mcp-config` suppresses user MCP servers; `--disallowedTools` denies the
- *     call pre-exec; isolated `CLAUDE_CONFIG_DIR` prevents user allow-rules/hooks from leaking.
+ *   Claude — `--permission-mode bypassPermissions` runs the pane NON-INTERACTIVELY (no per-call
+ *     permission prompts — the load-bearing fix for autonomous drive); deny rules still apply in
+ *     bypass mode, so `--disallowedTools` hard-denies the block-list pre-exec. `--strict-mcp-config`
+ *     suppresses user MCP servers; isolated `CLAUDE_CONFIG_DIR` prevents user allow-rules/hooks from
+ *     leaking.
  *   Codex  — isolated `CODEX_HOME` carries a config.toml whose `sandbox_mode` and
- *     `approval_policy = "never"` enforce at the syscall boundary; the `[projects] trust_level`
- *     pre-seeds trust to skip the interstitial, `[mcp_servers.co]` points at the co MCP command,
- *     and inline Codex hooks run the hard-block gate with `matchBlock`.
+ *     `approval_policy = "never"` enforce at the syscall boundary (also non-interactive); the
+ *     `[projects] trust_level` pre-seeds trust to skip the interstitial, `[mcp_servers.co]` points at
+ *     the co MCP command, and inline Codex hooks run the hard-block gate with `matchBlock`.
+ *     `--dangerously-bypass-hook-trust` lets that orchestrator-GENERATED PreToolUse hook execute in
+ *     the ephemeral isolated `CODEX_HOME` without a persisted-trust prompt (the orchestrator vets the
+ *     hook source) — without it the block-list either silently never runs or deadlocks on a trust
+ *     prompt.
  *
  * {@link readEnforcedConfig} reads concrete provider artifacts back (Claude deny patterns / Codex
  * isolated hooks), then {@link checkBlockListDrift} verifies declared vs enforced ids.
@@ -83,6 +90,10 @@ export interface PaneLaunchConfig {
   readonly claudeMcpConfigJson?: string;
   /** Claude only: generated stdio MCP config destination path. */
   readonly claudeMcpConfigPath?: string;
+  /** Claude only: isolated `settings.json` content that pre-accepts the bypassPermissions warning. */
+  readonly claudeSettingsJson?: string;
+  /** Claude only: isolated `settings.json` destination path under `CLAUDE_CONFIG_DIR`. */
+  readonly claudeSettingsPath?: string;
   /** Files the real host must materialize before spawning the pane. */
   readonly prelaunchFiles?: readonly PrelaunchFile[];
 }
@@ -354,7 +365,11 @@ function buildClaudeLaunchConfig(
   identity: PaneIdentity,
   blockList: readonly BlockRule[],
 ): PaneLaunchConfig {
-  const args: string[] = ['--strict-mcp-config'];
+  // `bypassPermissions` makes the pane non-interactive (no per-call permission prompts) so an
+  // unattended autonomous agent never deadlocks waiting for an operator to approve a `Read`/`Bash`.
+  // Deny rules apply in EVERY mode including bypassPermissions, so the `--disallowedTools` block-list
+  // below still hard-denies the dangerous commands pre-exec (the gated-merge invariant is preserved).
+  const args: string[] = ['--strict-mcp-config', '--permission-mode', 'bypassPermissions'];
   if (CLAUDE_ALLOWED_CO_MCP_TOOLS.length > 0) {
     args.push('--allowedTools', CLAUDE_ALLOWED_CO_MCP_TOOLS.join(','));
   }
@@ -366,10 +381,25 @@ function buildClaudeLaunchConfig(
   if (claudeMcpConfigPath != null) {
     args.push('--mcp-config', claudeMcpConfigPath);
   }
+  // Pre-accept the bypassPermissions acknowledgment in the isolated settings.json so the pane starts
+  // STRAIGHT TO READY instead of blocking on the one-time interactive "Yes, I accept" warning that
+  // `--permission-mode bypassPermissions` raises on a fresh CLAUDE_CONFIG_DIR. (Onboarding state —
+  // hasCompletedOnboarding — is seeded separately from the operator's ~/.claude.json via the conductor's
+  // CLAUDE_STATE_ALLOWLIST.) Without this companion file the keystone deadlocks every agent on the
+  // warning screen — verified against real claude 2.1.181.
+  const claudeSettingsPath = `${identity.isolatedHomeDir.replace(/\/+$/u, '')}/settings.json`;
+  const claudeSettingsJson = buildClaudeSettingsJson();
+  const settingsPrelaunch: PrelaunchFile = {
+    path: claudeSettingsPath,
+    contents: claudeSettingsJson,
+  };
   const base = {
     provider: 'claude',
     args,
     env: { CLAUDE_CONFIG_DIR: identity.isolatedHomeDir },
+    claudeSettingsJson,
+    claudeSettingsPath,
+    prelaunchFiles: [settingsPrelaunch],
   } satisfies PaneLaunchConfig;
   if (claudeMcpConfigPath == null) return base;
   const claudeMcpConfigJson = buildClaudeMcpConfigJson(identity);
@@ -377,8 +407,28 @@ function buildClaudeLaunchConfig(
     ...base,
     claudeMcpConfigJson,
     claudeMcpConfigPath,
-    prelaunchFiles: [{ path: claudeMcpConfigPath, contents: claudeMcpConfigJson }],
+    prelaunchFiles: [
+      settingsPrelaunch,
+      { path: claudeMcpConfigPath, contents: claudeMcpConfigJson },
+    ],
   };
+}
+
+// The isolated `settings.json` that makes a fresh-config-dir agent non-interactive: pre-accept the
+// bypassPermissions warning + suppress the first-session nag dialogs. Deny rules (`--disallowedTools`)
+// are unaffected — they apply in every mode, including bypassPermissions.
+function buildClaudeSettingsJson(): string {
+  return (
+    JSON.stringify(
+      {
+        skipDangerousModePermissionPrompt: true,
+        skipWorkflowUsageWarning: true,
+        skipAutoPermissionPrompt: true,
+      },
+      null,
+      2,
+    ) + '\n'
+  );
 }
 
 function buildCodexLaunchConfig(
@@ -392,7 +442,11 @@ function buildCodexLaunchConfig(
   const codexBlockListRulesPath = buildCodexBlockListRulesPath(identity);
   return {
     provider: 'codex',
-    args: [],
+    // Each pane gets a fresh, isolated CODEX_HOME with no persisted hook trust, so the
+    // orchestrator-generated PreToolUse block-list hook would otherwise be skipped (a silent
+    // guardrail hole) or deadlock on a trust prompt. The orchestrator vets the hook source (it
+    // writes it), so bypass the trust prompt to guarantee the block-list actually runs.
+    args: ['--dangerously-bypass-hook-trust'],
     env: { CODEX_HOME: identity.isolatedHomeDir },
     codexConfigToml,
     codexConfigTomlPath,

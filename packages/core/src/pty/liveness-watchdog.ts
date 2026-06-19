@@ -25,7 +25,9 @@
  * Silent-stop is a DISTINCT break (not a liveness state): a turn that has gone idle
  * (`detectTurnEnd.idle`) with NO completion verb and a quiet pty = the agent ended its turn WITHOUT
  * `co_finish`/`worker_done` (the `finish-before-yield` break). The process is `alive`; it just stopped
- * without finishing — so silent-stop rides alongside `liveness: 'alive'` as a `break`, never a reap.
+ * without finishing. The host supplies `requiresFinishBeforeYield` for that role/protocol gate, so
+ * the mail-store fact `hasOutstandingActionable` remains reserved for actual unresolved actionable
+ * mail. Silent-stop rides alongside `liveness: 'alive'` as a `break`, never a reap.
  *
  * ── wedged vs silent-stop ([synthesized] reconciliation) ─────────────────────────────────────────────
  * Both are byte-quiet, so bytes alone cannot tell them apart. The separator is {@link LivenessInput.turnActive}
@@ -103,11 +105,18 @@ export interface LivenessInput {
   readonly hasWaitingItems?: boolean;
   /**
    * True when the agent's inbox contains at least one outstanding (unresolved) actionable mail
-   * (`mail.outstanding(agent)` non-empty). Injected by the host-side `livenessInputFor` seam. When
-   * explicitly false, an idle warm pane is not treated as a silent-stop break because there is no
-   * outstanding turn to finish.
+   * (`mail.outstanding(agent)` non-empty). Injected by the host-side `livenessInputFor` seam. This is
+   * an actual mail-store fact, used by the `errored_waiting` re-wake gate.
    */
   readonly hasOutstandingActionable?: boolean;
+  /**
+   * True when the just-yielded turn was protocol-bound to end with a completion verb
+   * (`co_finish`/`worker_done`). Injected by the host-side seam from turn state + role; this is distinct
+   * from unresolved mail because one-shot mail may already have been retracted while the turn still
+   * must finish before yielding. Defaults to `hasOutstandingActionable` for older direct classifier
+   * callers, then true when neither field is supplied.
+   */
+  readonly requiresFinishBeforeYield?: boolean;
 }
 
 /** Classifier config. Extends the C2 detector config (provider/quiet window) with the wedge window. */
@@ -132,6 +141,8 @@ export function classifyLiveness(
   config: LivenessConfig = {},
 ): LivenessVerdict {
   const wedgeMs = config.wedgeMs ?? WEDGE_MS;
+  const requiresFinishBeforeYield =
+    input.requiresFinishBeforeYield ?? input.hasOutstandingActionable ?? true;
 
   // dead — highest precedence: an exited pane overrides every byte signal.
   if (input.exited) {
@@ -193,7 +204,7 @@ export function classifyLiveness(
 
   // silent-stop — the agent YIELDED its turn (no longer active) but went idle with NO completion verb
   // and a quiet pty: it stopped without finishing. Reuse C2's detector for the idle + no-verb gate.
-  if (!input.turnActive && input.hasOutstandingActionable !== false) {
+  if (!input.turnActive && requiresFinishBeforeYield) {
     const trace =
       input.turnStartedAt == null
         ? input.trace
