@@ -9,6 +9,37 @@ in-sandbox proof (AC-S10-4 items 1–4) runs automatically as part of `pnpm test
 
 ---
 
+## Proof fidelity: one `runProof({fake|claude|codex})` driver
+
+The in-sandbox proof and this operator proof are the **same driver** — `runProof` in
+`packages/mcp/src/conductor/host-proof.ts` — differing only by the resolved seam bundle:
+
+- **`runProof('fake')`** resolves a `FakePty` + the in-sandbox `FakeProvider` (a scripted
+  startup → spinner → quiet timeline that also drives the MCP client to call `co_mail_send`), an
+  in-memory transport, and an injected counter clock / quiet window. This is what `pnpm test` runs.
+  Its result is tagged **`fidelity: 'sandbox-fake'`**.
+- **`runProof('claude')` / `runProof('codex')`** resolve the host-live bundle — a real `NodePtyHost`
+  (node-pty), the socket-bridge transport, and real timers — exactly what `co-mcp host-proof <provider>`
+  runs below. Its result is tagged **`fidelity: 'host-live'`**.
+
+`fidelity` is **derived from the resolved pty host, never passed in**: a `FakePty` ⇒ `sandbox-fake`,
+a `NodePtyHost` ⇒ `host-live`, and any mismatch (e.g. a non-`FakePty` resolved for `fake` mode, or a
+host matching neither) throws (Principle 9 — fail-loud). A `fake` run can therefore **never** be
+mislabeled `host-live`.
+
+> **A green `fake` run is NOT host-live evidence.** `sandbox-fake` proves the harness wiring — that
+> the spawn → inject → turn → route → steer → SIGKILL → recover sequence is correctly composed. It
+> does **not** prove a real `claude`/`codex` binary reached `ready` and routed mail through a real pty
+> (Principle 2 — authentic-terminal). Only a `host-live` result is SH-1 evidence.
+
+`assertHostLiveProof(result)` is the **forward gate** for this distinction: it throws unless
+`result.fidelity === 'host-live'`. There is no programmatic SH-1-evidence sink today (this command
+prints to stderr and exits; SH-1 evidence is the manual bundle in [`sh1-runbook.md`](sh1-runbook.md)),
+so any **future** SH-1-evidence recorder MUST call `assertHostLiveProof` before recording a result as
+host-live / SH-1 evidence.
+
+---
+
 ## Prerequisites
 
 1. `co` and `co-mcp` built (`pnpm build` in the repo root) and resolvable from the shell. If `co`
@@ -113,6 +144,29 @@ Each run creates a unique `host-proof-*` agent id and nonce-bearing proof mail. 
 the durable audit trail, but the live session projection is cleaned up when the proof closes its
 engine. The proof does not reuse a stable agent id because stale mail from prior runs must never
 satisfy the current nonce.
+
+## SH-5 companion check — blocked raw publish deny
+
+The `host-proof` command proves host-live routing/steer/recovery. `SH-5` also needs a real-provider
+permission-hook capture because a green sandbox block-list is not host-live evidence. Run this
+companion check once per provider during the same live session:
+
+1. Open a real hosted Claude/Codex pane in the Agents Console.
+2. Ask the agent to attempt an inert raw publish command and **do not approve any permission prompt**:
+
+   ```sh
+   git push --dry-run origin HEAD:refs/heads/co-sh5-deny-proof
+   ```
+
+3. Capture the pane transcript showing the command was denied before execution by the hosted
+   permission hook / nudge path.
+4. Confirm the remote has no `co-sh5-deny-proof` ref and attach both artifacts to the acceptance
+   evidence.
+
+Pass condition: the raw command fails closed in the provider pane before any git network mutation.
+Failure condition: the command reaches git execution, asks for human approval instead of being
+blocked, or mutates a remote ref. Repeat with a `gh pr create` / `gh pr merge` shape if the run's
+scope specifically exercises PR publication.
 
 ## Running `co-mcp serve <projectId>` and observing the daemon
 

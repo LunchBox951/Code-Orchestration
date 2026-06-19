@@ -17,8 +17,8 @@ overwritten on the next sync.
 
 | Label | Meaning |
 |---|---|
-| `type:spec` | Top-level intent / locked spec |
-| `type:phase` | Independently-mergeable slice of a spec |
+| `type:spec` | A task's locked requirements document / governance issue |
+| `type:phase` | Independently-mergeable slice of a task |
 | `type:task` | Implementer-sized unit inside a phase |
 | `type:bug` | Something is broken |
 | `type:research` | Open, evidence-pending decision (Principle 16) |

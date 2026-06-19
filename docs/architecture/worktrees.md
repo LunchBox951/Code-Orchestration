@@ -75,7 +75,7 @@ fixed house style, so provider variance disappears by construction. Register var
   now reads a fresh monotonic clock and adds the boundary test.
   Touches login + refresh.
   ```
-  *(trivial: `chore(ci): bump node 20 -> 22 in test matrix`)*
+  *(trivial: `chore(ci): bump node 22 -> 24 in test matrix`)*
 - **Merge commits** (`co_merge` owns them — the prototype's "absolute mess") — same house
   style + a review reference:
   ```
@@ -95,7 +95,7 @@ three** — the mode only changes *where* reviewed work goes:
 
 | Mode | Integration path | PRs | Style |
 |---|---|---|---|
-| **Owner** | gated `co_merge` / `co_push` to your master | optional | `co` house style |
+| **Owner** | gated `co_merge` / `co_push` to your protected target | optional | `co` house style |
 | **Contributor** | fork → PR to upstream (the sales-pitch PR is the deliverable) | required | **yields to the host repo's conventions** — `CONTRIBUTING.md`, PR template, sign-off |
 | **Offline** | `co_merge` lands locally; push / PR disabled | n/a | `co` house style |
 

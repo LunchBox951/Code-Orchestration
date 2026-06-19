@@ -11,12 +11,25 @@ runbook builds on and assumes familiarity with [`docs/host-proof.md`](host-proof
 the lower-level Conductor plumbing proof (`co doctor --live`, `co-mcp host-proof`). Complete that
 proof first if you have not already.
 
-> **Current Stage 14 boundary:** the deterministic dry-run harness in
+> **Current Stage 15 boundary:** the deterministic dry-run harness in
 > `packages/mcp/src/conductor/sh1-dry-run.test.ts` proves orchestration plumbing only. A green dry-run
-> is not SH-1 evidence. `co-mcp serve <projectId>` now cold-starts registered root coordinators and
-> drives the live Stage 14 self-drive loop, but SH-1 still requires host-live evidence from real
-> provider binaries and the desktop review gate. Treat any manual tool calls that remain necessary
-> during the host run as evidence to capture, not as hidden automation.
+> is not SH-1 evidence. The desktop app now owns and supervises the Conductor daemon, cold-starts
+> registered root coordinators, and drives the live self-drive loop through the app on-ramp; SH-1
+> still requires host-live evidence from real provider binaries and the desktop review gate.
+> `co_spec_lock` is a known temporary gap in the app surface: the operator MCP tool exists, but the
+> desktop app and public CLI do not expose it yet. Treat that lock invocation and any other manual
+> tool calls that remain necessary during the host run as evidence to capture, not as hidden
+> automation.
+>
+> **A green `fake` proof is likewise NOT SH-1 evidence.** The unified host-proof driver
+> `runProof({fake|claude|codex})` (`packages/mcp/src/conductor/host-proof.ts`) runs the same sequence
+> against a `FakePty` (`runProof('fake')`, tagged `fidelity: 'sandbox-fake'`) or a real provider in a
+> real pty (`runProof('claude')` / `runProof('codex')`, tagged `fidelity: 'host-live'`). A
+> `sandbox-fake` result proves only the harness wiring — never that a real `claude`/`codex` binary
+> reached `ready` and routed mail through a real terminal (Principle 2 — authentic-terminal). The
+> `assertHostLiveProof(result)` gate throws on anything other than `fidelity: 'host-live'`; any future
+> SH-1-evidence recorder MUST call it first, so a sandbox-fake run can never be banked as SH-1
+> evidence. See [`host-proof.md`](host-proof.md) for the fidelity tiers and the forward gate.
 
 ---
 
@@ -41,19 +54,14 @@ proof first if you have not already.
 
 4. **Desktop app built and running with the Reviews view available.** The Review view is required
    for SH-1 evidence because it displays the diff and locked acceptance criteria before verdict
-   submission (see Step 3). Build the app (`pnpm build` from `apps/desktop`, or the appropriate
-   desktop build command for your environment), launch it with `CO_PROJECT_ID="$PROJECT_ID"` in its
-   environment, and confirm the **Reviews** nav item is visible before starting.
+   submission (see Step 3). Build the app (`pnpm build` from the repo root, or the appropriate
+   desktop build command for your environment), open it, choose the repo in the in-app project picker,
+   and confirm the **Reviews** nav item plus daemon status badge are visible before starting.
 
-5. **Conductor daemon running.** Start it with:
-
-   ```sh
-   co-mcp serve "$PROJECT_ID"
-   ```
-
-   > **Host-live note:** `co-mcp serve` requires an explicit `<projectId>` (unlike
-   > `co-mcp host-proof`, which auto-detects from CWD). `co-mcp project-id` registers the current repo
-   > if needed and prints the id you pass to `serve`.
+5. **Conductor daemon supervised by the app.** Do **not** start `co-mcp serve` by hand for the primary
+   SH-1 run. The desktop app owns the daemon lifecycle; use the header badge and **Retry** control if
+   it fails to become healthy. Manual `co-mcp serve <projectId>` remains an advanced/headless
+   diagnostic path, not the acceptance path.
 
 ---
 
@@ -63,11 +71,9 @@ proof first if you have not already.
 tool; the operator cannot call it directly). Ask a coordinator agent to draft a small, self-contained
 change to the `co` repo — a documentation clarification, a minor fix, or a small enhancement. The
 change must be real (it will actually land on the repo via the gated merge), so keep scope minimal.
-If you do not already have a coordinator for this run, start one after the daemon is running:
-
-```sh
-co-mcp start-session "$PROJECT_ID" --prompt "Draft a small doc clarification for co."
-```
+If you do not already have a coordinator for this run, start one from the desktop Dashboard. For the
+standard proof, click **Start from demo spec**; for a custom proof, use **Start session** with a small
+prompt such as "Draft a small doc clarification for co."
 
 Once the coordinator has drafted the spec and mailed you the task id:
 
@@ -77,13 +83,15 @@ Once the coordinator has drafted the spec and mailed you the task id:
 
    ```sh
    co spec <taskId>
-   # confirm the spec content, then invoke operator-only tool:
-   # co_spec_lock { "task_id": "<taskId>" }
+   # confirm the spec content, then from an operator MCP client invoke:
+   # tool: co_spec_lock
+   # input: { "task_id": "<taskId>" }
    ```
 
-   The lock verb is `co_spec_lock`, and it is operator-only on the MCP surface. There is no public
-   `co spec lock` CLI command yet, and an agent persona cannot lock a spec. Once locked, the spec id
-   is fixed — record it.
+   The lock verb is `co_spec_lock`, and it is operator-only on the MCP surface. There is no desktop
+   app button and no public `co spec lock` CLI command yet, and an agent persona cannot lock a spec.
+   This lock invocation is therefore a known manual gap for the host-live evidence bundle. Once
+   locked, the spec id is fixed — record it.
 
 3. Note the **task id** (shown by `co spec <taskId>` after lock). You will need it in Step 6.
 
@@ -108,7 +116,9 @@ surfaces:
 If any of these steps require a manual operator/coordinator tool invocation because the live daemon
 does not yet select the next transition on its own, record that invocation in the evidence bundle.
 Those notes are not failures of the Stage 13 review view, but they are remaining SH-1 automation
-work before the acceptance criterion can be marked complete.
+work before the acceptance criterion can be marked complete. In particular, the current
+`co_spec_lock` manual gap means a run can collect useful host-live evidence, but SH-1 must stay
+incomplete until a no-ad-hoc-tool-call path exists.
 
 ### Watching progress
 
@@ -190,8 +200,8 @@ proof is valid.
 For SH-1 evidence, also capture live-binary proof:
 
 - `pnpm build` output for the exact commit being proven.
-- `co-mcp --help` showing `co-mcp serve <projectId>`.
-- The `co-mcp serve <projectId>` terminal transcript for the run.
+- `co-mcp --help` showing the built daemon/session verbs are present.
+- Desktop daemon-status and Agents Console evidence for the app-supervised run.
 - Process/store evidence showing the run was driven by built `co` / `co-mcp` against program-data,
   not by `.co/` prototype state.
 
@@ -208,7 +218,7 @@ Collect the following artifacts and record them as the evidence bundle for `SH-1
 | Review view evidence | Screenshot of the Review view before submit, showing the diff, locked criteria, and selected PASS verdict; pair it with the recorded verdict / merge evidence below |
 | Gated-merge commit | `git log <integration-branch> --oneline -1` |
 | SH-2 guard green | Terminal output from Step 5 |
-| Live-binary transcript | `co-mcp serve <projectId>` terminal output plus `co-mcp --help` |
+| Live-binary transcript | Desktop daemon-status / Agents Console transcript plus `co-mcp --help` |
 | Prototype-free runtime evidence | Process/store notes from Step 5 |
 
 Only after the live run is end-to-end and the manual-gap notes above are closed should `SH-1` be
@@ -226,12 +236,12 @@ marked met in `docs/v1-acceptance-criteria.md`:
 
 | Symptom | Likely cause / fix |
 |---|---|
-| "Conductor not running" shown in Reviews | Start the daemon: `co-mcp serve <projectId>` |
+| "Conductor unavailable" shown in Reviews | The desktop app supervises the daemon — check the **daemon status badge** in the header and click **Retry** if it shows `failed` (no need to run `co-mcp serve` by hand). |
 | No agents appear in the Agents Console | Daemon did not tick, the spec is not yet locked, or the next transition still needs an explicit operator/coordinator tool call; run `co status` and `co spec <taskId>` to confirm |
 | Reviews view empty / no pending review | The gated merge was not queued yet; confirm or rerun the Lead/coordinator `co_merge` transition for the finished worktree and check the operator inbox for `review_request` |
 | "No locked spec" error from coordinator | Run `co spec <taskId>` and lock via operator-only `co_spec_lock` before planning/merge review |
 | SH-2 guard fails | A `.co/` literal was introduced in production source; grep `packages/*/src` for the offending path and remove it |
-| Clicking PASS has no effect | Desktop app lost connection to the IPC server; restart `co-mcp serve <projectId>` and reload the app |
+| Clicking PASS has no effect | The desktop app lost its connection to the daemon it supervises — check the header **daemon status badge**: wait if it shows `restarting`, or click **Retry** if it shows `failed`, then resubmit the verdict |
 | Gated merge blocked after PASS | Confirm the `review_response` was recorded, then rerun/resume the Lead's `co_merge` for the same branch/target |
 
 ---
