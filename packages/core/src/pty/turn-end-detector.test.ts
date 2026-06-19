@@ -54,6 +54,34 @@ describe('detectTurnEnd — byte-quiescence is the necessary idle gate (AC-L7-4)
     expect(Object.keys(r).sort()).toEqual(['idle', 'idleSignals', 'sawCompletionVerb']);
   });
 
+  it('does not count a failed co_finish span as completion', () => {
+    const trace: DetectorEvent[] = [
+      { kind: 'bytes', at: 0 },
+      { kind: 'bytes', at: 800 },
+      { kind: 'mcp_start', at: 700, verb: 'co_finish' },
+      { kind: 'mcp_end', at: 750, verb: 'co_finish', ok: false },
+    ];
+
+    const r = detectTurnEnd(trace, 800 + QUIET_WINDOW_MS + 1, { provider: 'claude' });
+
+    expect(r.idle).toBe(true);
+    expect(r.sawCompletionVerb).toBe(false);
+  });
+
+  it('counts a successful co_finish span as completion', () => {
+    const trace: DetectorEvent[] = [
+      { kind: 'bytes', at: 0 },
+      { kind: 'bytes', at: 800 },
+      { kind: 'mcp_start', at: 700, verb: 'co_finish' },
+      { kind: 'mcp_end', at: 750, verb: 'co_finish', ok: true },
+    ];
+
+    const r = detectTurnEnd(trace, 800 + QUIET_WINDOW_MS + 1, { provider: 'claude' });
+
+    expect(r.idle).toBe(true);
+    expect(r.sawCompletionVerb).toBe(true);
+  });
+
   it('never-rendered: an empty trace (and a byte-less trace) is NOT idle (nothing to go quiet FROM)', () => {
     // Byte-quiescence is "had bytes, then went silent" — absence of any render is NOT idle, so a
     // not-yet-started session is never mistaken for an idle one (guards the documented invariant).

@@ -44,6 +44,7 @@ export interface IPtyForkOptionsLike {
 export interface IPtyLike {
   readonly pid?: number;
   write(data: string): void;
+  resize(cols: number, rows: number): void;
   onData(listener: (data: string) => void): IDisposableLike;
   onExit(listener: (event: IPtyExitEvent) => void): IDisposableLike;
   kill(signal?: string): void;
@@ -130,6 +131,10 @@ class NodePtyPane implements Pane {
   signal(sig: string): void {
     // node-pty has no separate signal channel; delivering the signal IS `kill(sig)` (e.g. SIGSTOP).
     this.#pty.kill(sig);
+  }
+
+  resize(cols: number, rows: number): void {
+    this.#pty.resize(cols, rows);
   }
 }
 

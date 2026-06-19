@@ -156,10 +156,22 @@ export {
   CLARIFY_TIMEOUT_POLICY,
 } from './mail/escalation.js';
 // L1 W6 renderer-registry seam + a trivial generic default renderer (AC-L1-8). The bus stays
-// typed/structured for agents; making a DeliveredMail human-legible is the app's job. L1 ships
-// the seam + the default only — per-type human cards are the L9 plug-point (register).
-export type { MailRenderer, RendererRegistry } from './mail/renderer.js';
-export { createRendererRegistry, defaultMailRenderer } from './mail/renderer.js';
+// typed/structured for agents; making a DeliveredMail human-legible is the app's job. SF-6
+// (AC-S15-12) fills the L9 plug-point: the structured MailCardView model + the built-in per-type
+// CARD renderers (approval/escalation/review_response), registered in core so adapters paint generically.
+export type {
+  MailRenderer,
+  RendererRegistry,
+  MailCardField,
+  MailCardView,
+  MailCardRenderer,
+} from './mail/renderer.js';
+export {
+  createRendererRegistry,
+  defaultMailRenderer,
+  defaultMailCardRenderer,
+  registerBuiltInMailCards,
+} from './mail/renderer.js';
 // L1 W6 mail-type no-stub assertion (AC-L1-7): a reusable completeness check proving every
 // declared type has schema + flow (+ a predicate iff actionable). L1 owns this local assertion;
 // the full build-time gate is L2.
@@ -976,6 +988,7 @@ export type {
   PhaseStatusChanged,
   PhaseVerified,
   PlanReplanned,
+  TaskCompleted,
 } from './plans/events.js';
 export {
   PLANS_EVENT_V,
@@ -983,6 +996,7 @@ export {
   EVENT_PHASE_STATUS_CHANGED,
   EVENT_PHASE_VERIFIED,
   EVENT_PLAN_REPLANNED,
+  EVENT_TASK_COMPLETED,
   PLAN_SCOPE_PREFIX,
   PHASE_STATUSES,
   phaseStatusSchema,
@@ -991,6 +1005,7 @@ export {
   phaseStatusChangedSchema,
   phaseVerifiedSchema,
   planReplannedSchema,
+  taskCompletedSchema,
   plansSchemas,
   plansUpcasters,
   planScope,
@@ -998,6 +1013,7 @@ export {
   makePhaseStatusChangedEvent,
   makePhaseVerifiedEvent,
   makePlanReplannedEvent,
+  makeTaskCompletedEvent,
 } from './plans/events.js';
 // Plan projection: the `PlansProjector` folds plan events into `plans` and `plan_phases` read-model tables.
 export { PlansProjector } from './plans/plans-projector.js';
@@ -1179,6 +1195,28 @@ export { classifyStartup, normalizeStartupOutput } from './pty/startup-classifie
 export type { StartupOutcome } from './pty/startup-driver.js';
 export { driveToReady } from './pty/startup-driver.js';
 
+// Stage 15 P-F — shared provider startup-byte fixtures (the B1 signatures, with `[documented]` /
+// `[synthesized]` / `[host-live]` provenance tags). Lifted out of `startup-classifier.test.ts` so
+// BOTH the classifier tests AND the mcp host-proof / FakeProvider harness drive ONE source of truth
+// (no divergent re-declared copies). Non-test module: shipped in `src` like FakePty.
+export {
+  CLAUDE_TRUST,
+  CLAUDE_READY,
+  CLAUDE_READY_CURSOR_POSITIONED,
+  CLAUDE_READY_STATUS_STRIP,
+  CLAUDE_READY_BYPASS_STRIP,
+  CLAUDE_THEME,
+  CLAUDE_LOGIN,
+  CLAUDE_OAUTH_LOGIN,
+  CODEX_UPDATE,
+  CODEX_TRUST,
+  CODEX_HOOKS_REVIEW,
+  CODEX_READY,
+  CODEX_READY_CURRENT,
+  CODEX_MCP_STARTING,
+  CODEX_SIGNIN,
+} from './pty/startup-fixtures.js';
+
 // L7 B1 — NodePtyHost: the one real-binary adapter, implementing PtyHost over node-pty. node-pty is
 // reached only via a lazy injected loader behind a local type shim, so the gate is green without the
 // native module present; the live binary reaching ready is the operator's host-side proof.
@@ -1311,6 +1349,13 @@ export {
   OPERATOR_IPC_TICK,
   OPERATOR_IPC_TRANSCRIPT,
 } from './operator-ipc/contract.js';
+
+// AC-S15-7 — read-only local branch + locally fetched PR-ref data for the desktop Source view.
+// Offline-safe: uses local git refs only — no gh and no network.
+export type { BranchInfo } from './source/list-branches.js';
+export { listBranches } from './source/list-branches.js';
+export type { PullRequestInfo } from './source/list-pull-requests.js';
+export { listPullRequests } from './source/list-pull-requests.js';
 
 /** Workspace-internal package identity; proves cross-package imports resolve. */
 export const CORE_PACKAGE = '@co/core' as const;

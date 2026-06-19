@@ -16,6 +16,7 @@ import {
   makePhaseStatusChangedEvent,
   makePhaseVerifiedEvent,
   makePlanReplannedEvent,
+  makeTaskCompletedEvent,
   plansSchemas,
   plansUpcasters,
   type PhaseNode,
@@ -28,6 +29,36 @@ import {
   selectAllPlans,
   selectPlan,
 } from './plans-projector.js';
+
+function assertPlanOpenForMutation(operation: string, plan: PlanRecord): void {
+  if (plan.completedTs != null) {
+    throw new Error(
+      `${operation}: plan '${plan.taskId}' is already completed — task.completed is terminal`,
+    );
+  }
+}
+
+function assertPlanReadyToComplete(operation: string, plan: PlanRecord): void {
+  const unmerged = plan.phases.filter((p) => p.status !== 'merged');
+  if (unmerged.length > 0) {
+    const detail = unmerged.map((p) => `'${p.phaseId}' (${p.status})`).join(', ');
+    throw new Error(
+      `${operation}: refusing task.completed for plan '${plan.taskId}' — ${unmerged.length} ` +
+        `phase(s) not 'merged': ${detail}. Every phase must merge before the task can close.`,
+    );
+  }
+  const unverified = plan.phases.filter((p) => p.verifiedPass !== true);
+  if (unverified.length > 0) {
+    const detail = unverified
+      .map((p) => `'${p.phaseId}' (${p.verifiedPass === false ? 'failed' : 'missing'})`)
+      .join(', ');
+    throw new Error(
+      `${operation}: refusing task.completed for plan '${plan.taskId}' — ${unverified.length} ` +
+        `phase(s) not verified green: ${detail}. Every phase must have phase.verified(pass=true) ` +
+        'before the task can close.',
+    );
+  }
+}
 
 export interface PlanStore {
   /** Record a plan draft (append `plan.drafted` + fold); returns the read-back record. */
@@ -60,6 +91,8 @@ export interface PlanStore {
     phases: readonly PhaseNode[],
     actor: string,
   ): PlanRecord;
+  /** Record a task completion (append `task.completed` + fold); returns the completed plan. */
+  recordTaskCompleted(taskId: string, actor: string): PlanRecord;
   /** The plan record for `taskId`, or undefined. */
   getPlan(taskId: string): PlanRecord | undefined;
   /** Every recorded plan, in stable order (by drafted_ts then task_id). */
@@ -120,6 +153,7 @@ export function openPlanStore(projectId: string): PlanStore {
             JSON.stringify(existing.taskCriteria) === JSON.stringify(rec.taskCriteria) &&
             existingPhasesSerialized === newPhasesSerialized
           ) {
+            assertPlanOpenForMutation('openPlanStore.recordDraft', existing);
             return existing;
           }
           throw new Error(
@@ -164,6 +198,13 @@ export function openPlanStore(projectId: string): PlanStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
+        const existing = selectPlan(db, taskId);
+        if (existing == null) {
+          throw new Error(
+            `openPlanStore.changePhaseStatus: phase.status.changed for unknown plan '${taskId}' — draft it first`,
+          );
+        }
+        assertPlanOpenForMutation('openPlanStore.changePhaseStatus', existing);
         const [stored] = tx.append([
           makePhaseStatusChangedEvent(projectId, { taskId, phaseId, status }, actor),
         ]);
@@ -188,6 +229,13 @@ export function openPlanStore(projectId: string): PlanStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
+        const existing = selectPlan(db, taskId);
+        if (existing == null) {
+          throw new Error(
+            `openPlanStore.recordPhaseVerified: phase.verified for unknown plan '${taskId}' — draft it first`,
+          );
+        }
+        assertPlanOpenForMutation('openPlanStore.recordPhaseVerified', existing);
         const [stored] = tx.append([
           makePhaseVerifiedEvent(projectId, { taskId, phaseId, baselineSha, pass }, actor),
         ]);
@@ -211,6 +259,13 @@ export function openPlanStore(projectId: string): PlanStore {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
         ensurePlansTables(db);
+        const existing = selectPlan(db, taskId);
+        if (existing == null) {
+          throw new Error(
+            `openPlanStore.recordReplan: plan.replanned for unknown plan '${taskId}' — draft it first`,
+          );
+        }
+        assertPlanOpenForMutation('openPlanStore.recordReplan', existing);
         const [stored] = tx.append([
           makePlanReplannedEvent(
             projectId,
@@ -233,6 +288,32 @@ export function openPlanStore(projectId: string): PlanStore {
         if (!row) {
           throw new Error(
             `openPlanStore.recordReplan: row missing after projection (taskId='${taskId}')`,
+          );
+        }
+        return row;
+      });
+    },
+
+    recordTaskCompleted(taskId: string, actor: string): PlanRecord {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensurePlansTables(db);
+        const existing = selectPlan(db, taskId);
+        if (existing == null) {
+          throw new Error(
+            `openPlanStore.recordTaskCompleted: task.completed for unknown plan '${taskId}' — draft it first`,
+          );
+        }
+        if (existing.completedTs != null) {
+          return existing;
+        }
+        assertPlanReadyToComplete('openPlanStore.recordTaskCompleted', existing);
+        const [stored] = tx.append([makeTaskCompletedEvent(projectId, { taskId }, actor)]);
+        applyEvent(tx, decode(stored!, plansUpcasters, plansSchemas), projectors);
+        const row = selectPlan(db, taskId);
+        if (!row) {
+          throw new Error(
+            `openPlanStore.recordTaskCompleted: row missing after projection (taskId='${taskId}')`,
           );
         }
         return row;

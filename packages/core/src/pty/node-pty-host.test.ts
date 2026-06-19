@@ -53,6 +53,12 @@ class FakeIPty implements IPtyLike {
     };
   }
 
+  resizes: Array<{ cols: number; rows: number }> = [];
+
+  resize(cols: number, rows: number): void {
+    this.resizes.push({ cols, rows });
+  }
+
   kill(signal?: string): void {
     this.kills.push(signal);
   }
@@ -290,6 +296,17 @@ describe('NodePtyHost — IPty → Pane adapter wiring', () => {
     pane.signal('SIGSTOP');
     pane.kill();
     expect(mod.pty.kills).toEqual(['SIGKILL', 'SIGSTOP', undefined]);
+  });
+
+  it('Pane.resize delegates to IPty.resize with correct cols/rows', () => {
+    const mod = new FakeNodePty();
+    const pane = new NodePtyHost(mod).spawn(FULL_SPEC);
+    pane.resize(120, 40);
+    pane.resize(200, 50);
+    expect(mod.pty.resizes).toEqual([
+      { cols: 120, rows: 40 },
+      { cols: 200, rows: 50 },
+    ]);
   });
 
   it('each spawned Pane has a non-empty, distinct id', () => {

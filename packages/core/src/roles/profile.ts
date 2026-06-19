@@ -58,6 +58,8 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
       'co_spec_archive',
       'co_plan_ingest',
       'co_phase_status',
+      'co_phase_update',
+      'co_task_complete',
       'co_sling',
       'co_kickback',
       'co_merge',

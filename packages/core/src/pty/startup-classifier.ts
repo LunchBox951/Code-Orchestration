@@ -85,10 +85,13 @@ interface ProviderSignatures {
 const SIGNATURES: Readonly<Record<Provider, ProviderSignatures>> = {
   claude: {
     // [documented] welcome box + `❯` composer + `? for shortcuts`; anchor the STABLE status line.
-    // [host-live] Claude Code 2.1.158 ready footer dropped `? for shortcuts` and now shows the
-    // permission-mode/status strip (`shift+tab` cycling, agents hint, token count). Use concepts
-    // rather than exact spacing because the TUI lays the strip out with cursor-positioning.
-    readyAnchorGroups: [['? for shortcuts'], ['shift+tab', 'agents', 'tokens']],
+    // [host-live] Claude Code 2.1.158+ dropped `? for shortcuts` and shows the permission-mode/status
+    // strip instead (`shift+tab to cycle` + `← for agents`). We anchor on those two concepts, NOT a
+    // token count: in `bypassPermissions` mode (2.1.181) the strip reads "bypass permissions on
+    // (shift+tab to cycle) · ← for agents" with NO idle token count, so requiring `tokens` would never
+    // detect a bypass-mode coordinator as ready (it would time out at startup). `shift+tab` + `agents`
+    // appear only on the ready composer footer, never on an interstitial/login screen.
+    readyAnchorGroups: [['? for shortcuts'], ['shift+tab', 'agents']],
     // [documented] `Select login method:` header.
     loginAnchorGroups: [
       ['select login method'],

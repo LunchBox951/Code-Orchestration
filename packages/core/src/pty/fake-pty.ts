@@ -18,6 +18,8 @@ export interface FakePtyPane extends Pane {
   readonly spec: SpawnSpec;
   /** True while SIGSTOP is in effect (cleared by SIGCONT). */
   readonly stopped: boolean;
+  /** All resize calls, in order: `[cols, rows]` pairs. */
+  readonly resizes: readonly [number, number][];
 }
 
 let paneCounter = 0;
@@ -26,6 +28,7 @@ class FakePtyPaneImpl implements FakePtyPane {
   readonly id: string;
   readonly spec: SpawnSpec;
   private _written: string[] = [];
+  private _resizes: [number, number][] = [];
   private _stopped = false;
   private _exited = false;
   private _dataListeners: Set<(chunk: string) => void> = new Set();
@@ -38,6 +41,10 @@ class FakePtyPaneImpl implements FakePtyPane {
 
   get written(): readonly string[] {
     return this._written;
+  }
+
+  get resizes(): readonly [number, number][] {
+    return this._resizes;
   }
 
   get stopped(): boolean {
@@ -72,6 +79,10 @@ class FakePtyPaneImpl implements FakePtyPane {
     } else if (sig === 'SIGCONT') {
       this._stopped = false;
     }
+  }
+
+  resize(cols: number, rows: number): void {
+    this._resizes.push([cols, rows]);
   }
 
   emit(chunk: string): void {

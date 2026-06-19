@@ -39,6 +39,14 @@ export const OPERATOR_IPC_METHODS = {
   steer: 'steer',
   /** Reply to an actionable mail (routed through the daemon — single writer). */
   reply: 'reply',
+  /**
+   * Send a FRESH operator message to an agent (the operator's "message the coordinator" action). Posts
+   * an actionable `clarify_request` from `@operator`, so the daemon wakes a WAITING/idle recipient on its
+   * next tick (an informational `operator_message` would never drive a turn — see {@link selectEligible}).
+   * Distinct from {@link OPERATOR_IPC_METHODS.steer}, which needs an already-warm pane; this is the path
+   * that reaches an idle agent. Single writer (daemon-side store).
+   */
+  operatorMessage: 'operatorMessage',
   /** Approve/decline an outstanding `approval` as a structured `approval_response`. */
   approve: 'approve',
   /** Mark `recipient`'s informational mail at `seq` read (event-sourced — single writer). */
@@ -54,6 +62,10 @@ export const OPERATOR_IPC_METHODS = {
    * cold-starts the root on its next tick. Exactly one of `prompt` / `specBody` is required.
    */
   startSession: 'startSession',
+  /** Send raw keystroke bytes into a hosted agent's PTY stdin (live xterm → PTY passthrough). */
+  sendInput: 'session:input',
+  /** Resize a hosted agent's PTY to the given cols × rows (xterm fit → PTY width sync). */
+  resize: 'session:resize',
 } as const;
 
 /** The set of operator-IPC request method names. */
@@ -147,6 +159,13 @@ export interface OperatorIpcSurface {
   steer(agentId: string, steer: Steer): Promise<void>;
   /** Reply to the mail named by `target` with `draft` (single writer — daemon-side). */
   reply(target: OperatorMailRef, draft: ReplyDraft): Promise<DeliveredMail>;
+  /**
+   * Send a fresh operator message to `agentId` as an actionable `clarify_request` from `@operator`
+   * (single writer — daemon-side). Unlike {@link steer} (which requires a warm pane), this reaches an
+   * idle/WAITING agent: the daemon selects it on the next tick because the message is outstanding +
+   * actionable. The operator's "message the coordinator" affordance routes here when the agent is cold.
+   */
+  operatorMessage(agentId: string, subject: string, body: string): Promise<DeliveredMail>;
   /** Approve/decline the `approval` at `approvalSeq` (operator-terminal; single writer). */
   approve(approvalSeq: number, reply: ApprovalReply): Promise<DeliveredMail>;
   /** Mark `recipient`'s mail at `seq` read (event-sourced read-state — single writer, MNR #2). */
@@ -162,6 +181,10 @@ export interface OperatorIpcSurface {
    * `specBody` is supplied (Principle 9).
    */
   startSession(params: StartSessionParams): Promise<StartSessionResult>;
+  /** Send raw keystroke bytes into `agentId`'s warm PTY stdin (live xterm → PTY passthrough). */
+  sendInput(agentId: string, data: string): Promise<void>;
+  /** Resize `agentId`'s warm PTY to `cols` × `rows` (xterm fit → PTY width sync). */
+  resize(agentId: string, cols: number, rows: number): Promise<void>;
 }
 
 /**

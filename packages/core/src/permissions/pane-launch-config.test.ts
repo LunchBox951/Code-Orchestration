@@ -316,6 +316,33 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
     expect(config.args[disallowedIdx + 1]).toBeTruthy();
   });
 
+  it('claude: runs non-interactively via --permission-mode bypassPermissions (deny-list still applies)', () => {
+    const config = buildPaneLaunchConfig('claude', BASE_IDENTITY);
+    const modeIdx = config.args.indexOf('--permission-mode');
+    expect(modeIdx).toBeGreaterThanOrEqual(0);
+    expect(config.args[modeIdx + 1]).toBe('bypassPermissions');
+    // bypassPermissions auto-approves normal tool use but deny rules apply in every mode, so the
+    // block-list is still enforced via --disallowedTools (the gated-merge invariant is preserved).
+    expect(config.args).toContain('--disallowedTools');
+  });
+
+  it('claude: pre-accepts the bypassPermissions warning via an isolated settings.json', () => {
+    const config = buildPaneLaunchConfig('claude', BASE_IDENTITY);
+    expect(config.claudeSettingsPath).toBe(`${ISOLATED_HOME}/settings.json`);
+    const settings = JSON.parse(config.claudeSettingsJson ?? '{}') as Record<string, unknown>;
+    // Without this key, `--permission-mode bypassPermissions` blocks on the one-time interactive
+    // "Yes, I accept" warning on a fresh CLAUDE_CONFIG_DIR — deadlocking the unattended agent.
+    expect(settings['skipDangerousModePermissionPrompt']).toBe(true);
+    // The other two suppress first-session nag dialogs that would also block an unattended startup;
+    // lock all three so neither can silently regress out of the settings builder.
+    expect(settings['skipWorkflowUsageWarning']).toBe(true);
+    expect(settings['skipAutoPermissionPrompt']).toBe(true);
+    expect(config.prelaunchFiles).toContainEqual({
+      path: `${ISOLATED_HOME}/settings.json`,
+      contents: config.claudeSettingsJson,
+    });
+  });
+
   it('claude: args allow the CO MCP bus without allowing shell tools', () => {
     const config = buildPaneLaunchConfig('claude', BASE_IDENTITY);
     const allowedIdx = config.args.indexOf('--allowedTools');
@@ -454,7 +481,9 @@ describe('SpawnSpec composition (AC-L7-6)', () => {
     };
     expect(spec.command).toBe('codex');
     expect(spec.env['CODEX_HOME']).toBe(ISOLATED_HOME);
-    expect(spec.args).toEqual([]);
+    // The orchestrator-generated PreToolUse block-list hook needs the trust prompt bypassed to run
+    // in the ephemeral isolated CODEX_HOME (the orchestrator vets the hook source).
+    expect(spec.args).toEqual(['--dangerously-bypass-hook-trust']);
     expect(spec.prelaunchFiles).toHaveLength(2);
   });
 });
