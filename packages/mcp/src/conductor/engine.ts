@@ -329,6 +329,10 @@ function defaultClarifyTimeoutSeconds(projectId: ProjectId): number {
   }
 }
 
+function requiresFinishBeforeYield(identity: HostedIdentity): boolean {
+  return identity.role === 'lead' || identity.role === 'implementer';
+}
+
 /**
  * The Conductor engine. Owns the single-turn cycle and the MNR-5 launch authority. Stateful: it holds
  * the warm hosted panes it has launched. NOT a tool and NOT agent-callable (Principle D4).
@@ -778,10 +782,22 @@ export class ConductorEngine {
   ): LivenessVerdict {
     const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
     const exited = this.paneExited.get(agentKey) ?? false;
-    return classifyLiveness({ trace, exited, pidAlive: !exited, turnActive: false }, observedAt, {
-      ...this.deps.turnConfig,
-      provider: hosted.identity.provider,
-    });
+    return classifyLiveness(
+      {
+        trace,
+        exited,
+        // TODO(host-live): pidAlive defaults to "the pane has not exited"; the real kill(pid,0)
+        // probe is the host-side seam (host.ts) and has never run against a real binary.
+        pidAlive: !exited,
+        turnActive: false,
+        requiresFinishBeforeYield: requiresFinishBeforeYield(hosted.identity),
+      },
+      observedAt,
+      {
+        ...this.deps.turnConfig,
+        provider: hosted.identity.provider,
+      },
+    );
   }
 
   /**
@@ -820,12 +836,20 @@ export class ConductorEngine {
   }
 
   private emitToolActivity(agentKey: string, activity: ToolActivityEvent): void {
+    if (
+      activity.phase === 'end' &&
+      activity.ok === true &&
+      COMPLETION_VERBS.includes(activity.tool)
+    ) {
+      this.turnStartedAt.delete(agentKey);
+    }
     const listeners = this.toolActivityListeners.get(agentKey);
     if (listeners == null || listeners.size === 0) return;
     const ev: DetectorEvent = {
       kind: activity.phase === 'start' ? 'mcp_start' : 'mcp_end',
       at: this.deps.now(),
       verb: activity.tool,
+      ...(activity.phase === 'end' ? { ok: activity.ok } : {}),
     };
     for (const listener of [...listeners]) listener(ev);
   }
@@ -934,6 +958,38 @@ export class ConductorEngine {
       provider: hosted.identity.provider,
       ...this.deps.injectOptions,
     });
+  }
+
+  /**
+   * Write raw input bytes into a warm hosted pane (SF-2 companion for keystroke passthrough). Look up
+   * the agent's warm pane and call {@link Pane.write} directly. Never spawns or relaunches — throws
+   * fail-loud (Principle 9) if the agent is not hosted. Operator-initiated only (Principle D4).
+   */
+  writeInput(projectId: ProjectId, agent: string, data: string): void {
+    const hosted = this.getHosted(projectId, agent);
+    if (hosted == null) {
+      throw new Error(
+        `ConductorEngine.writeInput: agent '${agent}' is not hosted in project '${projectId}' — ` +
+          'cannot write input to a pane that is not warm (Principle 1 — never spawns or relaunches).',
+      );
+    }
+    hosted.pane.write(data);
+  }
+
+  /**
+   * Resize the PTY of a warm hosted pane to `cols` × `rows` (xterm fit → PTY sync). Look up the
+   * agent's warm pane and call {@link Pane.resize} directly. Never spawns or relaunches — throws
+   * fail-loud (Principle 9) if the agent is not hosted. Operator-initiated only (Principle D4).
+   */
+  resizePty(projectId: ProjectId, agent: string, cols: number, rows: number): void {
+    const hosted = this.getHosted(projectId, agent);
+    if (hosted == null) {
+      throw new Error(
+        `ConductorEngine.resizePty: agent '${agent}' is not hosted in project '${projectId}' — ` +
+          'cannot resize a pane that is not warm (Principle 1 — never spawns or relaunches).',
+      );
+    }
+    hosted.pane.resize(cols, rows);
   }
 
   /**
@@ -1126,11 +1182,11 @@ function latestByteAt(trace: readonly DetectorEvent[]): number | undefined {
 }
 
 function traceSawCompletionVerb(trace: readonly DetectorEvent[]): boolean {
-  return trace.some(
-    (ev) =>
-      (ev.kind === 'mcp' || ev.kind === 'mcp_start' || ev.kind === 'mcp_end') &&
-      COMPLETION_VERBS.includes(ev.verb),
-  );
+  return trace.some((ev) => {
+    if (ev.kind === 'mcp') return COMPLETION_VERBS.includes(ev.verb);
+    if (ev.kind === 'mcp_end') return COMPLETION_VERBS.includes(ev.verb) && ev.ok !== false;
+    return false;
+  });
 }
 
 function isMcpEvent(ev: DetectorEvent): boolean {

@@ -561,9 +561,17 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     expect(pane.spec.env['CLAUDE_CONFIG_DIR']).toContain(`/isolated/${root}`);
     expect(pane.spec.args).toContain('--strict-mcp-config');
     expect(pane.spec.args).toContain('--mcp-config');
-    expect(pane.spec.prelaunchFiles?.[0]?.path).toContain(`/isolated/${root}/mcp/co-mcp.json`);
-    expect(pane.spec.prelaunchFiles?.[0]?.contents).toContain('"bridge"');
-    expect(pane.spec.prelaunchFiles?.[0]?.contents).toContain('/mcp/bridge.sock');
+    // Find the prelaunch files by path (order-independent): the isolated settings.json (which
+    // pre-accepts the bypassPermissions warning) is now prelaunched alongside the MCP bridge config.
+    const mcpConfigFile = pane.spec.prelaunchFiles?.find((f) =>
+      f.path.endsWith(`/isolated/${root}/mcp/co-mcp.json`),
+    );
+    expect(mcpConfigFile?.contents).toContain('"bridge"');
+    expect(mcpConfigFile?.contents).toContain('/mcp/bridge.sock');
+    const settingsFile = pane.spec.prelaunchFiles?.find((f) =>
+      f.path.endsWith(`/isolated/${root}/settings.json`),
+    );
+    expect(settingsFile?.contents).toContain('skipDangerousModePermissionPrompt');
 
     await runner.stop();
   });

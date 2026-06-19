@@ -146,6 +146,24 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
     await this.engine.steer(this.projectId, agentId, steer);
   }
 
+  /**
+   * Send raw input bytes into `agentId`'s warm pane (keystroke passthrough). Delegates to
+   * {@link ConductorEngine.writeInput}, which throws fail-loud (Principle 9) if the agent is not
+   * hosted. Async to mirror the steer API (the engine call is sync; the promise resolves immediately).
+   */
+  async sendInput(agentId: string, data: string): Promise<void> {
+    this.engine.writeInput(this.projectId, agentId, data);
+  }
+
+  /**
+   * Resize `agentId`'s warm PTY to `cols` × `rows` (xterm fit → PTY sync). Delegates to
+   * {@link ConductorEngine.resizePty}, which throws fail-loud (Principle 9) if the agent is not
+   * hosted. Async to mirror the steer API (the engine call is sync; the promise resolves immediately).
+   */
+  async resize(agentId: string, cols: number, rows: number): Promise<void> {
+    this.engine.resizePty(this.projectId, agentId, cols, rows);
+  }
+
   // ── The daemon candidate-skip predicate (§3c) + observability accessors ─────────────────────────
 
   /**

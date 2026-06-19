@@ -902,6 +902,30 @@ describe('ConductorEngine — P1b classifies post-turn liveness and yields warm'
     expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // healthy liveness ⇒ the pane stays WARM
   });
 
+  it('a yielded coordinator turn is not classified as missing co_finish post-turn', async () => {
+    const { projectId, cwd } = makeProject();
+    seedActionableMail(projectId, 'coord-1', '@operator');
+    const identity = makeIdentity({
+      agent: 'coord-1',
+      projectId,
+      cwd,
+      role: 'coordinator',
+      parent: '@operator',
+    });
+    const { engine, pty, clock, qw } = makeEngine();
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    const item = outstandingItem(projectId, 'coord-1');
+    const turnP = engine.runOneTurn(hosted, item);
+    await driveTurnToIdle(pane, item, clock, qw);
+    const outcome = await turnP;
+
+    expect(outcome.turnEnd?.idle).toBe(true);
+    expect(outcome.turnEnd?.sawCompletionVerb).toBe(false);
+    expect(outcome.liveness?.liveness).toBe('alive');
+    expect(outcome.liveness?.break).toBeUndefined();
+  });
+
   it('a turn that ends with a completion verb is healthy (no break)', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
@@ -923,6 +947,30 @@ describe('ConductorEngine — P1b classifies post-turn liveness and yields warm'
     expect(outcome.turnEnd?.sawCompletionVerb).toBe(true);
     expect(outcome.liveness?.liveness).toBe('alive');
     expect(outcome.liveness?.break).toBeUndefined(); // a finished turn carries no break
+  });
+
+  it('a turn with a failed completion verb remains silent-stop eligible', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty, clock, qw } = makeEngine({
+      mcpActivity: (_pane, push) => {
+        push({ kind: 'mcp_start', at: 900, verb: 'co_finish' } satisfies DetectorEvent);
+        push({ kind: 'mcp_end', at: 1000, verb: 'co_finish', ok: false } satisfies DetectorEvent);
+        return () => {};
+      },
+    });
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    const item = outstandingItem(projectId, 'impl-x');
+    const turnP = engine.runOneTurn(hosted, item);
+    await driveTurnToIdle(pane, item, clock, qw);
+    const outcome = await turnP;
+
+    expect(outcome.turnEnd?.sawCompletionVerb).toBe(false);
+    expect(outcome.liveness?.liveness).toBe('alive');
+    expect(outcome.liveness?.break?.kind).toBe('silent_stop');
   });
 });
 
@@ -1121,6 +1169,53 @@ describe('ConductorEngine — SF-2 steer: route a mid-turn steer to the warm pan
     await expect(engine.steer(projectId, 'nope', { kind: 'interrupt' })).rejects.toThrow(
       /not hosted/i,
     );
+  });
+});
+
+// ── Stage 15 §7: writeInput + resizePty on the warm hosted pane ─────────────────────────────────
+describe('ConductorEngine — writeInput / resizePty: pass raw input and PTY resize to the warm pane', () => {
+  it('writeInput writes the data bytes directly to the warm pane', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    const before = pane.written.length;
+    engine.writeInput(projectId, 'impl-x', 'hello\r');
+
+    expect(pane.written.slice(before)).toEqual(['hello\r']);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // still warm
+  });
+
+  it('writeInput throws fail-loud when the agent is not hosted', () => {
+    const { projectId } = makeProject();
+    const { engine } = makeEngine();
+    expect(() => engine.writeInput(projectId, 'ghost', 'x')).toThrow(/not hosted/i);
+  });
+
+  it('resizePty calls resize on the warm pane with the correct dims', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    await hostPane(engine, pty, identity);
+
+    const pane = pty.panes[pty.panes.length - 1]!;
+    engine.resizePty(projectId, 'impl-x', 120, 40);
+    engine.resizePty(projectId, 'impl-x', 200, 50);
+
+    expect(pane.resizes).toEqual([
+      [120, 40],
+      [200, 50],
+    ]);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true); // still warm
+  });
+
+  it('resizePty throws fail-loud when the agent is not hosted', () => {
+    const { projectId } = makeProject();
+    const { engine } = makeEngine();
+    expect(() => engine.resizePty(projectId, 'ghost', 120, 40)).toThrow(/not hosted/i);
   });
 });
 

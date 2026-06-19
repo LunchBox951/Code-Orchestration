@@ -12,11 +12,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
+  CLAUDE_OAUTH_LOGIN,
+  CLAUDE_READY,
   FakePty,
   MAIL_CHAT,
+  NodePtyHost,
   OPERATOR,
   WEDGE_MS,
   defaultMailRenderer,
@@ -24,26 +27,43 @@ import {
   openRegistry,
   openRosterStore,
   type DeliveredMail,
+  type MailStore,
+  type NodePtyModule,
   type ProjectId,
   type ProjectRegistry,
+  type PtyHost,
   type RosterStore,
-  type MailStore,
   type SpawnSpec,
 } from '@co/core';
 import type { HostedIdentity } from '../live-session-host.js';
-import { buildHostProofSpawnSpec, hostProofMailRenderer, runHostProof } from './host-proof.js';
+import {
+  assertHostLiveProof,
+  buildHostProofSpawnSpec,
+  deriveProofFidelity,
+  hostProofMailRenderer,
+  runHostProof,
+  runProof,
+  type ProofResult,
+} from './host-proof.js';
+import {
+  driveTurnToIdle,
+  flush,
+  makeControllableQuietWindow,
+  makeCounterClock,
+  neverResolve,
+  routeProofMail,
+  tick,
+  waitUntil,
+} from './fake-provider.js';
 import { createStreamTransportPair } from './real-transport.js';
 
 // ── Startup fixture ────────────────────────────────────────────────────────────
 // ESC authored as a \u escape so the source holds no raw control byte.
 const ESC = '\u001B';
-const CLAUDE_READY = ESC + '[2J' + ESC + '[H' + '╭─ Welcome ─╮\r\n❯ \r\n  ? for shortcuts\r\n';
-const CLAUDE_OAUTH_LOGIN =
-  ESC +
-  '[2J' +
-  'Opening browser to sign in…\r\n' +
-  "Browser didn't open? Use the url below to sign in (c to copy)\r\n" +
-  'Paste code here if prompted >\r\n';
+// CLAUDE_READY / CLAUDE_OAUTH_LOGIN now come from the shared `@co/core` startup-fixtures module
+// (the classifier's signatures, imported above). They classify identically (ready / login_required)
+// to the simpler locals they replaced, so host-proof behavior is unchanged. ESC stays local for the
+// interrupt-key `written` assertions below.
 
 // ── Cleanup state ──────────────────────────────────────────────────────────────
 const ORIGINAL_ENV = process.env;
@@ -138,73 +158,6 @@ function makeIdentity(agent: string, projectId: ProjectId, cwd: string): HostedI
   };
 }
 
-/** Drain microtasks + a macrotask. */
-const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
-/** A few ticks for steps with several chained internal awaits (e.g. MCP bind handshake). */
-const flush = async (n = 4): Promise<void> => {
-  for (let i = 0; i < n; i++) await tick();
-};
-const waitUntil = async (predicate: () => boolean, timeoutMs = 1000): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('timed out waiting for test predicate');
-};
-
-/** Mutable monotonic clock — DATA, never a wall clock. */
-function makeClock(): { now: () => number; set: (t: number) => void } {
-  let t = 0;
-  return { now: () => t, set: (next) => void (t = next) };
-}
-
-/** Controllable byte-quiet window: resolves on `settle()` or on its own re-arm abort. */
-function makeQuietWindow(): {
-  quietWindow: (signal: AbortSignal) => Promise<void>;
-  settle: () => void;
-} {
-  const waiters = new Set<() => void>();
-  return {
-    quietWindow: (signal) =>
-      new Promise<void>((resolve) => {
-        if (signal.aborted) return resolve();
-        let settled = false;
-        const finish = (): void => {
-          if (settled) return;
-          settled = true;
-          waiters.delete(finish);
-          signal.removeEventListener('abort', finish);
-          resolve();
-        };
-        signal.addEventListener('abort', finish, { once: true });
-        waiters.add(finish);
-      }),
-    settle: () => {
-      for (const w of [...waiters]) w();
-    },
-  };
-}
-
-/** Drive a hosted pane through ONE idle turn: echo the injected text, emit turn bytes, settle quiet. */
-async function driveTurnToIdle(
-  pane: FakePty['panes'][number],
-  item: DeliveredMail,
-  clock: ReturnType<typeof makeClock>,
-  qw: ReturnType<typeof makeQuietWindow>,
-): Promise<void> {
-  await tick(); // injectMail has written the payload and is awaiting the echo
-  pane.emit(defaultMailRenderer(item)); // composer echoes the injected text → exactly one Enter
-  await tick(); // injectMail submits; observeTurnEnd arms the first quiet window
-  clock.set(1000);
-  pane.emit('⠋ working…\r\n'); // the turn produces bytes, then goes quiet
-  await tick(); // the new bytes re-arm the quiet window
-  clock.set(1000 + WEDGE_MS + 1);
-  qw.settle(); // the window elapses with no further output ⇒ idle
-}
-
-const neverResolve = (): Promise<void> => new Promise<void>(() => {});
-
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 describe('runHostProof — AC-S10-4·2: full sequence deterministically over FakePty + fakes', () => {
@@ -216,8 +169,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
     const paneRef: { current?: FakePty['panes'][number] } = {};
     let beforeSteerSawInterrupt = false;
 
@@ -236,17 +189,10 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       },
       expectedRouteNonce: 'nonce-ok',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: 'clarify_request',
-            subject: 'turn complete nonce-ok',
-            body: 'proof routing nonce-ok',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'nonce-ok',
+          register: (client) => clients.push(client),
         });
       },
     });
@@ -310,8 +256,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     };
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -322,17 +268,10 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       spawnSpec,
       expectedRouteNonce: 'spawn-spec-nonce',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: 'clarify_request',
-            subject: 'turn complete spawn-spec-nonce',
-            body: 'proof routing spawn-spec-nonce',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'spawn-spec-nonce',
+          register: (client) => clients.push(client),
         });
       },
     });
@@ -359,8 +298,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
     let markBeforeSteer!: () => void;
     const beforeSteerStarted = new Promise<void>((resolve) => {
       markBeforeSteer = resolve;
@@ -382,17 +321,10 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       },
       expectedRouteNonce: 'before-steer-nonce',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: 'clarify_request',
-            subject: 'turn complete before-steer-nonce',
-            body: 'proof routing before-steer-nonce',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'before-steer-nonce',
+          register: (client) => clients.push(client),
         });
       },
     });
@@ -422,8 +354,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
     const paneRef: { current?: FakePty['panes'][number] } = {};
     let beforeSteerRan = false;
 
@@ -437,17 +369,10 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       steerTurnStartDelayMs: 0,
       expectedRouteNonce: 'split-turn-nonce',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: 'clarify_request',
-            subject: 'turn complete split-turn-nonce',
-            body: 'proof routing split-turn-nonce',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'split-turn-nonce',
+          register: (client) => clients.push(client),
         });
       },
       beforeSteer: async () => {
@@ -512,8 +437,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
     const paneRef: { current?: FakePty['panes'][number] } = {};
     let retryAttempts = 0;
     let releaseSecondRetry: (() => void) | undefined;
@@ -542,17 +467,10 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       steerTurnStartDelayMs: 0,
       expectedRouteNonce: 'split-fallback-nonce',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: 'clarify_request',
-            subject: 'turn complete split-fallback-nonce',
-            body: 'proof routing split-fallback-nonce',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'split-fallback-nonce',
+          register: (client) => clients.push(client),
         });
       },
       beforeSteer: async () => {
@@ -602,8 +520,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -617,17 +535,10 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       renderMail: (item) =>
         item.subject.includes('host-proof steer') ? ' ' : defaultMailRenderer(item),
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: 'clarify_request',
-            subject: 'turn complete split-inject-fail-nonce',
-            body: 'proof routing split-inject-fail-nonce',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'split-inject-fail-nonce',
+          register: (client) => clients.push(client),
         });
       },
     });
@@ -651,8 +562,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -696,8 +607,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     // awaitMailRouted intentionally omitted — the hosted agent routes nothing during the turn.
     const proofP = runHostProof(projectId, identity, mail, {
@@ -741,8 +652,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -773,8 +684,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -784,17 +695,12 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       injectOptions: { retryDelay: neverResolve },
       expectedRouteNonce: 'fresh-nonce',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: 'clarify_request',
-            subject: 'turn complete',
-            body: 'proof routing',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'fresh-nonce',
+          subject: 'turn complete',
+          body: 'proof routing',
+          register: (client) => clients.push(client),
         });
       },
     });
@@ -818,8 +724,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
     const routeStore = openMailStore(projectId);
     mailStores.push(routeStore);
 
@@ -866,8 +772,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -901,8 +807,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -912,17 +818,11 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       injectOptions: { retryDelay: neverResolve },
       expectedRouteNonce: 'wrong-type-nonce',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: MAIL_CHAT,
-            subject: 'turn complete wrong-type-nonce',
-            body: 'proof routing wrong-type-nonce',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'wrong-type-nonce',
+          type: MAIL_CHAT,
+          register: (client) => clients.push(client),
         });
       },
     });
@@ -946,8 +846,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -957,20 +857,23 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       injectOptions: { retryDelay: neverResolve },
       expectedRouteNonce: 'duplicate-nonce',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        for (let i = 0; i < 2; i++) {
-          await c.callTool({
-            name: 'co_mail_send',
-            arguments: {
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'duplicate-nonce',
+          register: (client) => clients.push(client),
+          messages: [
+            {
               to: 'coord-1',
-              type: 'clarify_request',
-              subject: `turn complete duplicate-nonce ${i}`,
+              subject: 'turn complete duplicate-nonce 0',
               body: 'proof routing duplicate-nonce',
             },
-          });
-        }
+            {
+              to: 'coord-1',
+              subject: 'turn complete duplicate-nonce 1',
+              body: 'proof routing duplicate-nonce',
+            },
+          ],
+        });
       },
     });
 
@@ -993,8 +896,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -1004,26 +907,23 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       injectOptions: { retryDelay: neverResolve },
       expectedRouteNonce: 'extra-invalid-nonce',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: 'clarify_request',
-            subject: 'turn complete extra-invalid-nonce',
-            body: 'proof routing extra-invalid-nonce',
-          },
-        });
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: MAIL_CHAT,
-            subject: 'extra chatter',
-            body: 'not part of the proof',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'extra-invalid-nonce',
+          register: (client) => clients.push(client),
+          messages: [
+            {
+              to: 'coord-1',
+              subject: 'turn complete extra-invalid-nonce',
+              body: 'proof routing extra-invalid-nonce',
+            },
+            {
+              to: 'coord-1',
+              type: MAIL_CHAT,
+              subject: 'extra chatter',
+              body: 'not part of the proof',
+            },
+          ],
         });
       },
     });
@@ -1047,8 +947,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
     const routeStore = openMailStore(projectId);
     mailStores.push(routeStore);
     let beforeSteerStarted = false;
@@ -1101,8 +1001,8 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
     const mail = outstandingItem(projectId, 'impl-hp');
 
     const pty = new FakePty();
-    const clock = makeClock();
-    const qw = makeQuietWindow();
+    const clock = makeCounterClock();
+    const qw = makeControllableQuietWindow();
 
     const proofP = runHostProof(projectId, identity, mail, {
       pty,
@@ -1112,17 +1012,10 @@ describe('runHostProof — AC-S10-4·2: full sequence deterministically over Fak
       injectOptions: { retryDelay: neverResolve },
       expectedRouteNonce: 'stream-nonce',
       awaitMailRouted: async (clientTransport) => {
-        const c = new Client({ name: 'fake-provider-router', version: '0.0.0' });
-        clients.push(c);
-        await c.connect(clientTransport);
-        await c.callTool({
-          name: 'co_mail_send',
-          arguments: {
-            to: 'coord-1',
-            type: 'clarify_request',
-            subject: 'turn complete stream-nonce',
-            body: 'proof routing stream-nonce',
-          },
+        await routeProofMail(clientTransport, {
+          to: 'coord-1',
+          nonce: 'stream-nonce',
+          register: (client) => clients.push(client),
         });
       },
     });
@@ -1249,7 +1142,11 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
     });
 
     expect(spec.command).toBe('codex');
-    expect(spec.args).toEqual(['--add-dir', `${dataDir}/sockets`]);
+    expect(spec.args).toEqual([
+      '--dangerously-bypass-hook-trust',
+      '--add-dir',
+      `${dataDir}/sockets`,
+    ]);
     expect(spec.env['CODEX_HOME']).toBe(`${dataDir}/isolated/host-proof-codex`);
     const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
     expect(configToml).toBeDefined();
@@ -1268,5 +1165,77 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
       path: `${dataDir}/isolated/host-proof-codex/auth.json`,
       contents: '{"codex":true}\n',
     });
+  });
+});
+
+describe('runProof — unified driver + Principle-2 provenance (Stage 15 P-F)', () => {
+  it("runProof('fake') drives the full sandbox proof in ONE call and tags fidelity 'sandbox-fake'", async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    seedActionableMail(projectId, 'impl-hp');
+    const identity = makeIdentity('impl-hp', projectId, cwd);
+    const mail = outstandingItem(projectId, 'impl-hp');
+
+    const result = await runProof('fake', {
+      projectId,
+      identity,
+      mail,
+      nonce: 'fake-proof-nonce',
+    });
+
+    // Provenance: a FakePty bundle is sandbox-fake — and can NEVER be host-live.
+    expect(result.fidelity).toBe('sandbox-fake');
+    // A clean PASS: every proof step is green (turn ran + idle, mail routed, session reconstructed,
+    // steer completed mid-turn).
+    expect(result.turnRan).toBe(true);
+    expect(result.turnIdle).toBe(true);
+    expect(result.mailRouted).toBe(true);
+    expect(result.sessionReconstructed).toBe(true);
+    expect(result.steerCompleted).toBe(true);
+    expect(result.steerMidTurn).toBe(true);
+    expect(result.recoveredSessions.some((s) => s.agentId === 'impl-hp')).toBe(true);
+  });
+
+  it('assertHostLiveProof refuses a sandbox-fake result and passes a host-live one (both directions)', () => {
+    // Construct the results directly — exercise the assertion in isolation, no real binary spawned.
+    const base = {
+      turnRan: true,
+      turnIdle: true,
+      mailRouted: true,
+      sessionReconstructed: true,
+      steerCompleted: true,
+      steerMidTurn: true,
+      recoveredSessions: [],
+    } as const;
+
+    const sandboxFake: ProofResult = { ...base, fidelity: 'sandbox-fake' };
+    expect(() => assertHostLiveProof(sandboxFake)).toThrow(/sandbox-fake|host-live|SH-1/i);
+
+    const hostLive: ProofResult = { ...base, fidelity: 'host-live' };
+    expect(() => assertHostLiveProof(hostLive)).not.toThrow();
+  });
+
+  it('deriveProofFidelity is tamper-resistant: derives from the pty host, fails loud on a forced mismatch', () => {
+    // A stub node-pty module — constructing NodePtyHost never loads the native addon (only create() does).
+    const stubModule: NodePtyModule = {
+      spawn: () => {
+        throw new Error('test stub: node-pty must never spawn in the sandbox');
+      },
+    };
+
+    // Honest bundles derive the correct tier from the resolved pty host kind.
+    expect(deriveProofFidelity('fake', new FakePty())).toBe('sandbox-fake');
+    expect(deriveProofFidelity('claude', new NodePtyHost(stubModule))).toBe('host-live');
+    expect(deriveProofFidelity('codex', new NodePtyHost(stubModule))).toBe('host-live');
+
+    // Forcing a non-FakePty host into 'fake' mode must fail loud — a fake run can NEVER carry host-live.
+    expect(() => deriveProofFidelity('fake', new NodePtyHost(stubModule))).toThrow(
+      /non-FakePty|sandbox-fake/i,
+    );
+
+    // A host that is neither FakePty nor NodePtyHost matches no tier — fail loud (Principle 9).
+    const alien = {} as unknown as PtyHost;
+    expect(() => deriveProofFidelity('fake', alien)).toThrow(/FakePty|NodePtyHost|provenance/i);
+    expect(() => deriveProofFidelity('claude', alien)).toThrow(/FakePty|NodePtyHost|provenance/i);
   });
 });

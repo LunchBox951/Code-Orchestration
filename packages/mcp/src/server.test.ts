@@ -44,6 +44,8 @@ const EXPECTED_TOOLS = [
   'co_spec_archive',
   'co_plan_ingest',
   'co_phase_status',
+  'co_phase_update',
+  'co_task_complete',
   'co_issue_capture',
   'co_issue_list',
   'co_issue_diagnose',
@@ -364,6 +366,34 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
       arguments: { type: 'chat', subject: 's', body: 'b' },
     });
     expect(res.isError).toBe(true);
+  });
+
+  it('reports tool end activity with success/failure status', async () => {
+    const ctx = makeTestContext('impl-activity');
+    const events: Array<{ phase: 'start' | 'end'; tool: string; ok?: boolean }> = [];
+    const client = await connect({
+      contextFactory: () => ctx,
+      onToolActivity: (event) => events.push(event),
+    });
+
+    const ok = await client.callTool({
+      name: 'co_mail_send',
+      arguments: { to: 'impl-activity', type: 'chat', subject: 'ok', body: 'done' },
+    });
+    expect(ok.isError).toBeFalsy();
+
+    const failed = await client.callTool({
+      name: 'co_mail_send',
+      arguments: { type: 'chat', subject: 'bad', body: 'missing recipient' },
+    });
+    expect(failed.isError).toBe(true);
+
+    expect(events).toEqual([
+      { phase: 'start', tool: 'co_mail_send' },
+      { phase: 'end', tool: 'co_mail_send', ok: true },
+      { phase: 'start', tool: 'co_mail_send' },
+      { phase: 'end', tool: 'co_mail_send', ok: false },
+    ]);
   });
 });
 

@@ -25,6 +25,7 @@ import {
   openMailStore,
   openRegistry,
   openReviewStore,
+  openRosterStore,
   openSessionStore,
   openSpecStore,
   openWorktreeStore,
@@ -312,7 +313,16 @@ function liveRunningAgents(projectId: ProjectId, engine: ConductorEngine): reado
   }
 }
 
-function hasOutstandingActionable(projectId: ProjectId, agentId: string): boolean {
+function hasWaitingItems(projectId: ProjectId, agentId: string): boolean {
+  const mail = openMailStore(projectId);
+  try {
+    return waitingItems(mail, agentId).length > 0;
+  } finally {
+    mail.close();
+  }
+}
+
+function hasOutstandingActionableMail(projectId: ProjectId, agentId: string): boolean {
   const mail = openMailStore(projectId);
   try {
     return mail.outstanding(agentId).length > 0;
@@ -321,12 +331,13 @@ function hasOutstandingActionable(projectId: ProjectId, agentId: string): boolea
   }
 }
 
-function hasWaitingItems(projectId: ProjectId, agentId: string): boolean {
-  const mail = openMailStore(projectId);
+function requiresFinishBeforeYield(projectId: ProjectId, agentId: string): boolean {
+  const roster = openRosterStore(projectId);
   try {
-    return waitingItems(mail, agentId).length > 0;
+    const role = roster.getAgent(agentId)?.role;
+    return role == null || role === 'lead' || role === 'implementer';
   } finally {
-    mail.close();
+    roster.close();
   }
 }
 
@@ -567,8 +578,9 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         ...obs,
         pidAlive: pidAliveFor(agent),
         hasWaitingItems: hasWaitingItems(projectId, agent.agentId),
-        hasOutstandingActionable:
-          obs.turnStartedAt !== undefined && hasOutstandingActionable(projectId, agent.agentId),
+        hasOutstandingActionable: hasOutstandingActionableMail(projectId, agent.agentId),
+        requiresFinishBeforeYield:
+          obs.turnStartedAt !== undefined && requiresFinishBeforeYield(projectId, agent.agentId),
       };
     },
     now,
@@ -693,7 +705,8 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
     onTick: (o) =>
       console.error(
         `[co-mcp serve] tick ${o.tick} candidates=${o.candidateCount} ` +
-          `cold=${o.coldCandidates.length} selected=${o.selected ?? '-'} cadence=${o.cadenceFired}`,
+          `cold=${o.coldCandidates.length} rewarmed=${o.reWarmed.length} ` +
+          `selected=${o.selected ?? '-'} cadence=${o.cadenceFired}`,
       ),
     onError: (err) => console.error('[co-mcp serve] tick error:', err),
   });

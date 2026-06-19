@@ -25,6 +25,7 @@ import {
   assertNever,
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_CLARIFY_REQUEST,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   OPERATOR,
@@ -146,6 +147,38 @@ function requireSteer(params: WirePayload): Steer {
     return { kind };
   }
   throw new InvalidParamsError(`operator IPC steer: invalid kind '${String(kind)}'.`);
+}
+
+function requirePositiveDim(obj: WirePayload, key: string): number {
+  const value = obj[key];
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value <= 0 ||
+    !Number.isInteger(value)
+  ) {
+    throw new InvalidParamsError(
+      `operator IPC: missing/invalid '${key}' (expected a positive integer dimension).`,
+    );
+  }
+  return value;
+}
+
+// A terminal keystroke/paste chunk. Bounded so a buggy renderer can't push an unbounded string
+// straight through to node-pty's write (the operator-uid socket is the only caller, but fail closed).
+const MAX_INPUT_CHARS = 1024 * 1024;
+
+function requireInputData(obj: WirePayload, key: string): string {
+  const value = obj[key];
+  if (typeof value !== 'string') {
+    throw new InvalidParamsError(`operator IPC: missing/invalid '${key}' (expected a string).`);
+  }
+  if (value.length > MAX_INPUT_CHARS) {
+    throw new InvalidParamsError(
+      `operator IPC: '${key}' exceeds the ${MAX_INPUT_CHARS}-character input limit.`,
+    );
+  }
+  return value;
 }
 
 function requireDecision(obj: WirePayload, key: string): ApprovalDecision {
@@ -322,6 +355,10 @@ export class OperatorIpcServer {
         return {};
       case OPERATOR_IPC_METHODS.reply:
         return (await this.handleReply(params)) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.operatorMessage:
+        // The operator's "message an agent" verb: a fresh actionable `clarify_request` from @operator
+        // that wakes an idle recipient on the next tick (steer needs a warm pane — this does not).
+        return (await this.handleOperatorMessage(params)) as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.approve:
         return (await this.handleApprove(params)) as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.markRead:
@@ -343,6 +380,18 @@ export class OperatorIpcServer {
         // Resolve the project's repo path via the registry exactly as `runStartSessionCommand` does,
         // then delegate to the same core primitive (single source of truth; never duplicated here).
         return (await this.handleStartSession(params)) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.sendInput:
+        // Stage 15 §7 — raw keystroke passthrough: operator writes into the agent's warm PTY stdin.
+        await router.sendInput(requireString(params, 'agentId'), requireInputData(params, 'data'));
+        return {};
+      case OPERATOR_IPC_METHODS.resize:
+        // Stage 15 §7 — PTY resize sync: xterm fit dispatches the terminal dimensions to the PTY.
+        await router.resize(
+          requireString(params, 'agentId'),
+          requirePositiveDim(params, 'cols'),
+          requirePositiveDim(params, 'rows'),
+        );
+        return {};
       default:
         return assertNever(method);
     }
@@ -379,6 +428,32 @@ export class OperatorIpcServer {
       repoCwd,
       ...(fromPrompt ? { prompt } : { specBody }),
     });
+  }
+
+  /**
+   * Send a FRESH operator message to an agent (the "message the coordinator" verb). Posts an actionable
+   * `clarify_request` from {@link OPERATOR} to `agentId` through the daemon's own store (single writer —
+   * MNR #2), the SAME shape the kickoff seeds (`start-coordinator-session`). Because the item is
+   * outstanding + actionable, the daemon's `selectEligible` wakes the recipient on its next tick even
+   * when it is cold/idle — which `steer` (warm-pane-only) and an informational `operator_message`
+   * (never a wake item) cannot do.
+   */
+  private async handleOperatorMessage(params: WirePayload): Promise<DeliveredMail> {
+    const agentId = requireString(params, 'agentId');
+    const subject = requireString(params, 'subject');
+    const body = requireString(params, 'body');
+    const mail = this.openMail(this.projectId);
+    try {
+      return mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: agentId,
+        from: OPERATOR,
+        subject,
+        body,
+      });
+    } finally {
+      mail.close();
+    }
   }
 
   /** Reply to an actionable mail named by `target`, through the daemon's own store (single writer). */

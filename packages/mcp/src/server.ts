@@ -22,6 +22,8 @@ const SERVER_VERSION = '0.0.0';
 export interface ToolActivityEvent {
   readonly phase: 'start' | 'end';
   readonly tool: string;
+  /** Present on end events; true only when the tool handler returned successfully. */
+  readonly ok?: boolean;
 }
 
 export interface CoMcpServerOptions {
@@ -88,15 +90,17 @@ export function createCoMcpServer(opts: CoMcpServerOptions): McpServer {
     };
     server.registerTool(spec.name, config, async (args: unknown) => {
       opts.onToolActivity?.({ phase: 'start', tool: spec.name });
+      let ok = false;
       try {
         const ctx = await opts.contextFactory();
         const structured = await invokeTool(registry, ctx, spec.name, args);
+        ok = true;
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(structured) }],
           structuredContent: structured as Record<string, unknown>,
         };
       } finally {
-        opts.onToolActivity?.({ phase: 'end', tool: spec.name });
+        opts.onToolActivity?.({ phase: 'end', tool: spec.name, ok });
       }
     });
   }
