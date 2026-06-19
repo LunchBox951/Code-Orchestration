@@ -19,7 +19,7 @@ jobs:
     name: quality-gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # pnpm's version is read from package.json "packageManager" (pnpm@10.33.0).
       # No `version:` input on purpose: pnpm/action-setup@v6 throws
       # "Multiple versions of pnpm specified" when a `version` input disagrees
@@ -43,7 +43,7 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Stable promotion gets the stricter dependency gate. Nightly dependency
       # churn stays on dev, where Dependabot checks keep fixes flowing.
       - uses: pnpm/action-setup@v6
