@@ -11,6 +11,8 @@
     "pretest": "pnpm build",
     "test": "vitest run --exclude \".co/**\"",
     "test:watch": "vitest --exclude \".co/**\"",
+    "pretest:live": "pnpm build",
+    "test:live": "CO_LIVE_E2E=1 vitest run --exclude \".co/**\" packages/mcp/src/conductor/worker-benchmark.live.test.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

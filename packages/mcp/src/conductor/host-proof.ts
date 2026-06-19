@@ -58,6 +58,7 @@ import {
 } from '../context.js';
 import { defaultCoMcpPaths } from './host-launch-paths.js';
 import { providerAuthPrelaunchFiles } from './placement-launch.js';
+import { resolveHostLiveSeams } from './host-live-seams.js';
 
 // ── Seams ─────────────────────────────────────────────────────────────────────
 
@@ -524,22 +525,19 @@ async function runHostLiveProof(
         'sessionTools / renderMail / socketPath / bridgeLogPath). Fail-loud (Principle 9).',
     );
   }
-  // [host-live] — import the real seams at call-time (node-pty native addon + real timers + socket
-  // bridge transport). NOT at module load, so the in-sandbox test import stays free of the host-only graph.
-  const { createSocketBridgeTransportPair } = await import('./real-transport.js');
-  const { monotonicNowMs, realQuietWindow } = await import('./host.js');
-  const pty = await NodePtyHost.create();
-  const fidelity = deriveProofFidelity(mode, pty); // 'host-live', or fail-loud
+  // [host-live] — resolve the shared real seam bundle at call-time (node-pty native addon + real timers
+  // + socket bridge transport). NOT at module load, so the in-sandbox test import stays free of the
+  // host-only graph. The benchmark driver builds from the SAME resolveHostLiveSeams (one wiring path).
+  const seams = await resolveHostLiveSeams(mode);
 
   const result = await runHostProof(opts.projectId, opts.identity, opts.mail, {
-    pty,
-    makeTransport: () =>
-      createSocketBridgeTransportPair(hostLive.socketPath, hostLive.bridgeLogPath),
+    pty: seams.pty,
+    makeTransport: () => seams.makeTransport(hostLive.socketPath, hostLive.bridgeLogPath),
     sessionTools: hostLive.sessionTools,
-    now: monotonicNowMs,
-    quietWindow: realQuietWindow,
-    injectOptions: { retryDelay: hostProofInjectRetryDelay, allowUnverifiedSubmit: true },
-    afterReady: hostProofReadySettle,
+    now: seams.now,
+    quietWindow: seams.quietWindow,
+    injectOptions: { retryDelay: seams.injectRetryDelay, allowUnverifiedSubmit: true },
+    afterReady: seams.readySettle,
     ...(hostLive.trace === true ? { onPaneData: hostProofTracePaneData } : {}),
     renderMail: hostLive.renderMail,
     spawnSpec: hostLive.spawnSpec,
@@ -547,7 +545,7 @@ async function runHostLiveProof(
     separateSteerTurn: true,
     routeTimeoutMs: DEFAULT_ROUTE_TIMEOUT_MS,
   });
-  return { ...result, fidelity };
+  return { ...result, fidelity: seams.fidelity };
 }
 
 function seedSteerProofMail(
@@ -904,27 +902,9 @@ function hostProofIsolatedHomeDir(projectId: ProjectId, agent: string): string {
   }
 }
 
-// TODO(host-live): the 2000ms inject-retry and 4000ms ready-settle below are wall-clock magic
-// numbers never tuned against a real claude/codex binary (this path is FakePty-proven only).
-// Make them env-overridable and calibrate on the first real host-live run.
-function hostProofInjectRetryDelay(signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, 2000);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
-}
-
-function hostProofReadySettle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 4000));
-}
-
+// The host-live inject-retry + ready-settle timers (formerly hardcoded magic numbers here) now live in
+// host-live-seams.ts and are env-overridable (CO_HOST_LIVE_INJECT_RETRY_MS / CO_HOST_LIVE_READY_SETTLE_MS),
+// shared by both the host-proof and worker-benchmark drivers.
 function hostProofTracePaneData(chunk: string): void {
   const normalized = normalizeStartupOutput(chunk);
   if (normalized.length > 0) {
