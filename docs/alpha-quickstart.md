@@ -131,8 +131,8 @@ Operator host-live acceptance (run before merging):
 [ ] Auth: co doctor --live → [ok] provider-compatibility for both monitored providers (claude, codex).
 [ ] Session started: used "Start from demo spec" or "Start session" in the Dashboard.
 [ ] Plan-with-operator: the coordinator mails a clarify/brainstorm; you reply in-app; it drafts a spec.
-[ ] Lock: you approve the spec with the operator-only `co_spec_lock` path; agents cannot lock it.
-    Until the app exposes spec lock, record this as a remaining host-live automation gap.
+[ ] Lock: you approve the spec with `co spec lock <taskId>` (operator-only CLI, PR #50); agents cannot lock it.
+    An in-app Lock button is a remaining UX nicety, not an automation gap.
 [ ] Autonomous drive: WITHOUT manual tool calls, co spawns lead/implementer, runs turns, and a
     review_request lands in the Review view.
 [ ] Approve: click PASS in the Review view; confirm the gated merge lands on the integration branch.
