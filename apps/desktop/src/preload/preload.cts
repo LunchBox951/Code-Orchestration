@@ -25,6 +25,10 @@ const { contextBridge, ipcRenderer } = require('electron') as {
 };
 
 type ReviewState = unknown;
+type SourceState = unknown;
+type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
+type DaemonStatusPayload = { status: DaemonStatus; detail: string | null };
+type CurrentProjectState = { projectId: string; path: string | null } | null;
 
 interface CoShellBridge {
   navigate(view: NavView): void;
@@ -84,6 +88,15 @@ interface CoShellBridge {
     prompt: string | null,
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
+  sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
+  // ── Project + Daemon on-ramp ────────────────────────────────────────────────
+  openProject(): Promise<void>;
+  daemonRetry(): Promise<{ ok: boolean; error?: string }>;
+  onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;
+  onCurrentProject(listener: (state: CurrentProjectState) => void): () => void;
+  onAppError(listener: (message: string) => void): () => void;
+  // ── Source ──────────────────────────────────────────────────────────────────
+  refreshSource(): Promise<SourceState | null>;
 }
 
 const bridge: CoShellBridge = {
@@ -257,6 +270,35 @@ const bridge: CoShellBridge = {
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:start', prompt, specBody);
+  },
+  async sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:startFromDemoSpec');
+  },
+  // ── Project + Daemon on-ramp ────────────────────────────────────────────────
+  async openProject(): Promise<void> {
+    await ipcRenderer.invoke('project:open');
+  },
+  async daemonRetry(): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('daemon:retry');
+  },
+  onDaemonStatus(listener: (payload: DaemonStatusPayload) => void) {
+    const handler = (_event: unknown, payload: DaemonStatusPayload): void => listener(payload);
+    ipcRenderer.on('daemon:status', handler);
+    return () => ipcRenderer.removeListener('daemon:status', handler);
+  },
+  onCurrentProject(listener: (state: CurrentProjectState) => void) {
+    const handler = (_event: unknown, state: CurrentProjectState): void => listener(state);
+    ipcRenderer.on('project:current', handler);
+    return () => ipcRenderer.removeListener('project:current', handler);
+  },
+  onAppError(listener: (message: string) => void) {
+    const handler = (_event: unknown, message: string): void => listener(message);
+    ipcRenderer.on('app:error', handler);
+    return () => ipcRenderer.removeListener('app:error', handler);
+  },
+  // ── Source ──────────────────────────────────────────────────────────────────
+  async refreshSource(): Promise<SourceState | null> {
+    return ipcRenderer.invoke<SourceState | null>('source:refresh');
   },
 };
 

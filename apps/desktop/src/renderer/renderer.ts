@@ -94,6 +94,12 @@ let latestAgentsState: AgentsConsoleState | null = null;
 let latestLimitsState: LimitsCostState | null = null;
 let projectInfo: { id: string; name: string; branch?: string } | null = null;
 let sourceTab: 'branches' | 'prs' | 'commits' = 'branches';
+// The app-supervised Conductor daemon's lifecycle status (P-ON1), pushed over `daemon:status`. Drives
+// the header daemon pill independently of the operator-IPC connection's live/offline state.
+let latestDaemon: DaemonStatusPayload | null = null;
+// The latest read-only Source view state (P-ON4) from `source:refresh` — real branches/PR refs or a
+// named empty/error state. `null` until the first fetch resolves.
+let latestSource: SourceState | null = null;
 
 const OPERATOR_BUS = '@operator';
 const knownMailBuses = new Set<string>([OPERATOR_BUS]);
@@ -207,19 +213,29 @@ function renderHeader(): void {
     liveLabel.style.color = isLive ? 'oklch(0.8 0.13 150)' : 'var(--text-dim)';
   }
 
-  // daemon pill — degraded means the conductor IPC is down
+  // daemon pill — reflects the app-supervised Conductor daemon lifecycle (P-ON1), not the IPC live state.
+  // The app OWNS the daemon, so the operator sees its real status (starting/healthy/restarting/failed/
+  // stopped) and can Retry a failed start by clicking the pill.
   const daemonDot = document.getElementById('daemon-dot');
   const daemonLabel = document.getElementById('daemon-label');
-  if (daemonDot) daemonDot.style.background = isLive ? 'var(--success)' : 'oklch(0.6 0.02 30)';
-  if (daemonLabel) {
-    daemonLabel.textContent = status === 'connecting' ? 'starting' : isLive ? 'healthy' : 'stopped';
+  const daemonPill = document.getElementById('daemon-pill');
+  const daemonStatus = latestDaemon?.status ?? 'stopped';
+  if (daemonDot) daemonDot.style.background = daemonDotColor(daemonStatus);
+  if (daemonLabel) daemonLabel.textContent = daemonStatus;
+  if (daemonPill) {
+    // A failed daemon is the one retryable state — make the pill an affordance + surface the reason.
+    const retryable = daemonStatus === 'failed';
+    daemonPill.classList.toggle('retryable', retryable);
+    daemonPill.title = latestDaemon?.detail ?? '';
   }
 
-  // project pill
+  // project pill — clickable "Open project" affordance. With a project open it shows the repo name; with
+  // none open it stays in the honest empty state ("No project open") but remains the entry point.
   const pill = document.getElementById('project-pill');
   const nameEl = document.getElementById('project-name');
   const branchEl = document.getElementById('project-branch');
   const titlebar = document.getElementById('titlebar-title');
+  if (pill instanceof HTMLButtonElement) pill.disabled = false;
   if (projectInfo != null) {
     pill?.classList.remove('empty');
     if (nameEl) nameEl.textContent = projectInfo.name;
@@ -232,9 +248,30 @@ function renderHeader(): void {
       }
     }
     if (titlebar) titlebar.textContent = `co · Code Orchestration · ${projectInfo.name}`;
+  } else {
+    pill?.classList.add('empty');
+    if (nameEl) nameEl.textContent = 'No project open';
+    if (branchEl) branchEl.hidden = true;
+    if (titlebar) titlebar.textContent = 'co · Code Orchestration';
   }
 
   renderLimitsSummary();
+}
+
+// Map the supervised daemon lifecycle status to the header dot colour. `healthy` is success-green;
+// `starting`/`restarting` are an in-flight amber; `failed` is danger; `stopped` is neutral.
+function daemonDotColor(status: DaemonStatus): string {
+  switch (status) {
+    case 'healthy':
+      return 'var(--success)';
+    case 'starting':
+    case 'restarting':
+      return 'var(--warn)';
+    case 'failed':
+      return 'var(--danger)';
+    case 'stopped':
+      return 'oklch(0.6 0.02 30)';
+  }
 }
 
 // ── Limits popover ──────────────────────────────────────────────────────────────
@@ -1037,11 +1074,28 @@ function renderMail(state: MailState): void {
 
 // ── Source ──────────────────────────────────────────────────────────────────────
 
+// The current Source view's live branches (from `source:refresh`); the header's branch label reflects the
+// repo's actual current branch when known, falling back to the project pill's branch hint.
+function sourceBranches(): readonly BranchInfo[] {
+  return latestSource?.kind === 'source' ? latestSource.branches : [];
+}
+
+function currentBranchName(): string | null {
+  const current = sourceBranches().find((b) => b.isCurrent);
+  return current?.name ?? projectInfo?.branch ?? null;
+}
+
 function renderSource(): void {
   const repoName = document.getElementById('source-repo-name');
   const branchLabel = document.getElementById('source-branch-label');
   if (repoName) repoName.textContent = projectInfo?.name ?? 'repository';
-  if (branchLabel) branchLabel.textContent = projectInfo?.branch ?? '—';
+  if (branchLabel) branchLabel.textContent = currentBranchName() ?? '—';
+
+  // Reflect live counts on the tabs (branches + PR refs are the live reads; commits stays deferred).
+  const branchCount = sourceBranches().length;
+  const prCount = latestSource?.kind === 'source' ? latestSource.pullRequests.length : 0;
+  setSourceTabCount('src-branches-count', branchCount);
+  setSourceTabCount('src-prs-count', prCount);
 
   for (const el of document.querySelectorAll<HTMLElement>('.source-tab')) {
     el.classList.toggle('active', el.getAttribute('data-src') === sourceTab);
@@ -1050,24 +1104,102 @@ function renderSource(): void {
   const body = document.getElementById('source-body');
   if (!body) return;
 
-  // Source is not yet wired to live git/gh data in this build — render the design's
-  // honest first-class empty states (PRs are deferred to gh+network; branches/commits
-  // surface once the conductor exposes git over the operator IPC).
+  // Named non-source states (Principle 9 — never a blank pane): no project open, the open project's path
+  // is unavailable, or the git read failed. These outrank the per-tab views because no repo data exists.
+  if (latestSource == null) {
+    body.innerHTML = sourceMessage('⎇', 'Loading…', 'Reading branches from the open repository.');
+    return;
+  }
+  if (latestSource.kind === 'no-project') {
+    body.innerHTML = sourceMessage(
+      '▣',
+      'No project open',
+      'Open a project from the header to read its branches.',
+    );
+    return;
+  }
+  if (latestSource.kind === 'path-missing') {
+    body.innerHTML = sourceMessage('⎇', 'Repository path unavailable', esc(latestSource.message));
+    return;
+  }
+  if (latestSource.kind === 'error') {
+    body.innerHTML = sourceMessage('⚠', 'Could not read the repository', esc(latestSource.message));
+    return;
+  }
+
+  // kind === 'source' — real, locally-read data. Branches are the live surface; PRs are local refs only
+  // (the gated-PR list over gh+network stays deferred); commits stays the design's honest empty state.
   if (sourceTab === 'branches') {
-    body.innerHTML = `<div class="empty-inline" style="padding:70px 40px">
-        <span class="glyph">⎇</span>
-        <span class="lead">Branch list not wired yet</span>
-        <span class="sub">Worktree branches will surface here once the Conductor exposes git over the operator IPC.</span>
-      </div>`;
+    body.innerHTML = renderBranchList(latestSource.branches);
   } else if (sourceTab === 'prs') {
-    body.innerHTML = `<div class="empty-inline" style="padding:70px 40px">
-        <span class="glyph">⇄</span>
-        <span class="lead">No pull requests</span>
-        <span class="sub">Gated PRs appear here once a phase passes its full five-command gate (deferred to gh + network).</span>
-      </div>`;
+    body.innerHTML = renderPullRequestList(latestSource.pullRequests);
   } else {
     body.innerHTML = renderGitGraph([]);
   }
+}
+
+function setSourceTabCount(id: string, count: number): void {
+  const el = document.getElementById(id);
+  if (el) el.textContent = String(count);
+}
+
+function sourceMessage(glyph: string, lead: string, sub: string): string {
+  return `<div class="empty-inline" style="padding:70px 40px">
+      <span class="glyph">${glyph}</span>
+      <span class="lead">${lead}</span>
+      <span class="sub">${sub}</span>
+    </div>`;
+}
+
+function renderBranchList(branches: readonly BranchInfo[]): string {
+  if (branches.length === 0) {
+    return sourceMessage(
+      '⎇',
+      'No branches',
+      'This repository has no branches yet — the first commit creates one.',
+    );
+  }
+  const rows = branches
+    .map((b) => {
+      const head = b.isCurrent
+        ? '<span class="git-ref" style="margin-right:8px">◆ HEAD</span>'
+        : '';
+      const upstream =
+        b.upstream != null ? `<span class="git-author">↑ ${esc(b.upstream)}</span>` : '';
+      return `
+        <div class="git-row" style="padding:0 18px">
+          ${head}
+          <span class="git-msg">${esc(b.name)}</span>
+          ${upstream}
+          <span class="git-sha">${esc(b.lastCommit.sha)}</span>
+          <span class="git-when">${esc(b.lastCommit.subject)}</span>
+        </div>`;
+    })
+    .join('');
+  return `<div class="git-graph">${rows}</div>`;
+}
+
+function renderPullRequestList(pullRequests: readonly PullRequestInfo[]): string {
+  if (pullRequests.length === 0) {
+    return sourceMessage(
+      '⇄',
+      'No pull requests',
+      'Locally-fetched PR refs surface here; the gated-PR list over gh + network stays deferred.',
+    );
+  }
+  const rows = pullRequests
+    .map(
+      (pr) => `
+        <div class="git-row" style="padding:0 18px">
+          <span class="git-ref" style="margin-right:8px">⇄ #${pr.number}</span>
+          <span class="git-msg">${esc(pr.lastCommit.subject)}</span>
+          <span class="git-author">${esc(pr.source)}</span>
+          <span class="git-sha">${esc(pr.lastCommit.sha)}</span>
+          <span class="git-when">${esc(pr.ref)}</span>
+        </div>`,
+    )
+    .join('');
+  return `<div class="git-graph">${rows}</div>`;
 }
 
 // Lane-based VS-Code-style git graph (handoff §7). Renders nothing meaningful for an
@@ -1295,15 +1427,61 @@ document.addEventListener('DOMContentLoaded', () => {
   // Preload IBM Plex Mono so the live terminal builds on a stable monospace grid (anti-warp, #40).
   preloadTerminalFont();
 
-  // Project identity for the header pill.
-  void bridge.projectInfo?.().then((info) => {
-    if (info != null) {
-      const raw = info.id;
-      const base = raw.includes('/') ? (raw.split('/').pop() ?? raw) : raw;
-      projectInfo = { id: raw, name: base };
-      renderHeader();
-      renderSource();
+  // Derive the header pill's project identity from a projectId + optional path: prefer the repo dir name
+  // from the path (the operator's mental model), falling back to the id.
+  function applyCurrentProject(state: CurrentProjectState): void {
+    if (state == null) {
+      projectInfo = null;
+    } else {
+      const path = state.path;
+      const name =
+        path != null && path.length > 0
+          ? (path.split(/[/\\]/).filter(Boolean).pop() ?? state.projectId)
+          : state.projectId;
+      projectInfo = { id: state.projectId, name };
     }
+    renderHeader();
+    // A project change means the open repo changed — re-read its branches.
+    void refreshSource();
+  }
+
+  // Initial project identity (covers the startup race before the first `project:current` push lands).
+  void bridge.projectInfo?.().then((info) => {
+    if (info != null && projectInfo == null) {
+      applyCurrentProject({ projectId: info.id, path: null });
+    }
+  });
+
+  // Live current-project pushes (open / switch / no-project) from the controller.
+  bridge.onCurrentProject?.(applyCurrentProject);
+
+  // Live daemon lifecycle pushes (starting → healthy → restarting → failed → stopped) for the header pill.
+  bridge.onDaemonStatus?.((payload) => {
+    latestDaemon = payload;
+    renderHeader();
+  });
+
+  // Controller-surfaced errors (e.g. an "Open project" register/open failure) — Principle 9 visible.
+  bridge.onAppError?.((message) => showAppError(message));
+
+  // Read the open repo's branches / local PR refs for the Source view.
+  async function refreshSource(): Promise<void> {
+    latestSource = (await bridge.refreshSource?.()) ?? null;
+    renderSource();
+  }
+  void refreshSource();
+
+  // Project pill → the in-app "Open project" on-ramp (directory picker → register → start daemon + shell).
+  document.getElementById('project-pill')?.addEventListener('click', () => {
+    void bridge.openProject?.();
+  });
+
+  // Daemon pill → Retry a FAILED daemon start (the one retryable state). No-op for other states.
+  document.getElementById('daemon-pill')?.addEventListener('click', () => {
+    if (latestDaemon?.status !== 'failed') return;
+    void bridge.daemonRetry?.().then((r) => {
+      if (!r.ok && r.error != null) showAppError(r.error);
+    });
   });
 
   // Nav clicks
@@ -1423,12 +1601,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('session-start-form')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
     if (target.closest('#session-demo-spec')) {
-      const ta = document.getElementById('session-prompt-input') as HTMLTextAreaElement | null;
-      if (ta) {
-        ta.value =
-          'Finish stage-15 convergence: fix the unstick bug (key on agentId), land routing, and get PR #41 review-ready. Lock the spec, then fan out a lead with phase workers.';
-        ta.focus();
-      }
+      // P-ON3 — one-click launch a coordinator from the bundled predesigned demo spec (no terminal). The
+      // main process reads dist/renderer/demo-spec.md and starts a root session from its body.
+      void bridge.sessionStartFromDemoSpec?.().then((r) => {
+        if (r.ok) flashToast('Launching coordinator from the demo spec…');
+        else showAppError(r.error ?? 'Failed to start from the demo spec');
+      });
       return;
     }
     if (!target.closest('#session-start-btn')) return;
@@ -1593,7 +1771,11 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       return;
     }
-    if (target.closest('#source-fetch')) flashToast('Source not yet wired to git');
+    if (target.closest('#source-fetch')) {
+      // Re-read the open repo's branches / local PR refs (a direct local git read — no network fetch).
+      flashToast('Refreshing branches…');
+      void refreshSource();
+    }
   });
 
   renderSource();

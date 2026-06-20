@@ -26,6 +26,11 @@ for (const name of readdirSync(srcDir)) {
   }
 }
 
+// Bundle the predesigned on-ramp demo spec (repo-root docs/) into dist/renderer/demo-spec.md so the
+// main process can read it at runtime for "Start from demo spec" (session:startFromDemoSpec). This
+// script lives at apps/desktop/scripts, so the repo root is three levels up. Node built-ins only.
+cpSync(join(here, '../../../docs/demo-spec-co-improves-its-docs.md'), join(dstDir, 'demo-spec.md'));
+
 // Vendor xterm UMD build + CSS (renderer uses window.Terminal global; no bundler).
 mkdirSync(join(dstDir, 'vendor'), { recursive: true });
 cpSync(require.resolve('@xterm/xterm/lib/xterm.js'), join(dstDir, 'vendor', 'xterm.js'));

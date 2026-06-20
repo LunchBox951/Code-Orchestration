@@ -256,9 +256,20 @@
         background: oklch(0.2 0.01 255);
         border: 1px solid oklch(0.34 0.04 255);
         border-radius: 8px;
-        cursor: default;
+        cursor: pointer;
         color: var(--text-body);
         font-family: inherit;
+      }
+      .project-pill:hover {
+        border-color: var(--accent);
+      }
+      .project-pill:disabled {
+        cursor: default;
+      }
+      /* A FAILED supervised daemon is the one retryable state — hint the pill is clickable to Retry. */
+      #daemon-pill.retryable {
+        cursor: pointer;
+        border-color: var(--danger);
       }
       .project-pill.empty {
         background: var(--bg-panel-2);
@@ -2247,7 +2258,13 @@
       </div>
       <div class="header-divider"></div>
 
-      <button class="project-pill empty" id="project-pill" type="button" disabled>
+      <button
+        class="project-pill empty"
+        id="project-pill"
+        type="button"
+        aria-label="Open project"
+        title="Open project"
+      >
         <span class="project-dot">▣</span>
         <span class="project-name" id="project-name">No project open</span>
         <span class="project-branch" id="project-branch" hidden></span>

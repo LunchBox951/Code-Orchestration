@@ -218,6 +218,44 @@ interface LimitsCostState {
   taskCosts: readonly LimitsCostCostRow[];
 }
 
+// ── Source / Daemon / Project on-ramp (inline — renderer is isolated from Node context) ──────
+
+interface BranchCommit {
+  sha: string;
+  subject: string;
+  committedAt?: string;
+  author?: string;
+}
+
+interface BranchInfo {
+  name: string;
+  isCurrent: boolean;
+  upstream?: string;
+  lastCommit: BranchCommit;
+}
+
+interface PullRequestInfo {
+  number: number;
+  ref: string;
+  source: string;
+  lastCommit: BranchCommit;
+}
+
+type SourceState =
+  | { kind: 'source'; branches: readonly BranchInfo[]; pullRequests: readonly PullRequestInfo[] }
+  | { kind: 'no-project' }
+  | { kind: 'path-missing'; projectId: string; message: string }
+  | { kind: 'error'; message: string };
+
+type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
+
+interface DaemonStatusPayload {
+  status: DaemonStatus;
+  detail: string | null;
+}
+
+type CurrentProjectState = { projectId: string; path: string | null } | null;
+
 interface CoShellBridge {
   navigate(view: NavView): void;
   projectInfo(): Promise<ProjectInfo | null>;
@@ -276,6 +314,15 @@ interface CoShellBridge {
     prompt: string | null,
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
+  sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
+  // ── Project + Daemon on-ramp ────────────────────────────────────────────────
+  openProject(): Promise<void>;
+  daemonRetry(): Promise<{ ok: boolean; error?: string }>;
+  onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;
+  onCurrentProject(listener: (state: CurrentProjectState) => void): () => void;
+  onAppError(listener: (message: string) => void): () => void;
+  // ── Source ──────────────────────────────────────────────────────────────────
+  refreshSource(): Promise<SourceState | null>;
 }
 
 interface Window {
