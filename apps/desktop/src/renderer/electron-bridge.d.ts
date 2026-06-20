@@ -1,8 +1,12 @@
 // Renderer-side type declarations for the contextBridge surface exposed by preload.cts.
 // Declared inline (no Node/shared imports) because the renderer is isolated from Node context.
 
-type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'cost';
+type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'usage';
 type ConnectionStatus = 'connecting' | 'live' | 'degraded';
+
+interface ProjectInfo {
+  id: string;
+}
 type AgentStatus = 'warm' | 'waiting' | 'stuck' | 'paused' | 'unknown';
 
 interface ConnectionObservation {
@@ -110,6 +114,24 @@ interface XtermTerminal {
   reset(): void;
   clear(): void;
   dispose(): void;
+  // Load an xterm addon (e.g. the fit addon) — `unknown` keeps the renderer free of an xterm type import.
+  loadAddon(addon: unknown): void;
+  // Interactive stdin: fires for every keystroke/paste chunk the operator types into the pane.
+  onData(cb: (data: string) => void): void;
+  // The fitted grid dimensions (read AFTER fit) — drive PTY.resize(cols, rows) for width-agreement.
+  readonly cols: number;
+  readonly rows: number;
+}
+
+// The vendored `@xterm/addon-fit` UMD build assigns `globalThis.FitAddon = { FitAddon: <constructor> }`.
+interface XtermFitAddon {
+  fit(): void;
+  activate(terminal: unknown): void;
+  dispose(): void;
+}
+
+interface XtermFitAddonModule {
+  FitAddon: new () => XtermFitAddon;
 }
 
 // ── Review (inline — renderer is isolated from Node context) ─────────────────
@@ -196,8 +218,47 @@ interface LimitsCostState {
   taskCosts: readonly LimitsCostCostRow[];
 }
 
+// ── Source / Daemon / Project on-ramp (inline — renderer is isolated from Node context) ──────
+
+interface BranchCommit {
+  sha: string;
+  subject: string;
+  committedAt?: string;
+  author?: string;
+}
+
+interface BranchInfo {
+  name: string;
+  isCurrent: boolean;
+  upstream?: string;
+  lastCommit: BranchCommit;
+}
+
+interface PullRequestInfo {
+  number: number;
+  ref: string;
+  source: string;
+  lastCommit: BranchCommit;
+}
+
+type SourceState =
+  | { kind: 'source'; branches: readonly BranchInfo[]; pullRequests: readonly PullRequestInfo[] }
+  | { kind: 'no-project' }
+  | { kind: 'path-missing'; projectId: string; message: string }
+  | { kind: 'error'; message: string };
+
+type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
+
+interface DaemonStatusPayload {
+  status: DaemonStatus;
+  detail: string | null;
+}
+
+type CurrentProjectState = { projectId: string; path: string | null } | null;
+
 interface CoShellBridge {
   navigate(view: NavView): void;
+  projectInfo(): Promise<ProjectInfo | null>;
   refreshConnection(): Promise<ConnectionState | null>;
   onNavState(listener: (state: { activeView: NavView }) => void): () => void;
   onConnectionState(listener: (state: ConnectionState) => void): () => void;
@@ -231,6 +292,12 @@ interface CoShellBridge {
   onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
+  agentsSendInput(agentId: string, data: string): Promise<{ ok: boolean; error?: string }>;
+  agentsResize(
+    agentId: string,
+    cols: number,
+    rows: number,
+  ): Promise<{ ok: boolean; error?: string }>;
   agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
   // ── Review ────────────────────────────────────────────────────────────────
@@ -247,9 +314,19 @@ interface CoShellBridge {
     prompt: string | null,
     specBody: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
+  sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
+  // ── Project + Daemon on-ramp ────────────────────────────────────────────────
+  openProject(): Promise<void>;
+  daemonRetry(): Promise<{ ok: boolean; error?: string }>;
+  onDaemonStatus(listener: (payload: DaemonStatusPayload) => void): () => void;
+  onCurrentProject(listener: (state: CurrentProjectState) => void): () => void;
+  onAppError(listener: (message: string) => void): () => void;
+  // ── Source ──────────────────────────────────────────────────────────────────
+  refreshSource(): Promise<SourceState | null>;
 }
 
 interface Window {
   coShell: CoShellBridge;
   Terminal: new (opts?: unknown) => XtermTerminal;
+  FitAddon: XtermFitAddonModule;
 }
