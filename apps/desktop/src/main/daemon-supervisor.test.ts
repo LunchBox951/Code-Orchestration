@@ -309,55 +309,55 @@ describe('daemon-supervisor — bounded restart on crash', () => {
     expect(statuses).toEqual(['starting', 'healthy', 'restarting', 'healthy']);
   });
 
-  it('applies exponential backoff via the injected delay seam between restarts', async () => {
+  it('applies exponential backoff across consecutive failed restarts (a crash loop)', async () => {
     const spawn = recordingSpawn();
     const delay = vi.fn(immediateDelay);
+    // Healthy initial start, then every respawn fails its health-wait: a genuine crash loop, so the
+    // consecutive-failure budget climbs and the backoff grows within one un-recovered episode.
+    const probeHealth = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
     const supervisor = createDaemonSupervisor({
       spawn: spawn.seam,
-      probeHealth: vi.fn().mockResolvedValue(true),
+      probeHealth,
       delay,
       maxRetries: 5,
       backoffBaseMs: 500,
       backoffMaxMs: 8_000,
+      healthTimeoutMs: 10,
+      healthIntervalMs: 10, // 1 poll per attempt
     });
 
     await supervisor.start(PROJECT_ID);
     spawn.current().crash();
     await flush();
-    spawn.current().crash();
-    await flush();
 
-    // First restart backs off 500ms (500 * 2^0), second 1000ms (500 * 2^1).
+    // First restart backs off 500ms (500 * 2^0), second 1000ms (500 * 2^1) — climbing because the
+    // restarts FAIL consecutively (a successful recovery would reset the budget back to 500).
     expect(delay).toHaveBeenCalledWith(500);
     expect(delay).toHaveBeenCalledWith(1_000);
   });
 
-  it('after MAX retries the daemon is "failed" with NO further respawn', async () => {
+  it('after MAX consecutive failed restarts the daemon is "failed" with NO further respawn', async () => {
     const spawn = recordingSpawn();
-    const statuses: DaemonStatus[] = [];
+    // Healthy initial start, then every respawn fails its health-wait — a crash loop that the budget
+    // is meant to cap (vs. a daemon that recovers each time, which must never reach "failed").
+    const probeHealth = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
     const supervisor = createDaemonSupervisor({
       spawn: spawn.seam,
-      probeHealth: vi.fn().mockResolvedValue(true),
+      probeHealth,
       delay: immediateDelay,
       maxRetries: 3,
-      onStatus: (s) => statuses.push(s),
+      healthTimeoutMs: 10,
+      healthIntervalMs: 10,
     });
 
     await supervisor.start(PROJECT_ID);
 
-    // Three crashes are absorbed by the 3-restart budget; the fourth exhausts it.
-    for (let i = 0; i < 3; i++) {
-      spawn.current().crash();
-      await flush();
-      expect(supervisor.status).toBe('healthy');
-    }
-    expect(spawn.spy).toHaveBeenCalledTimes(4); // 1 initial + 3 restarts
-
+    // One crash that never recovers runs the 3-restart budget straight to exhaustion.
     spawn.current().crash();
     await flush();
 
     expect(supervisor.status).toBe('failed');
-    expect(spawn.spy).toHaveBeenCalledTimes(4); // NO further respawn
+    expect(spawn.spy).toHaveBeenCalledTimes(4); // 1 initial + 3 failed restarts, NO further respawn
     expect(supervisor.detail).toMatch(/exhausted 3 restart attempts/i);
 
     // A late exit after "failed" must not resurrect it.
@@ -365,6 +365,27 @@ describe('daemon-supervisor — bounded restart on crash', () => {
     await flush();
     expect(spawn.spy).toHaveBeenCalledTimes(4);
     expect(supervisor.status).toBe('failed');
+  });
+
+  it('resets the restart budget on each successful recovery — recovered crashes never exhaust it', async () => {
+    const spawn = recordingSpawn();
+    const supervisor = createDaemonSupervisor({
+      spawn: spawn.seam,
+      probeHealth: vi.fn().mockResolvedValue(true), // every restart recovers to healthy
+      delay: immediateDelay,
+      maxRetries: 3,
+    });
+
+    await supervisor.start(PROJECT_ID);
+
+    // Far more distinct, fully-recovered crashes than maxRetries. Each recovery clears the budget,
+    // so the supervisor stays healthy — the bound is for a crash LOOP, not lifetime crashes.
+    for (let i = 0; i < 10; i++) {
+      spawn.current().crash();
+      await flush();
+      expect(supervisor.status).toBe('healthy');
+    }
+    expect(spawn.spy).toHaveBeenCalledTimes(11); // 1 initial + 10 successful restarts, never "failed"
   });
 
   it('a respawn that never becomes healthy consumes the budget and ends in "failed"', async () => {

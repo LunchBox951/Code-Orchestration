@@ -344,6 +344,11 @@ export class DaemonSupervisor {
       const healthy = await this.waitForHealth(child, generation);
       if (generation !== this.generation || this.stopping) return;
       if (healthy) {
+        // A successful recovery CLEARS the budget — `retries` counts CONSECUTIVE failed restarts
+        // (a crash loop), not lifetime crashes. Mirrors doStart's healthy branch; without this a
+        // long-lived daemon that recovers from occasional crashes would spuriously hit `failed`
+        // after maxRetries distinct (each-recovered) crashes.
+        this.retries = 0;
         this._detail = null;
         this.setStatus('healthy');
         return;
