@@ -16,10 +16,10 @@ proof first if you have not already.
 > is not SH-1 evidence. The desktop app now owns and supervises the Conductor daemon, cold-starts
 > registered root coordinators, and drives the live self-drive loop through the app on-ramp; SH-1
 > still requires host-live evidence from real provider binaries and the desktop review gate.
-> `co_spec_lock` is a known temporary gap in the app surface: the operator MCP tool exists, but the
-> desktop app and public CLI do not expose it yet. Treat that lock invocation and any other manual
-> tool calls that remain necessary during the host run as evidence to capture, not as hidden
-> automation.
+> Spec lock is the public `co spec lock <taskId>` CLI (PR #50) — the operator's approval gate,
+> running the same core `lockSpec` primitive as the `co_spec_lock` MCP tool; only an in-app Lock
+> button remains a UX nicety. Treat any manual tool calls that remain necessary during the host run
+> as evidence to capture, not as hidden automation.
 >
 > **A green `fake` proof is likewise NOT SH-1 evidence.** The unified host-proof driver
 > `runProof({fake|claude|codex})` (`packages/mcp/src/conductor/host-proof.ts`) runs the same sequence

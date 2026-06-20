@@ -1,8 +1,8 @@
 # Alpha Quickstart
 
 Get the `co` orchestration loop running on your machine using the desktop app. The primary flow is
-app-first, with one temporary host-live gap: locking a drafted spec still requires the operator-only
-MCP `co_spec_lock` path until the app exposes that control.
+app-first; locking a drafted spec is the operator's approval gate via the public `co spec lock
+<taskId>` CLI (PR #50) — an in-app Lock button is the only remaining UX nicety.
 
 > **A green sandbox run is NOT SH-1 acceptance evidence — SH-1 ☑ requires the full host run
 > described in [`docs/sh1-runbook.md`](sh1-runbook.md).**
