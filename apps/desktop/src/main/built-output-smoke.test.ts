@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -8,6 +8,10 @@ const desktopRoot = join(here, '../..');
 
 function distFile(...parts: string[]): string {
   return readFileSync(join(desktopRoot, 'dist', ...parts), 'utf8');
+}
+
+function distExists(...parts: string[]): boolean {
+  return existsSync(join(desktopRoot, 'dist', ...parts));
 }
 
 describe('desktop built-output script modes', () => {
@@ -31,6 +35,29 @@ describe('desktop built-output script modes', () => {
     expect(html).toContain('<script src="./vendor/xterm.js"></script>');
     expect(xtermJs).toContain('Terminal');
     expect(xtermCss).toContain('.xterm');
+  });
+
+  it('vendors the xterm fit addon (window.FitAddon) loaded BEFORE the module renderer', () => {
+    const html = distFile('renderer', 'index.html');
+    const addonFit = distFile('renderer', 'vendor', 'addon-fit.js');
+
+    // The fit addon must load as a self-script BEFORE renderer.js so window.FitAddon exists when the
+    // live terminal is constructed (the width-agreement that fixes the warped, read-only pane, #40).
+    const fitIdx = html.indexOf('./vendor/addon-fit.js');
+    const rendererIdx = html.indexOf('./renderer.js');
+    expect(fitIdx).toBeGreaterThan(-1);
+    expect(rendererIdx).toBeGreaterThan(-1);
+    expect(fitIdx).toBeLessThan(rendererIdx);
+    expect(addonFit).toContain('FitAddon');
+  });
+
+  it('bundles the IBM Plex Mono woff2 the live terminal @font-faces for a stable cell grid', () => {
+    const html = distFile('renderer', 'index.html');
+    expect(distExists('renderer', 'vendor', 'fonts', 'ibm-plex-mono-latin-400-normal.woff2')).toBe(
+      true,
+    );
+    expect(html).toContain('./vendor/fonts/ibm-plex-mono-latin-400-normal.woff2');
+    expect(html).toContain("font-family: 'IBM Plex Mono'");
   });
 
   it('emits sandbox-compatible preload JavaScript without static ESM syntax', () => {

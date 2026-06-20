@@ -9,6 +9,8 @@ import {
   requireNonEmptyString,
   requireReviewVerdict,
   requireSteer,
+  requireInputData,
+  requirePositiveDim,
 } from './ipc-guards.js';
 
 describe('main IPC runtime guards', () => {
@@ -80,5 +82,23 @@ describe('main IPC runtime guards', () => {
     expect(() => requireSteer({ kind: 'answer', text: '   ' })).toThrow(/steer text/i);
     expect(() => requireSteer({ kind: 'teleport', text: 'nope' })).toThrow(/steer kind/i);
     expect(() => requireSteer(null)).toThrow(/steer/i);
+  });
+
+  it('accepts terminal input strings (including empty) and rejects non-strings / oversized chunks', () => {
+    expect(requireInputData('y\r', 'input data')).toBe('y\r');
+    expect(requireInputData('', 'input data')).toBe('');
+    expect(() => requireInputData(42, 'input data')).toThrow(/input data/i);
+    expect(() => requireInputData('x'.repeat(1024 * 1024 + 1), 'input data')).toThrow(
+      /input data/i,
+    );
+  });
+
+  it('accepts positive integer PTY dimensions and rejects NaN, fractional, or non-positive values', () => {
+    expect(requirePositiveDim(80, 'cols')).toBe(80);
+    expect(() => requirePositiveDim(Number.NaN, 'cols')).toThrow(/cols/i);
+    expect(() => requirePositiveDim(24.5, 'rows')).toThrow(/rows/i);
+    expect(() => requirePositiveDim(0, 'cols')).toThrow(/cols/i);
+    expect(() => requirePositiveDim(-1, 'rows')).toThrow(/rows/i);
+    expect(() => requirePositiveDim('80', 'cols')).toThrow(/cols/i);
   });
 });

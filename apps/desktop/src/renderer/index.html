@@ -9,6 +9,23 @@
     />
     <title>co · Code Orchestration</title>
     <style>
+      /* Bundled IBM Plex Mono (latin) — self-hosted woff2 (CSP font-src 'self'), copied into
+         vendor/fonts by copy-renderer-assets.mjs. A fixed, preloaded monospace metric is what lets
+         the live xterm terminal measure a stable cell grid (the anti-warp requirement, GitHub #40). */
+      @font-face {
+        font-family: 'IBM Plex Mono';
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('./vendor/fonts/ibm-plex-mono-latin-400-normal.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Mono';
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url('./vendor/fonts/ibm-plex-mono-latin-600-normal.woff2') format('woff2');
+      }
       /* ════════════════════════════════════════════════════════════════════════
          Cockpit v1 design system — ported from the "co Cockpit" design handoff.
          All colors OKLCH, near-neutral cool gray (hue 262) + a small accent family.
@@ -2509,6 +2526,8 @@
     </div>
 
     <script src="./vendor/xterm.js"></script>
+    <!-- Fit addon (window.FitAddon) — loaded before renderer.js so it exists when the terminal builds. -->
+    <script src="./vendor/addon-fit.js"></script>
     <script type="module" src="./renderer.js"></script>
   </body>
 </html>

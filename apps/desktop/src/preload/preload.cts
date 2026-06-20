@@ -62,6 +62,12 @@ interface CoShellBridge {
   onAgentsConsoleState(listener: (state: AgentsConsoleState) => void): () => void;
   agentsSelect(agentId: string | null): Promise<AgentsConsoleState | null>;
   agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }>;
+  agentsSendInput(agentId: string, data: string): Promise<{ ok: boolean; error?: string }>;
+  agentsResize(
+    agentId: string,
+    cols: number,
+    rows: number,
+  ): Promise<{ ok: boolean; error?: string }>;
   agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
   // ── Review ────────────────────────────────────────────────────────────────
@@ -194,6 +200,21 @@ const bridge: CoShellBridge = {
   },
   async agentsSteer(agentId: string, steer: Steer): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agents:steer', agentId, steer);
+  },
+  async agentsSendInput(agentId: string, data: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agents:input', agentId, data);
+  },
+  async agentsResize(
+    agentId: string,
+    cols: number,
+    rows: number,
+  ): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>(
+      'agents:resize',
+      agentId,
+      cols,
+      rows,
+    );
   },
   async agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agent:stop', agentId);

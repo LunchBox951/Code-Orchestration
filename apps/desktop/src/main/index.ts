@@ -7,10 +7,12 @@ import {
   requireComposerField,
   requireFiniteSeq,
   requireAgentId,
+  requireInputData,
   requireMailTab,
   requireMailType,
   requireNavView,
   requireNonEmptyString,
+  requirePositiveDim,
   requireReviewVerdict,
   requireSteer,
 } from './ipc-guards.js';
@@ -337,6 +339,36 @@ ipcMain.handle('agents:steer', async (_event, agentId: unknown, steer: unknown) 
   if (shell == null) return { ok: false, error: 'shell not ready' };
   try {
     await shell.client.steer(requireAgentId(agentId), requireSteer(steer));
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg };
+  }
+});
+
+// Forward a raw keystroke/paste chunk the operator typed into the in-app terminal to the hosted
+// pty's stdin (the interactive pane — answers prompts, steers by typing; GitHub #40).
+ipcMain.handle('agents:input', async (_event, agentId: unknown, data: unknown) => {
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  try {
+    await shell.client.sendInput(requireAgentId(agentId), requireInputData(data, 'input data'));
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg };
+  }
+});
+
+// Drive PTY.resize(cols, rows) from the fitted xterm grid so the hosted pty's grid matches the
+// rendered grid — the width-agreement that keeps cursor-addressed redraws from warping (#40).
+ipcMain.handle('agents:resize', async (_event, agentId: unknown, cols: unknown, rows: unknown) => {
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  try {
+    await shell.client.resize(
+      requireAgentId(agentId),
+      requirePositiveDim(cols, 'cols'),
+      requirePositiveDim(rows, 'rows'),
+    );
     return { ok: true };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
