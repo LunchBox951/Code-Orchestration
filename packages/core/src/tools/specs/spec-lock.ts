@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ToolSpec } from '../registry.js';
 import { OPERATOR } from '../../mail/events.js';
-import { validateCriteria } from '../../plans/criteria.js';
+import { lockSpec } from '../../specs/lock-spec.js';
 import {
   specRecordOutputSchema,
   specRecordToOutput,
@@ -46,32 +46,8 @@ export const specLockTool: ToolSpec<SpecLockInput, SpecRecordOutput> = {
       throw new Error(`co_spec_lock: only ${OPERATOR} may lock a spec (caller '${ctx.agent}').`);
     }
 
-    const spec = ctx.specs.getSpec(input.task_id);
-    if (spec == null) {
-      throw new Error(
-        `co_spec_lock: no spec record for task '${input.task_id}' — draft it before locking.`,
-      );
-    }
-    if (spec.state !== 'draft') {
-      throw new Error(
-        `co_spec_lock: spec '${input.task_id}' is in state '${spec.state}', not 'draft' — only a ` +
-          'draft can be locked.',
-      );
-    }
-
-    // The RG-4 validator gate: a spec cannot be locked with fuzzy criteria (D3).
-    const violations = validateCriteria(spec.criteria);
-    if (violations.length > 0) {
-      const enumerated = violations
-        .map((v) => `  - criterion ${v.index} ("${v.text}"): ${v.reason}`)
-        .join('\n');
-      throw new Error(
-        `co_spec_lock: refusing to lock '${input.task_id}' — ${violations.length} criterion ` +
-          `violation(s); fix the criteria and re-draft:\n${enumerated}`,
-      );
-    }
-
-    const locked = ctx.specs.recordLock(input.task_id, OPERATOR);
-    return specRecordToOutput(locked);
+    // Lock semantics live in the shared core primitive so the tool and the `co spec lock` CLI
+    // cannot drift (not-found / non-draft / fuzzy-criteria refusals, then recordLock).
+    return specRecordToOutput(lockSpec(ctx.specs, input.task_id, OPERATOR));
   },
 };

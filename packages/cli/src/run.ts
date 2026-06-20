@@ -20,6 +20,7 @@ import {
   MAIL_WORKER_DONE,
   MAIL_TYPES,
   openSpecStore,
+  lockSpec,
   openPlanStore,
   openWorktreeStore,
   CleanupGateImpl,
@@ -98,6 +99,7 @@ Mail (operator-only):
 
 Spec/plan views (operator-only):
   co spec [<taskId>]        List all specs, or show a specific spec
+  co spec lock <taskId>     Lock a draft spec — freeze its criteria for review (operator-only)
   co plan [<taskId>]        List all plans, or show a specific plan with phases
   co phase <taskId>         Show phase status for a task's plan
 
@@ -251,6 +253,17 @@ function renderSpec(spec: SpecRecord): string {
     if (bodyLines.length > 20) lines.push('    ...(truncated)');
   }
   return lines.join('\n') + '\n';
+}
+
+function renderSpecLocked(spec: SpecRecord): string {
+  return (
+    [
+      `Locked spec ${spec.taskId}`,
+      `  State:     ${spec.state}`,
+      `  Locked by: ${spec.lockedBy ?? OPERATOR}`,
+      `  Criteria:  ${spec.criteria.length} frozen for review`,
+    ].join('\n') + '\n'
+  );
 }
 
 function renderPlanList(plans: readonly PlanRecord[]): string {
@@ -627,6 +640,34 @@ function runMailCommand(projectId: string, argv: string[]): RunResult {
   };
 }
 
+// ── Spec lock handler (operator surface for co_spec_lock) ─────────────────────
+
+/**
+ * `co spec lock <taskId>` — the public operator path to lock a drafted spec, freezing its acceptance
+ * criteria for review. The operator-only `co_spec_lock` MCP tool and this command share the core
+ * {@link lockSpec} primitive (single source of truth: not-found / non-draft / fuzzy-criteria refusals
+ * → recordLock). The CLI IS the operator surface, so the actor is always `@operator`.
+ */
+function runSpecLock(projectId: string, argv: string[]): RunResult {
+  try {
+    const parsed = parseStrictArgs(argv, { maxPositionals: 1 });
+    const taskId = parsed.positionals[0];
+    if (!taskId) {
+      return { output: `co spec lock: missing <taskId> argument.\n`, exitCode: 1 };
+    }
+    const store = openSpecStore(projectId);
+    try {
+      const locked = lockSpec(store, taskId, OPERATOR);
+      return { output: renderSpecLocked(locked), exitCode: 0 };
+    } finally {
+      store.close();
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { output: `co spec lock: ${msg}\n`, exitCode: 1 };
+  }
+}
+
 /**
  * Run the co CLI. Accepts `argv` (defaults to `process.argv.slice(2)`) and `cwd` (defaults to
  * `process.cwd()`) for testability. Returns `{ output, exitCode }`. Exits 1 for an unregistered
@@ -765,6 +806,9 @@ export async function run(
     // ── Spec / plan views (operator-only) ───────────────────────────────────
 
     case 'spec': {
+      if (rest[0] === 'lock') {
+        return runSpecLock(projectId, rest.slice(1));
+      }
       try {
         const parsed = parseStrictArgs(rest, { maxPositionals: 1 });
         const taskId = parsed.positionals[0];
