@@ -20,6 +20,7 @@ const __dirname = dirname(__filename);
 
 let shell: ReturnType<typeof createAppShell> | null = null;
 let mainWindow: BrowserWindow | null = null;
+let currentProjectId: string | null = null;
 
 function sendToRenderer(channel: string, data: unknown): void {
   mainWindow?.webContents?.send(channel, data);
@@ -61,6 +62,7 @@ async function createWindow(): Promise<void> {
     throw new Error('CO_PROJECT_ID environment variable is required to identify the project');
   }
   const projectId = rawProjectId as Parameters<typeof createAppShell>[0]['projectId'];
+  currentProjectId = rawProjectId;
 
   shell = createAppShell({
     projectId,
@@ -161,6 +163,10 @@ function requireApprovalReply(value: unknown): ApprovalReply {
 
 ipcMain.handle('nav:navigate', (_event, view: unknown) => {
   shell?.nav.navigate(requireNavView(view));
+});
+
+ipcMain.handle('project:info', () => {
+  return currentProjectId != null ? { id: currentProjectId } : null;
 });
 
 ipcMain.handle('connection:refresh', async () => {

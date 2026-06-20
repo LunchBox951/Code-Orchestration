@@ -28,9 +28,9 @@ describe('NavVM', () => {
     const b = vi.fn();
     vm.subscribe(a);
     vm.subscribe(b);
-    vm.navigate('cost');
-    expect(a).toHaveBeenCalledWith({ activeView: 'cost' });
-    expect(b).toHaveBeenCalledWith({ activeView: 'cost' });
+    vm.navigate('usage');
+    expect(a).toHaveBeenCalledWith({ activeView: 'usage' });
+    expect(b).toHaveBeenCalledWith({ activeView: 'usage' });
   });
 
   it('unsubscribe stops notifications', () => {
@@ -44,18 +44,17 @@ describe('NavVM', () => {
 
   it('preserves state across navigations', () => {
     const vm = new NavVM();
-    vm.navigate('review');
+    vm.navigate('usage');
     vm.navigate('source');
     expect(vm.state.activeView).toBe('source');
   });
 
-  it('all 6 nav views are defined', () => {
-    expect(NAV_VIEWS).toHaveLength(6);
+  it('all 5 nav views are defined', () => {
+    expect(NAV_VIEWS).toHaveLength(5);
     expect(NAV_VIEWS).toContain('dashboard');
     expect(NAV_VIEWS).toContain('agents');
     expect(NAV_VIEWS).toContain('mail');
-    expect(NAV_VIEWS).toContain('review');
     expect(NAV_VIEWS).toContain('source');
-    expect(NAV_VIEWS).toContain('cost');
+    expect(NAV_VIEWS).toContain('usage');
   });
 });

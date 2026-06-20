@@ -1,8 +1,12 @@
 // Renderer-side type declarations for the contextBridge surface exposed by preload.cts.
 // Declared inline (no Node/shared imports) because the renderer is isolated from Node context.
 
-type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'cost';
+type NavView = 'dashboard' | 'agents' | 'mail' | 'source' | 'usage';
 type ConnectionStatus = 'connecting' | 'live' | 'degraded';
+
+interface ProjectInfo {
+  id: string;
+}
 type AgentStatus = 'warm' | 'waiting' | 'stuck' | 'paused' | 'unknown';
 
 interface ConnectionObservation {
@@ -198,6 +202,7 @@ interface LimitsCostState {
 
 interface CoShellBridge {
   navigate(view: NavView): void;
+  projectInfo(): Promise<ProjectInfo | null>;
   refreshConnection(): Promise<ConnectionState | null>;
   onNavState(listener: (state: { activeView: NavView }) => void): () => void;
   onConnectionState(listener: (state: ConnectionState) => void): () => void;
