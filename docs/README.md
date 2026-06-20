@@ -31,6 +31,9 @@ Run on an authenticated host, never in CI. The hermetic halves run under `pnpm t
   plumbing against a real `claude`/`codex` binary.
 - [Worker benchmark](worker-benchmark.md) — `pnpm test:live`: hosts a real implementer that writes
   code and signals done, then **objectively grades** the artifact (the switchable sandbox→live test).
+- [Orchestration benchmark](orchestration-benchmark.md) — `pnpm test:live`: the v1 **centerpiece** — drives
+  the full coordinator → lead → 2-implementers → merge-up chain for a scenario and **objectively grades the
+  merged artifact**, per provider (the multi-level switchable sandbox→live test).
 - [SH-1 self-host](sh1-runbook.md) · [Offline](offline-runbook.md) — the full self-host + local-only
   evidence bundles.
 

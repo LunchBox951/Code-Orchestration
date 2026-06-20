@@ -11,6 +11,11 @@ a host-live run spends also _measure_ the providers. It is the switchable "sandb
 test suite: `pnpm test` runs the hermetic sandbox tests; `pnpm test:live` runs this against the real
 binaries on an authenticated host.
 
+Where this grades **one implementer writing one module**, the
+[orchestration benchmark](orchestration-benchmark.md) grades the **whole spawn chain** (coordinator → lead
+→ 2 implementers → merge-up) — the v1 centerpiece. The two share the same honesty bar (derived fidelity,
+objective oracle, skip-loud gate) and the same `CO_BENCH_*` budget knobs.
+
 Everything here runs on the **operator's host machine**, never in CI. The hermetic pieces (the scenario
 evaluator and the driver's pure predicates) run automatically under `pnpm test`.
 

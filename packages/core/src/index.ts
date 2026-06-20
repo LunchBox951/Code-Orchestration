@@ -854,6 +854,31 @@ export {
   importFreshModule,
 } from './bench/worker-scenarios.js';
 
+// Multi-level ORCHESTRATION benchmark (the centerpiece v1 proof): the `@co/mcp` driver hosts the real
+// coordinator→lead→implementer chain and merges up; this module owns the general-task prompts + the
+// executed-merge oracle. Pure core (no host graph). See docs/orchestration-benchmark.md.
+export type {
+  OrchestrationScenario,
+  OrchestrationTaskContext,
+  ImplementerSubtask,
+  LeadIntegration,
+} from './bench/orchestration-scenarios.js';
+export {
+  ORCHESTRATION_SCENARIOS,
+  calcLibScenario,
+  getOrchestrationScenario,
+} from './bench/orchestration-scenarios.js';
+export type {
+  ProviderMode,
+  RunFidelity,
+  StopReason,
+  AgentRunMetric,
+  MergeOutcome,
+  OrchestrationRunInput,
+  OrchestrationScorecard,
+} from './bench/orchestration-metrics.js';
+export { summarizeRun, toJsonl, renderScorecard } from './bench/orchestration-metrics.js';
+
 // L6a Phase A — authoritative role profiles + durable agent→role→parent projection + spawn rules
 // (AC-L6a-1, AC-L6a-3, AC-L6a-8, AC-L6a-9, AC-L6a-10). Five base roles promoted from a seed
 // toolset list to full permission profiles (mandate + writeScope + toolset + capabilities);
