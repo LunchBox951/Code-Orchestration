@@ -90,3 +90,14 @@ export {
   ConductorUnavailableError,
   type OperatorIpcClientDeps,
 } from './operator-ipc/client.js';
+// LIVE worker BENCHMARK (gated behind CO_LIVE_E2E) — hosts a REAL implementer agent in a real node-pty
+// through CO's socket-bridge MCP surface, gives it a real coding task, and OBJECTIVELY grades the
+// artifact it produces. Builds from the SAME resolveHostLiveSeams wiring path the host-proof uses. The
+// fidelity is derived from the resolved node-pty host (never the flag). See docs/worker-benchmark.md.
+export {
+  runWorkerBenchmark,
+  buildWorkerSpawnSpec,
+  type WorkerBenchmarkOptions,
+  type WorkerBenchmarkResult,
+  type WorkerBenchmarkStopReason,
+} from './conductor/worker-benchmark.js';

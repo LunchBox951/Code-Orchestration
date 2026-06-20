@@ -838,6 +838,22 @@ export {
   CO_LIVE_E2E_ENV,
 } from './dispatch/provider-source.js';
 
+// Live worker-BENCHMARK scenarios — pluggable, OBJECTIVELY-graded coding tasks for the `CO_LIVE_E2E`
+// host-live worker benchmark (the `@co/mcp` driver hosts a real implementer agent, this module owns the
+// task prompt + the executed-artifact evaluator). Pure core (no host graph), so the adapter imports it
+// from this barrel (AC-L2-1). See docs/worker-benchmark.md.
+export type {
+  ArtifactCheck,
+  BenchmarkScenario,
+  BenchmarkTaskContext,
+} from './bench/worker-scenarios.js';
+export {
+  WORKER_BENCH_SCENARIOS,
+  addModuleScenario,
+  getScenario,
+  importFreshModule,
+} from './bench/worker-scenarios.js';
+
 // L6a Phase A — authoritative role profiles + durable agent→role→parent projection + spawn rules
 // (AC-L6a-1, AC-L6a-3, AC-L6a-8, AC-L6a-9, AC-L6a-10). Five base roles promoted from a seed
 // toolset list to full permission profiles (mandate + writeScope + toolset + capabilities);
