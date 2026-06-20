@@ -985,6 +985,11 @@ export { SpecsProjector } from './specs/specs-projector.js';
 export type { SpecStore } from './specs/specs-store.js';
 export { openSpecStore } from './specs/specs-store.js';
 
+// Shared spec-lock primitive: the single source of truth for the lock semantics (not-found /
+// non-draft / fuzzy-criteria refusals → recordLock), consumed by the `co_spec_lock` MCP tool and
+// the public `co spec lock` operator CLI so the two surfaces cannot drift.
+export { lockSpec } from './specs/lock-spec.js';
+
 // L6b F2 — the PURE criterion validator (D2): the structural acceptance-criteria gate. `validateCriteria`
 // returns one violation per failed criterion (`[]` ⇒ all valid); the PRIMARY check is a wired `verify`
 // command present (it never hard-codes a project command), the SECONDARY is a conservative `VACUOUS_PHRASES`

@@ -2,6 +2,7 @@
 // to the coShell bridge exposed by the preload via contextBridge.
 
 import { reviewDetailNeedsRebuild, reviewDetailSignature } from './review-render-helpers.js';
+import { mailDetailNeedsRebuild, mailDetailSignature } from './mail-render-helpers.js';
 
 const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'cost'] as const;
 type NavView = (typeof NAV_VIEWS)[number];
@@ -252,7 +253,7 @@ function renderMailSidebar(state: MailState): void {
     .join('');
 }
 
-function renderMailDetail(state: MailState): void {
+function renderMailDetail(state: MailState, prevState: MailState | null): void {
   const detailPane = document.getElementById('mail-detail-pane');
   if (!detailPane) return;
 
@@ -262,6 +263,17 @@ function renderMailDetail(state: MailState): void {
     detailPane.innerHTML = `<div class="empty-state">Select a message to read it</div>`;
     return;
   }
+
+  // Preserve the caret while typing in the reply/decision composer (bug #39): when the ONLY change is
+  // composer.body and that textarea is focused, skip the rebuild — the live textarea already holds the
+  // typed value, so recreating it would drop the caret to the start and reverse the text.
+  const composerFocused = document.activeElement?.id === 'composer-body';
+  const needsRebuild = mailDetailNeedsRebuild(
+    prevState != null ? mailDetailSignature(prevState) : null,
+    mailDetailSignature(state),
+    composerFocused,
+  );
+  if (!needsRebuild) return;
 
   const isActionable = selected.kind === 'actionable';
   const isApproval = selected.type === 'approval';
@@ -351,9 +363,10 @@ function renderMailDetail(state: MailState): void {
 }
 
 function renderMail(state: MailState): void {
+  const prevState = latestMailState;
   latestMailState = state;
   renderMailSidebar(state);
-  renderMailDetail(state);
+  renderMailDetail(state, prevState);
 
   // Update nav badge with actionable count
   const totalActionables = state.inbox.filter((r) => r.kind === 'actionable').length;

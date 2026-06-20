@@ -8,6 +8,8 @@ import {
   openDispatchStore,
   openConfigStore,
   openRegistry,
+  openSpecStore,
+  OPERATOR,
   UsageUnavailableError,
 } from '@co/core';
 import type { Provider, UsageSnapshot } from '@co/core';
@@ -354,6 +356,70 @@ describe('co doctor', () => {
       },
     });
     expect(result.exitCode).toBe(0);
+  });
+});
+
+describe('co spec lock — the public operator lock path (closes the SH-1 manual-lock gap)', () => {
+  function seedDraft(
+    projectId: string,
+    taskId: string,
+    criteria: ReadonlyArray<{ text: string; verify?: string }>,
+  ): void {
+    const specs = openSpecStore(projectId);
+    specs.recordDraft({ taskId, title: 'T', goal: 'G', criteria, body: 'body', actor: 'coord-1' });
+    specs.close();
+  }
+
+  it('locks a valid-criteria draft and reports the locked record', async () => {
+    const { projectId, dir } = makeRegisteredProject();
+    seedDraft(projectId, 'task-lock-cli', [
+      { text: 'expired tokens rejected (401)', verify: 'pnpm vitest run packages/core/x' },
+      { text: 'format check passes', verify: 'pnpm format:check' },
+    ]);
+
+    const result = await run(['spec', 'lock', 'task-lock-cli'], dir);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toMatch(/Locked spec task-lock-cli/);
+    expect(result.output).toMatch(/State:\s+locked/);
+
+    const specs = openSpecStore(projectId);
+    const locked = specs.getSpec('task-lock-cli');
+    specs.close();
+    expect(locked?.state).toBe('locked');
+    expect(locked?.lockedBy).toBe(OPERATOR);
+  });
+
+  it('refuses to lock fuzzy criteria, leaving the spec a draft', async () => {
+    const { projectId, dir } = makeRegisteredProject();
+    seedDraft(projectId, 'task-fuzzy-cli', [
+      { text: 'expired tokens rejected (401)', verify: 'pnpm vitest run packages/core/x' },
+      { text: 'auth works' },
+    ]);
+
+    const result = await run(['spec', 'lock', 'task-fuzzy-cli'], dir);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/co spec lock: refusing to lock 'task-fuzzy-cli'/);
+
+    const specs = openSpecStore(projectId);
+    const stillDraft = specs.getSpec('task-fuzzy-cli');
+    specs.close();
+    expect(stillDraft?.state).toBe('draft');
+  });
+
+  it('exits 1 when the task id is missing', async () => {
+    const { dir } = makeRegisteredProject();
+    const result = await run(['spec', 'lock'], dir);
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/missing <taskId>/);
+  });
+
+  it('exits 1 when no draft exists for the task id', async () => {
+    const { dir } = makeRegisteredProject();
+    const result = await run(['spec', 'lock', 'ghost-task'], dir);
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/no spec record for task 'ghost-task'/);
   });
 });
 
