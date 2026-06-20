@@ -43,14 +43,17 @@ These are the top-level conditions that, all met, *are* v1.
   slings → finish → gated review-merge round-trip → land — over `FakePty` with **zero hand-stitched
   transitions** after lock; Stage 13 landed the operator [`sh1-runbook.md`](sh1-runbook.md) + the
   desktop Review view the live gate uses. A green `FakePty` run is **not** host-live evidence
-  (Principle 9), and the current operator-only `co_spec_lock` manual gap means a rehearsal can collect
-  evidence but cannot flip `SH-1` to `☑` until the lock path is app/public-CLI driven.
+  (Principle 9). The spec-lock path is now public-CLI driven (`co spec lock`, PR #50) — the operator
+  approval gate, not an automation gap — so a clean host-live run can flip `SH-1` to `☑`; the host
+  run itself remains the only gate.
 - `SH-2` ☐ `co` reads all of its own state/specs/plans from its **own program-data** — no `.co/`
   dependency remains (Principle 12 — `pristine-repo`; Principle 14 — `recoverable`). L6b lands the
   **records half**: specs (`draft→locked→archived`, queryable via `co_spec_get`) and plans
   (`co_plan_ingest`) are durable event-sourced program-data records with no `.co/specs` dependency
-  (see [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md), AC-L6b-1/4/5). Remaining: removing
-  the live `.co/`-read paths + the migration (SH-3).
+  (see [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md), AC-L6b-1/4/5). No live `.co/`-read
+  paths remain in production source (read-side guard `sh2-no-co-read.test.ts`, complementing the
+  write-side `assertRepoPristine`). Remaining: the SH-3 migration that removes the prototype footprint
+  and confirms `co` self-hosts from program-data.
 - `SH-3` ☐ The prototype footprint (`.co/`, `.claude/`, `.codex/`) is removed and the migration PR
   has landed on `main` ([`migration.md`](migration.md)).
 - `SH-4` ☐ `co` successfully operates on **at least one stranger repo**, including a **local-only

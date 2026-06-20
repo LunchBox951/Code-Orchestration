@@ -16,10 +16,10 @@ proof first if you have not already.
 > is not SH-1 evidence. The desktop app now owns and supervises the Conductor daemon, cold-starts
 > registered root coordinators, and drives the live self-drive loop through the app on-ramp; SH-1
 > still requires host-live evidence from real provider binaries and the desktop review gate.
-> `co_spec_lock` is a known temporary gap in the app surface: the operator MCP tool exists, but the
-> desktop app and public CLI do not expose it yet. Treat that lock invocation and any other manual
-> tool calls that remain necessary during the host run as evidence to capture, not as hidden
-> automation.
+> Spec lock is the public `co spec lock <taskId>` CLI (PR #50) — the operator's approval gate,
+> running the same core `lockSpec` primitive as the `co_spec_lock` MCP tool; only an in-app Lock
+> button remains a UX nicety. Treat any manual tool calls that remain necessary during the host run
+> as evidence to capture, not as hidden automation.
 >
 > **A green `fake` proof is likewise NOT SH-1 evidence.** The unified host-proof driver
 > `runProof({fake|claude|codex})` (`packages/mcp/src/conductor/host-proof.ts`) runs the same sequence
@@ -79,19 +79,17 @@ Once the coordinator has drafted the spec and mailed you the task id:
 
 1. Review the draft spec (`co spec <taskId>`) and confirm each acceptance criterion carries a
    `verify` command.
-2. Lock it through the operator MCP surface:
+2. Lock it through the operator surface:
 
    ```sh
-   co spec <taskId>
-   # confirm the spec content, then from an operator MCP client invoke:
-   # tool: co_spec_lock
-   # input: { "task_id": "<taskId>" }
+   co spec <taskId>          # review the drafted spec content, then approve it:
+   co spec lock <taskId>     # public operator CLI (PR #50); same core lockSpec as the co_spec_lock MCP tool
    ```
 
-   The lock verb is `co_spec_lock`, and it is operator-only on the MCP surface. There is no desktop
-   app button and no public `co spec lock` CLI command yet, and an agent persona cannot lock a spec.
-   This lock invocation is therefore a known manual gap for the host-live evidence bundle. Once
-   locked, the spec id is fixed — record it.
+   `co spec lock` is the operator's approval gate — operator-only (an agent persona cannot lock a
+   spec), running the same core `lockSpec` primitive as the `co_spec_lock` MCP tool. This is the
+   intended human gate, **not** an automation gap: a host-live run can lock via this public CLI
+   command with no ad-hoc operator MCP tool call. Once locked, the spec id is fixed — record it.
 
 3. Note the **task id** (shown by `co spec <taskId>` after lock). You will need it in Step 6.
 
@@ -116,9 +114,9 @@ surfaces:
 If any of these steps require a manual operator/coordinator tool invocation because the live daemon
 does not yet select the next transition on its own, record that invocation in the evidence bundle.
 Those notes are not failures of the Stage 13 review view, but they are remaining SH-1 automation
-work before the acceptance criterion can be marked complete. In particular, the current
-`co_spec_lock` manual gap means a run can collect useful host-live evidence, but SH-1 must stay
-incomplete until a no-ad-hoc-tool-call path exists.
+work before the acceptance criterion can be marked complete. The operator's `co spec lock` approval
+is **not** such a gap — it is the public-CLI human gate (PR #50), by design — so a run whose only
+operator actions are spec approval and the PASS verdict has no ad-hoc-tool-call gap and can flip SH-1.
 
 ### Watching progress
 
@@ -239,7 +237,7 @@ marked met in `docs/v1-acceptance-criteria.md`:
 | "Conductor unavailable" shown in Reviews | The desktop app supervises the daemon — check the **daemon status badge** in the header and click **Retry** if it shows `failed` (no need to run `co-mcp serve` by hand). |
 | No agents appear in the Agents Console | Daemon did not tick, the spec is not yet locked, or the next transition still needs an explicit operator/coordinator tool call; run `co status` and `co spec <taskId>` to confirm |
 | Reviews view empty / no pending review | The gated merge was not queued yet; confirm or rerun the Lead/coordinator `co_merge` transition for the finished worktree and check the operator inbox for `review_request` |
-| "No locked spec" error from coordinator | Run `co spec <taskId>` and lock via operator-only `co_spec_lock` before planning/merge review |
+| "No locked spec" error from coordinator | Run `co spec <taskId>` to review, then `co spec lock <taskId>` (operator-only) before planning/merge review |
 | SH-2 guard fails | A `.co/` literal was introduced in production source; grep `packages/*/src` for the offending path and remove it |
 | Clicking PASS has no effect | The desktop app lost its connection to the daemon it supervises — check the header **daemon status badge**: wait if it shows `restarting`, or click **Retry** if it shows `failed`, then resubmit the verdict |
 | Gated merge blocked after PASS | Confirm the `review_response` was recorded, then rerun/resume the Lead's `co_merge` for the same branch/target |

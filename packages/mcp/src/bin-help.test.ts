@@ -35,10 +35,10 @@ describe('co-mcp binary help', () => {
     expect(runbook).toContain('Current Stage 15 boundary');
     expect(runbook).toContain('The desktop app now owns and supervises the Conductor daemon');
     expect(runbook).toContain('Manual `co-mcp serve <projectId>` remains an advanced/headless');
-    expect(runbook).toContain('`co_spec_lock` is a known temporary gap in the app surface');
-    expect(runbook).toMatch(
-      /There is no desktop\s+app button and no public `co spec lock` CLI command yet/,
-    );
+    // Spec lock is now the public `co spec lock` CLI (PR #50) — no longer an app-surface gap.
+    expect(runbook).toContain('Spec lock is the public `co spec lock <taskId>` CLI (PR #50)');
+    expect(runbook).not.toContain('known temporary gap in the app surface');
+    expect(runbook).not.toMatch(/no public `co spec lock` CLI command yet/);
     expect(runbook).toContain('For SH-1 evidence, submit from the Review view');
     expect(runbook).not.toContain(
       'picks up the task on its next tick and drives the full lifecycle autonomously',

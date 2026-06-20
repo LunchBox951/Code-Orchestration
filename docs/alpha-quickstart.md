@@ -1,8 +1,8 @@
 # Alpha Quickstart
 
 Get the `co` orchestration loop running on your machine using the desktop app. The primary flow is
-app-first, with one temporary host-live gap: locking a drafted spec still requires the operator-only
-MCP `co_spec_lock` path until the app exposes that control.
+app-first; locking a drafted spec is the operator's approval gate via the public `co spec lock
+<taskId>` CLI (PR #50) — an in-app Lock button is the only remaining UX nicety.
 
 > **A green sandbox run is NOT SH-1 acceptance evidence — SH-1 ☑ requires the full host run
 > described in [`docs/sh1-runbook.md`](sh1-runbook.md).**
@@ -131,8 +131,8 @@ Operator host-live acceptance (run before merging):
 [ ] Auth: co doctor --live → [ok] provider-compatibility for both monitored providers (claude, codex).
 [ ] Session started: used "Start from demo spec" or "Start session" in the Dashboard.
 [ ] Plan-with-operator: the coordinator mails a clarify/brainstorm; you reply in-app; it drafts a spec.
-[ ] Lock: you approve the spec with the operator-only `co_spec_lock` path; agents cannot lock it.
-    Until the app exposes spec lock, record this as a remaining host-live automation gap.
+[ ] Lock: you approve the spec with `co spec lock <taskId>` (operator-only CLI, PR #50); agents cannot lock it.
+    An in-app Lock button is a remaining UX nicety, not an automation gap.
 [ ] Autonomous drive: WITHOUT manual tool calls, co spawns lead/implementer, runs turns, and a
     review_request lands in the Review view.
 [ ] Approve: click PASS in the Review view; confirm the gated merge lands on the integration branch.

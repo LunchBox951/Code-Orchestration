@@ -51,7 +51,7 @@ already proved.
 
 | v1 `☑` | The live proof (operator-only) | Driver / where | Sandbox already proves |
 |---|---|---|---|
-| **`SH-1`** | The autonomous **multi-phase** change self-drives end to end against real `claude`/`codex` (start → lock → sling → finish → merge → review → PASS → advance → … → land), no ad-hoc operator tool calls. The current `co_spec_lock` manual gap may collect evidence, but it does not flip `SH-1` to `☑`. | [`sh1-runbook.md`](sh1-runbook.md) + app on-ramp + §7 PR checklist | `sh1-dry-run` ≥2-phase loop over `FakePty`, zero hand-stitched transitions |
+| **`SH-1`** | The autonomous **multi-phase** change self-drives end to end against real `claude`/`codex` (start → lock → sling → finish → merge → review → PASS → advance → … → land), no ad-hoc operator tool calls. Spec lock now uses the public `co spec lock` CLI (PR #50) — the operator approval gate, not an automation gap — so a clean run can flip `SH-1`. | [`sh1-runbook.md`](sh1-runbook.md) + app on-ramp + §7 PR checklist | `sh1-dry-run` ≥2-phase loop over `FakePty`, zero hand-stitched transitions |
 | **`SF-1`** | Real `claude`/`codex` reach an authenticated `ready` prompt in a real node-pty; the in-app terminal is legible at the live geometry (#40 PTY width-agreement). | `co-mcp host-proof claude\|codex`; the app console | FakePty startup classify; xterm FitAddon + raw-stream render |
 | **`SF-2`** | A real mid-turn **interrupt actually halts** a live turn (per-provider key verified). | host-proof steer step; app steer controls | byte-written-before-settle (`steerMidTurn`) |
 | **`PV-2`** / `PV-1` | Interactive **subscription auth works for BOTH providers**, and both run real worker turns (**Codex parity** — the load-bearing unknown). | `co doctor --live`; host-proof per provider | spawn/transport seam, provider-neutral dispatch |
@@ -66,8 +66,9 @@ terminal width and the hosted pty width must agree so cursor-addressed redraws l
 
 ## 3. How the operator runs the deferred live host-run
 
-The on-ramp Stage 15 builds makes this **app-first** (the CLI is the power-user path). One temporary
-gap remains: spec lock uses the operator-only `co_spec_lock` MCP path until the app exposes it.
+The on-ramp Stage 15 builds makes this **app-first** (the CLI is the power-user path). Spec lock is
+the public `co spec lock <taskId>` CLI command (PR #50); an in-app Lock button is a remaining UX
+nicety, not a blocker.
 
 1. `pnpm install && pnpm build` (dev install — a packaged installer is the `⊘` post-v1 non-goal).
 2. `co doctor --live` → `[ok] provider-compatibility` for both monitored providers (`claude`,
@@ -76,7 +77,7 @@ gap remains: spec lock uses the operator-only `co_spec_lock` MCP path until the 
 4. **Choose a repo/directory** in the app (registers + targets it).
 5. **Launch a coordinator from the predesigned spec** in the app; watch it cold-start in the Agents
    Console.
-6. Plan-with-operator → operator `co_spec_lock` (record this manual gap) → **autonomous multi-phase
+6. Plan-with-operator → operator approves via `co spec lock <taskId>` → **autonomous multi-phase
    drive** → PASS in the Review view → confirm the gated merge.
 7. Repeat on a local-only repo (`SH-4`); confirm a blocked raw command fails closed (`SH-5`).
 8. Capture any step that still needed a manual tool call, and any Codex-parity gap.
@@ -88,11 +89,12 @@ gap remains: spec lock uses the operator-only `co_spec_lock` MCP path until the 
 
 Once the live run passes and the operator records evidence:
 
-1. **Flip only the criteria actually discharged by the evidence.** With the current temporary
-   operator `co_spec_lock` gap, keep `SH-1` at `◐` and record the useful host-live evidence as a
-   partial run. Flip `SH-1` to `☑` only after the lock path is in-app or public-CLI driven and the
-   run has no ad-hoc operator tool calls. `SH-4` / `SH-5` may be flipped independently if their live
-   evidence is complete and linked in [`v1-acceptance-criteria.md`](v1-acceptance-criteria.md).
+1. **Flip only the criteria actually discharged by the evidence.** The lock path is now public-CLI
+   driven (`co spec lock`, PR #50), so a run whose only operator actions are spec approval and the
+   PASS verdict has no ad-hoc operator tool calls — flip `SH-1` to `☑` on such a clean run; otherwise
+   keep it `◐` and record the partial host-live evidence. `SH-4` / `SH-5` may be flipped
+   independently if their live evidence is complete and linked in
+   [`v1-acceptance-criteria.md`](v1-acceptance-criteria.md).
 2. **Gated `dev → main` promotion** — a `release/*` → `main` PR through the review gate. Check the
    current delta with `git rev-list --count origin/main..origin/dev`.
 3. **`SH-3` prototype-footprint teardown** (the `migration` issue, [`migration.md`](migration.md)) —
