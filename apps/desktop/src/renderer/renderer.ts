@@ -9,8 +9,9 @@
 
 import { mailDetailNeedsRebuild, mailDetailSignature } from './mail-render-helpers.js';
 import { applyTermFeed, createAgentsTerminal, decideTermFeed } from './agents-terminal-helpers.js';
+import { reviewDetailNeedsRebuild, reviewDetailSignature } from './review-render-helpers.js';
 
-const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'source', 'usage'] as const;
+const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'usage'] as const;
 type LocalNavView = (typeof NAV_VIEWS)[number];
 
 function isNavView(v: unknown): v is LocalNavView {
@@ -91,6 +92,7 @@ let latestConnection: ConnectionState | null = null;
 let latestDashboard: DashboardState | null = null;
 let latestMailState: MailState | null = null;
 let latestAgentsState: AgentsConsoleState | null = null;
+let latestReviewState: ReviewState | null = null;
 let latestLimitsState: LimitsCostState | null = null;
 let projectInfo: { id: string; name: string; branch?: string } | null = null;
 let sourceTab: 'branches' | 'prs' | 'commits' = 'branches';
@@ -155,6 +157,7 @@ function activateView(view: LocalNavView): void {
     el.classList.toggle('active', el.id === `view-${view}`);
   }
   if (view === 'agents' && latestAgentsState != null) renderAgentsTranscript(latestAgentsState);
+  if (view === 'review' && latestReviewState != null) renderReview(latestReviewState);
 }
 
 function setNavEnabled(enabled: boolean): void {
@@ -999,6 +1002,19 @@ function renderMailDetail(state: MailState, prevState: MailState | null): void {
           <button class="btn btn-danger" data-action="decline" data-seq="${selected.seq}"${pendingAttr}>Decline</button>
         </div>
       </div>`;
+  } else if (selected.type === 'review_request') {
+    // The SH-1 human gate: route a review request to the Review view, where the operator records a
+    // structured PASS / ISSUES verdict against the diff + locked acceptance criteria (a plain mail
+    // reply would only send a clarify_response, never a review_response verdict).
+    const reviewId = reviewIdFromMailRow(selected);
+    const reviewIdAttr = reviewId != null ? ` data-review-id="${esc(reviewId)}"` : '';
+    actionsHtml = `
+      <div class="mail-actions">
+        <div class="lbl-row"><span class="lbl">Quick actions</span><span class="hint">record a PASS / ISSUES verdict in the Review view</span></div>
+        <div class="btns">
+          <button class="btn btn-primary" data-action="open-review"${reviewIdAttr}${pendingAttr}>Open in Review →</button>
+        </div>
+      </div>`;
   } else if (isActionable) {
     const replyType = REPLY_TYPE;
     actionsHtml = `
@@ -1070,6 +1086,163 @@ function renderMail(state: MailState): void {
   renderMailDetail(state, prevState);
   const totalActionables = state.inbox.filter((r) => r.kind === 'actionable').length;
   setBadge('mail-badge', totalActionables);
+}
+
+// ── Review (the SH-1 human gate: diff + locked acceptance criteria → PASS / ISSUES) ───────────────
+
+function reviewAgeStr(ts: number): string {
+  const age = Math.floor((Date.now() - ts) / 60000);
+  if (age < 60) return `${age}m`;
+  if (age < 1440) return `${Math.floor(age / 60)}h`;
+  return `${Math.floor(age / 1440)}d`;
+}
+
+function renderDiffLines(patch: string): string {
+  if (!patch) return '<span class="diff-hunk">(no changes)</span>';
+  return patch
+    .split('\n')
+    .map((line) => {
+      if (line.startsWith('+')) return `<span class="diff-add">${esc(line)}</span>`;
+      if (line.startsWith('-')) return `<span class="diff-remove">${esc(line)}</span>`;
+      if (line.startsWith('@@')) return `<span class="diff-hunk">${esc(line)}</span>`;
+      return esc(line);
+    })
+    .join('\n');
+}
+
+/** A `review_request` mail carries its review id in the idempotency key (`review-request:<id>`). */
+function reviewIdFromMailRow(row: MailRow): string | null {
+  const key = row.idempotencyKey;
+  if (key != null && key.startsWith('review-request:')) return key.slice('review-request:'.length);
+  return null;
+}
+
+function renderReviewDetail(context: SelectedContext, composer: VerdictComposer): string {
+  if (context == null) {
+    return `<div class="empty-inline"><span class="glyph">✓</span><span class="lead">Select a review to inspect it</span></div>`;
+  }
+  if (context.status === 'loading') {
+    return `<div class="empty-inline"><span class="lead">Loading review context…</span></div>`;
+  }
+  const { value } = context;
+  if (value.kind === 'not-found') {
+    return `<div class="empty-inline"><span class="lead">Review not found: ${esc(value.reviewId)}</span></div>`;
+  }
+  if (value.kind === 'conductor-down') {
+    return `<div class="empty-inline"><span class="lead">Conductor not running — the app supervises the daemon; check the header daemon badge.</span></div>`;
+  }
+
+  const { diff, criteria } = value;
+  const canSubmitVerdict = diff.kind === 'patch' && criteria.kind === 'criteria';
+  const pendingAttr = composer.pending ? ' disabled' : '';
+
+  let diffHtml: string;
+  if (diff.kind === 'unavailable') {
+    const reason =
+      diff.reason === 'worktree-missing'
+        ? 'Worktree not found — the branch may have been cleaned up.'
+        : 'Git diff failed — check the conductor logs.';
+    diffHtml = `<div class="empty-inline"><span class="lead">${esc(reason)}</span></div>`;
+  } else {
+    diffHtml = `<pre class="review-diff-pre">${renderDiffLines(diff.patch)}</pre>`;
+  }
+
+  let criteriaHtml: string;
+  if (criteria.kind === 'no-locked-spec') {
+    criteriaHtml = `<div class="empty-inline"><span class="lead">No locked spec — acceptance criteria not available.</span></div>`;
+  } else {
+    criteriaHtml = criteria.criteria
+      .map(
+        (c) =>
+          `<div class="review-criterion"><div class="rc-text">· ${esc(c.text)}</div>${
+            c.verify != null ? `<div class="rc-verify">$ ${esc(c.verify)}</div>` : ''
+          }</div>`,
+      )
+      .join('');
+  }
+
+  let verdictBody = '';
+  if (composer.active && canSubmitVerdict) {
+    verdictBody = [
+      `<div class="review-verdict-body">`,
+      `<textarea class="review-body-textarea" id="review-composer-body" aria-label="Review verdict notes"${pendingAttr}`,
+      ` placeholder="${composer.verdict === 'ISSUES' ? 'Describe the issues…' : 'Optional notes…'}">${esc(composer.body)}</textarea>`,
+      `</div>`,
+      `<div class="review-verdict-footer">`,
+      `<button class="btn btn-ghost" data-review-action="cancel-verdict"${pendingAttr}>Cancel</button>`,
+      `<button class="btn ${composer.verdict === 'PASS' ? 'btn-success' : 'btn-danger'}" data-review-action="submit-verdict"${pendingAttr}>Submit ${esc(composer.verdict)}</button>`,
+      `</div>`,
+    ].join('');
+  }
+
+  const verdictActions =
+    !composer.active && canSubmitVerdict
+      ? [
+          `<div class="review-verdict-actions">`,
+          `<button class="btn btn-success" data-review-action="begin-pass" aria-label="Submit PASS verdict"${pendingAttr}>PASS</button>`,
+          `<button class="btn btn-danger" data-review-action="begin-issues" aria-label="Submit ISSUES verdict"${pendingAttr}>ISSUES</button>`,
+          `</div>`,
+        ].join('')
+      : '';
+  const verdictUnavailable = !canSubmitVerdict
+    ? `<div class="empty-inline"><span class="lead">Verdict unavailable until the diff and locked criteria load.</span></div>`
+    : '';
+
+  return [
+    `<div class="review-read">`,
+    `<div class="review-block">`,
+    `<div class="review-block-hd">Diff · ${esc(value.branch)} → ${esc(value.target)}</div>`,
+    diffHtml,
+    `</div>`,
+    `<div class="review-block">`,
+    `<div class="review-block-hd">Acceptance criteria${criteria.kind === 'criteria' ? ` · ${esc(criteria.specRef)}` : ''}</div>`,
+    `<div class="review-criteria-list" aria-label="Acceptance criteria">${criteriaHtml}</div>`,
+    `</div>`,
+    `<div class="review-block">`,
+    `<div class="review-block-hd">Verdict</div>`,
+    verdictActions,
+    verdictUnavailable,
+    verdictBody,
+    `</div>`,
+    `</div>`,
+  ].join('');
+}
+
+function renderReview(state: ReviewState): void {
+  const prevState = latestReviewState;
+  latestReviewState = state;
+
+  const reviewList = document.getElementById('review-list');
+  if (reviewList) {
+    if (state.pending.length === 0) {
+      reviewList.innerHTML = `<div class="empty-inline"><span class="glyph">✓</span><span class="lead">No pending reviews</span></div>`;
+    } else {
+      reviewList.innerHTML = state.pending
+        .map((row) => {
+          const isSelected = row.reviewId === state.selectedReviewId;
+          return [
+            `<button class="review-row${isSelected ? ' selected' : ''}" data-review-id="${esc(row.reviewId)}" type="button" role="option" aria-selected="${isSelected ? 'true' : 'false'}">`,
+            `<div class="rr-subject">${esc(row.subject)}</div>`,
+            `<div class="rr-meta"><span class="rr-sender">${esc(row.sender)}</span><span class="rr-age">${esc(reviewAgeStr(row.ts))}</span></div>`,
+            `</button>`,
+          ].join('');
+        })
+        .join('');
+    }
+  }
+
+  const detailPane = document.getElementById('review-detail-pane');
+  if (detailPane) {
+    const composerFocused = document.activeElement?.id === 'review-composer-body';
+    const needsRebuild = reviewDetailNeedsRebuild(
+      prevState != null ? reviewDetailSignature(prevState) : null,
+      reviewDetailSignature(state),
+      composerFocused,
+    );
+    if (needsRebuild) detailPane.innerHTML = renderReviewDetail(state.context, state.composer);
+  }
+
+  setBadge('review-badge', state.pending.length);
 }
 
 // ── Source ──────────────────────────────────────────────────────────────────────
@@ -1748,6 +1921,15 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'decline-with-composer':
         if (seq != null) void bridge.mailDeclineWithComposer(seq);
         break;
+      case 'open-review': {
+        bridge.navigate('review');
+        const reviewId = btn.dataset['reviewId'];
+        const loaded = reviewId != null ? bridge.reviewSelect(reviewId) : bridge.reviewRefresh();
+        void loaded.then((s) => {
+          if (s != null) renderReview(s);
+        });
+        break;
+      }
     }
   });
 
@@ -1757,6 +1939,64 @@ document.addEventListener('DOMContentLoaded', () => {
     if (row?.dataset['seq'] == null) return;
     e.preventDefault();
     void bridge.mailSelect(Number(row.dataset['seq']));
+  });
+
+  // ── Review (the SH-1 human gate) ───────────────────────────────────────────────
+  bridge.onReviewState((state) => renderReview(state));
+  bridge.onReviewError((message) => showAppError(message));
+  void bridge.reviewRefresh();
+
+  const handleReviewSelect = (reviewId: string): void => {
+    void bridge.reviewSelect(reviewId).then((s) => {
+      if (s != null) renderReview(s);
+    });
+  };
+
+  document.getElementById('view-review')?.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+
+    const row = target.closest<HTMLElement>('.review-row');
+    if (row?.dataset['reviewId'] != null) {
+      handleReviewSelect(row.dataset['reviewId']);
+      return;
+    }
+
+    const btn = target.closest<HTMLElement>('[data-review-action]');
+    if (!btn) return;
+    const apply = (p: Promise<ReviewState | null>): void => {
+      void p.then((s) => {
+        if (s != null) renderReview(s);
+      });
+    };
+    switch (btn.dataset['reviewAction']) {
+      case 'begin-pass':
+        apply(bridge.reviewBeginVerdict('PASS'));
+        break;
+      case 'begin-issues':
+        apply(bridge.reviewBeginVerdict('ISSUES'));
+        break;
+      case 'cancel-verdict':
+        apply(bridge.reviewCancelVerdict());
+        break;
+      case 'submit-verdict':
+        apply(bridge.reviewSubmitVerdict());
+        break;
+    }
+  });
+
+  document.getElementById('view-review')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const row = (e.target as HTMLElement).closest<HTMLElement>('.review-row');
+    if (row?.dataset['reviewId'] == null) return;
+    e.preventDefault();
+    handleReviewSelect(row.dataset['reviewId']);
+  });
+
+  document.getElementById('view-review')?.addEventListener('input', (e) => {
+    const textarea = (e.target as HTMLElement).closest<HTMLTextAreaElement>(
+      '#review-composer-body',
+    );
+    if (textarea) void bridge.reviewUpdateComposerBody(textarea.value);
   });
 
   // ── Source interactions ───────────────────────────────────────────────────────

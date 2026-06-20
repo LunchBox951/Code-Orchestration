@@ -1,7 +1,7 @@
 // Renderer-side type declarations for the contextBridge surface exposed by preload.cts.
 // Declared inline (no Node/shared imports) because the renderer is isolated from Node context.
 
-type NavView = 'dashboard' | 'agents' | 'mail' | 'source' | 'usage';
+type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'usage';
 type ConnectionStatus = 'connecting' | 'live' | 'degraded';
 
 interface ProjectInfo {

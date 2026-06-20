@@ -10,14 +10,12 @@ const appShellSource = readFileSync(join(here, '../main/app-shell.ts'), 'utf8');
 const mainSource = readFileSync(join(here, '../main/index.ts'), 'utf8');
 
 describe('cockpit information architecture', () => {
-  it('exposes the five v1 surfaces and drops the Review view', () => {
-    for (const view of ['dashboard', 'agents', 'mail', 'source', 'usage']) {
+  it('exposes the six v1 surfaces incl. the Review view (the SH-1 human gate)', () => {
+    for (const view of ['dashboard', 'agents', 'mail', 'review', 'source', 'usage']) {
       expect(htmlSource).toContain(`id="view-${view}"`);
       expect(htmlSource).toContain(`data-view="${view}"`);
     }
-    // Review is intentionally out of the v1 arc (re-addable later).
-    expect(htmlSource).not.toContain('id="view-review"');
-    expect(htmlSource).not.toContain('data-view="review"');
+    // The legacy 'cost' view was renamed to 'usage'.
     expect(htmlSource).not.toContain('data-view="cost"');
   });
 

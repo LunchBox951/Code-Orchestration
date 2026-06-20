@@ -1,11 +1,12 @@
 import { assertNever } from '@co/core';
 
-export type NavView = 'dashboard' | 'agents' | 'mail' | 'source' | 'usage';
+export type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'usage';
 
 export const NAV_VIEWS = [
   'dashboard',
   'agents',
   'mail',
+  'review',
   'source',
   'usage',
 ] as const satisfies ReadonlyArray<NavView>;
