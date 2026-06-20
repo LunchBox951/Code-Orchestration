@@ -114,6 +114,78 @@ function collectAgentIds(nodes: readonly TreeNode[], out: string[] = []): string
   return out;
 }
 
+// ── Cleared agents — declutter the viewport of idle, finished agents (e.g. accumulated host-proof
+// coordinators). VIEW-only: persisted in localStorage, never touches the roster/conductor, so nothing
+// is lost. A cleared agent that becomes active (warm/stuck) again is auto-restored.
+const DISMISSED_AGENTS_KEY = 'co.dismissedAgents';
+
+function loadDismissedAgents(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_AGENTS_KEY);
+    const parsed: unknown = raw != null ? JSON.parse(raw) : [];
+    return new Set(
+      Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+const dismissedAgents = loadDismissedAgents();
+
+function persistDismissedAgents(): void {
+  try {
+    window.localStorage.setItem(DISMISSED_AGENTS_KEY, JSON.stringify([...dismissedAgents]));
+  } catch {
+    /* localStorage unavailable — in-memory dismissal still declutters this session. */
+  }
+}
+
+/** True iff this node or any descendant is active (WARM or STUCK) — such a subtree is never hidden. */
+function subtreeActive(node: TreeNode): boolean {
+  return node.status === 'warm' || node.status === 'stuck' || node.children.some(subtreeActive);
+}
+
+function countSubtree(nodes: readonly TreeNode[]): number {
+  return nodes.reduce((n, c) => n + 1 + countSubtree(c.children), 0);
+}
+
+/**
+ * Filter cleared agents out of the tree for display. A cleared node is dropped only if its whole
+ * subtree is idle; a cleared node that became active again is auto-restored. Returns the visible tree
+ * and the count of agents hidden.
+ */
+function pruneDismissedAgents(nodes: readonly TreeNode[]): { tree: TreeNode[]; hidden: number } {
+  let hidden = 0;
+  const tree: TreeNode[] = [];
+  for (const node of nodes) {
+    if (dismissedAgents.has(node.agentId)) {
+      if (subtreeActive(node)) {
+        dismissedAgents.delete(node.agentId); // re-activated → restore
+      } else {
+        hidden += 1 + countSubtree(node.children);
+        continue;
+      }
+    }
+    const childResult = pruneDismissedAgents(node.children);
+    hidden += childResult.hidden;
+    tree.push({ ...node, children: childResult.tree });
+  }
+  return { tree, hidden };
+}
+
+/** Agent ids eligible to be cleared now: an idle subtree (no warm/stuck node) not already cleared. */
+function clearableAgentIds(nodes: readonly TreeNode[], out: string[] = []): string[] {
+  for (const node of nodes) {
+    if (!subtreeActive(node)) {
+      if (!dismissedAgents.has(node.agentId)) out.push(node.agentId);
+    } else {
+      clearableAgentIds(node.children, out);
+    }
+  }
+  return out;
+}
+
 function rememberMailBuses(state: DashboardState): void {
   knownMailBuses.clear();
   knownMailBuses.add(OPERATOR_BUS);
@@ -237,7 +309,6 @@ function renderHeader(): void {
   const pill = document.getElementById('project-pill');
   const nameEl = document.getElementById('project-name');
   const branchEl = document.getElementById('project-branch');
-  const titlebar = document.getElementById('titlebar-title');
   if (pill instanceof HTMLButtonElement) pill.disabled = false;
   if (projectInfo != null) {
     pill?.classList.remove('empty');
@@ -250,12 +321,10 @@ function renderHeader(): void {
         branchEl.hidden = true;
       }
     }
-    if (titlebar) titlebar.textContent = `co · Code Orchestration · ${projectInfo.name}`;
   } else {
     pill?.classList.add('empty');
     if (nameEl) nameEl.textContent = 'No project open';
     if (branchEl) branchEl.hidden = true;
-    if (titlebar) titlebar.textContent = 'co · Code Orchestration';
   }
 
   renderLimitsSummary();
@@ -347,7 +416,7 @@ function renderLimitsPopover(state: LimitsCostState): void {
   const body = document.getElementById('limits-popover-body');
   if (!body) return;
   if (state.headroomRows.length === 0) {
-    body.innerHTML = `<div class="empty-inline"><span class="lead">No usage data</span></div>`;
+    body.innerHTML = `<div class="empty-inline"><span class="glyph">%</span><span class="lead">No usage recorded yet</span><span class="sub">Provider headroom appears once agents run real turns through the balancer.</span></div>`;
     return;
   }
   body.innerHTML = groupHeadroom(state)
@@ -515,10 +584,31 @@ function renderDashboard(): void {
     ? `<div class="degraded-banner">Conductor not running — showing last known state</div>`
     : '';
 
+  const dismissedSizeBefore = dismissedAgents.size;
+  const pruned =
+    dash != null ? pruneDismissedAgents(dash.tree) : { tree: [] as TreeNode[], hidden: 0 };
+  if (dismissedAgents.size !== dismissedSizeBefore) persistDismissedAgents();
+  const clearableCount = dash != null ? clearableAgentIds(dash.tree).length : 0;
+  const fleetTools = [
+    clearableCount > 0
+      ? `<button class="link" data-mc-action="clear-finished" type="button">Clear finished (${clearableCount})</button>`
+      : '',
+    pruned.hidden > 0
+      ? `<button class="link" data-mc-action="show-hidden" type="button">${pruned.hidden} hidden · show all</button>`
+      : '',
+  ].join('');
+  const fleetHd = `<span class="ttl">Fleet</span><span class="meta">spawn tree · click to open console</span>${fleetTools}`;
+
   const fleetBody =
-    dash != null && dash.tree.length > 0
-      ? renderTreeRows(dash.tree, 0)
-      : `<div class="empty-inline">
+    pruned.tree.length > 0
+      ? renderTreeRows(pruned.tree, 0)
+      : pruned.hidden > 0
+        ? `<div class="empty-inline">
+           <span class="glyph">✓</span>
+           <span class="lead">All agents cleared from view.</span>
+           <span class="sub"><button class="link" data-mc-action="show-hidden" type="button">Show ${pruned.hidden} hidden</button></span>
+         </div>`
+        : `<div class="empty-inline">
            <span class="glyph">∅</span>
            <span class="lead">No agents yet.</span>
            <span class="sub">Start a coordinator session — it locks the spec and spawns the fleet.</span>
@@ -565,12 +655,12 @@ function renderDashboard(): void {
   const grid =
     phase === 'opened'
       ? `<div class="panel" style="flex:1;min-height:280px">
-           <div class="panel-hd"><span class="ttl">Fleet</span><span class="meta">spawn tree · click to open console</span></div>
+           <div class="panel-hd">${fleetHd}</div>
            <div class="panel-body">${fleetBody}</div>
          </div>`
       : `<div class="mc-grid">
            <div class="panel">
-             <div class="panel-hd"><span class="ttl">Fleet</span><span class="meta">spawn tree · click to open console</span></div>
+             <div class="panel-hd">${fleetHd}</div>
              <div class="panel-body">${fleetBody}</div>
            </div>
            <div class="mc-right">${rightCol}</div>
@@ -868,7 +958,10 @@ function mailAgeStr(ts: number): string {
 function renderMailSidebar(state: MailState): void {
   const busSelector = document.getElementById('mail-bus-selector');
   if (busSelector) {
-    const buses = [OPERATOR_BUS, ...[...knownMailBuses].filter((b) => b !== OPERATOR_BUS)];
+    const buses = [
+      OPERATOR_BUS,
+      ...[...knownMailBuses].filter((b) => b !== OPERATOR_BUS && !dismissedAgents.has(b)),
+    ];
     if (!buses.includes(state.activeBus)) buses.push(state.activeBus);
     busSelector.innerHTML = buses
       .map((bus) => {
@@ -1342,10 +1435,10 @@ function renderBranchList(branches: readonly BranchInfo[]): string {
       return `
         <div class="git-row" style="padding:0 18px">
           ${head}
-          <span class="git-msg">${esc(b.name)}</span>
+          <span class="git-branch">${esc(b.name)}</span>
+          <span class="git-msg">${esc(b.lastCommit.subject)}</span>
           ${upstream}
           <span class="git-sha">${esc(b.lastCommit.sha)}</span>
-          <span class="git-when">${esc(b.lastCommit.subject)}</span>
         </div>`;
     })
     .join('');
@@ -1365,10 +1458,10 @@ function renderPullRequestList(pullRequests: readonly PullRequestInfo[]): string
       (pr) => `
         <div class="git-row" style="padding:0 18px">
           <span class="git-ref" style="margin-right:8px">⇄ #${pr.number}</span>
+          <span class="git-branch">${esc(pr.ref)}</span>
           <span class="git-msg">${esc(pr.lastCommit.subject)}</span>
           <span class="git-author">${esc(pr.source)}</span>
           <span class="git-sha">${esc(pr.lastCommit.sha)}</span>
-          <span class="git-when">${esc(pr.ref)}</span>
         </div>`,
     )
     .join('');
@@ -1766,6 +1859,18 @@ document.addEventListener('DOMContentLoaded', () => {
         bridge.navigate('mail');
       } else if (action === 'pause') {
         flashToast('Pause all — not yet wired');
+      } else if (action === 'clear-finished') {
+        if (latestDashboard != null) {
+          for (const id of clearableAgentIds(latestDashboard.tree)) dismissedAgents.add(id);
+          persistDismissedAgents();
+          renderDashboard();
+          if (latestMailState != null) renderMailSidebar(latestMailState);
+        }
+      } else if (action === 'show-hidden') {
+        dismissedAgents.clear();
+        persistDismissedAgents();
+        renderDashboard();
+        if (latestMailState != null) renderMailSidebar(latestMailState);
       }
     }
   });
