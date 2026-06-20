@@ -101,3 +101,29 @@ export {
   type WorkerBenchmarkResult,
   type WorkerBenchmarkStopReason,
 } from './conductor/worker-benchmark.js';
+// MULTI-LEVEL ORCHESTRATION BENCHMARK (the v1 centerpiece) — drives the full coordinator → lead → 2
+// implementers → merge-up chain for an OrchestrationScenario, automates the operator gates, and grades the
+// merged integration branch by EXECUTING it against the scenario's hidden oracle. Switchable sandbox↔live
+// via the injected automation seam; fidelity is DERIVED from the resolved pty host (never a flag). The
+// pure helpers (done-detector, metrics aggregation, fidelity derivation, grader) are exported for
+// no-pty unit testing. See docs/orchestration-benchmark.md.
+export {
+  runOrchestrationBenchmark,
+  deriveRunFidelity,
+  detectChainCompletion,
+  aggregateAgentMetrics,
+  aggregateMergeOutcomes,
+  countImplementerBranchesMergedUp,
+  gradeIntegrationBranch,
+  ORCH_BENCH_DEFAULTS,
+  ORCH_BENCH_TASK_ID,
+  CO_BENCH_MAX_TICKS_ENV,
+  CO_BENCH_WALLCLOCK_MS_ENV,
+  CO_BENCH_PER_STEP_MS_ENV,
+  type OrchestrationBenchmarkOptions,
+  type OrchestrationAutomation,
+  type AutomationDriveInput,
+  type AutomationDriveResult,
+  type AgentTurnSample,
+  type OrchestrationStopReason,
+} from './conductor/orchestration-benchmark.js';
