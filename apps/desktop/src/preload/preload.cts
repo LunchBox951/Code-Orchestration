@@ -1,4 +1,4 @@
-type NavView = 'dashboard' | 'agents' | 'mail' | 'source' | 'usage';
+type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'usage' | 'settings';
 type NavState = { readonly activeView: NavView };
 type ProjectInfo = { id: string };
 type ConnectionState = unknown;
@@ -25,6 +25,9 @@ const { contextBridge, ipcRenderer } = require('electron') as {
 };
 
 type ReviewState = unknown;
+type SettingsState = unknown;
+type SettingsLayer = 'global' | 'project';
+type SettingWriteResult = { ok: boolean; error?: string };
 type SourceState = unknown;
 type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
 type DaemonStatusPayload = { status: DaemonStatus; detail: string | null };
@@ -83,6 +86,12 @@ interface CoShellBridge {
   reviewCancelVerdict(): Promise<ReviewState | null>;
   reviewSubmitVerdict(): Promise<ReviewState | null>;
   reviewRefresh(): Promise<ReviewState | null>;
+  // ── Settings ────────────────────────────────────────────────────────────────
+  onSettingsState(listener: (state: SettingsState) => void): () => void;
+  settingsGetState(): Promise<SettingsState | null>;
+  settingsSet(layer: SettingsLayer, key: string, value: unknown): Promise<SettingWriteResult>;
+  settingsClear(layer: SettingsLayer, key: string): Promise<{ ok: boolean }>;
+  settingsSetLayer(layer: SettingsLayer): Promise<SettingsState | null>;
   // ── Session ───────────────────────────────────────────────────────────────
   sessionStart(
     prompt: string | null,
@@ -263,6 +272,24 @@ const bridge: CoShellBridge = {
   },
   async reviewRefresh(): Promise<ReviewState | null> {
     return ipcRenderer.invoke<ReviewState | null>('review:refresh');
+  },
+  // ── Settings ────────────────────────────────────────────────────────────────
+  onSettingsState(listener: (state: SettingsState) => void) {
+    const handler = (_event: unknown, state: SettingsState): void => listener(state);
+    ipcRenderer.on('settings:state', handler);
+    return () => ipcRenderer.removeListener('settings:state', handler);
+  },
+  async settingsGetState(): Promise<SettingsState | null> {
+    return ipcRenderer.invoke<SettingsState | null>('settings:getState');
+  },
+  async settingsSet(layer: SettingsLayer, key: string, value: unknown): Promise<SettingWriteResult> {
+    return ipcRenderer.invoke<SettingWriteResult>('settings:set', { layer, key, value });
+  },
+  async settingsClear(layer: SettingsLayer, key: string): Promise<{ ok: boolean }> {
+    return ipcRenderer.invoke<{ ok: boolean }>('settings:clear', { layer, key });
+  },
+  async settingsSetLayer(layer: SettingsLayer): Promise<SettingsState | null> {
+    return ipcRenderer.invoke<SettingsState | null>('settings:setLayer', layer);
   },
   // ── Session ───────────────────────────────────────────────────────────────
   async sessionStart(
