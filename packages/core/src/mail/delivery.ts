@@ -329,6 +329,16 @@ export class InProcessDelivery implements Delivery {
             'review request/response mail is tied to review-store side effects.',
         );
       }
+      // Once this item has been forwarded ONWARD (it is the held_seq of a forward link), the
+      // obligation has climbed the chain and is no longer the sender's to withdraw. Retracting it
+      // would strand the downstream forward link, double-count the obligation, and break the relay
+      // of the eventual answer back to the original asker. Refuse loud (Principle 9 — never-drop).
+      if (forwardedMailForHeld(db, seq) != null) {
+        throw new Error(
+          `InProcessDelivery.retract: cannot retract seq=${seq}; it has already been forwarded ` +
+            "onward and is no longer the sender's to withdraw. Let the escalation chain resolve.",
+        );
+      }
 
       const [stored] = tx.append([makeMailRetractEvent(this.projectId, sender, seq)]);
       applyEvent(tx, decode(stored!, mailUpcasters, mailSchemas), this.projectors);
