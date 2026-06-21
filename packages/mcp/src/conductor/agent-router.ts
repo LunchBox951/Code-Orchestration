@@ -128,6 +128,14 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
     this.paused.delete(agentId);
   }
 
+  /** Un-stop: clear ALL operator/watchdog suppression (stopped+paused+stuck) so the daemon may re-select
+   *  the agent next tick. Idempotent, never throws, never relaunches (the daemon re-reads the live set). */
+  unstop(agentId: string): void {
+    this.stopped.delete(agentId);
+    this.paused.delete(agentId);
+    this.stuck.delete(agentId);
+  }
+
   /**
    * The host-side `markStuck` owner: flip an agent into STUCK. `serveConductor` wires this into the
    * {@link import('@co/core').ReconcileLoop}'s `markStuck` seam, so a watchdog escalation lands here and

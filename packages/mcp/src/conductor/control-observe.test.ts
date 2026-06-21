@@ -393,6 +393,23 @@ describe('AC-S10-3.2 — a paused agent with outstanding mail is SKIPPED by cand
   });
 });
 
+// ── AC-S10-3.3b — unstop clears all suppression sets (makes Stop reversible) ────────────────────
+describe('AC-S10-3.3b — unstop clears stopped+paused+stuck so the daemon re-selects the agent', () => {
+  it('unstop clears stopped+paused+stuck so the daemon re-selects the agent', () => {
+    const { engine } = makeEngine(makeClock(), makeQuietWindow());
+    const { projectId } = makeProject();
+    const router = new DaemonBackedAgentRouter({ engine, projectId });
+    router.stop('impl-x');
+    router.markStuck('impl-x');
+    router.pause('impl-x');
+    router.unstop('impl-x');
+    expect(router.isStopped('impl-x')).toBe(false);
+    expect(router.isStuck('impl-x')).toBe(false);
+    expect(router.isPaused('impl-x')).toBe(false);
+    expect(router.shouldSkip(projectId, 'impl-x')).toBe(false);
+  });
+});
+
 // ── AC-S10-3.3 — revertStuck + rewake genuinely re-wakes a STUCK agent (MNR #4) ───────────────────
 describe('AC-S10-3.3 — MNR #4: an agent STUCK via the wired markStuck is reverted + ACTUALLY re-woken', () => {
   it('STUCK (via the reconcile-wired markStuck) skips the agent; revertStuck+rewake re-drives it', async () => {
