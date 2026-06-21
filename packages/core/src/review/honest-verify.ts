@@ -54,8 +54,10 @@ export function honestVerify(
   }
 
   return {
-    regressions: [...regressions].sort(),
-    baselineFailures: [...baselineFailures].sort(),
+    // Dedup before sorting: a finish array with a repeated failing test name would otherwise
+    // double-count into the surfaced failure arrays and the escalation mail text.
+    regressions: [...new Set(regressions)].sort(),
+    baselineFailures: [...new Set(baselineFailures)].sort(),
     suiteResult: finish.some((t) => !t.passed) ? 'fail' : 'pass',
     baselineCompared: true,
   };

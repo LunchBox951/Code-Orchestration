@@ -92,6 +92,19 @@ describe('honestVerify — regression classification', () => {
     expect(out.regressions).toEqual(['b-test', 'm-test']); // sorted
   });
 
+  it('deduplicates repeated failing test names so they cannot double-count', () => {
+    const baseline: TestOutcome[] = [{ name: 'dup-baseline', passed: false }];
+    const finish: TestOutcome[] = [
+      { name: 'dup-baseline', passed: false }, // repeated baseline failure
+      { name: 'dup-baseline', passed: false },
+      { name: 'dup-regress', passed: false }, // repeated regression
+      { name: 'dup-regress', passed: false },
+    ];
+    const out = honestVerify(baseline, finish);
+    expect(out.baselineFailures).toEqual(['dup-baseline']);
+    expect(out.regressions).toEqual(['dup-regress']);
+  });
+
   it('is deterministic: identical inputs always produce identical output', () => {
     const baseline: TestOutcome[] = [
       { name: 'test-a', passed: true },
