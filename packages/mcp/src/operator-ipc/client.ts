@@ -20,6 +20,7 @@ import {
   OPERATOR_IPC_TRANSCRIPT,
   queryObservability,
   type ApprovalReply,
+  type ArchiveEntry,
   type DeliveredMail,
   type LiveObservabilitySnapshot,
   type ObservabilitySnapshot,
@@ -202,6 +203,23 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
       cols,
       rows,
     } as unknown as WirePayload);
+  }
+
+  /** B5 — list archived coordinator branches (the cross-process read; degraded to `[]` by the facade). */
+  async listArchive(): Promise<readonly ArchiveEntry[]> {
+    // The server wraps the array in { entries } so the result is an object (JSON-RPC 2.0 constraint).
+    const result = await this.call(OPERATOR_IPC_METHODS.listArchive, {});
+    return (result as unknown as { entries: readonly ArchiveEntry[] }).entries;
+  }
+
+  /** B5 — un-archive `id`: remove the archive record (branch stays). Fails loud when down. */
+  async restoreArchive(id: string): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.restoreArchive, { id } as unknown as WirePayload);
+  }
+
+  /** B5 — hard-purge `id`: `git branch -D <branch>` then remove the archive record. Fails loud when down. */
+  async purgeArchive(id: string): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.purgeArchive, { id } as unknown as WirePayload);
   }
 
   /** Subscribe to the per-tick `tick` push; returns an unsubscribe fn. */
@@ -531,6 +549,42 @@ export class OperatorIpcClient {
   /** Stage 15 §7 — resize `agentId`'s warm PTY to `cols` × `rows`. */
   async resize(agentId: string, cols: number, rows: number): Promise<void> {
     await this.withConnection((c) => c.resize(agentId, cols, rows));
+  }
+
+  /**
+   * B5 — list archived coordinator branches. READ/degrade (mirrors {@link transcript}): with NO socket it
+   * returns an empty `[]` rather than hanging or throwing — the renderer shows nothing until the
+   * Conductor is back. A live socket returns the daemon's list.
+   */
+  async listArchive(): Promise<readonly ArchiveEntry[]> {
+    const connection = await this.ensureConnection();
+    if (connection != null) {
+      try {
+        return await connection.listArchive();
+      } catch (error) {
+        // A socket drop nulls the connection — ordinary degrade (silent per D5/MNR #3). Any OTHER error
+        // is unexpected: surface it for diagnostics rather than masking a real fault. Either way fall
+        // through to the empty list — never hang, never throw.
+        if (this.connection != null) this.report(error);
+      }
+    }
+    return [];
+  }
+
+  /**
+   * B5 — un-archive `id`: remove the archive record (branch stays). A control verb: throws a clear
+   * {@link ConductorUnavailableError} when the Conductor socket is down (Principle 9).
+   */
+  async restoreArchive(id: string): Promise<void> {
+    await this.withConnection((c) => c.restoreArchive(id));
+  }
+
+  /**
+   * B5 — hard-purge `id`: `git branch -D <branch>` then remove the archive record. A control verb:
+   * throws a clear {@link ConductorUnavailableError} when the Conductor socket is down (Principle 9).
+   */
+  async purgeArchive(id: string): Promise<void> {
+    await this.withConnection((c) => c.purgeArchive(id));
   }
 
   /** Subscribe to the per-tick push; survives reconnects. Returns an unsubscribe fn. */

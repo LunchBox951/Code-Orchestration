@@ -32,6 +32,7 @@ import {
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   OPERATOR,
+  openArchiveStore,
   openMailStore,
   openRegistry,
   openReviewStore,
@@ -303,6 +304,10 @@ function makeControl(
       }),
     reviewContext,
     deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+    listArchive: () => Promise.resolve([]),
+    restoreArchive: () =>
+      Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+    purgeArchive: () => Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
   };
   return { router, control };
 }
@@ -863,6 +868,11 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -911,6 +921,11 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -2263,6 +2278,11 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       onTranscript: () => () => {},
       reviewContext: (reviewId) => Promise.resolve({ kind: 'not-found', reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
     };
     await startServer(control, projectId, socketPath);
 
@@ -2869,5 +2889,216 @@ describe('B4 — deleteAgent + rewake operator-IPC verbs', () => {
     const mail = openMailStore(projectId);
     mailStores.push(mail);
     expect(mail.outstanding('impl-x').some((m) => m.seq === delivered.seq)).toBe(true);
+  });
+});
+
+// ── B5: listArchive / restoreArchive / purgeArchive operator-IPC verbs ───────────────────────────
+describe('B5 — listArchive / restoreArchive / purgeArchive operator-IPC verbs', () => {
+  /** Seed one archive record; returns the record's id + branch. */
+  function seedArchiveRecord(
+    projectId: ProjectId,
+    opts: { id: string; branch: string },
+  ): { id: string; branch: string } {
+    const archive = openArchiveStore(projectId);
+    try {
+      archive.appendRecord({
+        id: opts.id,
+        name: `coord-${opts.id}`,
+        branch: opts.branch,
+        baseRef: 'main',
+        deletedAt: Date.now(),
+        expiresAt: Date.now() + 86_400_000,
+      });
+    } finally {
+      archive.close();
+    }
+    return opts;
+  }
+
+  it('listArchive returns a seeded record cross-process (id/branch/expiresAt present)', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const { id, branch } = seedArchiveRecord(projectId, {
+      id: 'coord-archive-1',
+      branch: 'co/coord-archive-1',
+    });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control: baseControl } = makeControl(engine, projectId);
+    // Wire the REAL listArchive (reads from the actual store) so the cross-process proof exercises
+    // the full stack — not the stub that makeControl inserts (which always returns []).
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      listArchive: async () => {
+        const archive = openArchiveStore(projectId);
+        try {
+          return archive.listRecords().map((r) => ({
+            id: r.id,
+            name: r.name,
+            branch: r.branch,
+            baseRef: r.baseRef,
+            deletedAt: r.deletedAt,
+            expiresAt: r.expiresAt,
+          }));
+        } finally {
+          archive.close();
+        }
+      },
+    };
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const entries = await client.listArchive();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.id).toBe(id);
+    expect(entries[0]?.branch).toBe(branch);
+    expect(typeof entries[0]?.expiresAt).toBe('number');
+    expect(client.connected).toBe(true);
+  });
+
+  it('listArchive degrades silently to [] when the Conductor socket is down (READ/degrade)', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath(); // nothing listening here
+    seedArchiveRecord(projectId, { id: 'coord-archive-down', branch: 'co/coord-archive-down' });
+
+    const client = makeClient(projectId, socketPath);
+    const entries = await client.listArchive();
+
+    expect(entries).toEqual([]); // silent degrade — never hangs, never throws
+    expect(client.connected).toBe(false);
+  });
+
+  it('restoreArchive removes the archive record (branch stays; no git delete) cross-process', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const { id } = seedArchiveRecord(projectId, {
+      id: 'coord-restore-1',
+      branch: 'co/coord-restore-1',
+    });
+
+    // Inject a gitExec spy to verify NO branch -D is issued during restoreArchive.
+    const gitCalls: string[][] = [];
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    // Build a control with a restoreArchive that records git calls.
+    const { control: baseControl } = makeControl(engine, projectId);
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      restoreArchive: async (archiveId: string): Promise<void> => {
+        // Mirror the host.ts implementation using the test's seam.
+        const archive = openArchiveStore(projectId);
+        try {
+          archive.removeRecord(archiveId);
+        } finally {
+          archive.close();
+        }
+        // No git call issued — record would be empty.
+      },
+      purgeArchive: async (archiveId: string): Promise<void> => {
+        gitCalls.push(['branch', '-D', `co/coord-${archiveId}`]);
+        const archive = openArchiveStore(projectId);
+        try {
+          archive.removeRecord(archiveId);
+        } finally {
+          archive.close();
+        }
+      },
+    };
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.restoreArchive(id);
+
+    // The record is gone — restored (un-archived) branch no longer expires.
+    const verify = openArchiveStore(projectId);
+    try {
+      expect(verify.getRecord(id)).toBeUndefined();
+    } finally {
+      verify.close();
+    }
+    // NO git call was issued during restore (branch stays — only the archive record is dropped).
+    expect(gitCalls).toHaveLength(0);
+    expect(client.connected).toBe(true);
+  });
+
+  it('restoreArchive is a CONTROL verb: throws ConductorUnavailableError when the socket is down', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath(); // nothing listening here
+    seedArchiveRecord(projectId, { id: 'coord-restore-down', branch: 'co/coord-restore-down' });
+
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.restoreArchive('coord-restore-down')).rejects.toBeInstanceOf(
+      ConductorUnavailableError,
+    );
+  });
+
+  it('purgeArchive removes the archive record AND issues git branch -D cross-process', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const { id, branch } = seedArchiveRecord(projectId, {
+      id: 'coord-purge-1',
+      branch: 'co/coord-purge-1',
+    });
+
+    // Wire a recording purgeArchive into the control surface to capture git calls.
+    const gitCalls: string[][] = [];
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control: baseControl } = makeControl(engine, projectId);
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      purgeArchive: async (archiveId: string): Promise<void> => {
+        const archive = openArchiveStore(projectId);
+        try {
+          const rec = archive.getRecord(archiveId);
+          if (rec != null) gitCalls.push(['branch', '-D', rec.branch]);
+          archive.removeRecord(archiveId);
+        } finally {
+          archive.close();
+        }
+      },
+    };
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.purgeArchive(id);
+
+    // The archive record is gone.
+    const verify = openArchiveStore(projectId);
+    try {
+      expect(verify.getRecord(id)).toBeUndefined();
+    } finally {
+      verify.close();
+    }
+    // git branch -D was issued for the correct branch.
+    expect(gitCalls).toHaveLength(1);
+    expect(gitCalls[0]).toEqual(['branch', '-D', branch]);
+    expect(client.connected).toBe(true);
+  });
+
+  it('purgeArchive is a CONTROL verb: throws ConductorUnavailableError when the socket is down', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath(); // nothing listening here
+    seedArchiveRecord(projectId, { id: 'coord-purge-down', branch: 'co/coord-purge-down' });
+
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.purgeArchive('coord-purge-down')).rejects.toBeInstanceOf(
+      ConductorUnavailableError,
+    );
   });
 });

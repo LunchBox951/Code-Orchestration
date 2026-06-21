@@ -401,6 +401,18 @@ export class OperatorIpcServer {
           requirePositiveDim(params, 'rows'),
         );
         return {};
+      case OPERATOR_IPC_METHODS.listArchive:
+        // B5 — READ: list archived coordinator branches; wrapped in { entries } so the result is an
+        // object (JSON-RPC 2.0 result MUST be an object — never an array on the wire).
+        return { entries: await this.control.listArchive() } as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.restoreArchive:
+        // B5 — CONTROL: remove the archive record (branch stays; expiry cancelled). Fail loud when down.
+        await this.control.restoreArchive(requireString(params, 'id'));
+        return {};
+      case OPERATOR_IPC_METHODS.purgeArchive:
+        // B5 — CONTROL: git branch -D then remove the archive record. Fail loud when down.
+        await this.control.purgeArchive(requireString(params, 'id'));
+        return {};
       default:
         return assertNever(method);
     }

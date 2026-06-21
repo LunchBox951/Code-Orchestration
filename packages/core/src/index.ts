@@ -1437,6 +1437,7 @@ export type {
   OperatorIpcConnectionState,
   StartSessionParams,
   StartSessionResult,
+  ArchiveEntry,
 } from './operator-ipc/contract.js';
 export {
   OPERATOR_IPC_METHODS,

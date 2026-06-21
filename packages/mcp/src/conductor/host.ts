@@ -26,6 +26,7 @@ import {
   defaultGitReader,
   deleteAgentSubtree,
   descendantsLeafFirst,
+  openArchiveStore,
   openMailStore,
   openRegistry,
   openReviewStore,
@@ -37,6 +38,7 @@ import {
   reapExpiredArchives,
   waitingItems,
   QUIET_WINDOW_MS,
+  type ArchiveEntry,
   type BreakSignal,
   type InjectNudgeFn,
   type LiveObservabilitySnapshot,
@@ -119,6 +121,21 @@ export interface ConductorControlSurface {
    * the IPC layer surfaces partial-failure detail to the operator.
    */
   readonly deleteAgent: (agentId: string) => Promise<void>;
+  /**
+   * B5 (listArchive) — list archived (unmerged) coordinator branches. A READ — degrades silently to `[]`
+   * when the socket is down (mirrors observe; never hangs, never throws — Principle 9 / MNR #3).
+   */
+  readonly listArchive: () => Promise<readonly ArchiveEntry[]>;
+  /**
+   * B5 (restoreArchive) — un-archive `id`: remove the archive record so the reaper skips it. The
+   * branch STAYS (no git delete). A control verb — fails loud when down (Principle 9).
+   */
+  readonly restoreArchive: (id: string) => Promise<void>;
+  /**
+   * B5 (purgeArchive) — hard-purge `id`: `git branch -D <branch>` then remove the archive record.
+   * A control verb — fails loud when down (Principle 9).
+   */
+  readonly purgeArchive: (id: string) => Promise<void>;
 }
 
 // ── The cadence runner ──────────────────────────────────────────────────────────────────────────────
@@ -590,6 +607,58 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         gitExec: defaultGitExec,
         gitReader: defaultGitReader,
       });
+    },
+    // B5 (listArchive) — list all archived branch records; open/close per call (mirrors reviewContext).
+    listArchive: async (): Promise<readonly ArchiveEntry[]> => {
+      const archive = openArchiveStore(projectId);
+      try {
+        return archive.listRecords().map((r) => ({
+          id: r.id,
+          name: r.name,
+          branch: r.branch,
+          baseRef: r.baseRef,
+          deletedAt: r.deletedAt,
+          expiresAt: r.expiresAt,
+        }));
+      } finally {
+        archive.close();
+      }
+    },
+    // B5 (restoreArchive) — remove the archive record so the reaper skips it; branch stays.
+    restoreArchive: async (id: string): Promise<void> => {
+      const archive = openArchiveStore(projectId);
+      try {
+        archive.removeRecord(id);
+      } finally {
+        archive.close();
+      }
+    },
+    // B5 (purgeArchive) — hard-purge: git branch -D <branch> then remove the archive record.
+    // repoCwd is resolved per call from the registry, exactly as deleteAgent (Principle 9: fail loud).
+    purgeArchive: async (id: string): Promise<void> => {
+      const registry = openRegistry();
+      let repoCwd: string;
+      try {
+        const p = registry.pathFor(projectId);
+        if (p == null) {
+          throw new Error(
+            `co-mcp serve: purgeArchive: project '${projectId}' is not registered — cannot resolve repoCwd.`,
+          );
+        }
+        repoCwd = p;
+      } finally {
+        registry.close();
+      }
+      const archive = openArchiveStore(projectId);
+      try {
+        const rec = archive.getRecord(id);
+        if (rec != null) {
+          defaultGitExec(repoCwd, ['branch', '-D', rec.branch]);
+        }
+        archive.removeRecord(id);
+      } finally {
+        archive.close();
+      }
     },
   };
 

@@ -27,6 +27,18 @@ import type { Criterion } from '../specs/criteria-schema.js';
 export const OPERATOR_IPC_METHODS = {
   /** Snapshot the LIVE observability view (roster ⊕ warm/paused/stuck + outstanding + cost). */
   observe: 'observe',
+  /** List archived (unmerged) coordinator branches — degrades silently to `[]` when the socket is down. */
+  listArchive: 'listArchive',
+  /**
+   * Un-archive a coordinator branch: remove the archive record (branch STAYS; no git delete). A control
+   * verb — fails loud when the socket is down (Principle 9).
+   */
+  restoreArchive: 'restoreArchive',
+  /**
+   * Hard-purge an archived branch: `git branch -D <branch>` then remove the archive record. A control
+   * verb — fails loud when the socket is down (Principle 9).
+   */
+  purgeArchive: 'purgeArchive',
   /** Pause an agent (the daemon skips it until {@link OPERATOR_IPC_METHODS.resume}). */
   pause: 'pause',
   /** Resume a paused agent. */
@@ -158,6 +170,23 @@ export interface StartSessionResult {
 }
 
 /**
+ * One archived coordinator branch entry — a mirror of the store's `ArchiveRecord`, carried over the
+ * wire. All six fields are read-only (desktop renders, never mutates). Numbers match the store's
+ * epoch-ms convention. Named `ArchiveEntry` (not `ArchiveRecord`) so the contract has no implicit
+ * dependency on the store layer's internal type — the desktop never imports from the store directly.
+ */
+export interface ArchiveEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly branch: string;
+  readonly baseRef: string;
+  /** Epoch ms when the coordinator branch was archived (deleted from the active roster). */
+  readonly deletedAt: number;
+  /** Epoch ms when the reaper will hard-delete the branch unless the operator restores or purges it first. */
+  readonly expiresAt: number;
+}
+
+/**
  * The transport-agnostic operator surface the wire exposes: the daemon-side SERVER implements it over
  * a live Conductor control surface + a {@link MailStore}; the app-side CLIENT calls it over the
  * socket. Every method is async (the wire is async); the void verbs resolve once the daemon has
@@ -217,6 +246,22 @@ export interface OperatorIpcSurface {
   sendInput(agentId: string, data: string): Promise<void>;
   /** Resize `agentId`'s warm PTY to `cols` × `rows` (xterm fit → PTY width sync). */
   resize(agentId: string, cols: number, rows: number): Promise<void>;
+  /**
+   * List archived (unmerged) coordinator branches. A READ — degrades silently to `[]` when the
+   * Conductor socket is down (mirrors {@link observe}; never hangs, never throws — Principle 9 / MNR #3).
+   */
+  listArchive(): Promise<readonly ArchiveEntry[]>;
+  /**
+   * Un-archive a coordinator branch: remove the archive record so the reaper skips it. The branch STAYS
+   * (Restore = promote to an ordinary branch; no git delete). A control verb — fails loud when down
+   * (Principle 9).
+   */
+  restoreArchive(id: string): Promise<void>;
+  /**
+   * Hard-purge an archived branch now: `git branch -D <branch>` then remove the archive record.
+   * A control verb — fails loud when the Conductor socket is down (Principle 9).
+   */
+  purgeArchive(id: string): Promise<void>;
 }
 
 /**
