@@ -101,6 +101,26 @@ describe('ConnectionVM', () => {
     expect(unsub).toHaveBeenCalledOnce();
   });
 
+  it('does not publish a refresh result that resolves after close', async () => {
+    let resolveObserve!: (observation: OperatorObservation) => void;
+    const observe = vi.fn(
+      () =>
+        new Promise<OperatorObservation>((resolve) => {
+          resolveObserve = resolve;
+        }),
+    );
+    const onState = vi.fn();
+    const vm = new ConnectionVM({ client: makeClient({ observe }), onState });
+
+    const started = vm.start();
+    vm.close();
+    resolveObserve(liveObs);
+    await started;
+
+    expect(onState).not.toHaveBeenCalled();
+    expect(vm.state).toEqual({ status: 'connecting', observation: null });
+  });
+
   it('refresh updates the observation', async () => {
     const vm = new ConnectionVM({ client: makeClient() });
     await vm.start();

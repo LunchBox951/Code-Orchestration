@@ -29,6 +29,7 @@ function makeAgent(
     outstandingMail: 0,
     paused: false,
     stuck: false,
+    stopped: false,
     costUsd: 0,
     ...overrides,
   };
@@ -94,6 +95,19 @@ describe('AgentsConsoleVM — live observation', () => {
     expect(vm.state.roster[0]?.status).toBe('paused');
   });
 
+  it('maps stopped agent with outstanding mail to stopped status', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(
+      liveObs([
+        makeAgent('a1', '@operator', {
+          outstandingMail: 2,
+          stopped: true,
+        }),
+      ]),
+    );
+    expect(vm.state.roster[0]?.status).toBe('stopped');
+  });
+
   it('maps !hosted + outstandingMail>0 to waiting status', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator', { hosted: false, outstandingMail: 2 })]));
@@ -133,6 +147,15 @@ describe('AgentsConsoleVM — live observation', () => {
     expect(row?.parent).toBe('@operator');
   });
 
+  it('roster carries operator-provided names', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('coord-auth-9f3a1c', '@operator', { name: 'Auth refactor' })]));
+    expect(vm.state.roster[0]).toMatchObject({
+      agentId: 'coord-auth-9f3a1c',
+      name: 'Auth refactor',
+    });
+  });
+
   it('handles empty agent list without throwing', () => {
     const vm = new AgentsConsoleVM();
     expect(() => vm.update(liveObs([]))).not.toThrow();
@@ -157,6 +180,17 @@ describe('AgentsConsoleVM — static (daemon-down) observation', () => {
     const vm = new AgentsConsoleVM();
     vm.update(staticObs([makeStaticAgent('a1', '@operator'), makeStaticAgent('a2', '@operator')]));
     expect(vm.state.roster.every((r) => r.status === 'unknown')).toBe(true);
+  });
+
+  it('roster carries operator-provided names in static mode', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(
+      staticObs([makeStaticAgent('coord-auth-9f3a1c', '@operator', { name: 'Auth refactor' })]),
+    );
+    expect(vm.state.roster[0]).toMatchObject({
+      agentId: 'coord-auth-9f3a1c',
+      name: 'Auth refactor',
+    });
   });
 
   it('never throws on static observation', () => {

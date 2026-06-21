@@ -67,6 +67,7 @@
         --st-running: oklch(0.8 0.17 150);
         --st-waiting: oklch(0.66 0.02 260);
         --st-done: oklch(0.69 0.1 255);
+        --st-stopped: oklch(0.58 0.04 265);
         --st-stuck: oklch(0.67 0.21 25);
         --st-paused: oklch(0.81 0.13 80);
         --st-unknown: oklch(0.55 0.009 262);
@@ -830,18 +831,30 @@
       .fleet-row {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         width: 100%;
+        padding: 0;
+        border: none;
+        border-radius: 8px;
+        background: transparent;
+      }
+      .fleet-row:hover {
+        background: var(--bg-hover);
+      }
+      .fleet-row-open {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex: 1;
+        min-width: 0;
         padding: 9px 10px;
         border: none;
         border-radius: 8px;
         cursor: pointer;
         font-family: inherit;
         text-align: left;
+        color: inherit;
         background: transparent;
-      }
-      .fleet-row:hover {
-        background: var(--bg-hover);
       }
       .fleet-row .state-dot {
         width: 9px;
@@ -907,6 +920,17 @@
         font-family: 'IBM Plex Mono', monospace;
         font-size: 10.5px;
         color: var(--text-faint);
+      }
+
+      /* subtree grouping — each top-level coordinator + descendants */
+      .subtree-group {
+        border: 1px solid oklch(0.28 0.006 262);
+        border-radius: 8px;
+        padding: 4px;
+        margin-bottom: 6px;
+      }
+      .subtree-group:last-child {
+        margin-bottom: 0;
       }
 
       /* action-required cards */
@@ -1058,7 +1082,8 @@
         font-size: 11.5px;
       }
 
-      textarea.field {
+      textarea.field,
+      input.field {
         resize: none;
         border: 1px solid var(--border-strong);
         border-radius: 9px;
@@ -1070,8 +1095,67 @@
         line-height: 1.6;
         padding: 12px;
       }
-      textarea.field:focus {
+      textarea.field:focus,
+      input.field:focus {
         border-color: var(--accent);
+      }
+
+      .delete-confirm {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin: -2px 6px 8px 32px;
+        padding: 10px;
+        border: 1px solid oklch(0.42 0.08 35);
+        border-radius: 8px;
+        background: oklch(0.22 0.035 35);
+      }
+      .delete-confirm .lead {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: oklch(0.92 0.025 45);
+      }
+      .delete-confirm .sub {
+        font-size: 11.5px;
+        line-height: 1.45;
+        color: oklch(0.78 0.04 50);
+      }
+      .delete-confirm .actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+
+      /* Inline Re-wake composer — injected after an agent row (renderer.ts). */
+      .rewake-composer {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin: 4px 6px 8px;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg-panel-2);
+      }
+      .rewake-composer .rewake-input {
+        resize: none;
+        border: 1px solid var(--border-strong);
+        border-radius: 6px;
+        outline: none;
+        background: var(--bg-input);
+        color: oklch(0.88 0.005 262);
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 12.5px;
+        line-height: 1.5;
+        padding: 8px;
+      }
+      .rewake-composer .rewake-input:focus {
+        border-color: var(--accent);
+      }
+      .rewake-composer .rewake-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
       }
 
       /* ════════════════════════ Agents console ══════════════════════════════ */
@@ -1105,15 +1189,11 @@
       .sess-row {
         display: flex;
         align-items: center;
-        gap: 9px;
+        gap: 8px;
         width: 100%;
-        padding: 9px;
         margin-bottom: 2px;
         border: none;
         border-radius: 8px;
-        cursor: pointer;
-        font-family: inherit;
-        text-align: left;
         background: transparent;
       }
       .sess-row:hover {
@@ -1121,6 +1201,21 @@
       }
       .sess-row.selected {
         background: var(--bg-hover);
+      }
+      .sess-row-open {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        flex: 1;
+        min-width: 0;
+        padding: 9px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-family: inherit;
+        text-align: left;
+        background: transparent;
+        color: inherit;
       }
       .sess-row .state-dot {
         width: 8px;
@@ -1154,7 +1249,8 @@
       .sess-actions {
         display: flex;
         gap: 4px;
-        margin-top: 5px;
+        margin: 0;
+        padding-right: 8px;
       }
       .sess-actions .btn {
         height: 22px;
@@ -2526,7 +2622,7 @@
           <div class="agents-layout">
             <div class="agents-rail">
               <div class="agents-rail-hd" id="agents-rail-hd">Sessions · 0</div>
-              <div id="agents-roster" class="agents-rail-body" role="listbox" aria-label="Agents">
+              <div id="agents-roster" class="agents-rail-body" role="list" aria-label="Agents">
                 <div class="empty-inline"><span class="lead">No agents</span></div>
               </div>
             </div>

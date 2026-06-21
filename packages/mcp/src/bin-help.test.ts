@@ -8,6 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const runbook = readFileSync(join(process.cwd(), 'docs', 'sh1-runbook.md'), 'utf8');
 const hostProof = readFileSync(join(process.cwd(), 'docs', 'host-proof.md'), 'utf8');
 const offlineRunbook = readFileSync(join(process.cwd(), 'docs', 'offline-runbook.md'), 'utf8');
+const alphaQuickstart = readFileSync(join(process.cwd(), 'docs', 'alpha-quickstart.md'), 'utf8');
 const demoSpec = readFileSync(
   join(process.cwd(), 'docs', 'demo-spec-co-improves-its-docs.md'),
   'utf8',
@@ -20,8 +21,24 @@ describe('co-mcp binary help', () => {
     expect(help).toContain('co-mcp serve <projectId>');
     expect(help).toContain('co-mcp host-proof <provider> [projectId]');
     expect(help).toContain('co-mcp bridge <socketPath>');
-    expect(help).toContain('co-mcp start-session <projectId>');
+    expect(help).toContain(
+      'co-mcp start-session <projectId> --name "Name" (--prompt "…" | --spec <path>)',
+    );
+    expect(help).toContain(
+      'start-session requires --name and exactly one of --prompt / --spec (both/neither fails loud).',
+    );
     expect(help).toContain('co-mcp project-id [repoPath]');
+  });
+
+  it('keeps the alpha quickstart aligned with required start-session names', () => {
+    expect(alphaQuickstart).toContain(
+      'co-mcp start-session <projectId> --name "Doc clarification" --prompt "Draft a small doc clarification."',
+    );
+    expect(alphaQuickstart).toContain(
+      'co-mcp start-session <projectId> --name "Draft spec" --spec /path/to/draft-spec.md',
+    );
+    expect(alphaQuickstart).toContain('`--name` is required');
+    expect(alphaQuickstart).toContain('Exactly one of `--prompt` / `--spec` is required');
   });
 
   it('routes --help to the help renderer instead of the stdio MCP server', () => {

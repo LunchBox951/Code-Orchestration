@@ -1,10 +1,11 @@
 import { assertNever } from '@co/core';
 import type { OperatorObservation, DeliveredMail, AgentLiveView, AgentRecord } from '@co/core';
 
-export type AgentStatus = 'warm' | 'waiting' | 'stuck' | 'paused' | 'unknown';
+export type AgentStatus = 'warm' | 'waiting' | 'stopped' | 'stuck' | 'paused' | 'unknown';
 
 export interface TreeNode {
   readonly agentId: string;
+  readonly name?: string;
   readonly role: string;
   readonly subRole?: string;
   readonly parent: string;
@@ -16,6 +17,7 @@ export interface FleetStats {
   readonly total: number;
   readonly warm: number;
   readonly waiting: number;
+  readonly stopped: number;
   readonly stuck: number;
   readonly paused: number;
 }
@@ -37,6 +39,7 @@ export interface DashboardState {
 
 type AgentEntry = {
   agentId: string;
+  name?: string;
   role: string;
   subRole?: string;
   parent: string;
@@ -44,6 +47,7 @@ type AgentEntry = {
 
 function deriveStatusLive(a: AgentLiveView): AgentStatus {
   if (a.stuck) return 'stuck';
+  if (a.stopped) return 'stopped';
   if (a.paused) return 'paused';
   if (a.hosted) return 'warm';
   if (a.outstandingMail > 0) return 'waiting';
@@ -75,6 +79,7 @@ function buildTree(
       // Cycle detected — return a leaf to avoid infinite recursion (Principle 9: never throw)
       return {
         agentId: a.agentId,
+        ...(a.name != null ? { name: a.name } : {}),
         role: a.role,
         ...(a.subRole != null ? { subRole: a.subRole } : {}),
         parent: a.parent,
@@ -86,6 +91,7 @@ function buildTree(
     const kids = childrenOf.get(a.agentId) ?? [];
     return {
       agentId: a.agentId,
+      ...(a.name != null ? { name: a.name } : {}),
       role: a.role,
       ...(a.subRole != null ? { subRole: a.subRole } : {}),
       parent: a.parent,
@@ -111,7 +117,7 @@ function deriveFromObservation(observation: OperatorObservation | null): {
   stats: FleetStats;
   connection: 'live' | 'degraded';
 } {
-  const empty: FleetStats = { total: 0, warm: 0, waiting: 0, stuck: 0, paused: 0 };
+  const empty: FleetStats = { total: 0, warm: 0, waiting: 0, stopped: 0, stuck: 0, paused: 0 };
 
   if (observation == null) {
     return { tree: [], stats: empty, connection: 'degraded' };
@@ -128,6 +134,7 @@ function deriveFromObservation(observation: OperatorObservation | null): {
         total: agents.length,
         warm: agents.filter((a) => statusMap.get(a.agentId) === 'warm').length,
         waiting: agents.filter((a) => statusMap.get(a.agentId) === 'waiting').length,
+        stopped: agents.filter((a) => statusMap.get(a.agentId) === 'stopped').length,
         stuck: agents.filter((a) => statusMap.get(a.agentId) === 'stuck').length,
         paused: agents.filter((a) => statusMap.get(a.agentId) === 'paused').length,
       };
@@ -139,7 +146,14 @@ function deriveFromObservation(observation: OperatorObservation | null): {
         agents.map((a: AgentRecord) => [a.agentId, 'unknown' as const]),
       );
       const tree = buildTree(agents as ReadonlyArray<AgentRecord & AgentEntry>, statusMap);
-      const stats: FleetStats = { total: agents.length, warm: 0, waiting: 0, stuck: 0, paused: 0 };
+      const stats: FleetStats = {
+        total: agents.length,
+        warm: 0,
+        waiting: 0,
+        stopped: 0,
+        stuck: 0,
+        paused: 0,
+      };
       return { tree, stats, connection: 'degraded' };
     }
     default:
@@ -150,7 +164,7 @@ function deriveFromObservation(observation: OperatorObservation | null): {
 export class DashboardVM {
   private _state: DashboardState = {
     tree: [],
-    stats: { total: 0, warm: 0, waiting: 0, stuck: 0, paused: 0 },
+    stats: { total: 0, warm: 0, waiting: 0, stopped: 0, stuck: 0, paused: 0 },
     actionables: [],
     connection: 'degraded',
   };

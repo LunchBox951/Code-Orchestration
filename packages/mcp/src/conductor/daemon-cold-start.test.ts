@@ -29,9 +29,11 @@ import {
   defaultMailRenderer,
   type DetectorEvent,
   openMailStore,
+  openProjectStore,
   openRegistry,
   openRosterStore,
   openSessionStore,
+  openWorktreeStore,
   startCoordinatorSession,
   type DeliveredMail,
   type ProjectId,
@@ -39,6 +41,7 @@ import {
   type SlingDeps,
 } from '@co/core';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
+import { DaemonBackedAgentRouter } from './agent-router.js';
 import { ConductorEngine } from './engine.js';
 import type { HostedIdentity } from '../live-session-host.js';
 
@@ -427,6 +430,125 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
     }
   });
 
+  it('does NOT cold-start a stopped root after daemon restart until operator re-wake clears suppression', async () => {
+    const { projectId, repo } = makeProject();
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+
+    const clock1 = makeClock();
+    const qw1 = makeQuietWindow();
+    const pty1 = new FakePty();
+    const engine1 = makeEngine(pty1, clock1, qw1, {
+      mcpActivity: (push) => {
+        push({ kind: 'mcp_start', at: clock1.now(), verb: 'co_spec_draft' });
+        push({ kind: 'mcp_end', at: clock1.now(), verb: 'co_spec_draft' });
+      },
+    });
+    const router1 = new DaemonBackedAgentRouter({ engine: engine1, projectId });
+    const daemon1 = new ConductorDaemon({
+      engine: engine1,
+      reconcile: makeReconcile(clock1),
+      projectId,
+      now: clock1.now,
+      reconcileEvery: 1,
+      isSkipped: (pid, agent) => router1.shouldSkip(pid, agent),
+    });
+
+    const firstKickoff = kickoffFor(projectId, coordinator);
+    const firstTickP = daemon1.tick();
+    await tick();
+    const firstPane = pty1.panes[0]!;
+    firstPane.emit(CLAUDE_READY);
+    await driveTurnToIdle(firstPane, firstKickoff, clock1, qw1);
+    await firstTickP;
+
+    router1.stop(coordinator);
+    await router1.drain();
+
+    const staleProjection = openProjectStore(projectId);
+    try {
+      staleProjection.transaction((tx) => {
+        (tx.raw as { exec(sql: string): void }).exec('DELETE FROM agent_control');
+      });
+    } finally {
+      staleProjection.close();
+    }
+
+    const clock2 = makeClock();
+    const qw2 = makeQuietWindow();
+    const pty2 = new FakePty();
+    const engine2 = makeEngine(pty2, clock2, qw2);
+    const router2 = new DaemonBackedAgentRouter({ engine: engine2, projectId });
+    const daemon2 = new ConductorDaemon({
+      engine: engine2,
+      reconcile: makeReconcile(clock2),
+      projectId,
+      now: clock2.now,
+      reconcileEvery: 1,
+      isSkipped: (pid, agent) => router2.shouldSkip(pid, agent),
+    });
+
+    const stoppedTickP = daemon2.tick();
+    await tick();
+    const spawnedWhileStopped = pty2.panes.length;
+    if (spawnedWhileStopped > 0) {
+      const pane = pty2.panes[0]!;
+      pane.emit(CLAUDE_READY);
+      await stoppedTickP;
+    }
+    expect(spawnedWhileStopped).toBe(0);
+    const stoppedTick = await stoppedTickP;
+    expect(stoppedTick.coldStarted).toEqual([]);
+
+    const mail = openMailStore(projectId);
+    let rewake: DeliveredMail;
+    try {
+      rewake = mail.send({
+        type: 'clarify_request',
+        to: coordinator,
+        from: OPERATOR,
+        subject: 'Operator rewake',
+        body: 'continue',
+      });
+    } finally {
+      mail.close();
+    }
+    router2.unstop(coordinator);
+
+    const rewakeTickP = daemon2.tick();
+    await tick();
+    expect(pty2.panes).toHaveLength(1);
+    const pane = pty2.panes[0]!;
+    pane.emit(CLAUDE_READY);
+    await driveTurnToIdle(pane, rewake, clock2, qw2);
+    const rewakeTick = await rewakeTickP;
+    expect(rewakeTick.coldStarted).toEqual([coordinator]);
+    expect(rewakeTick.selected).toBe(coordinator);
+  });
+
+  it('continues cold-starting other roots when one launch fails', async () => {
+    const { projectId, repo } = makeProject();
+    const broken = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'broken root', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    ).coordinator;
+    const healthy = 'coord-root-healthy';
+    recordColdAgentWithWorktree(projectId, repo, healthy, 'coordinator', OPERATOR);
+
+    const clock = makeClock();
+    const spy = makeSelectiveLaunchEngine([broken]);
+    const out = await makeReWarmDaemon(projectId, spy.engine, clock).tick();
+
+    expect(spy.ensureHostedCalls.map((i) => i.agent)).toEqual([broken, healthy]);
+    expect(out.coldStarted).toEqual([healthy]);
+    expect(out.coldStartErrors).toEqual([
+      { agent: broken, message: `launch failed for ${broken}` },
+    ]);
+    expect(spy.drivableSeen.at(-1)?.map((i) => i.agent)).toEqual([healthy]);
+  });
+
   it('is deterministic: two runs on fresh projects produce identical cold-start outcomes', async () => {
     // The root id is a deterministic function of the project id (a per-project randomUUID), so it
     // differs by project — exactly like sh1-dry-run's fingerprint excludes per-run git SHAs. Normalize
@@ -500,6 +622,44 @@ function makeSpyEngine(): {
     runCycle: async (drivable: readonly HostedIdentity[]): Promise<null> => {
       drivableSeen.push([...drivable]);
       return null; // selection-only: drive nothing (the SELECTION is what these prove)
+    },
+    tickClarifyTimeouts: async (): Promise<readonly DeliveredMail[]> => [],
+  };
+  return { engine: fake as unknown as ConductorEngine, ensureHostedCalls, drivableSeen };
+}
+
+function makeSelectiveLaunchEngine(failAgents: readonly string[]): {
+  engine: ConductorEngine;
+  ensureHostedCalls: HostedIdentity[];
+  drivableSeen: HostedIdentity[][];
+} {
+  const fail = new Set(failAgents);
+  const hosted = new Set<string>();
+  const ensureHostedCalls: HostedIdentity[] = [];
+  const drivableSeen: HostedIdentity[][] = [];
+  const key = (id: HostedIdentity): string => `${id.projectId}:${id.agent}`;
+  const fake = {
+    isHosted: (projectId: ProjectId, agent: string): boolean => hosted.has(`${projectId}:${agent}`),
+    ensureHosted: async (identity: HostedIdentity): Promise<void> => {
+      ensureHostedCalls.push(identity);
+      if (fail.has(identity.agent)) throw new Error(`launch failed for ${identity.agent}`);
+      const sessions = openSessionStore(identity.projectId);
+      try {
+        sessions.recordSession({
+          agentId: identity.agent,
+          pane: identity.pane,
+          cwd: identity.cwd,
+          provider: identity.provider,
+          resume: identity.resume,
+        });
+      } finally {
+        sessions.close();
+      }
+      hosted.add(key(identity));
+    },
+    runCycle: async (drivable: readonly HostedIdentity[]): Promise<null> => {
+      drivableSeen.push([...drivable]);
+      return null;
     },
     tickClarifyTimeouts: async (): Promise<readonly DeliveredMail[]> => [],
   };
@@ -594,6 +754,47 @@ function recordRecoveredAgent(
   }
 }
 
+function recordColdAgentWithWorktree(
+  projectId: ProjectId,
+  cwd: string,
+  agentId: string,
+  role: Role,
+  parent: string,
+): void {
+  const roster = openRosterStore(projectId);
+  try {
+    roster.recordAgent({ agentId, role, parent });
+  } finally {
+    roster.close();
+  }
+  const worktrees = openWorktreeStore(projectId);
+  try {
+    worktrees.recordWorktree({
+      branch: `co/${agentId}`,
+      baseRef: 'main',
+      baseSha: 'a'.repeat(40),
+      path: cwd,
+      parent,
+      agent: agentId,
+      role,
+    });
+  } finally {
+    worktrees.close();
+  }
+  const mail = openMailStore(projectId);
+  try {
+    mail.send({
+      type: 'clarify_request',
+      to: agentId,
+      from: parent,
+      subject: 'wake',
+      body: 'please continue',
+    });
+  } finally {
+    mail.close();
+  }
+}
+
 function makeReWarmDaemon(
   projectId: ProjectId,
   engine: ConductorEngine,
@@ -609,6 +810,24 @@ function makeReWarmDaemon(
 }
 
 describe('ConductorDaemon — Stage 15 P-E re-warm recovered NON-root agents (AC-S15-2 / ST-2)', () => {
+  it('continues cold re-waking other stopped agents when one launch fails', async () => {
+    const { projectId, repo } = makeProject();
+    seedLeadChain(projectId);
+    recordColdAgentWithWorktree(projectId, repo, 'impl-broken', 'implementer', 'lead-1');
+    recordColdAgentWithWorktree(projectId, repo, 'impl-ok', 'implementer', 'lead-1');
+
+    const clock = makeClock();
+    const spy = makeSelectiveLaunchEngine(['impl-broken']);
+    const out = await makeReWarmDaemon(projectId, spy.engine, clock).tick();
+
+    expect(spy.ensureHostedCalls.map((i) => i.agent)).toEqual(['impl-broken', 'impl-ok']);
+    expect(out.coldRewoke).toEqual(['impl-ok']);
+    expect(out.coldRewakeErrors).toEqual([
+      { agent: 'impl-broken', message: 'launch failed for impl-broken' },
+    ]);
+    expect(spy.drivableSeen.at(-1)?.map((i) => i.agent)).toEqual(['impl-ok']);
+  });
+
   it('records a recovered NON-root re-warm only when the injected launch authority accepts it', async () => {
     const { projectId, repo } = makeProject();
     seedLeadChain(projectId);

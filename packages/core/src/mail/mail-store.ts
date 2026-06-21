@@ -108,6 +108,10 @@ export interface MailStore {
   markRead(recipient: string, seq: number): DeliveredMail;
   /** Retract `sender`'s mail at `seq` (event-sourced tombstone); only the original sender may. */
   retract(sender: string, seq: number): DeliveredMail;
+  /** Tombstone all non-review actionable mail for `recipient`; used by durable agent deletion. */
+  clearOutstanding(recipient: string): number;
+  /** Tombstone non-review actionable mail for `recipient` from `sender`; used by durable subtree deletion. */
+  clearOutstandingFromSenderToRecipient(sender: string, recipient: string): number;
   /** Headless chronological read of a recipient's inbox. */
   inbox(recipient: string): readonly DeliveredMail[];
   /** Chronological read of every mail an agent SENT (by sender), for by-sender derivations (W5 'waiting'). */
@@ -581,6 +585,25 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
         throw new Error('mail: the configured Delivery does not support retract (tombstone seam)');
       }
       return delivery.retract(sender, seq);
+    },
+
+    clearOutstanding(recipient: string): number {
+      if (!delivery.clearOutstanding) {
+        throw new Error(
+          'mail: the configured Delivery does not support recipient cleanup (tombstone seam)',
+        );
+      }
+      return delivery.clearOutstanding(recipient);
+    },
+
+    clearOutstandingFromSenderToRecipient(sender: string, recipient: string): number {
+      if (!delivery.clearOutstandingFromSenderToRecipient) {
+        throw new Error(
+          'mail: the configured Delivery does not support recipient/sender cleanup ' +
+            '(tombstone seam)',
+        );
+      }
+      return delivery.clearOutstandingFromSenderToRecipient(sender, recipient);
     },
 
     inbox(recipient: string): readonly DeliveredMail[] {

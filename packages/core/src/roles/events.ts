@@ -39,6 +39,7 @@ export const agentRegisteredSchema = z.object({
   agentId: z.string().min(1),
   role: roleEnumSchema,
   subRole: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
   parent: z.string().min(1),
 });
 export type AgentRegistered = z.infer<typeof agentRegisteredSchema>;
@@ -99,6 +100,7 @@ export interface AgentRecord {
   readonly agentId: string;
   readonly role: Role;
   readonly subRole?: string;
+  readonly name?: string;
   readonly parent: string;
   readonly registeredTs: number;
 }

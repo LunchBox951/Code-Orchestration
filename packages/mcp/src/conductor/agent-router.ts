@@ -5,8 +5,8 @@
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  * THE FINDING THIS CURES (Stage 9): `unstick`/`pause`/`stop` were typed seams that, with no Conductor
  * running, threw `[host-live]` — they never acted on a live agent. This class wires them to the running
- * {@link ConductorEngine} + a small in-memory control-state tracker, so in the daemon process they
- * actually kill/release a pane, pause selection, and re-wake a STUCK agent. Stage 11's operator-IPC
+ * {@link ConductorEngine} + control-state tracking, so in the daemon process they actually kill/release
+ * a pane, pause selection, and re-wake a STUCK agent. Stage 11's operator-IPC
  * binding drives this transport-agnostic API from the desktop app.
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  *
@@ -23,7 +23,13 @@
  * class of OPERATOR methods, never agent-callable (Principle 4 + D4). The STUCK set is the host-side
  * `markStuck`/`revertStuck` owner: `serveConductor` wires {@link markStuck} into the `ReconcileLoop`.
  */
-import { type AgentRouterSeam, type ProjectId, type Steer } from '@co/core';
+import {
+  openAgentControlStore,
+  type AgentControlStore,
+  type AgentRouterSeam,
+  type ProjectId,
+  type Steer,
+} from '@co/core';
 import type { ConductorEngine } from './engine.js';
 
 /** Constructor seams for {@link DaemonBackedAgentRouter}. */
@@ -32,6 +38,8 @@ export interface DaemonBackedAgentRouterDeps {
   readonly engine: ConductorEngine;
   /** The project this router controls. The void seam verbs key by `agentId` within this project. */
   readonly projectId: ProjectId;
+  /** Opens durable operator-control state. Default: {@link openAgentControlStore}. */
+  readonly openControl?: (projectId: ProjectId) => AgentControlStore;
   /**
    * Surface a `stop` applied to an agent with NO warm pane (nothing to kill). Recorded — never a silent
    * multi-hour reap (Principle 9): the stop is still tracked, the operator is informed. Default: none.
@@ -45,14 +53,15 @@ export interface DaemonBackedAgentRouterDeps {
 }
 
 /**
- * The live, daemon-backed {@link AgentRouterSeam}. Holds three in-memory sets — PAUSED (operator), STUCK
- * (watchdog), STOPPED (operator) — and composes the engine primitives to act on warm panes. The
+ * The live, daemon-backed {@link AgentRouterSeam}. Holds three skip sets — PAUSED (operator), STUCK
+ * (watchdog), STOPPED (operator, durably hydrated) — and composes the engine primitives to act on warm panes. The
  * {@link AgentRouterSeam} verbs are sync + `void` (the seam's contract); the richer operator surface
  * ({@link resume}, {@link steer}, {@link markStuck}) is added as sibling methods.
  */
 export class DaemonBackedAgentRouter implements AgentRouterSeam {
   private readonly engine: ConductorEngine;
   private readonly projectId: ProjectId;
+  private readonly control: AgentControlStore;
   private readonly onStopUnhosted: ((agentId: string) => void) | undefined;
   private readonly onStopError: ((agentId: string, error: unknown) => void) | undefined;
   /** Agents the operator PAUSED — the daemon SKIPS these when selecting candidates (§3c). */
@@ -67,8 +76,10 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
   constructor(deps: DaemonBackedAgentRouterDeps) {
     this.engine = deps.engine;
     this.projectId = deps.projectId;
+    this.control = (deps.openControl ?? openAgentControlStore)(deps.projectId);
     this.onStopUnhosted = deps.onStopUnhosted;
     this.onStopError = deps.onStopError;
+    this.refreshStopped();
   }
 
   // ── AgentRouterSeam — the core seam (sync, void) ───────────────────────────────────────────────
@@ -102,6 +113,7 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
    * instant this returns; the awaited tail is just the MCP-session teardown, tracked for {@link drain}.
    */
   stop(agentId: string): void {
+    this.control.recordStopped(agentId);
     this.stopped.add(agentId);
     this.paused.delete(agentId);
     this.stuck.delete(agentId);
@@ -126,6 +138,26 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
   /** Resume a paused agent — the daemon drives it again next tick. (The pause/resume counterpart.) */
   resume(agentId: string): void {
     this.paused.delete(agentId);
+  }
+
+  /** Un-stop: clear ALL operator/watchdog suppression (stopped+paused+stuck) so the daemon may re-select
+   *  the agent next tick. Idempotent, never throws, never relaunches (the daemon re-reads the live set). */
+  unstop(agentId: string): void {
+    this.control.clearStopped(agentId);
+    this.stopped.delete(agentId);
+    this.paused.delete(agentId);
+    this.stuck.delete(agentId);
+  }
+
+  /**
+   * Record a STOPPED skip without releasing a pane. `deleteAgent` owns release ordering itself, but it
+   * must still suppress daemon cold-start while durable teardown is in flight or after a failed teardown.
+   */
+  recordStopped(agentId: string): void {
+    this.control.recordStopped(agentId);
+    this.stopped.add(agentId);
+    this.paused.delete(agentId);
+    this.stuck.delete(agentId);
   }
 
   /**
@@ -173,10 +205,9 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
    * never skipped.
    */
   shouldSkip(projectId: ProjectId, agentId: string): boolean {
-    return (
-      projectId === this.projectId &&
-      (this.paused.has(agentId) || this.stuck.has(agentId) || this.stopped.has(agentId))
-    );
+    if (projectId !== this.projectId) return false;
+    this.refreshStopped();
+    return this.paused.has(agentId) || this.stuck.has(agentId) || this.stopped.has(agentId);
   }
 
   /** Whether `agentId` is currently paused (for the live-observe overlay + tests). */
@@ -191,12 +222,27 @@ export class DaemonBackedAgentRouter implements AgentRouterSeam {
 
   /** Whether `agentId` has been stopped (recorded even when it had no warm pane). */
   isStopped(agentId: string): boolean {
+    this.refreshStopped();
     return this.stopped.has(agentId);
   }
 
   /** Await every in-flight async stop teardown — for deterministic shutdown and tests. */
   async drain(): Promise<void> {
     await Promise.all([...this.pending]);
+  }
+
+  close(): void {
+    this.control.close();
+  }
+
+  /**
+   * Re-hydrate durable STOPPED state from the read model. Recovery rebuilds projections after this
+   * router is constructed, so candidate filtering must be able to see rows reconstructed from the log
+   * before the first cold-start decision.
+   */
+  refreshStopped(): void {
+    this.stopped.clear();
+    for (const agentId of this.control.listStopped()) this.stopped.add(agentId);
   }
 
   private reportStopError(agentId: string, error: unknown): void {

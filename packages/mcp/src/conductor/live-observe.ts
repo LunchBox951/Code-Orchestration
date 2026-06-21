@@ -37,7 +37,7 @@ export interface EngineLiveStateProviderDeps {
 /**
  * Fills the core {@link LiveStateProvider} seam from the running {@link ConductorEngine} (warm set) + the
  * project mail store (outstanding actionable count) + the optional {@link DaemonBackedAgentRouter}
- * (paused/stuck). One mail-store open per `liveStates` call (closed in `finally`); the engine + router
+ * (paused/stuck/stopped). One mail-store open per `liveStates` call (closed in `finally`); the engine + router
  * reads are pure in-memory lookups.
  */
 export class EngineLiveStateProvider implements LiveStateProvider {
@@ -62,6 +62,7 @@ export class EngineLiveStateProvider implements LiveStateProvider {
         outstandingMail: mail.outstandingCount(agentId),
         paused: this.router?.isPaused(agentId) ?? false,
         stuck: this.router?.isStuck(agentId) ?? false,
+        stopped: this.router?.isStopped(agentId) ?? false,
       }));
     } finally {
       mail.close();

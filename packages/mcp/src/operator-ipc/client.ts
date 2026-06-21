@@ -18,8 +18,10 @@ import {
   OPERATOR_IPC_METHODS,
   OPERATOR_IPC_TICK,
   OPERATOR_IPC_TRANSCRIPT,
+  openArchiveStore,
   queryObservability,
   type ApprovalReply,
+  type ArchiveEntry,
   type DeliveredMail,
   type LiveObservabilitySnapshot,
   type ObservabilitySnapshot,
@@ -53,6 +55,22 @@ function errorCode(error: unknown): string | undefined {
 function isExpectedConnectUnavailable(error: unknown): boolean {
   const code = errorCode(error);
   return code !== undefined && EXPECTED_CONNECT_UNAVAILABLE_CODES.has(code);
+}
+
+function archiveEntriesFromStore(projectId: ProjectId): readonly ArchiveEntry[] {
+  const archive = openArchiveStore(projectId);
+  try {
+    return archive.listRecords().map((record) => ({
+      id: record.id,
+      name: record.name,
+      branch: record.branch,
+      baseRef: record.baseRef,
+      deletedAt: record.deletedAt,
+      expiresAt: record.expiresAt,
+    }));
+  } finally {
+    archive.close();
+  }
 }
 
 /** A pending in-flight request awaiting its response by id. */
@@ -171,9 +189,23 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
   /** Stage 14 P4 — start a ROOT coordinator session (operator-only; mirrors {@link reviewContext}). */
   async startSession(params: StartSessionParams): Promise<StartSessionResult> {
     return (await this.call(OPERATOR_IPC_METHODS.startSession, {
+      ...(params.name != null ? { name: params.name } : {}),
       ...(params.prompt != null ? { prompt: params.prompt } : {}),
       ...(params.specBody != null ? { specBody: params.specBody } : {}),
     } as unknown as WirePayload)) as unknown as StartSessionResult;
+  }
+
+  /** B4 — delete `agentId` and its entire subtree (recursive; cascade via the daemon's control surface). */
+  async deleteAgent(agentId: string): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.deleteAgent, { agentId });
+  }
+
+  /** B4 — re-wake `agentId`: post follow-up mail, then clear suppression. */
+  async rewake(agentId: string, message: string): Promise<DeliveredMail> {
+    return (await this.call(OPERATOR_IPC_METHODS.rewake, {
+      agentId,
+      message,
+    } as unknown as WirePayload)) as unknown as DeliveredMail;
   }
 
   /** Stage 15 §7 — send raw keystroke bytes into `agentId`'s warm PTY stdin. */
@@ -188,6 +220,23 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
       cols,
       rows,
     } as unknown as WirePayload);
+  }
+
+  /** B5 — list archived branches (the cross-process read; static-store fallback by the facade). */
+  async listArchive(): Promise<readonly ArchiveEntry[]> {
+    // The server wraps the array in { entries } so the result is an object (JSON-RPC 2.0 constraint).
+    const result = await this.call(OPERATOR_IPC_METHODS.listArchive, {});
+    return (result as unknown as { entries: readonly ArchiveEntry[] }).entries;
+  }
+
+  /** B5 — un-archive `id`: remove the archive record (branch stays). Fails loud when down. */
+  async restoreArchive(id: string): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.restoreArchive, { id } as unknown as WirePayload);
+  }
+
+  /** B5 — hard-purge `id`: `git branch -D <branch>` then remove the archive record. Fails loud when down. */
+  async purgeArchive(id: string): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.purgeArchive, { id } as unknown as WirePayload);
   }
 
   /** Subscribe to the per-tick `tick` push; returns an unsubscribe fn. */
@@ -493,6 +542,22 @@ export class OperatorIpcClient {
     return this.withConnection((c) => c.startSession(params));
   }
 
+  /**
+   * B4 — delete `agentId` and its entire subtree. A control verb: throws a clear
+   * {@link ConductorUnavailableError} when the Conductor socket is down (Principle 9).
+   */
+  async deleteAgent(agentId: string): Promise<void> {
+    await this.withConnection((c) => c.deleteAgent(agentId));
+  }
+
+  /**
+   * B4 — re-wake `agentId`: post follow-up mail, then clear suppression. A
+   * control verb: throws a clear {@link ConductorUnavailableError} when the socket is down (Principle 9).
+   */
+  rewake(agentId: string, message: string): Promise<DeliveredMail> {
+    return this.withConnection((c) => c.rewake(agentId, message));
+  }
+
   /** Stage 15 §7 — send raw keystroke bytes into `agentId`'s warm PTY stdin. */
   async sendInput(agentId: string, data: string): Promise<void> {
     await this.withConnection((c) => c.sendInput(agentId, data));
@@ -501,6 +566,41 @@ export class OperatorIpcClient {
   /** Stage 15 §7 — resize `agentId`'s warm PTY to `cols` × `rows`. */
   async resize(agentId: string, cols: number, rows: number): Promise<void> {
     await this.withConnection((c) => c.resize(agentId, cols, rows));
+  }
+
+  /**
+   * B5 — list archived branches. READ/degrade (mirrors {@link observe}): with NO socket it reads the
+   * static archive store rather than hiding preserved branches. A live socket returns the daemon's list.
+   */
+  async listArchive(): Promise<readonly ArchiveEntry[]> {
+    const connection = await this.ensureConnection();
+    if (connection != null) {
+      try {
+        return await connection.listArchive();
+      } catch (error) {
+        // A socket drop nulls the connection — ordinary degrade (silent per D5/MNR #3). Any OTHER error
+        // is unexpected: surface it for diagnostics rather than masking a real fault. Either way fall
+        // through to the empty list — never hang, never throw.
+        if (this.connection != null) this.report(error);
+      }
+    }
+    return archiveEntriesFromStore(this.projectId);
+  }
+
+  /**
+   * B5 — un-archive `id`: remove the archive record (branch stays). A control verb: throws a clear
+   * {@link ConductorUnavailableError} when the Conductor socket is down (Principle 9).
+   */
+  async restoreArchive(id: string): Promise<void> {
+    await this.withConnection((c) => c.restoreArchive(id));
+  }
+
+  /**
+   * B5 — hard-purge `id`: `git branch -D <branch>` then remove the archive record. A control verb:
+   * throws a clear {@link ConductorUnavailableError} when the Conductor socket is down (Principle 9).
+   */
+  async purgeArchive(id: string): Promise<void> {
+    await this.withConnection((c) => c.purgeArchive(id));
   }
 
   /** Subscribe to the per-tick push; survives reconnects. Returns an unsubscribe fn. */

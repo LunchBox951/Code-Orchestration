@@ -393,6 +393,23 @@ describe('AC-S10-3.2 — a paused agent with outstanding mail is SKIPPED by cand
   });
 });
 
+// ── AC-S10-3.3b — unstop clears all suppression sets (makes Stop reversible) ────────────────────
+describe('AC-S10-3.3b — unstop clears stopped+paused+stuck so the daemon re-selects the agent', () => {
+  it('unstop clears stopped+paused+stuck so the daemon re-selects the agent', () => {
+    const { engine } = makeEngine(makeClock(), makeQuietWindow());
+    const { projectId } = makeProject();
+    const router = new DaemonBackedAgentRouter({ engine, projectId });
+    router.stop('impl-x');
+    router.markStuck('impl-x');
+    router.pause('impl-x');
+    router.unstop('impl-x');
+    expect(router.isStopped('impl-x')).toBe(false);
+    expect(router.isStuck('impl-x')).toBe(false);
+    expect(router.isPaused('impl-x')).toBe(false);
+    expect(router.shouldSkip(projectId, 'impl-x')).toBe(false);
+  });
+});
+
 // ── AC-S10-3.3 — revertStuck + rewake genuinely re-wakes a STUCK agent (MNR #4) ───────────────────
 describe('AC-S10-3.3 — MNR #4: an agent STUCK via the wired markStuck is reverted + ACTUALLY re-woken', () => {
   it('STUCK (via the reconcile-wired markStuck) skips the agent; revertStuck+rewake re-drives it', async () => {
@@ -529,6 +546,7 @@ describe('AC-S10-3.5 — queryLiveObservability returns the live overlay (distin
 
     const router = new DaemonBackedAgentRouter({ engine, projectId });
     router.pause('impl-x'); // also exercise the paused overlay
+    router.recordStopped('lead-1'); // stopped is observable even for cold agents
     const provider = new EngineLiveStateProvider({ engine, projectId, router });
 
     const live = queryLiveObservability(projectId, provider);
@@ -539,6 +557,7 @@ describe('AC-S10-3.5 — queryLiveObservability returns the live overlay (distin
     expect(x.hosted).toBe(true);
     expect(x.paused).toBe(true);
     expect(x.stuck).toBe(false);
+    expect(x.stopped).toBe(false);
     expect(x.outstandingMail).toBe(1);
     expect(x.role).toBe('implementer');
     expect(x.parent).toBe('lead-1');
@@ -547,6 +566,7 @@ describe('AC-S10-3.5 — queryLiveObservability returns the live overlay (distin
     // A COLD roster agent: not hosted, nothing outstanding.
     const lead = byId.get('lead-1')!;
     expect(lead.hosted).toBe(false);
+    expect(lead.stopped).toBe(true);
     expect(lead.outstandingMail).toBe(0);
 
     // The full static rollup rides along, and the LIVE snapshot is DISTINGUISHABLE from the static one:
@@ -556,7 +576,9 @@ describe('AC-S10-3.5 — queryLiveObservability returns the live overlay (distin
       stat.agents.map((a) => a.agentId).sort(),
     );
     expect(stat.agents.every((a) => !('hosted' in a) && !('outstandingMail' in a))).toBe(true);
-    expect(live.agents.every((a) => 'hosted' in a && 'outstandingMail' in a)).toBe(true);
+    expect(
+      live.agents.every((a) => 'hosted' in a && 'outstandingMail' in a && 'stopped' in a),
+    ).toBe(true);
   });
 
   it('with no control router wired, paused/stuck default false (pure engine-observe)', async () => {
@@ -573,6 +595,7 @@ describe('AC-S10-3.5 — queryLiveObservability returns the live overlay (distin
     expect(x.hosted).toBe(true);
     expect(x.paused).toBe(false);
     expect(x.stuck).toBe(false);
+    expect(x.stopped).toBe(false);
   });
 });
 
