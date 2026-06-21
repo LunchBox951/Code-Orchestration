@@ -46,6 +46,13 @@ class SqliteStore implements Store {
     this.db = new DatabaseSync(dbPath);
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA foreign_keys = ON');
+    // A contended writer should briefly wait for the lock holder rather than hard-fail. Multiple
+    // OS processes (the daemon, the CLI, doctor/recovery) each open their OWN handle on the same
+    // per-project store.db; node:sqlite's default busy_timeout is 0, so without this a cross-process
+    // write collision throws SQLITE_BUSY immediately instead of waiting (Principle 14 — recoverable).
+    // This only helps the multi-process case; two handles inside one synchronous process never
+    // overlap by design.
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.migrate();
 
     this.insertStmt = this.db.prepare(
@@ -115,18 +122,32 @@ class SqliteStore implements Store {
       throw new Error('Store.transaction: nested transactions are not supported');
     }
     this.inTransaction = true;
-    this.db.exec('BEGIN');
     try {
+      // BEGIN is inside the try so a throw here (e.g. a contended SQLITE_BUSY) still resets
+      // inTransaction in the finally — otherwise the guard above would brick the store for the
+      // rest of the process lifetime.
+      this.db.exec('BEGIN');
       const tx: StoreTx = {
         append: (events) => this.insertEvents(events),
         raw: this.db,
       };
-      const result = fn(tx);
-      this.db.exec('COMMIT');
+      let result: R;
+      try {
+        result = fn(tx);
+        this.db.exec('COMMIT');
+      } catch (err) {
+        // SQLite auto-rolls-back the active transaction on some failure classes (SQLITE_FULL,
+        // SQLITE_IOERR, …); the explicit ROLLBACK then throws "cannot rollback - no transaction
+        // is active". Swallow ONLY that so the original cause (err) propagates rather than being
+        // masked by a misleading rollback error (Principle 9 — no-silent-failures).
+        try {
+          this.db.exec('ROLLBACK');
+        } catch {
+          // The transaction was already auto-rolled-back; keep `err` as the surfaced cause.
+        }
+        throw err;
+      }
       return result;
-    } catch (err) {
-      this.db.exec('ROLLBACK');
-      throw err;
     } finally {
       this.inTransaction = false;
     }
