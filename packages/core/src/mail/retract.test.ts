@@ -9,15 +9,18 @@ import { decode } from '../replay/decode.js';
 import type { StoredEvent } from '../store/types.js';
 import { assertRepoPristine } from '../config/pristine.js';
 import {
+  EVENT_MAIL_RECIPIENT_CLEARED,
   EVENT_MAIL_RETRACTED,
   MAIL_CHAT,
   MAIL_CLARIFY_REQUEST,
   MAIL_CLARIFY_RESPONSE,
   MAIL_ESCALATION,
+  MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   makeMailEvent,
   makeMailForwardEvent,
+  makeMailRecipientClearedEvent,
   makeMailRetractEvent,
   mailSchemas,
   mailUpcasters,
@@ -431,6 +434,128 @@ describe('mail.retracted — the sender withdraws a message (tombstone)', () => 
   // `InProcessDelivery` (persist-only, no wake/inject) and is covered in live-delivery.test.ts.
 });
 
+describe('mail.recipient_cleared — infrastructure cleanup for deleted recipients', () => {
+  it('clears all actionable mail for a recipient while preserving audit rows', () => {
+    const mail = openMailStore('p-recipient-clear');
+    try {
+      const clarify = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'lead',
+        from: 'worker-a',
+        subject: 'question',
+        body: 'need input',
+      });
+      const escalation = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'worker-b',
+        subject: 'blocked',
+        body: 'need authority',
+      });
+      const info = mail.send({
+        type: MAIL_CHAT,
+        to: 'lead',
+        from: 'worker-c',
+        subject: 'heads up',
+        body: 'informational',
+      });
+      expect(mail.outstanding('lead').map((m) => m.seq)).toEqual([clarify.seq, escalation.seq]);
+
+      expect(mail.clearOutstanding('lead')).toBe(2);
+
+      expect(mail.outstanding('lead')).toEqual([]);
+      expect(mail.outstandingCount('lead')).toBe(0);
+      expect(mail.inbox('lead').map((m) => m.seq)).toEqual([info.seq]);
+      expect(mail.sentBy('worker-a').find((m) => m.seq === clarify.seq)?.retracted).toBe(true);
+      expect(mail.sentBy('worker-b').find((m) => m.seq === escalation.seq)?.retracted).toBe(true);
+      expect(mail.sentBy('worker-c').find((m) => m.seq === info.seq)?.retracted).toBe(false);
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('skips review mail while clearing non-review actionables for the same recipient', () => {
+    const projectId = 'p-recipient-clear-review';
+    const store = openProjectStore(projectId);
+    const projectors: Projector[] = [new MailProjector()];
+    const decodeFn = (e: StoredEvent): StoredEvent => decode(e, mailUpcasters, mailSchemas);
+
+    try {
+      const reviewRequest = store.transaction((tx) => {
+        const [stored] = tx.append([
+          makeMailEvent(projectId, {
+            type: MAIL_REVIEW_REQUEST,
+            to: '@operator',
+            from: 'lead',
+            subject: 'review',
+            body: 'please review',
+          }),
+        ]);
+        applyEvent(tx, decodeFn(stored!), projectors);
+        return stored!;
+      });
+
+      const mail = openMailStore(projectId);
+      try {
+        const clarify = mail.send({
+          type: MAIL_CLARIFY_REQUEST,
+          to: '@operator',
+          from: 'impl',
+          subject: 'clarify',
+          body: 'non-review action',
+        });
+        expect(mail.outstanding('@operator').map((m) => m.seq)).toEqual([
+          reviewRequest.seq,
+          clarify.seq,
+        ]);
+        expect(mail.clearOutstanding('@operator')).toBe(1);
+        expect(mail.outstanding('@operator').map((m) => m.seq)).toEqual([reviewRequest.seq]);
+        expect(mail.sentBy('lead').find((m) => m.seq === reviewRequest.seq)?.retracted).toBe(false);
+        expect(mail.sentBy('impl').find((m) => m.seq === clarify.seq)?.retracted).toBe(true);
+      } finally {
+        mail.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it('clears forwarded actionables terminally so parent cleanup does not reopen deleted recipients', () => {
+    const mail = openMailStore('p-recipient-clear-forwarded');
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'worker',
+        subject: 'blocked',
+        body: 'need authority',
+      });
+      const forwarded = mail.forward(held, {
+        type: MAIL_ESCALATION,
+        to: 'coord',
+        from: 'lead',
+        subject: held.subject,
+        body: held.body,
+        correlationId: String(held.seq),
+        causationId: String(held.seq),
+      });
+      expect(mail.outstanding('lead')).toEqual([]);
+      expect(mail.outstanding('coord').map((m) => m.seq)).toEqual([forwarded.seq]);
+
+      expect(mail.clearOutstanding('lead')).toBe(1);
+      expect(mail.clearOutstanding('coord')).toBe(1);
+
+      expect(mail.outstanding('lead')).toEqual([]);
+      expect(mail.outstanding('coord')).toEqual([]);
+      expect(mail.inbox('lead')).toEqual([]);
+      expect(mail.sentBy('worker').find((m) => m.seq === held.seq)?.retracted).toBe(true);
+      expect(mail.sentBy('lead').find((m) => m.seq === forwarded.seq)?.retracted).toBe(true);
+    } finally {
+      mail.close();
+    }
+  });
+});
+
 describe('AC-L1-9 preserved — a log with a mail.retracted event replays byte-identical', () => {
   function snapshot(projectId: string): string {
     const store = openProjectStore(projectId);
@@ -483,6 +608,46 @@ describe('AC-L1-9 preserved — a log with a mail.retracted event replays byte-i
       expect(types).toContain(EVENT_MAIL_RETRACTED);
       // The tombstone is infrastructure — never a sendable participant type.
       expect((MAIL_TYPES as readonly string[]).includes(EVENT_MAIL_RETRACTED)).toBe(false);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('send + recipient clear rebuilds byte-identical and logs infrastructure outside MAIL_TYPES', () => {
+    const projectId = 'p-recipient-clear-replay';
+    const mail = openMailStore(projectId);
+    try {
+      mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'lead',
+        from: 'worker',
+        subject: 'question',
+        body: 'need input',
+      });
+      mail.clearOutstanding('lead');
+    } finally {
+      mail.close();
+    }
+
+    const live = snapshot(projectId);
+
+    const store = openProjectStore(projectId);
+    try {
+      rebuildAll(store, [new MailProjector()], (e) => decode(e, mailUpcasters, mailSchemas));
+    } finally {
+      store.close();
+    }
+    expect(snapshot(projectId)).toBe(live);
+    expect(live).toContain('"retracted":1');
+
+    const raw = openProjectStore(projectId);
+    try {
+      const types = raw.readAll().map((e) => e.type);
+      expect(types).toContain(EVENT_MAIL_RECIPIENT_CLEARED);
+      expect((MAIL_TYPES as readonly string[]).includes(EVENT_MAIL_RECIPIENT_CLEARED)).toBe(false);
+      expect(makeMailRecipientClearedEvent(projectId, 'lead').type).toBe(
+        EVENT_MAIL_RECIPIENT_CLEARED,
+      );
     } finally {
       raw.close();
     }

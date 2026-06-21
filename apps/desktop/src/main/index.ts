@@ -1,14 +1,20 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
-import type { ApprovalReply, OperatorMailRef, ProjectId, ReplyDraft } from '@co/core';
-import { openRegistry } from '@co/core';
+import type { ApprovalReply, ArchiveEntry, OperatorMailRef, ProjectId, ReplyDraft } from '@co/core';
+import { openArchiveStore, openRegistry } from '@co/core';
 import { createAppShell } from './app-shell.js';
 import { createDaemonSupervisor } from './daemon-supervisor.js';
 import { createProjectController } from './open-project.js';
 import { resolveSourceState } from './source-ipc.js';
 import { readBundledDemoSpec, startFromDemoSpec } from './demo-spec.js';
 import { desktopErrorMessage } from './desktop-errors.js';
+import {
+  deleteAgentAndRefresh,
+  rewakeAgentAndRefresh,
+  startSessionAndRefresh,
+  stopAgentAndRefresh,
+} from './lifecycle-actions.js';
 import {
   requireComposerField,
   requireFiniteSeq,
@@ -175,6 +181,22 @@ function asRecord(value: unknown, label: string): Record<string, unknown> {
     return value as Record<string, unknown>;
   }
   throw new Error(`Invalid ${label}: expected an object.`);
+}
+
+function listArchiveFromStore(projectId: ProjectId): readonly ArchiveEntry[] {
+  const archive = openArchiveStore(projectId);
+  try {
+    return archive.listRecords().map((record) => ({
+      id: record.id,
+      name: record.name,
+      branch: record.branch,
+      baseRef: record.baseRef,
+      deletedAt: record.deletedAt,
+      expiresAt: record.expiresAt,
+    }));
+  } finally {
+    archive.close();
+  }
 }
 
 function requireMailTarget(value: unknown): OperatorMailRef {
@@ -447,7 +469,7 @@ ipcMain.handle('agent:stop', async (_event, agentId: unknown) => {
   const shell = controller.shell;
   if (shell == null) return { ok: false, error: 'shell not ready' };
   try {
-    await shell.client.stop(requireAgentId(agentId));
+    await stopAgentAndRefresh(shell, requireAgentId(agentId));
     return { ok: true };
   } catch (e: unknown) {
     const msg = desktopErrorMessage(e, 'stop the agent');
@@ -469,36 +491,115 @@ ipcMain.handle('agent:unstick', async (_event, agentId: unknown) => {
   }
 });
 
-// ── Session IPC channels ─────────────────────────────────────────────────────
-
-ipcMain.handle('session:start', async (_event, prompt: unknown, specBody: unknown) => {
+ipcMain.handle('agent:delete', async (_event, agentId: unknown) => {
   const shell = controller.shell;
   if (shell == null) return { ok: false, error: 'shell not ready' };
   try {
-    const promptStr =
-      typeof prompt === 'string' && prompt.trim().length > 0 ? prompt.trim() : undefined;
-    const specStr =
-      typeof specBody === 'string' && specBody.trim().length > 0 ? specBody.trim() : undefined;
-    await shell.client.startSession({
-      ...(promptStr != null ? { prompt: promptStr } : {}),
-      ...(specStr != null ? { specBody: specStr } : {}),
-    });
+    await deleteAgentAndRefresh(shell, requireAgentId(agentId));
     return { ok: true };
   } catch (e: unknown) {
-    const msg = desktopErrorMessage(e, 'start a session');
+    const msg = desktopErrorMessage(e, 'delete the coordinator');
+    sendToRenderer('agentsConsole:error', msg);
     return { ok: false, error: msg };
   }
 });
 
+ipcMain.handle('agent:rewake', async (_event, agentId: unknown, message: unknown) => {
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  const messageStr =
+    typeof message === 'string' && message.trim().length > 0 ? message.trim() : null;
+  if (messageStr == null) return { ok: false, error: 'Re-wake message must not be empty.' };
+  try {
+    await rewakeAgentAndRefresh(shell, requireAgentId(agentId), messageStr);
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = desktopErrorMessage(e, 're-wake the agent');
+    sendToRenderer('agentsConsole:error', msg);
+    return { ok: false, error: msg };
+  }
+});
+
+// ── Session IPC channels ─────────────────────────────────────────────────────
+
+ipcMain.handle(
+  'session:start',
+  async (_event, prompt: unknown, specBody: unknown, name: unknown) => {
+    const shell = controller.shell;
+    if (shell == null) return { ok: false, error: 'shell not ready' };
+    try {
+      const promptStr =
+        typeof prompt === 'string' && prompt.trim().length > 0 ? prompt.trim() : undefined;
+      const specStr =
+        typeof specBody === 'string' && specBody.trim().length > 0 ? specBody.trim() : undefined;
+      const nameStr = typeof name === 'string' && name.trim().length > 0 ? name.trim() : null;
+      if (nameStr == null) return { ok: false, error: 'Coordinator name is required.' };
+      await startSessionAndRefresh(shell, {
+        name: nameStr,
+        ...(promptStr != null ? { prompt: promptStr } : {}),
+        ...(specStr != null ? { specBody: specStr } : {}),
+      });
+      return { ok: true };
+    } catch (e: unknown) {
+      const msg = desktopErrorMessage(e, 'start a session');
+      return { ok: false, error: msg };
+    }
+  },
+);
+
 // Launch a coordinator from the BUNDLED predesigned demo spec (AC-S15-6 — no terminal). Reads
 // dist/renderer/demo-spec.md behind an injectable seam and starts a session via the same
 // `startSession({ specBody })` path as the free-form form. Every failure is a visible result.
-ipcMain.handle('session:startFromDemoSpec', () =>
-  startFromDemoSpec({
-    client: controller.shell?.client ?? null,
+ipcMain.handle('session:startFromDemoSpec', async (_event, name: unknown) => {
+  const shell = controller.shell;
+  const result = await startFromDemoSpec({
+    client: shell?.client ?? null,
+    name: typeof name === 'string' && name.trim().length > 0 ? name.trim() : null,
     readDemoSpec: () => readBundledDemoSpec(__dirname),
-  }),
-);
+  });
+  if (result.ok && shell != null) await shell.connection.refresh();
+  return result;
+});
+
+// ── Archive IPC channels ─────────────────────────────────────────────────────
+
+// READ — use the live shell when available, otherwise fall back to static archive records (never throw).
+ipcMain.handle('archive:list', async () => {
+  const shell = controller.shell;
+  const projectId = controller.currentProject?.projectId;
+  if (shell == null) return projectId != null ? listArchiveFromStore(projectId) : [];
+  try {
+    return await shell.client.listArchive();
+  } catch {
+    return projectId != null ? listArchiveFromStore(projectId) : [];
+  }
+});
+
+ipcMain.handle('archive:restore', async (_event, id: unknown) => {
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  const idStr = requireNonEmptyString(id, 'archive id');
+  try {
+    await shell.client.restoreArchive(idStr);
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = desktopErrorMessage(e, 'restore the archived branch');
+    return { ok: false, error: msg };
+  }
+});
+
+ipcMain.handle('archive:purge', async (_event, id: unknown) => {
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  const idStr = requireNonEmptyString(id, 'archive id');
+  try {
+    await shell.client.purgeArchive(idStr);
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = desktopErrorMessage(e, 'purge the archived branch');
+    return { ok: false, error: msg };
+  }
+});
 
 // ── Source IPC channels ──────────────────────────────────────────────────────
 

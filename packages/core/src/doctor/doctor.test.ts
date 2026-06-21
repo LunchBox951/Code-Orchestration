@@ -28,7 +28,7 @@ import {
   type ProviderProbeSeam,
   type ProviderProbeResult,
 } from './doctor.js';
-import { queryObservability } from './observability.js';
+import { queryLiveObservability, queryObservability } from './observability.js';
 
 // ── Test env setup ────────────────────────────────────────────────────────────
 
@@ -519,6 +519,37 @@ describe('queryObservability', () => {
     expect(agentRollup).toBeDefined();
     expect(taskRollup).toBeDefined();
     expect(agentRollup?.totalCostUsd).toBeCloseTo(0.05);
+  });
+
+  it('carries operator-provided agent names into the live view', () => {
+    const roster = openRosterStore(PROJECT_ID);
+    try {
+      roster.recordAgent({
+        agentId: 'coord-auth-9f3a1c',
+        role: 'coordinator',
+        parent: '@operator',
+        name: 'Auth refactor',
+      });
+    } finally {
+      roster.close();
+    }
+
+    const snap = queryLiveObservability(PROJECT_ID, {
+      liveStates: (agentIds) =>
+        agentIds.map((agentId) => ({
+          agentId,
+          hosted: false,
+          outstandingMail: 0,
+          paused: false,
+          stuck: false,
+          stopped: false,
+        })),
+    });
+
+    expect(snap.agents[0]).toMatchObject({
+      agentId: 'coord-auth-9f3a1c',
+      name: 'Auth refactor',
+    });
   });
 
   it('phase status is accessible from the plans dimension', () => {

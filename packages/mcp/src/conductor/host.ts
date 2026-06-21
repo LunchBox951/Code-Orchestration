@@ -21,7 +21,14 @@ import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
 import {
   NodePtyHost,
+  defaultGitExec,
   defaultGitRawReader,
+  defaultGitReader,
+  assertDeleteAgentSubtreePreflight,
+  deleteAgentSubtree,
+  descendantsLeafFirst,
+  isMissingBranchDeleteError,
+  openArchiveStore,
   openMailStore,
   openRegistry,
   openReviewStore,
@@ -30,8 +37,10 @@ import {
   openSpecStore,
   openWorktreeStore,
   queryLiveObservability,
+  reapExpiredArchives,
   waitingItems,
   QUIET_WINDOW_MS,
+  type ArchiveEntry,
   type BreakSignal,
   type InjectNudgeFn,
   type LiveObservabilitySnapshot,
@@ -41,6 +50,7 @@ import {
   type ReviewContext,
   type RunningAgent,
   type TranscriptTail,
+  type GitExec,
 } from '@co/core';
 import { ReconcileLoop } from '@co/core';
 import { ConductorEngine, type TransportPair } from './engine.js';
@@ -107,6 +117,28 @@ export interface ConductorControlSurface {
    * events. DEGRADES EXPLICITLY (Principle 9) — every failure mode is a named state, never a throw.
    */
   readonly reviewContext: (reviewId: string) => Promise<ReviewContext>;
+  /**
+   * B3 (deleteAgent) — tear down a coordinator's entire subtree: release all warm panes, clear router
+   * suppression, then cascade-delete the durable roster/worktree/session/archive via the core primitive.
+   * Fails loud (Principle 9) on unresolvable repoCwd; lets AggregateError from the core propagate so
+   * the IPC layer surfaces partial-failure detail to the operator.
+   */
+  readonly deleteAgent: (agentId: string) => Promise<void>;
+  /**
+   * B5 (listArchive) — list archived (unmerged) branches. A READ; the app-side facade can fall back
+   * to the static archive store when the socket is down (mirrors observe; never hangs, never throws).
+   */
+  readonly listArchive: () => Promise<readonly ArchiveEntry[]>;
+  /**
+   * B5 (restoreArchive) — un-archive `id`: remove the archive record so the reaper skips it. The
+   * branch STAYS (no git delete). A control verb — fails loud when down (Principle 9).
+   */
+  readonly restoreArchive: (id: string) => Promise<void>;
+  /**
+   * B5 (purgeArchive) — hard-purge `id`: `git branch -D <branch>` then remove the archive record.
+   * A control verb — fails loud when down (Principle 9).
+   */
+  readonly purgeArchive: (id: string) => Promise<void>;
 }
 
 // ── The cadence runner ──────────────────────────────────────────────────────────────────────────────
@@ -281,6 +313,10 @@ function reportServeControlDiagnostic(
   }
 }
 
+function reportServeControlInfo(message: string): void {
+  console.error(`[co-mcp serve] control: ${message}`);
+}
+
 /**
  * The default `[host-live]` transport seam: binding the co MCP surface to a real pty-bound provider
  * transport is an explicit host-live seam for direct `serveConductor` callers. Throws a clear message
@@ -355,6 +391,8 @@ export interface ServeConductorOptions {
   readonly makeTransport?: (identity: HostedIdentity) => TransportPair;
   /** Monotonic ms clock. Default: {@link monotonicNowMs}. */
   readonly now?: () => number;
+  /** Mutating git seam for delete/purge/reaper control paths. Defaults to production git. */
+  readonly gitExec?: GitExec;
   /** Byte-quiet window seam. Default: {@link realQuietWindow}. */
   readonly quietWindow?: (signal: AbortSignal) => Promise<void>;
   /** The cadence scheduler. Default: {@link defaultScheduler}. */
@@ -423,6 +461,7 @@ export interface OperatorIpcServeConfig {
 export async function serveConductor(opts: ServeConductorOptions): Promise<ConductorHostRunner> {
   const projectId = opts.projectId;
   const now = opts.now ?? monotonicNowMs;
+  const gitExec = opts.gitExec ?? defaultGitExec;
   const pty = opts.pty ?? (await NodePtyHost.create());
 
   // P2 / AC-S10-2 — lazy placement-spawn gate: breaks the construction cycle (gate wraps engine).
@@ -432,11 +471,20 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   let isolatedHomeDirFor: ((agent: string) => string) | undefined;
   // The project data dir backs both the per-pane isolated homes (P2) and the operator-IPC socket
   // (Stage 11 P1) — derive it once when either is needed.
+  // repoCwd is the project's registered repo working directory; resolved once here for the reaper
+  // tick (Principle 9: deleteAgent resolves it per-call so it can fail loud on unregistered projects).
   let dataDir: string | undefined;
-  if (opts.coMcpPaths != null || opts.operatorIpc != null) {
+  let repoCwdForReaper: string | undefined;
+  {
     const registry = openRegistry();
-    dataDir = registry.dataDirFor(projectId);
-    registry.close();
+    try {
+      if (opts.coMcpPaths != null || opts.operatorIpc != null) {
+        dataDir = registry.dataDirFor(projectId);
+      }
+      repoCwdForReaper = registry.pathFor(projectId) ?? undefined;
+    } finally {
+      registry.close();
+    }
   }
   if (opts.coMcpPaths != null && dataDir != null) {
     const resolvedDataDir = dataDir;
@@ -488,10 +536,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     engine,
     projectId,
     onStopUnhosted: (agent) =>
-      reportServeControlDiagnostic(
-        opts.onError,
-        new Error(`co-mcp serve: stop requested for '${agent}' but it is not hosted.`),
-      ),
+      reportServeControlInfo(`stop requested for '${agent}' but it is not hosted; recorded.`),
     onStopError: (agent, error) =>
       reportServeControlDiagnostic(
         opts.onError,
@@ -523,6 +568,192 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         },
         reviewId,
       ),
+    // B3 (deleteAgent) — compose hook: suppress daemon selection, release warm panes, then cascade-delete
+    // the durable subtree. Suppression is cleared only after durable teardown succeeds, so a failed delete
+    // cannot cold-start a surviving agent. Each call opens the registry to resolve repoCwd (Principle 9:
+    // fail loud if the project is not registered). AggregateError from deleteAgentSubtree propagates.
+    deleteAgent: async (agentId: string): Promise<void> => {
+      // Resolve repoCwd per call: open + close the registry (mirrors the reviewContext store pattern).
+      const registry = openRegistry();
+      let repoCwd: string;
+      try {
+        const p = registry.pathFor(projectId);
+        if (p == null) {
+          throw new Error(
+            `co-mcp serve: deleteAgent: project '${projectId}' is not registered — cannot resolve repoCwd.`,
+          );
+        }
+        repoCwd = p;
+      } finally {
+        registry.close();
+      }
+
+      // Compute the leaf-first id list (descendants + root) from the roster.
+      assertDeleteAgentSubtreePreflight(projectId, agentId);
+      const roster = openRosterStore(projectId);
+      let ids: string[];
+      try {
+        const agents = roster.listAgents();
+        if (roster.getAgent(agentId) == null) {
+          throw new Error(`co-mcp serve: deleteAgent: root agent '${agentId}' not found.`);
+        }
+        ids = [...descendantsLeafFirst(agents, agentId).map((a) => a.agentId), agentId];
+      } finally {
+        roster.close();
+      }
+
+      // Suppress every id before releasing panes. If durable teardown fails, these ids stay suppressed so
+      // the daemon does not cold-start any surviving roster row.
+      for (const id of ids) router.recordStopped(id);
+
+      // Release every warm pane — error-isolated so one rejecting `hosted.session.close()` cannot strand
+      // the remaining releases OR the durable teardown below (mirrors the best-effort spirit of
+      // `engine.closeAll`). Collect any failures and surface them after the durable teardown still runs
+      // (never silently swallowed — Principle 9).
+      const releaseErrors: Error[] = [];
+      for (const id of ids) {
+        try {
+          await engine.release(projectId, id, {});
+        } catch (e) {
+          const err = e instanceof Error ? e : new Error(String(e));
+          releaseErrors.push(err);
+          reportServeControlDiagnostic(
+            opts.onError,
+            new Error(`co-mcp serve: deleteAgent: pane release for '${id}' failed: ${err.message}`),
+          );
+        }
+      }
+
+      // Durable cascade teardown via the core primitive (roster/worktree/session/archive, leaf-first).
+      // Runs REGARDLESS of pane-release failures — the durable teardown must not be stranded.
+      // AggregateError on partial failure — Principle 9: let it propagate to the IPC layer.
+      try {
+        deleteAgentSubtree(projectId, agentId, {
+          repoCwd,
+          nowMs: Date.now(),
+          gitExec,
+          gitReader: defaultGitReader,
+        });
+      } catch (teardownError) {
+        // Combine the teardown failure with any collected pane-release errors so the operator sees both.
+        const teardownErrors =
+          teardownError instanceof AggregateError
+            ? teardownError.errors
+            : [teardownError instanceof Error ? teardownError : new Error(String(teardownError))];
+        throw new AggregateError(
+          [...releaseErrors, ...teardownErrors],
+          'co-mcp serve: deleteAgent: teardown failure',
+          { cause: teardownError },
+        );
+      }
+
+      // The durable subtree is gone; clear stale suppression so future agent ids are not poisoned.
+      for (const id of ids) router.unstop(id);
+
+      // The durable teardown succeeded; surface any pane-release errors that were collected.
+      if (releaseErrors.length > 0) {
+        throw new AggregateError(
+          releaseErrors,
+          'co-mcp serve: deleteAgent: pane release(s) failed (durable teardown completed)',
+        );
+      }
+    },
+    // B5 (listArchive) — list all archived branch records; open/close per call (mirrors reviewContext).
+    listArchive: async (): Promise<readonly ArchiveEntry[]> => {
+      const archive = openArchiveStore(projectId);
+      try {
+        return archive.listRecords().map((r) => ({
+          id: r.id,
+          name: r.name,
+          branch: r.branch,
+          baseRef: r.baseRef,
+          deletedAt: r.deletedAt,
+          expiresAt: r.expiresAt,
+        }));
+      } finally {
+        archive.close();
+      }
+    },
+    // B5 (restoreArchive) — remove the archive record so the reaper skips it; branch stays.
+    // Verify the branch still exists first; otherwise keep the archive handle for retry/recovery.
+    restoreArchive: async (id: string): Promise<void> => {
+      const archive = openArchiveStore(projectId);
+      try {
+        const rec = archive.getRecord(id);
+        if (rec == null) return;
+        const registry = openRegistry();
+        let repoCwd: string;
+        try {
+          const p = registry.pathFor(projectId);
+          if (p == null) {
+            throw new Error(
+              `co-mcp serve: restoreArchive: project '${projectId}' is not registered — cannot resolve repoCwd.`,
+            );
+          }
+          repoCwd = p;
+        } finally {
+          registry.close();
+        }
+        try {
+          gitExec(repoCwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${rec.branch}`]);
+        } catch (gitError) {
+          const error = new Error(
+            `co-mcp serve: restoreArchive: git rev-parse failed for archived branch ` +
+              `'${rec.branch}'; keeping archive record '${id}'.`,
+            { cause: gitError },
+          );
+          reportServeControlDiagnostic(opts.onError, error);
+          throw error;
+        }
+        archive.removeRecord(id);
+      } finally {
+        archive.close();
+      }
+    },
+    // B5 (purgeArchive) — hard-purge: git branch -D <branch> then remove the archive record.
+    // repoCwd is resolved per call from the registry, exactly as deleteAgent (Principle 9: fail loud).
+    purgeArchive: async (id: string): Promise<void> => {
+      const registry = openRegistry();
+      let repoCwd: string;
+      try {
+        const p = registry.pathFor(projectId);
+        if (p == null) {
+          throw new Error(
+            `co-mcp serve: purgeArchive: project '${projectId}' is not registered — cannot resolve repoCwd.`,
+          );
+        }
+        repoCwd = p;
+      } finally {
+        registry.close();
+      }
+      const archive = openArchiveStore(projectId);
+      try {
+        const rec = archive.getRecord(id);
+        // Idempotent: an unknown id (getRecord → null) makes removeRecord a benign no-op — a stale or
+        // double purge is NOT an error. When the record exists, `git branch -D` must succeed before the
+        // archive record is removed; otherwise the operator loses the retry/restore handle.
+        if (rec != null) {
+          try {
+            gitExec(repoCwd, ['branch', '-D', rec.branch]);
+          } catch (gitError) {
+            if (isMissingBranchDeleteError(gitError, rec.branch)) {
+              archive.removeRecord(id);
+              return;
+            }
+            reportServeControlDiagnostic(
+              opts.onError,
+              new Error(
+                `co-mcp serve: purgeArchive: git branch -D '${rec.branch}' failed: ${errorMessage(gitError)}`,
+              ),
+            );
+            throw gitError;
+          }
+          archive.removeRecord(id);
+        }
+      } finally {
+        archive.close();
+      }
+    },
   };
 
   // Stage 11 P1 (OP-IPC) — the cross-process operator-IPC server, started alongside the cadence
@@ -609,10 +840,19 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   });
 
   const wtStoreForStop = ownedWtStore;
+  // B3 (reaper) — throttled archive reaper: runs at most once every 60 ticks. Uses repoCwdForReaper
+  // resolved at serve-setup time. A missing repoCwd (unregistered project) is benign — skip silently.
+  // Errors are caught + logged: a reaper failure must never crash the tick (Principle 9 inverse — the
+  // tick loop itself is load-bearing; diagnostic issues must not take it down).
+  let reaperTickCount = 0;
+  const REAPER_EVERY_N_TICKS = 60;
+
   // Forward each tick as the operator-IPC `tick` push (D6 — the whole fresh snapshot) while still
-  // honoring any caller `onTick`. Built only when either is present, so existing callers are unchanged.
+  // honoring any caller `onTick`. Also runs the throttled archive reaper when repoCwdForReaper is
+  // known. Built when any of these are present; existing callers without IPC/onTick/repoCwd are
+  // unchanged (undefined → the runner skips the hook entirely).
   const onTick =
-    ipcServer != null || opts.onTick != null
+    ipcServer != null || opts.onTick != null || repoCwdForReaper != null
       ? (outcome: DaemonTickOutcome): void => {
           try {
             opts.onTick?.(outcome);
@@ -623,6 +863,21 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
             );
           }
           if (ipcServer != null) ipcServer.pushTick(control.observe());
+          // B3 (reaper) — opportunistic archive purge, throttled to once per N ticks.
+          reaperTickCount++;
+          if (reaperTickCount % REAPER_EVERY_N_TICKS === 0 && repoCwdForReaper != null) {
+            try {
+              reapExpiredArchives(projectId, Date.now(), {
+                repoCwd: repoCwdForReaper,
+                gitExec,
+              });
+            } catch (reaperError) {
+              reportServeControlDiagnostic(
+                opts.onError,
+                new Error(`co-mcp serve: archive reaper error: ${errorMessage(reaperError)}`),
+              );
+            }
+          }
         }
       : undefined;
   const runner = new ConductorHostRunner({
@@ -640,6 +895,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         await engine.closeAll();
       } finally {
         wtStoreForStop?.close();
+        router.close();
       }
     },
   });

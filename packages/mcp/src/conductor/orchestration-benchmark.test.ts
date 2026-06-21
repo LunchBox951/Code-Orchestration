@@ -544,6 +544,10 @@ async function operatorPassViaIpc(
         },
         rid,
       ),
+    deleteAgent: () => Promise.reject(new Error('orch-bench: deleteAgent is not used here')),
+    listArchive: () => Promise.resolve([]),
+    restoreArchive: () => Promise.reject(new Error('orch-bench: restoreArchive is not used here')),
+    purgeArchive: () => Promise.reject(new Error('orch-bench: purgeArchive is not used here')),
   };
   const server = new OperatorIpcServer({ control, projectId, socketPath });
   ipcServers.push(server);

@@ -71,9 +71,9 @@ proof first if you have not already.
 tool; the operator cannot call it directly). Ask a coordinator agent to draft a small, self-contained
 change to the `co` repo — a documentation clarification, a minor fix, or a small enhancement. The
 change must be real (it will actually land on the repo via the gated merge), so keep scope minimal.
-If you do not already have a coordinator for this run, start one from the desktop Dashboard. For the
-standard proof, click **Start from demo spec**; for a custom proof, use **Start session** with a small
-prompt such as "Draft a small doc clarification for co."
+If you do not already have a coordinator for this run, start one from the desktop Dashboard and
+enter a coordinator name first. For the standard proof, click **Start from demo spec**; for a custom
+proof, use **Start session** with a small prompt such as "Draft a small doc clarification for co."
 
 Once the coordinator has drafted the spec and mailed you the task id:
 

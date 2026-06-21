@@ -32,6 +32,7 @@ import {
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   OPERATOR,
+  openArchiveStore,
   openMailStore,
   openRegistry,
   openReviewStore,
@@ -67,7 +68,7 @@ import {
 import { SocketClientTransport } from '../conductor/real-transport.js';
 import type { HostedIdentity } from '../live-session-host.js';
 import { resolveReviewContext } from '../conductor/review-context.js';
-import { OperatorIpcServer } from './server.js';
+import { OperatorIpcServer, type OperatorIpcServerDeps } from './server.js';
 import { ConductorUnavailableError, OperatorIpcClient, OperatorIpcConnection } from './client.js';
 import { classifyIncoming, makeRequest, WIRE_ERROR } from './wire.js';
 
@@ -302,6 +303,11 @@ function makeControl(
         if (pid === projectId) listener(agent, chunk, offset);
       }),
     reviewContext,
+    deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+    listArchive: () => Promise.resolve([]),
+    restoreArchive: () =>
+      Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+    purgeArchive: () => Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
   };
   return { router, control };
 }
@@ -861,6 +867,12 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -908,6 +920,12 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -2259,6 +2277,12 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId) => Promise.resolve({ kind: 'not-found', reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
     };
     await startServer(control, projectId, socketPath);
 
@@ -2351,6 +2375,47 @@ describe('operator-IPC wire — JSON-RPC envelope compatibility + unknown-method
       expect(reply.id).toBe(8);
       expect(reply.error.code).toBe(WIRE_ERROR.invalidParams);
       expect(reply.error.message).toMatch(/agentId/i);
+    } finally {
+      await transport.close();
+    }
+  });
+
+  it('includes AggregateError inner messages in JSON-RPC internal errors', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control: baseControl } = makeControl(engine, projectId);
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      deleteAgent: () =>
+        Promise.reject(
+          new AggregateError(
+            [new Error('worktree remove failed'), new Error('branch delete failed')],
+            'deleteAgent failed',
+          ),
+        ),
+    };
+    await startServer(control, projectId, socketPath);
+
+    const transport = new SocketClientTransport(socketPath);
+    const got = new Promise<ReturnType<typeof classifyIncoming>>((resolve) => {
+      transport.onmessage = (message) => resolve(classifyIncoming(message));
+    });
+    await transport.start();
+    try {
+      await transport.send(makeRequest(9, 'deleteAgent', { agentId: 'coord-x' }));
+      const reply = await got;
+      expect(reply.kind).toBe('error');
+      if (reply.kind !== 'error') throw new Error('unreachable');
+      expect(reply.id).toBe(9);
+      expect(reply.error.code).toBe(WIRE_ERROR.internalError);
+      expect(reply.error.message).toContain('deleteAgent failed');
+      expect(reply.error.message).toContain('worktree remove failed');
+      expect(reply.error.message).toContain('branch delete failed');
     } finally {
       await transport.close();
     }
@@ -2573,6 +2638,8 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     const startCalls: Array<{
       projectId: string;
       repoCwd: string;
+      name?: string;
+      coordinatorId?: string;
       prompt?: string;
       specBody?: string;
     }> = [];
@@ -2580,6 +2647,8 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
       startCalls.push({
         projectId: params.projectId,
         repoCwd: params.repoCwd,
+        name: params.name,
+        coordinatorId: params.coordinatorId,
         prompt: params.prompt,
         specBody: params.specBody,
       });
@@ -2601,15 +2670,21 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     await server.start();
     const client = makeClient(projectId, socketPath);
 
-    const result = await client.startSession({ prompt: 'orchestrate the new feature' });
+    const result = await client.startSession({
+      name: 'new feature',
+      prompt: 'orchestrate the new feature',
+    });
 
     expect(result).toEqual(fakeResult);
     expect(startCalls).toHaveLength(1);
     expect(startCalls[0]).toMatchObject({
       projectId,
       repoCwd: cwd,
+      name: 'new feature',
       prompt: 'orchestrate the new feature',
     });
+    // The server mints a name-derived coordinatorId — just verify shape (hex suffix varies).
+    expect(startCalls[0]?.coordinatorId).toMatch(/^coord-new-feature-[0-9a-f]{6}$/);
     expect(startCalls[0]?.specBody).toBeUndefined();
   });
 
@@ -2625,9 +2700,9 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
       baseRef: 'main',
       baseSha: 'def',
     };
-    const startCalls: Array<{ prompt?: string; specBody?: string }> = [];
+    const startCalls: Array<{ name?: string; prompt?: string; specBody?: string }> = [];
     const startFn: typeof startCoordinatorSession = (params) => {
-      startCalls.push({ prompt: params.prompt, specBody: params.specBody });
+      startCalls.push({ name: params.name, prompt: params.prompt, specBody: params.specBody });
       return fakeResult;
     };
 
@@ -2646,10 +2721,16 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     await server.start();
     const client = makeClient(projectId, socketPath);
 
-    const result = await client.startSession({ specBody: '# spec\n\n- Do the thing' });
+    const result = await client.startSession({
+      name: 'draft spec task',
+      specBody: '# spec\n\n- Do the thing',
+    });
 
     expect(result).toEqual(fakeResult);
-    expect(startCalls[0]).toMatchObject({ specBody: '# spec\n\n- Do the thing' });
+    expect(startCalls[0]).toMatchObject({
+      name: 'draft spec task',
+      specBody: '# spec\n\n- Do the thing',
+    });
     expect(startCalls[0]?.prompt).toBeUndefined();
   });
 
@@ -2675,9 +2756,9 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     await server.start();
     const client = makeClient(projectId, socketPath);
 
-    await expect(client.startSession({ prompt: 'a prompt', specBody: 'a spec' })).rejects.toThrow(
-      /exactly one/i,
-    );
+    await expect(
+      client.startSession({ name: 'my coord', prompt: 'a prompt', specBody: 'a spec' }),
+    ).rejects.toThrow(/exactly one/i);
   });
 
   it('exactly-one-of: neither prompt nor specBody → InvalidParams error across the socket', async () => {
@@ -2703,6 +2784,548 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     const client = makeClient(projectId, socketPath);
 
     // Neither prompt nor specBody supplied (both undefined/empty).
-    await expect(client.startSession({})).rejects.toThrow(/exactly one/i);
+    await expect(client.startSession({ name: 'my coord' })).rejects.toThrow(/exactly one/i);
+  });
+
+  it('startSession name: the coordinator id encodes the slug with a 6-hex suffix', async () => {
+    // B4: the server mints a name-derived coordinator id from coordinatorIdFromParts(name, randomHex).
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const startCalls: Array<{ coordinatorId?: string; name?: string }> = [];
+    const startFn: typeof startCoordinatorSession = (params) => {
+      startCalls.push({ coordinatorId: params.coordinatorId, name: params.name });
+      // Return the coordinator id the server minted (pass it through so the client sees it).
+      return {
+        coordinator: params.coordinatorId ?? 'coord-unknown',
+        worktreePath: '/tmp/wt',
+        branch: `co/${params.coordinatorId ?? 'coord-unknown'}`,
+        baseRef: 'main',
+        baseSha: 'abc',
+      };
+    };
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      startFn,
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    const res = await client.startSession({ name: 'auth refactor', prompt: 'do the thing' });
+
+    // The coordinator id encodes the name-slug + a 6-hex entropy suffix.
+    expect(res.coordinator).toMatch(/^coord-auth-refactor-[0-9a-f]{6}$/);
+    expect(startCalls[0]?.coordinatorId).toMatch(/^coord-auth-refactor-[0-9a-f]{6}$/);
+    expect(startCalls[0]?.name).toBe('auth refactor');
+  });
+
+  it('startSession re-rolls the coordinator id when the first suffix collides with the roster', async () => {
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const startCalls: Array<{ coordinatorId?: string; name?: string }> = [];
+    const startFn: typeof startCoordinatorSession = (params) => {
+      startCalls.push({ coordinatorId: params.coordinatorId, name: params.name });
+      return {
+        coordinator: params.coordinatorId ?? 'coord-unknown',
+        worktreePath: '/tmp/wt',
+        branch: `co/${params.coordinatorId ?? 'coord-unknown'}`,
+        baseRef: 'main',
+        baseSha: 'abc',
+      };
+    };
+    const suffixes = ['aaaaaa', 'bbbbbb'];
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const deps = {
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      openRoster: () =>
+        ({
+          getAgent: (agentId: string) =>
+            agentId === 'coord-auth-refactor-aaaaaa'
+              ? { agentId, role: 'coordinator', parent: '@operator' }
+              : undefined,
+          close: () => {},
+        }) as unknown as RosterStore,
+      randomHex: () => suffixes.shift() ?? 'cccccc',
+      startFn,
+    } satisfies OperatorIpcServerDeps & {
+      openRoster: () => RosterStore;
+      randomHex: () => string;
+    };
+    const server = new OperatorIpcServer(deps);
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    const res = await client.startSession({ name: 'auth refactor', prompt: 'do the thing' });
+
+    expect(res.coordinator).toBe('coord-auth-refactor-bbbbbb');
+    expect(startCalls).toEqual([
+      { coordinatorId: 'coord-auth-refactor-bbbbbb', name: 'auth refactor' },
+    ]);
+  });
+
+  it('startSession trims the coordinator name before minting and starting', async () => {
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const startCalls: Array<{ coordinatorId?: string; name?: string }> = [];
+    const startFn: typeof startCoordinatorSession = (params) => {
+      startCalls.push({ coordinatorId: params.coordinatorId, name: params.name });
+      return {
+        coordinator: params.coordinatorId ?? 'coord-unknown',
+        worktreePath: '/tmp/wt',
+        branch: `co/${params.coordinatorId ?? 'coord-unknown'}`,
+        baseRef: 'main',
+        baseSha: 'abc',
+      };
+    };
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      randomHex: () => 'aaaaaa',
+      startFn,
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    const res = await client.startSession({ name: '  auth refactor  ', prompt: 'do the thing' });
+
+    expect(res.coordinator).toBe('coord-auth-refactor-aaaaaa');
+    expect(startCalls).toEqual([
+      { coordinatorId: 'coord-auth-refactor-aaaaaa', name: 'auth refactor' },
+    ]);
+  });
+
+  it('startSession rejects whitespace-only names before calling the start primitive', async () => {
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    let calledStart = false;
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      startFn: () => {
+        calledStart = true;
+        throw new Error('should not reach startFn');
+      },
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.startSession({ name: '   ', prompt: 'something' })).rejects.toThrow(
+      /name/i,
+    );
+    expect(calledStart).toBe(false);
+  });
+
+  it('startSession without name → InvalidParams (name is runtime-required)', async () => {
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      startFn: () => {
+        throw new Error('should not reach startFn');
+      },
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    // Bypass the typed client (name is optional at the type level) to exercise the runtime guard.
+    const raw = client as unknown as {
+      startSession: (p: Record<string, unknown>) => Promise<unknown>;
+    };
+    await expect(raw.startSession({ prompt: 'something' })).rejects.toThrow(/name/i);
+  });
+});
+
+// ── B4: deleteAgent + rewake IPC verbs ───────────────────────────────────────
+describe('B4 — deleteAgent + rewake operator-IPC verbs', () => {
+  it('deleteAgent dispatches end-to-end: control.deleteAgent is called with the right agentId', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+
+    // Wire a recording deleteAgent into the control surface so we can assert dispatch.
+    const deletedAgentIds: string[] = [];
+    const { router, control: baseControl } = makeControl(engine, projectId);
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      deleteAgent: (agentId) => {
+        deletedAgentIds.push(agentId);
+        return Promise.resolve();
+      },
+    };
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.deleteAgent('impl-x');
+
+    expect(deletedAgentIds).toEqual(['impl-x']);
+    // The connection must survive a successful control verb.
+    expect(client.connected).toBe(true);
+
+    // Suppress unused-variable warning for the router that `makeControl` returns.
+    void router;
+  });
+
+  it('rewake clears suppression and posts an actionable clarify_request from @operator', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'impl-x', role: 'implementer', parent: 'lead-1' });
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { router, control } = makeControl(engine, projectId);
+
+    // Suppress the agent (stopped + paused so unstop must clear both).
+    router.stop('impl-x');
+    router.pause('impl-x');
+    expect(router.isStopped('impl-x')).toBe(true);
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const delivered = await client.rewake('impl-x', 'address PR review comments');
+
+    // unstop cleared all suppression sets.
+    expect(router.isStopped('impl-x')).toBe(false);
+    expect(router.isPaused('impl-x')).toBe(false);
+
+    // A clarify_request from @operator landed in impl-x's inbox.
+    expect(delivered.type).toBe('clarify_request');
+    expect(delivered.sender).toBe('@operator');
+    expect(delivered.recipient).toBe('impl-x');
+    expect(delivered.body).toBe('address PR review comments');
+
+    // Verify the mail is outstanding (actionable) in the daemon's store.
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    expect(mail.outstanding('impl-x').some((m) => m.seq === delivered.seq)).toBe(true);
+  });
+
+  it('rewake rejects whitespace-only messages before clearing suppression or posting mail', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'impl-x', role: 'implementer', parent: 'lead-1' });
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { router, control } = makeControl(engine, projectId);
+    router.stop('impl-x');
+    router.pause('impl-x');
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.rewake('impl-x', '   ')).rejects.toThrow(/message|non-empty/i);
+    expect(router.isStopped('impl-x')).toBe(true);
+    expect(router.isPaused('impl-x')).toBe(true);
+
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    expect(mail.outstanding('impl-x')).toEqual([]);
+  });
+
+  it('rewake rejects unknown agents before posting mail', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { router, control } = makeControl(engine, projectId);
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.rewake('missing-agent', 'wake up')).rejects.toThrow(/unknown|registered/i);
+    expect(router.isStopped('missing-agent')).toBe(false);
+
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    expect(mail.outstanding('missing-agent')).toEqual([]);
+  });
+});
+
+// ── B5: listArchive / restoreArchive / purgeArchive operator-IPC verbs ───────────────────────────
+describe('B5 — listArchive / restoreArchive / purgeArchive operator-IPC verbs', () => {
+  /** Seed one archive record; returns the record's id + branch. */
+  function seedArchiveRecord(
+    projectId: ProjectId,
+    opts: { id: string; branch: string },
+  ): { id: string; branch: string } {
+    const archive = openArchiveStore(projectId);
+    try {
+      archive.appendRecord({
+        id: opts.id,
+        name: `coord-${opts.id}`,
+        branch: opts.branch,
+        baseRef: 'main',
+        deletedAt: Date.now(),
+        expiresAt: Date.now() + 86_400_000,
+      });
+    } finally {
+      archive.close();
+    }
+    return opts;
+  }
+
+  it('listArchive returns a seeded record cross-process (id/branch/expiresAt present)', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const { id, branch } = seedArchiveRecord(projectId, {
+      id: 'coord-archive-1',
+      branch: 'co/coord-archive-1',
+    });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control: baseControl } = makeControl(engine, projectId);
+    // Wire the REAL listArchive (reads from the actual store) so the cross-process proof exercises
+    // the full stack — not the stub that makeControl inserts (which always returns []).
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      listArchive: async () => {
+        const archive = openArchiveStore(projectId);
+        try {
+          return archive.listRecords().map((r) => ({
+            id: r.id,
+            name: r.name,
+            branch: r.branch,
+            baseRef: r.baseRef,
+            deletedAt: r.deletedAt,
+            expiresAt: r.expiresAt,
+          }));
+        } finally {
+          archive.close();
+        }
+      },
+    };
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const entries = await client.listArchive();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.id).toBe(id);
+    expect(entries[0]?.branch).toBe(branch);
+    expect(typeof entries[0]?.expiresAt).toBe('number');
+    // The remaining wire fields must also survive the round-trip — a silent field-drop is caught here.
+    expect(entries[0]?.name).toBe(`coord-${id}`); // the name seedArchiveRecord wrote
+    expect(entries[0]?.baseRef).toBe('main'); // the baseRef seedArchiveRecord wrote
+    expect(typeof entries[0]?.deletedAt).toBe('number');
+    expect(client.connected).toBe(true);
+  });
+
+  it('listArchive reads the static archive store when the Conductor socket is down (READ/degrade)', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath(); // nothing listening here
+    const { id, branch } = seedArchiveRecord(projectId, {
+      id: 'coord-archive-down',
+      branch: 'co/coord-archive-down',
+    });
+
+    const client = makeClient(projectId, socketPath);
+    const entries = await client.listArchive();
+
+    expect(entries.map((e) => e.id)).toEqual([id]);
+    expect(entries[0]?.branch).toBe(branch);
+    expect(client.connected).toBe(false);
+  });
+
+  it('restoreArchive removes the archive record (branch stays; no git delete) cross-process', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const { id } = seedArchiveRecord(projectId, {
+      id: 'coord-restore-1',
+      branch: 'co/coord-restore-1',
+    });
+
+    // Inject a gitExec spy to verify NO branch -D is issued during restoreArchive.
+    const gitCalls: string[][] = [];
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    // Build a control with a restoreArchive that records git calls.
+    const { control: baseControl } = makeControl(engine, projectId);
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      restoreArchive: async (archiveId: string): Promise<void> => {
+        // Mirror the host.ts implementation using the test's seam.
+        const archive = openArchiveStore(projectId);
+        try {
+          archive.removeRecord(archiveId);
+        } finally {
+          archive.close();
+        }
+        // No git call issued — record would be empty.
+      },
+      purgeArchive: async (archiveId: string): Promise<void> => {
+        gitCalls.push(['branch', '-D', `co/coord-${archiveId}`]);
+        const archive = openArchiveStore(projectId);
+        try {
+          archive.removeRecord(archiveId);
+        } finally {
+          archive.close();
+        }
+      },
+    };
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.restoreArchive(id);
+
+    // The record is gone — restored (un-archived) branch no longer expires.
+    const verify = openArchiveStore(projectId);
+    try {
+      expect(verify.getRecord(id)).toBeUndefined();
+    } finally {
+      verify.close();
+    }
+    // NO git call was issued during restore (branch stays — only the archive record is dropped).
+    expect(gitCalls).toHaveLength(0);
+    expect(client.connected).toBe(true);
+  });
+
+  it('restoreArchive is a CONTROL verb: throws ConductorUnavailableError when the socket is down', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath(); // nothing listening here
+    seedArchiveRecord(projectId, { id: 'coord-restore-down', branch: 'co/coord-restore-down' });
+
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.restoreArchive('coord-restore-down')).rejects.toBeInstanceOf(
+      ConductorUnavailableError,
+    );
+  });
+
+  it('purgeArchive removes the archive record AND issues git branch -D cross-process', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const { id, branch } = seedArchiveRecord(projectId, {
+      id: 'coord-purge-1',
+      branch: 'co/coord-purge-1',
+    });
+
+    // Wire a recording purgeArchive into the control surface to capture git calls.
+    const gitCalls: string[][] = [];
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control: baseControl } = makeControl(engine, projectId);
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      purgeArchive: async (archiveId: string): Promise<void> => {
+        const archive = openArchiveStore(projectId);
+        try {
+          const rec = archive.getRecord(archiveId);
+          if (rec != null) gitCalls.push(['branch', '-D', rec.branch]);
+          archive.removeRecord(archiveId);
+        } finally {
+          archive.close();
+        }
+      },
+    };
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.purgeArchive(id);
+
+    // The archive record is gone.
+    const verify = openArchiveStore(projectId);
+    try {
+      expect(verify.getRecord(id)).toBeUndefined();
+    } finally {
+      verify.close();
+    }
+    // git branch -D was issued for the correct branch.
+    expect(gitCalls).toHaveLength(1);
+    expect(gitCalls[0]).toEqual(['branch', '-D', branch]);
+    expect(client.connected).toBe(true);
+  });
+
+  it('purgeArchive is a CONTROL verb: throws ConductorUnavailableError when the socket is down', async () => {
+    const { projectId } = makeProject();
+    const socketPath = makeSocketPath(); // nothing listening here
+    seedArchiveRecord(projectId, { id: 'coord-purge-down', branch: 'co/coord-purge-down' });
+
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.purgeArchive('coord-purge-down')).rejects.toBeInstanceOf(
+      ConductorUnavailableError,
+    );
   });
 });

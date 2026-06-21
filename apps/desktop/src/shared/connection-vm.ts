@@ -25,6 +25,8 @@ export class ConnectionVM {
   private readonly onState: ((state: ConnectionState) => void) | undefined;
   private readonly onTickCb: ((tick: OperatorIpcTick) => void) | undefined;
   private unsubTick: (() => void) | null = null;
+  private closed = false;
+  private refreshGeneration = 0;
 
   constructor(deps: ConnectionVMDeps) {
     this.client = deps.client;
@@ -37,20 +39,26 @@ export class ConnectionVM {
   }
 
   async start(): Promise<void> {
+    this.closed = false;
     this.unsubTick = this.client.onTick((tick) => {
+      if (this.closed) return;
       this.onTickCb?.(tick);
     });
     await this.refresh();
   }
 
   async refresh(): Promise<void> {
+    const generation = ++this.refreshGeneration;
     const observation = await this.client.observe();
+    if (this.closed || generation !== this.refreshGeneration) return;
     const status: ConnectionStatus = observation.kind === 'live' ? 'live' : 'degraded';
     this._state = { status, observation };
     this.onState?.(this._state);
   }
 
   close(): void {
+    this.closed = true;
+    this.refreshGeneration += 1;
     this.unsubTick?.();
     this.unsubTick = null;
   }

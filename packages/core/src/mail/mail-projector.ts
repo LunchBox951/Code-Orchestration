@@ -5,6 +5,8 @@ import {
   EVENT_MAIL_LIVE_EFFECT,
   EVENT_MAIL_FORWARD,
   EVENT_MAIL_READ,
+  EVENT_MAIL_RECIPIENT_CLEARED,
+  EVENT_MAIL_RECIPIENT_SENDER_CLEARED,
   EVENT_MAIL_RETRACTED,
   MAIL_APPROVAL_RESPONSE,
   MAIL_CLARIFY_REQUEST,
@@ -12,6 +14,7 @@ import {
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
+  OPERATOR,
   completionPredicate,
   mailKind,
   mailRecipientForScope,
@@ -23,6 +26,7 @@ import {
   type MailLiveEffect,
   type MailMessage,
   type MailRead,
+  type MailRecipientSenderCleared,
   type MailRetract,
   type MailType,
   type ReviewResponse,
@@ -51,9 +55,10 @@ import type { Verdict } from '../review/verdict.js';
  *                   Log-derived from the payload, so the outward-action gate reads it
  *                   replay-safely; NULL for every other type.
  *   - `retracted` — set by a {@link EVENT_MAIL_RETRACTED} tombstone (only the original
- *                   sender can append one). A retracted mail drops out of `inbox()` and the
- *                   outstanding-action projection, but its row + log event persist
- *                   (Principle 14 — recoverable, replay-safe).
+ *                   sender can append one) or by a recipient-scoped
+ *                   {@link EVENT_MAIL_RECIPIENT_CLEARED} cleanup receipt. A retracted mail drops
+ *                   out of `inbox()` and the outstanding-action projection, but its row + log
+ *                   event persist (Principle 14 — recoverable, replay-safe).
  *
  * Indexes: `recipient` for `inbox(recipient)`, idempotency scope for the dedupe lookup,
  * `thread_id` for in-thread resolution, and `(recipient, kind, resolved)` for the
@@ -261,6 +266,66 @@ export function outstandingForRecipient(db: DatabaseSync, recipient: string): De
 }
 
 /**
+ * All non-retracted actionable mail addressed to `recipient`, including already-resolved items. Used by
+ * terminal recipient cleanup so a forwarded/resolved item cannot reopen after its parent is tombstoned.
+ */
+export function actionableForRecipient(db: DatabaseSync, recipient: string): DeliveredMail[] {
+  ensureInboxTable(db);
+  const rows = db
+    .prepare(
+      `SELECT ${INBOX_COLUMNS} FROM inbox
+       WHERE recipient = ? AND kind = 'actionable' AND retracted = 0
+       ORDER BY seq`,
+    )
+    .all(recipient);
+  return rows.map(rowToDeliveredMail);
+}
+
+/**
+ * Non-review actionable mail addressed to `recipient`, including already-resolved rows. Recipient
+ * cleanup is infrastructure for agent deletion; review mail is preserved for the review-store audit
+ * trail and unresolved review obligations are blocked by delete preflight instead.
+ */
+export function nonReviewActionableForRecipient(
+  db: DatabaseSync,
+  recipient: string,
+): DeliveredMail[] {
+  return actionableForRecipient(db, recipient).filter((mail) => !isReviewMail(mail));
+}
+
+/** All non-retracted actionable mail addressed to `recipient` from `sender`, including resolved rows. */
+export function actionableForRecipientFromSender(
+  db: DatabaseSync,
+  recipient: string,
+  sender: string,
+): DeliveredMail[] {
+  ensureInboxTable(db);
+  const rows = db
+    .prepare(
+      `SELECT ${INBOX_COLUMNS} FROM inbox
+       WHERE recipient = ? AND sender = ? AND kind = 'actionable' AND retracted = 0
+       ORDER BY seq`,
+    )
+    .all(recipient, sender);
+  return rows.map(rowToDeliveredMail);
+}
+
+/** Non-review actionable mail addressed to `recipient` from `sender`, including resolved rows. */
+export function nonReviewActionableForRecipientFromSender(
+  db: DatabaseSync,
+  recipient: string,
+  sender: string,
+): DeliveredMail[] {
+  return actionableForRecipientFromSender(db, recipient, sender).filter(
+    (mail) => !isReviewMail(mail),
+  );
+}
+
+function isReviewMail(mail: DeliveredMail): boolean {
+  return mail.type === MAIL_REVIEW_REQUEST || mail.type === MAIL_REVIEW_RESPONSE;
+}
+
+/**
  * All mail a given agent SENT (matched on `sender` = the event `actor`), chronological.
  * Unlike {@link inboxForRecipient} (keyed by RECIPIENT), this is keyed by SENDER, so an
  * agent can find the actionable items IT RAISED — e.g. the W5 'awaiting reply' query.
@@ -367,6 +432,8 @@ export class MailProjector implements Projector {
       type === EVENT_MAIL_READ ||
       type === EVENT_MAIL_FORWARD ||
       type === EVENT_MAIL_RETRACTED ||
+      type === EVENT_MAIL_RECIPIENT_CLEARED ||
+      type === EVENT_MAIL_RECIPIENT_SENDER_CLEARED ||
       type === EVENT_MAIL_LIVE_EFFECT ||
       (MAIL_TYPES as readonly string[]).includes(type)
     );
@@ -394,6 +461,14 @@ export class MailProjector implements Projector {
     }
     if (event.type === EVENT_MAIL_RETRACTED) {
       this.applyRetractReceipt(db, event);
+      return;
+    }
+    if (event.type === EVENT_MAIL_RECIPIENT_CLEARED) {
+      this.applyRecipientClearedReceipt(db, event);
+      return;
+    }
+    if (event.type === EVENT_MAIL_RECIPIENT_SENDER_CLEARED) {
+      this.applyRecipientSenderClearedReceipt(db, event);
       return;
     }
     if (event.type === EVENT_MAIL_LIVE_EFFECT) {
@@ -496,6 +571,49 @@ export class MailProjector implements Projector {
     }
     db.prepare('UPDATE inbox SET retracted = 1 WHERE seq = ? AND sender = ?').run(seq, sender);
     recomputeResolvedAfterRetractingCloser(db, retracted);
+  }
+
+  /**
+   * Fold a recipient-cleanup receipt: tombstone all actionable mail addressed to the
+   * recipient. This is intentionally recipient-scoped infrastructure, not sender-owned retract, so
+   * deletion can clear stale obligations across all senders while preserving audit rows.
+   */
+  private applyRecipientClearedReceipt(db: DatabaseSync, event: StoredEvent): void {
+    const recipient = mailRecipientForScope(event.scope);
+    if (event.actor !== OPERATOR) {
+      throw new Error(
+        `mail projector: recipient cleanup seq=${event.seq} actor '${event.actor ?? '<none>'}' ` +
+          `must be '${OPERATOR}'`,
+      );
+    }
+    db.prepare(
+      `UPDATE inbox
+       SET retracted = 1
+       WHERE recipient = ? AND kind = 'actionable' AND retracted = 0
+         AND type NOT IN (?, ?)`,
+    ).run(recipient, MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE);
+  }
+
+  /**
+   * Fold a sender-scoped recipient-cleanup receipt: tombstone actionable mail addressed to the
+   * recipient from the named sender. This lets subtree deletion clear operator-held terminal
+   * obligations from deleted agents without clearing unrelated operator work.
+   */
+  private applyRecipientSenderClearedReceipt(db: DatabaseSync, event: StoredEvent): void {
+    const recipient = mailRecipientForScope(event.scope);
+    const { sender } = event.payload as MailRecipientSenderCleared;
+    if (event.actor !== OPERATOR) {
+      throw new Error(
+        `mail projector: recipient/sender cleanup seq=${event.seq} actor ` +
+          `'${event.actor ?? '<none>'}' must be '${OPERATOR}'`,
+      );
+    }
+    db.prepare(
+      `UPDATE inbox
+       SET retracted = 1
+       WHERE recipient = ? AND sender = ? AND kind = 'actionable' AND retracted = 0
+         AND type NOT IN (?, ?)`,
+    ).run(recipient, sender, MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE);
   }
 
   /**

@@ -10,6 +10,8 @@ import {
   makeMailForwardEvent,
   makeMailEvent,
   makeMailLiveEffectEvent,
+  makeMailRecipientClearedEvent,
+  makeMailRecipientSenderClearedEvent,
   makeMailReadEvent,
   makeMailRetractEvent,
   mailSchemas,
@@ -20,6 +22,8 @@ import {
 import {
   ensureInboxTable,
   forwardedMailForHeld,
+  nonReviewActionableForRecipient,
+  nonReviewActionableForRecipientFromSender,
   selectLiveDeliveryEffect,
   selectMailByIdempotencyKey,
   selectMailBySeq,
@@ -94,6 +98,10 @@ export interface Delivery {
   markRead?(recipient: string, seq: number): DeliveredMail;
   /** Append a retract-receipt for `sender`'s mail at `seq` (tombstone); returns the updated row. */
   retract?(sender: string, seq: number): DeliveredMail;
+  /** Append a recipient-cleanup receipt; returns the number of non-review actionable items tombstoned. */
+  clearOutstanding?(recipient: string): number;
+  /** Append a recipient+sender cleanup receipt; returns the number of non-review actionable items tombstoned. */
+  clearOutstandingFromSenderToRecipient?(sender: string, recipient: string): number;
 }
 
 export interface DeliveryResult {
@@ -334,6 +342,44 @@ export class InProcessDelivery implements Delivery {
       return updated;
     });
   }
+
+  /**
+   * Append a recipient cleanup receipt and fold it in the SAME tx. This is used by durable agent
+   * deletion to clear stale non-review obligations across all senders without deleting mail rows.
+   */
+  clearOutstanding(recipient: string): number {
+    return this.store.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      ensureInboxTable(db);
+      const event = makeMailRecipientClearedEvent(this.projectId, recipient);
+
+      const actionable = nonReviewActionableForRecipient(db, recipient);
+      if (actionable.length === 0) return 0;
+
+      const [stored] = tx.append([event]);
+      applyEvent(tx, decode(stored!, mailUpcasters, mailSchemas), this.projectors);
+      return actionable.length;
+    });
+  }
+
+  /**
+   * Append a recipient+sender cleanup receipt and fold it in the SAME tx. This is used by durable
+   * agent deletion to clear operator-held non-review obligations created by deleted subtree agents only.
+   */
+  clearOutstandingFromSenderToRecipient(sender: string, recipient: string): number {
+    return this.store.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      ensureInboxTable(db);
+      const event = makeMailRecipientSenderClearedEvent(this.projectId, recipient, sender);
+
+      const actionable = nonReviewActionableForRecipientFromSender(db, recipient, sender);
+      if (actionable.length === 0) return 0;
+
+      const [stored] = tx.append([event]);
+      applyEvent(tx, decode(stored!, mailUpcasters, mailSchemas), this.projectors);
+      return actionable.length;
+    });
+  }
 }
 
 /**
@@ -443,6 +489,16 @@ export class LiveDelivery implements Delivery {
   retract(sender: string, seq: number): DeliveredMail {
     // A retract-receipt is a tombstone — persist only (no wake, no injection).
     return this.inner.retract(sender, seq);
+  }
+
+  clearOutstanding(recipient: string): number {
+    // A recipient cleanup is a bulk tombstone — persist only (no wake, no injection).
+    return this.inner.clearOutstanding(recipient);
+  }
+
+  clearOutstandingFromSenderToRecipient(sender: string, recipient: string): number {
+    // A scoped recipient cleanup is a bulk tombstone — persist only (no wake, no injection).
+    return this.inner.clearOutstandingFromSenderToRecipient(sender, recipient);
   }
 
   private wakeAndMaybeInject(delivered: DeliveredMail): void {

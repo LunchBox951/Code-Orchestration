@@ -279,15 +279,18 @@ export function selectEligible(
         store = openMail(identity.projectId);
         stores.set(identity.projectId, store);
       }
-      const [mail] = store.outstanding(identity.agent);
+      const mail = firstEligibleMail(store, identity.agent);
       if (mail != null) return { identity, mail };
-      const wakeMail = firstUnreadTurnWakeMail(store, identity.agent);
-      if (wakeMail != null) return { identity, mail: wakeMail };
     }
     return undefined;
   } finally {
     for (const store of stores.values()) store.close();
   }
+}
+
+export function firstEligibleMail(store: MailStore, agent: string): DeliveredMail | undefined {
+  const [mail] = store.outstanding(agent);
+  return mail ?? firstUnreadTurnWakeMail(store, agent);
 }
 
 function firstUnreadTurnWakeMail(store: MailStore, agent: string): DeliveredMail | undefined {

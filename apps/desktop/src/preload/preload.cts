@@ -29,6 +29,16 @@ type SettingsState = unknown;
 type SettingsLayer = 'global' | 'project';
 type SettingWriteResult = { ok: boolean; error?: string };
 type SourceState = unknown;
+
+/** One archived branch — mirrors ArchiveEntry from @co/core contract (inline, no Node import). */
+interface ArchiveEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly branch: string;
+  readonly baseRef: string;
+  readonly deletedAt: number;
+  readonly expiresAt: number;
+}
 type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
 type DaemonStatusPayload = { status: DaemonStatus; detail: string | null };
 type CurrentProjectState = { projectId: string; path: string | null } | null;
@@ -77,6 +87,8 @@ interface CoShellBridge {
   ): Promise<{ ok: boolean; error?: string }>;
   agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
+  agentsDelete(agentId: string): Promise<{ ok: boolean; error?: string }>;
+  agentsRewake(agentId: string, message: string): Promise<{ ok: boolean; error?: string }>;
   // ── Review ────────────────────────────────────────────────────────────────
   onReviewState(listener: (state: ReviewState) => void): () => void;
   onReviewError(listener: (message: string) => void): () => void;
@@ -96,8 +108,9 @@ interface CoShellBridge {
   sessionStart(
     prompt: string | null,
     specBody: string | null,
+    name: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
-  sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
+  sessionStartFromDemoSpec(name: string | null): Promise<{ ok: boolean; error?: string }>;
   // ── Project + Daemon on-ramp ────────────────────────────────────────────────
   openProject(): Promise<void>;
   daemonRetry(): Promise<{ ok: boolean; error?: string }>;
@@ -106,6 +119,10 @@ interface CoShellBridge {
   onAppError(listener: (message: string) => void): () => void;
   // ── Source ──────────────────────────────────────────────────────────────────
   refreshSource(): Promise<SourceState | null>;
+  // ── Archive ──────────────────────────────────────────────────────────────────
+  archiveList(): Promise<readonly ArchiveEntry[]>;
+  archiveRestore(id: string): Promise<{ ok: boolean; error?: string }>;
+  archivePurge(id: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 const bridge: CoShellBridge = {
@@ -244,6 +261,12 @@ const bridge: CoShellBridge = {
   async agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agent:unstick', agentId);
   },
+  async agentsDelete(agentId: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agent:delete', agentId);
+  },
+  async agentsRewake(agentId: string, message: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agent:rewake', agentId, message);
+  },
   // ── Review ────────────────────────────────────────────────────────────────
   onReviewState(listener: (state: ReviewState) => void) {
     const handler = (_event: unknown, state: ReviewState): void => listener(state);
@@ -299,11 +322,17 @@ const bridge: CoShellBridge = {
   async sessionStart(
     prompt: string | null,
     specBody: string | null,
+    name: string | null,
   ): Promise<{ ok: boolean; error?: string }> {
-    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:start', prompt, specBody);
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>(
+      'session:start',
+      prompt,
+      specBody,
+      name,
+    );
   },
-  async sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }> {
-    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:startFromDemoSpec');
+  async sessionStartFromDemoSpec(name: string | null): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:startFromDemoSpec', name);
   },
   // ── Project + Daemon on-ramp ────────────────────────────────────────────────
   async openProject(): Promise<void> {
@@ -330,6 +359,16 @@ const bridge: CoShellBridge = {
   // ── Source ──────────────────────────────────────────────────────────────────
   async refreshSource(): Promise<SourceState | null> {
     return ipcRenderer.invoke<SourceState | null>('source:refresh');
+  },
+  // ── Archive ──────────────────────────────────────────────────────────────────
+  async archiveList(): Promise<readonly ArchiveEntry[]> {
+    return ipcRenderer.invoke<readonly ArchiveEntry[]>('archive:list');
+  },
+  async archiveRestore(id: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('archive:restore', id);
+  },
+  async archivePurge(id: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('archive:purge', id);
   },
 };
 

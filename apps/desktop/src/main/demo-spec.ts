@@ -10,7 +10,7 @@ import { desktopErrorMessage } from './desktop-errors.js';
  * The predesigned on-ramp spec ships at repo-root `docs/demo-spec-co-improves-its-docs.md` and is
  * bundled into `dist/renderer/demo-spec.md` by `copy-renderer-assets.mjs`. `session:startFromDemoSpec`
  * reads that bundled file and starts a ROOT coordinator from its body via the already-plumbed
- * `startSession({ specBody })` path — the same primitive the free-form session form uses.
+ * `startSession({ name, specBody })` path — the same primitive the free-form session form uses.
  *
  * The spec read is an injectable seam so the launch path is HEADLESS-testable (no real Electron, no
  * real `co-mcp serve`). Every failure is a NAMED, visible result (Principle 9): no project open, an
@@ -25,6 +25,8 @@ export interface StartSessionClient {
 export interface DemoSpecDeps {
   /** The live shell's operator-IPC client, or `null` when no project is open. Production: `controller.shell?.client`. */
   readonly client: StartSessionClient | null;
+  /** Operator-provided coordinator name. Required to match the normal desktop start path. */
+  readonly name?: string | null;
   /** Read the bundled demo spec as text. Injectable for tests; production: {@link readBundledDemoSpec}. */
   readonly readDemoSpec: () => string;
 }
@@ -51,6 +53,10 @@ export async function startFromDemoSpec(
   if (deps.client == null) {
     return { ok: false, error: 'No project is open — use "Open project" to choose one.' };
   }
+  const name = deps.name?.trim();
+  if (name == null || name.length === 0) {
+    return { ok: false, error: 'Coordinator name is required.' };
+  }
 
   let specBody: string;
   try {
@@ -65,7 +71,7 @@ export async function startFromDemoSpec(
   }
 
   try {
-    await deps.client.startSession({ specBody });
+    await deps.client.startSession({ name, specBody });
     return { ok: true };
   } catch (e: unknown) {
     return { ok: false, error: desktopErrorMessage(e, 'start from the demo spec') };

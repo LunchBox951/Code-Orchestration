@@ -12,6 +12,7 @@ export const CONSOLE_TRANSCRIPT_MAX_CHARS = 64 * 1024;
 
 export interface AgentConsoleRow {
   readonly agentId: string;
+  readonly name?: string;
   readonly role: string;
   readonly parent: string;
   readonly status: AgentStatus;
@@ -27,6 +28,7 @@ export interface AgentsConsoleState {
 
 function deriveStatusLive(a: AgentLiveView): AgentStatus {
   if (a.stuck) return 'stuck';
+  if (a.stopped) return 'stopped';
   if (a.paused) return 'paused';
   if (a.hosted) return 'warm';
   if (a.outstandingMail > 0) return 'waiting';
@@ -75,6 +77,7 @@ export class AgentsConsoleVM {
         const agents = observation.snapshot.agents;
         const roster: AgentConsoleRow[] = agents.map((a: AgentLiveView) => ({
           agentId: a.agentId,
+          ...(a.name != null ? { name: a.name } : {}),
           role: a.role,
           parent: a.parent,
           status: deriveStatusLive(a),
@@ -93,6 +96,7 @@ export class AgentsConsoleVM {
         const agents = observation.snapshot.agents;
         const roster: AgentConsoleRow[] = agents.map((a: AgentRecord) => ({
           agentId: a.agentId,
+          ...(a.name != null ? { name: a.name } : {}),
           role: a.role,
           parent: a.parent,
           status: 'unknown' as const,

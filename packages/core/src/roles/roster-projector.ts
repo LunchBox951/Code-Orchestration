@@ -19,6 +19,7 @@ const CREATE_ROSTER_TABLE = `
     agent_id      TEXT PRIMARY KEY,
     role          TEXT NOT NULL,
     sub_role      TEXT,
+    name          TEXT,
     parent        TEXT NOT NULL,
     registered_ts INTEGER NOT NULL
   );
@@ -27,6 +28,10 @@ const CREATE_ROSTER_TABLE = `
 /** Defensive create of the roster read-model table — called on reset/apply AND every read path. */
 export function ensureRosterTables(db: DatabaseSync): void {
   db.exec(CREATE_ROSTER_TABLE);
+  const rosterColumns = db.prepare('PRAGMA table_info(roster)').all() as Array<{ name: string }>;
+  if (!rosterColumns.some((c) => c.name === 'name')) {
+    db.exec('ALTER TABLE roster ADD COLUMN name TEXT');
+  }
 }
 
 /** Map a raw `roster` row to an {@link AgentRecord}. */
@@ -35,12 +40,13 @@ export function rowToAgentRecord(row: Record<string, unknown>): AgentRecord {
     agentId: String(row.agent_id),
     role: String(row.role) as Role,
     ...(row.sub_role != null ? { subRole: String(row.sub_role) } : {}),
+    ...(row.name != null ? { name: String(row.name) } : {}),
     parent: String(row.parent),
     registeredTs: Number(row.registered_ts),
   };
 }
 
-const ROSTER_COLUMNS = 'agent_id, role, sub_role, parent, registered_ts';
+const ROSTER_COLUMNS = 'agent_id, role, sub_role, name, parent, registered_ts';
 
 /** The agent record for `agentId`, or undefined. */
 export function selectAgent(db: DatabaseSync, agentId: string): AgentRecord | undefined {
@@ -62,7 +68,8 @@ function sameRegistration(existing: AgentRecord, rec: AgentRegistered): boolean 
   return (
     existing.role === rec.role &&
     existing.parent === rec.parent &&
-    (existing.subRole ?? undefined) === (rec.subRole ?? undefined)
+    (existing.subRole ?? undefined) === (rec.subRole ?? undefined) &&
+    (rec.name === undefined || existing.name === rec.name)
   );
 }
 
@@ -180,13 +187,13 @@ export class RosterProjector implements Projector {
     const type = rosterEvent.type;
     switch (type) {
       case EVENT_AGENT_REGISTERED: {
-        const { agentId, role, subRole, parent } = rosterEvent.payload;
+        const { agentId, role, subRole, name, parent } = rosterEvent.payload;
         const existing = validateAgentRegistration(db, rosterEvent.payload);
         if (existing != null) return;
         db.prepare(
-          `INSERT INTO roster (agent_id, role, sub_role, parent, registered_ts)
-           VALUES (?, ?, ?, ?, ?)`,
-        ).run(agentId, role, subRole ?? null, parent, event.ts);
+          `INSERT INTO roster (agent_id, role, sub_role, name, parent, registered_ts)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        ).run(agentId, role, subRole ?? null, name ?? null, parent, event.ts);
         return;
       }
       case EVENT_AGENT_REMOVED: {

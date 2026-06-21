@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
-    "electron": "^39.8.5",
+    "electron": "^42.4.1",
     "electron-builder": "^26.0.0"
   }
 }

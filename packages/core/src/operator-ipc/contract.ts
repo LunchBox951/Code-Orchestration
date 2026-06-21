@@ -27,6 +27,18 @@ import type { Criterion } from '../specs/criteria-schema.js';
 export const OPERATOR_IPC_METHODS = {
   /** Snapshot the LIVE observability view (roster ⊕ warm/paused/stuck + outstanding + cost). */
   observe: 'observe',
+  /** List archived unmerged branches — the client degrades to a static archive-store read when down. */
+  listArchive: 'listArchive',
+  /**
+   * Un-archive a branch: remove the archive record (branch STAYS; no git delete). A control verb —
+   * fails loud when the socket is down (Principle 9).
+   */
+  restoreArchive: 'restoreArchive',
+  /**
+   * Hard-purge an archived branch: `git branch -D <branch>` then remove the archive record. A control
+   * verb — fails loud when the socket is down (Principle 9).
+   */
+  purgeArchive: 'purgeArchive',
   /** Pause an agent (the daemon skips it until {@link OPERATOR_IPC_METHODS.resume}). */
   pause: 'pause',
   /** Resume a paused agent. */
@@ -62,6 +74,19 @@ export const OPERATOR_IPC_METHODS = {
    * cold-starts the root on its next tick. Exactly one of `prompt` / `specBody` is required.
    */
   startSession: 'startSession',
+  /**
+   * Delete an agent and its entire subtree (recursive descendants + their worktrees + branches). The
+   * daemon's single writer: callers never act on the stores directly. Delegates to
+   * `ConductorControlSurface.deleteAgent` which cascades through the core primitive.
+   */
+  deleteAgent: 'deleteAgent',
+  /**
+   * Re-wake a stopped/paused/stuck agent by posting an actionable `clarify_request` from `@operator`,
+   * then clearing all suppression state — so `selectEligible` picks it up on the next daemon tick.
+   * Unlike {@link OPERATOR_IPC_METHODS.operatorMessage} (which posts but does not unstop), this verb
+   * must post the actionable mail first, then clear suppression state after the mail commit.
+   */
+  rewake: 'rewake',
   /** Send raw keystroke bytes into a hosted agent's PTY stdin (live xterm → PTY passthrough). */
   sendInput: 'session:input',
   /** Resize a hosted agent's PTY to the given cols × rows (xterm fit → PTY width sync). */
@@ -118,6 +143,11 @@ export interface ApprovalReply {
  * permission; this is NEVER an agent-callable MCP tool (Principle 4 + D4).
  */
 export interface StartSessionParams {
+  /**
+   * A human-readable name for this coordinator (e.g. `'Auth Refactor'`). The public operator-IPC
+   * contract requires it and the server enforces the same rule at runtime (Principle 9 — fail loud).
+   */
+  readonly name: string;
   /** The operator's free-form kickoff prompt. Exactly one of `prompt` / `specBody`. */
   readonly prompt?: string;
   /** A draft-spec brief to kick off from. Exactly one of `prompt` / `specBody`. */
@@ -125,17 +155,34 @@ export interface StartSessionParams {
 }
 
 /**
- * The result of a `startSession` call: the deterministic root coordinator id + worktree facts. The
+ * The result of a `startSession` call: the registered root coordinator id + worktree facts. The
  * daemon will cold-start the root on its next tick (the start primitive does NOT mint a session).
  */
 export interface StartSessionResult {
-  /** The deterministic root coordinator id, now registered (roster) + provisioned (worktree). */
+  /** The root coordinator id, now registered (roster) + provisioned (worktree). */
   readonly coordinator: string;
   /** Absolute path of the root's provisioned worktree (the daemon's cold-start cwd). */
   readonly worktreePath: string;
   readonly branch: string;
   readonly baseRef: string;
   readonly baseSha: string;
+}
+
+/**
+ * One archived branch entry — a mirror of the store's `ArchiveRecord`, carried over the wire. All six
+ * fields are read-only (desktop renders, never mutates). Numbers match the store's epoch-ms
+ * convention. Named `ArchiveEntry` (not `ArchiveRecord`) so the contract has no implicit dependency
+ * on the store layer's internal type — the desktop never imports from the store directly.
+ */
+export interface ArchiveEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly branch: string;
+  readonly baseRef: string;
+  /** Epoch ms when the branch was archived during subtree deletion. */
+  readonly deletedAt: number;
+  /** Epoch ms when the reaper will hard-delete the branch unless the operator restores or purges it first. */
+  readonly expiresAt: number;
 }
 
 /**
@@ -181,10 +228,39 @@ export interface OperatorIpcSurface {
    * `specBody` is supplied (Principle 9).
    */
   startSession(params: StartSessionParams): Promise<StartSessionResult>;
+  /**
+   * Delete `agentId` and its entire subtree (recursive descendants + worktrees + branches). A
+   * control verb that requires the daemon socket — throws a clear error when the Conductor is down
+   * (Principle 9). Delegates to `ConductorControlSurface.deleteAgent` which cascades through the
+   * core primitive.
+   */
+  deleteAgent(agentId: string): Promise<void>;
+  /**
+   * Re-wake `agentId`: post an actionable `clarify_request` from `@operator`, then clear all
+   * suppression state (stopped/paused/stuck) so the daemon's `selectEligible` wakes the recipient on
+   * its next tick. Fails loud when the Conductor socket is down (Principle 9).
+   */
+  rewake(agentId: string, message: string): Promise<DeliveredMail>;
   /** Send raw keystroke bytes into `agentId`'s warm PTY stdin (live xterm → PTY passthrough). */
   sendInput(agentId: string, data: string): Promise<void>;
   /** Resize `agentId`'s warm PTY to `cols` × `rows` (xterm fit → PTY width sync). */
   resize(agentId: string, cols: number, rows: number): Promise<void>;
+  /**
+   * List archived unmerged branches. A READ — the client degrades to a static archive-store read when
+   * the Conductor socket is down (mirrors {@link observe}; never hangs, never throws — Principle 9 /
+   * MNR #3).
+   */
+  listArchive(): Promise<readonly ArchiveEntry[]>;
+  /**
+   * Un-archive a branch: remove the archive record so the reaper skips it. The branch STAYS (Restore =
+   * promote to an ordinary branch; no git delete). A control verb — fails loud when down (Principle 9).
+   */
+  restoreArchive(id: string): Promise<void>;
+  /**
+   * Hard-purge an archived branch now: `git branch -D <branch>` then remove the archive record.
+   * A control verb — fails loud when the Conductor socket is down (Principle 9).
+   */
+  purgeArchive(id: string): Promise<void>;
 }
 
 /**

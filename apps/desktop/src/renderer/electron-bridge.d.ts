@@ -7,7 +7,7 @@ type ConnectionStatus = 'connecting' | 'live' | 'degraded';
 interface ProjectInfo {
   id: string;
 }
-type AgentStatus = 'warm' | 'waiting' | 'stuck' | 'paused' | 'unknown';
+type AgentStatus = 'warm' | 'waiting' | 'stopped' | 'stuck' | 'paused' | 'unknown';
 
 interface ConnectionObservation {
   kind: 'live' | 'static';
@@ -21,6 +21,7 @@ interface ConnectionState {
 
 interface TreeNode {
   agentId: string;
+  name?: string;
   role: string;
   subRole?: string;
   parent: string;
@@ -32,6 +33,7 @@ interface FleetStats {
   total: number;
   warm: number;
   waiting: number;
+  stopped: number;
   stuck: number;
   paused: number;
 }
@@ -93,6 +95,7 @@ interface MailState {
 
 interface AgentConsoleRow {
   agentId: string;
+  name?: string;
   role: string;
   parent: string;
   status: AgentStatus;
@@ -216,6 +219,18 @@ interface LimitsCostState {
   headroomRows: readonly LimitsCostHeadroomRow[];
   agentCosts: readonly LimitsCostCostRow[];
   taskCosts: readonly LimitsCostCostRow[];
+}
+
+// ── Archive (inline — renderer is isolated from Node context) ────────────────
+
+/** One archived branch — mirrors ArchiveEntry from @co/core contract. */
+interface ArchiveEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly branch: string;
+  readonly baseRef: string;
+  readonly deletedAt: number;
+  readonly expiresAt: number;
 }
 
 // ── Source / Daemon / Project on-ramp (inline — renderer is isolated from Node context) ──────
@@ -346,6 +361,8 @@ interface CoShellBridge {
   ): Promise<{ ok: boolean; error?: string }>;
   agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
+  agentsDelete(agentId: string): Promise<{ ok: boolean; error?: string }>;
+  agentsRewake(agentId: string, message: string): Promise<{ ok: boolean; error?: string }>;
   // ── Review ────────────────────────────────────────────────────────────────
   onReviewState(listener: (state: ReviewState) => void): () => void;
   onReviewError(listener: (message: string) => void): () => void;
@@ -365,8 +382,9 @@ interface CoShellBridge {
   sessionStart(
     prompt: string | null,
     specBody: string | null,
+    name: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
-  sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
+  sessionStartFromDemoSpec(name: string | null): Promise<{ ok: boolean; error?: string }>;
   // ── Project + Daemon on-ramp ────────────────────────────────────────────────
   openProject(): Promise<void>;
   daemonRetry(): Promise<{ ok: boolean; error?: string }>;
@@ -375,6 +393,10 @@ interface CoShellBridge {
   onAppError(listener: (message: string) => void): () => void;
   // ── Source ──────────────────────────────────────────────────────────────────
   refreshSource(): Promise<SourceState | null>;
+  // ── Archive ──────────────────────────────────────────────────────────────────
+  archiveList(): Promise<readonly ArchiveEntry[]>;
+  archiveRestore(id: string): Promise<{ ok: boolean; error?: string }>;
+  archivePurge(id: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 interface Window {

@@ -30,6 +30,7 @@ function makeAgent(
     outstandingMail: 0,
     paused: false,
     stuck: false,
+    stopped: false,
     costUsd: 0,
     ...overrides,
   };
@@ -79,7 +80,14 @@ describe('DashboardVM — initial state', () => {
     expect(vm.state.connection).toBe('degraded');
     expect(vm.state.tree).toHaveLength(0);
     expect(vm.state.actionables).toHaveLength(0);
-    expect(vm.state.stats).toEqual({ total: 0, warm: 0, waiting: 0, stuck: 0, paused: 0 });
+    expect(vm.state.stats).toEqual({
+      total: 0,
+      warm: 0,
+      waiting: 0,
+      stopped: 0,
+      stuck: 0,
+      paused: 0,
+    });
   });
 });
 
@@ -107,6 +115,18 @@ describe('DashboardVM — live observation', () => {
     expect(childIds).toContain('impl-2');
   });
 
+  it('carries operator-provided names into tree nodes', () => {
+    const vm = new DashboardVM();
+    vm.update(
+      liveObs([makeAgent('coord-auth-9f3a1c', '@operator', { name: 'Auth refactor' })]),
+      [],
+    );
+    expect(vm.state.tree[0]).toMatchObject({
+      agentId: 'coord-auth-9f3a1c',
+      name: 'Auth refactor',
+    });
+  });
+
   it('maps hosted agent to warm status', () => {
     const vm = new DashboardVM();
     const agents = [makeAgent('a1', '@operator', { hosted: true })];
@@ -126,6 +146,19 @@ describe('DashboardVM — live observation', () => {
     const agents = [makeAgent('a1', '@operator', { paused: true })];
     vm.update(liveObs(agents), []);
     expect(vm.state.tree[0]?.status).toBe('paused');
+  });
+
+  it('maps stopped agent with outstanding mail to stopped status', () => {
+    const vm = new DashboardVM();
+    const agents = [
+      makeAgent('a1', '@operator', {
+        hosted: false,
+        outstandingMail: 2,
+        stopped: true,
+      }),
+    ];
+    vm.update(liveObs(agents), []);
+    expect(vm.state.tree[0]?.status).toBe('stopped');
   });
 
   it('maps !hosted + outstandingMail>0 to waiting status', () => {
@@ -163,10 +196,18 @@ describe('DashboardVM — live observation', () => {
       makeAgent('a2', '@operator', { outstandingMail: 1 }),
       makeAgent('a3', '@operator', { stuck: true }),
       makeAgent('a4', '@operator', { paused: true }),
-      makeAgent('a5', '@operator'),
+      makeAgent('a5', '@operator', { stopped: true }),
+      makeAgent('a6', '@operator'),
     ];
     vm.update(liveObs(agents), []);
-    expect(vm.state.stats).toEqual({ total: 5, warm: 1, waiting: 1, stuck: 1, paused: 1 });
+    expect(vm.state.stats).toEqual({
+      total: 6,
+      warm: 1,
+      waiting: 1,
+      stopped: 1,
+      stuck: 1,
+      paused: 1,
+    });
   });
 
   it('handles multiple root agents', () => {
@@ -206,6 +247,18 @@ describe('DashboardVM — static (daemon-down) observation', () => {
     expect(vm.state.tree).toHaveLength(1);
     expect(vm.state.tree[0]?.agentId).toBe('lead-1');
     expect(vm.state.tree[0]?.children[0]?.agentId).toBe('impl-1');
+  });
+
+  it('carries operator-provided names in static mode', () => {
+    const vm = new DashboardVM();
+    vm.update(
+      staticObs([makeStaticAgent('coord-auth-9f3a1c', '@operator', { name: 'Auth refactor' })]),
+      [],
+    );
+    expect(vm.state.tree[0]).toMatchObject({
+      agentId: 'coord-auth-9f3a1c',
+      name: 'Auth refactor',
+    });
   });
 
   it('all agents get unknown status in static mode', () => {

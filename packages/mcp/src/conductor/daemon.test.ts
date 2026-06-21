@@ -18,6 +18,8 @@ import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  MAIL_CLARIFY_REQUEST,
+  MAIL_CLARIFY_RESPONSE,
   ReconcileLoop,
   buildCoreRegistry,
   defaultMailRenderer,
@@ -25,6 +27,7 @@ import {
   openRegistry,
   openRosterStore,
   openSessionStore,
+  openWorktreeStore,
   recoverProjectStore,
   WEDGE_MS,
   type BreakInfo,
@@ -143,6 +146,45 @@ function seedActionableMail(projectId: ProjectId, agent: string, from = 'lead-1'
     });
   } finally {
     mail.close();
+  }
+}
+
+function seedUnreadTurnWakeMail(projectId: ProjectId, agent: string): DeliveredMail {
+  const mail = openMailStore(projectId);
+  try {
+    const request = mail.send({
+      type: MAIL_CLARIFY_REQUEST,
+      to: 'lead-1',
+      from: agent,
+      subject: 'question',
+      body: 'need input',
+    });
+    return mail.reply(request, {
+      type: MAIL_CLARIFY_RESPONSE,
+      from: 'lead-1',
+      subject: 'answer',
+      body: 'resolved',
+    });
+  } finally {
+    mail.close();
+  }
+}
+
+function seedWorktree(projectId: ProjectId, identity: HostedIdentity): void {
+  const worktrees = openWorktreeStore(projectId);
+  try {
+    worktrees.recordWorktree({
+      branch: `co/${identity.agent}`,
+      baseRef: 'main',
+      baseSha: 'a'.repeat(40),
+      path: identity.cwd,
+      parent: identity.parent,
+      agent: identity.agent,
+      role: identity.role,
+      ...(identity.subRole != null ? { subRole: identity.subRole } : {}),
+    });
+  } finally {
+    worktrees.close();
   }
 }
 
@@ -554,6 +596,65 @@ describe('ConductorDaemon — single launch authority (MNR-5): warm reuse, never
     expect(out.cycle).toBeNull();
     expect(engine.isHosted(projectId, 'impl-cold')).toBe(false);
     expect(pty.panes).toHaveLength(0);
+  });
+
+  it('re-hosts a stopped non-root agent with a live worktree and wake mail', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    await hostPane(engine, pty, identity);
+    seedWorktree(projectId, identity);
+    await engine.release(projectId, 'impl-x');
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(false);
+    seedActionableMail(projectId, 'impl-x', '@operator');
+
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock);
+    const item = outstandingItem(projectId, 'impl-x');
+    const tickP = daemon.tick();
+    await tick();
+
+    expect(pty.panes).toHaveLength(2);
+    const rehostedPane = pty.panes[1]!;
+    rehostedPane.emit(CLAUDE_READY);
+    await driveTurnToIdle(rehostedPane, item, clock, qw);
+    const out = await tickP;
+
+    expect(out.selected).toBe('impl-x');
+    expect(out.candidateCount).toBe(1);
+    expect(out.cycle?.turn.errored).toBe(false);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true);
+  });
+
+  it('re-hosts a stopped non-root agent for unread turn-wake response mail', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    await hostPane(engine, pty, identity);
+    seedWorktree(projectId, identity);
+    await engine.release(projectId, 'impl-x');
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(false);
+    const item = seedUnreadTurnWakeMail(projectId, 'impl-x');
+
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock);
+    const tickP = daemon.tick();
+    await tick();
+
+    expect(pty.panes).toHaveLength(2);
+    const rehostedPane = pty.panes[1]!;
+    rehostedPane.emit(CLAUDE_READY);
+    await driveTurnToIdle(rehostedPane, item, clock, qw);
+    const out = await tickP;
+
+    expect(out.selected).toBe('impl-x');
+    expect(out.candidateCount).toBe(1);
+    expect(out.cycle?.mail.type).toBe(MAIL_CLARIFY_RESPONSE);
+    expect(engine.isHosted(projectId, 'impl-x')).toBe(true);
   });
 
   it('reuses the warm pane across two ticks and never spawns a second pane for one agent', async () => {
