@@ -467,6 +467,19 @@ ipcMain.handle('agent:unstick', async (_event, agentId: unknown) => {
   }
 });
 
+ipcMain.handle('agent:delete', async (_event, agentId: unknown) => {
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  try {
+    await shell.client.deleteAgent(requireAgentId(agentId));
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = desktopErrorMessage(e, 'delete the coordinator');
+    sendToRenderer('agentsConsole:error', msg);
+    return { ok: false, error: msg };
+  }
+});
+
 // ── Session IPC channels ─────────────────────────────────────────────────────
 
 ipcMain.handle(

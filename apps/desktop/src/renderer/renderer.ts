@@ -102,6 +102,8 @@ let latestDaemon: DaemonStatusPayload | null = null;
 // The latest read-only Source view state (P-ON4) from `source:refresh` — real branches/PR refs or a
 // named empty/error state. `null` until the first fetch resolves.
 let latestSource: SourceState | null = null;
+// The agentId of a Delete button currently in the pending-confirm state (two-step confirm).
+let pendingDeleteId: string | null = null;
 
 const OPERATOR_BUS = '@operator';
 const knownMailBuses = new Set<string>([OPERATOR_BUS]);
@@ -473,6 +475,7 @@ function renderTreeRows(nodes: readonly TreeNode[], depth: number): string {
           </span>
           <span class="right">
             <span class="state" style="color:${meta.color}">${meta.label}</span>
+            ${depth === 0 && node.role.toLowerCase() === 'coordinator' ? `<button class="btn btn-ghost" data-agent-action="delete" data-agent-id="${esc(node.agentId)}" type="button" aria-label="Delete coordinator ${esc(node.agentId)}">Delete</button>` : ''}
           </span>
         </button>
         ${renderTreeRows(node.children, depth + 1)}`;
@@ -1834,6 +1837,53 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Mission Control interactions ──────────────────────────────────────────────
   document.getElementById('view-dashboard')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
+
+    // ── Per-coordinator Delete (two-step in-app confirm) ──────────────────────
+    const agentActionBtn = target.closest<HTMLElement>('[data-agent-action]');
+    if (agentActionBtn?.dataset['agentId'] != null) {
+      e.stopPropagation();
+      const agentAction = agentActionBtn.dataset['agentAction'];
+      const agentId = agentActionBtn.dataset['agentId'];
+      if (agentAction === 'delete') {
+        if (agentActionBtn.dataset['confirm'] === '1') {
+          // Second click — confirmed; execute the delete.
+          agentActionBtn.removeAttribute('data-confirm');
+          agentActionBtn.textContent = 'Delete';
+          pendingDeleteId = null;
+          void bridge.agentsDelete(agentId).then((r) => {
+            if (!r.ok) showAppError(r.error ?? 'Failed to delete the coordinator');
+          });
+        } else {
+          // First click — enter pending-confirm state.
+          // Reset any previously-pending button first.
+          if (pendingDeleteId != null && pendingDeleteId !== agentId) {
+            const prev = document.querySelector<HTMLElement>(
+              `[data-agent-action="delete"][data-agent-id="${pendingDeleteId}"]`,
+            );
+            if (prev) {
+              prev.removeAttribute('data-confirm');
+              prev.textContent = 'Delete';
+            }
+          }
+          agentActionBtn.dataset['confirm'] = '1';
+          agentActionBtn.textContent = 'Confirm delete?';
+          pendingDeleteId = agentId;
+        }
+      }
+      return;
+    }
+
+    // Reset any pending-confirm button when clicking elsewhere in the dashboard.
+    if (pendingDeleteId != null) {
+      const prev = document.querySelector<HTMLElement>(
+        `[data-agent-action="delete"][data-agent-id="${pendingDeleteId}"]`,
+      );
+      if (prev) {
+        prev.removeAttribute('data-confirm');
+        prev.textContent = 'Delete';
+      }
+      pendingDeleteId = null;
+    }
 
     const fleetRow = target.closest<HTMLElement>('.fleet-row');
     if (fleetRow?.dataset['agentId'] != null) {

@@ -221,3 +221,38 @@ describe('Subtree grouping in the fleet tree (C2)', () => {
     expect(htmlSource).toContain('.subtree-group');
   });
 });
+
+describe('Per-coordinator Delete with in-app confirm (C3)', () => {
+  it('renderTreeRows emits a Delete button with data-agent-action="delete" for root coordinators', () => {
+    expect(rendererSource).toContain('data-agent-action="delete"');
+    expect(rendererSource).toContain('aria-label="Delete coordinator ${esc(node.agentId)}"');
+    // Must be guarded to depth===0 + coordinator role only
+    expect(rendererSource).toContain("depth === 0 && node.role.toLowerCase() === 'coordinator'");
+  });
+
+  it('renderer wires agentsDelete to the bridge in the dashboard dispatcher', () => {
+    expect(rendererSource).toContain('bridge.agentsDelete(');
+    expect(rendererSource).toContain("agentAction === 'delete'");
+  });
+
+  it('dashboard delete dispatcher calls e.stopPropagation() before acting', () => {
+    // Locate the dashboard [data-agent-action] branch and verify stopPropagation is called early
+    const dashSection = rendererSource.slice(
+      rendererSource.indexOf("document.getElementById('view-dashboard')"),
+    );
+    const actionBlock = dashSection.slice(dashSection.indexOf('[data-agent-action]'));
+    expect(actionBlock.slice(0, 300)).toContain('e.stopPropagation()');
+  });
+
+  it('main process registers ipcMain.handle for agent:delete', () => {
+    expect(mainSource).toMatch(/ipcMain\.handle\(\s*'agent:delete'/);
+  });
+
+  it('bridge exposes agentsDelete in both preload and electron-bridge type declarations', () => {
+    const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+    const bridgeSource = readFileSync(join(here, 'electron-bridge.d.ts'), 'utf8');
+    expect(preloadSource).toContain('agentsDelete(');
+    expect(preloadSource).toContain("'agent:delete'");
+    expect(bridgeSource).toContain('agentsDelete(');
+  });
+});
