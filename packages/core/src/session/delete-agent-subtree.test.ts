@@ -6,19 +6,52 @@
  *     methods called by the function under test.
  *   - `gitExec` and `gitReader` are spy functions that record calls and return controlled outputs.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AgentRecord } from '../roles/events.js';
 import type { WorktreeRecord } from '../worktrees/events.js';
 import type { RemoveWorktreeDeps } from '../worktrees/worktree-store.js';
 import type { ArchiveRecord } from '../archive/events.js';
 import type { SessionRecord } from './events.js';
+import {
+  EVENT_MAIL_RECIPIENT_CLEARED,
+  EVENT_MAIL_RECIPIENT_SENDER_CLEARED,
+  EVENT_MAIL_RETRACTED,
+  MAIL_APPROVAL,
+  MAIL_CLARIFY_REQUEST,
+  MAIL_ESCALATION,
+  MAIL_REVIEW_REQUEST,
+  OPERATOR,
+} from '../mail/events.js';
+import { openProjectStore } from '../store/sqlite-store.js';
 import type { RosterStore } from '../roles/roster-store.js';
 import type { WorktreeStore } from '../worktrees/worktree-store.js';
 import type { SessionStore } from './session-store.js';
 import type { ArchiveStore } from '../archive/archive-store.js';
+import { openMailStore, type MailStore } from '../mail/mail-store.js';
+import { buildHumanReviewVerdict } from '../review/human-review.js';
+import { openReviewStore } from '../review/review-store.js';
 import type { GitExec } from '../worktrees/sling.js';
 import type { GitReader } from '../worktrees/detect-base.js';
 import { deleteAgentSubtree, ARCHIVE_TTL_MS } from './delete-agent-subtree.js';
+
+const ORIGINAL_ENV = process.env;
+let dataDirs: string[] = [];
+
+beforeEach(() => {
+  process.env = { ...ORIGINAL_ENV };
+  const dir = mkdtempSync(join(tmpdir(), 'co-delete-subtree-'));
+  dataDirs = [dir];
+  process.env.CO_DATA_DIR = dir;
+});
+
+afterEach(() => {
+  process.env = ORIGINAL_ENV;
+  for (const dir of dataDirs) rmSync(dir, { recursive: true, force: true });
+  dataDirs = [];
+});
 
 // ── in-memory fake stores ─────────────────────────────────────────────────────────────────────────
 
@@ -33,6 +66,10 @@ function makeFakeRoster(agents: AgentRecord[]): RosterStore & { removed: string[
     removeAgent(agentId: string): AgentRecord {
       const idx = roster.findIndex((a) => a.agentId === agentId);
       if (idx === -1) throw new Error(`removeAgent: ${agentId} not found`);
+      const child = roster.find((a) => a.parent === agentId);
+      if (child != null) {
+        throw new Error(`removeAgent: ${agentId} still has child ${child.agentId}`);
+      }
       const [rec] = roster.splice(idx, 1);
       removed.push(agentId);
       return rec!;
@@ -51,7 +88,7 @@ function makeFakeWorktrees(
   worktrees: WorktreeRecord[],
 ): WorktreeStore & { removedBranches: string[]; removeForce: string[] } {
   const wts = [...worktrees];
-  const removedSet = new Set<string>();
+  const removedSet = new Set(wts.filter((w) => w.removed).map((w) => w.branch));
   const removedBranches: string[] = [];
   const removeForce: string[] = [];
   return {
@@ -184,6 +221,19 @@ function session(agentId: string, pane: string): SessionRecord {
   };
 }
 
+function cleanupMailEvents(projectId: string): Array<{
+  readonly type: string;
+  readonly actor?: string;
+  readonly scope: string;
+}> {
+  const store = openProjectStore(projectId);
+  try {
+    return store.readAll().filter((event) => event.scope.startsWith('mail:'));
+  } finally {
+    store.close();
+  }
+}
+
 // ── spy helpers ───────────────────────────────────────────────────────────────────────────────────
 
 /** Records every git command invocation as [cwd, ...args]. */
@@ -202,11 +252,22 @@ function makeGitExecSpy(): { spy: GitExec; calls: [string, ...string[]][] } {
  *   - rev-parse HEAD: returns a fake sha
  */
 function makeGitReader(opts: {
+  existingBranches?: Set<string>;
   mergedBranches?: Set<string>;
   dirtyPaths?: Set<string>;
 }): GitReader {
-  const { mergedBranches = new Set(), dirtyPaths = new Set() } = opts;
+  const { existingBranches, mergedBranches = new Set(), dirtyPaths = new Set() } = opts;
   return (cwd: string, args: readonly string[]): string | null => {
+    if (
+      args[0] === 'rev-parse' &&
+      args[1] === '--verify' &&
+      args[2] === '--quiet' &&
+      args[3]?.startsWith('refs/heads/')
+    ) {
+      return existingBranches == null || existingBranches.has(args[3].slice('refs/heads/'.length))
+        ? 'f'.repeat(40) + '\n'
+        : null;
+    }
     if (args[0] === 'merge-base' && args[1] === '--is-ancestor') {
       const branch = args[2]!;
       // return '' means merged (exit 0), null means not merged (exit 1)
@@ -327,10 +388,11 @@ describe('deleteAgentSubtree', () => {
       caughtError = err;
     }
 
-    // The AggregateError still fires (co/lead's branch -d failure is collected).
+    // The AggregateError still fires (co/lead's branch -d failure is collected), and the parent
+    // roster row cannot be removed while the failed child remains.
     expect(caughtError).toBeInstanceOf(AggregateError);
     const ae = caughtError as AggregateError;
-    expect(ae.errors).toHaveLength(1);
+    expect(ae.errors).toHaveLength(2);
     expect((ae.errors[0] as Error).message).toContain('co/lead');
     // co/lead's `branch -d` never returned, so it must NOT be reported as deleted; co/impl's did.
     expect(branchDeleteOk).toContain('co/impl');
@@ -422,6 +484,51 @@ describe('deleteAgentSubtree', () => {
     expect(archive.records).toHaveLength(1);
   });
 
+  it('does not force-remove or archive a dirty unmerged worktree when snapshot fails', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2, name: 'impl' },
+    ]);
+    const sandboxPath = '/data/worktrees/co/impl';
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl', 'main', sandboxPath)]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const gitExec: GitExec = (cwd, args) => {
+      if (cwd === sandboxPath && args[0] === 'commit') {
+        throw new Error('commit failed');
+      }
+    };
+    const gitReader = makeGitReader({
+      mergedBranches: new Set(),
+      dirtyPaths: new Set([sandboxPath]),
+    });
+
+    let caught: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', {
+        openRoster: () => roster,
+        openWorktrees: () => worktreeStore,
+        openSessions: () => sessions,
+        openArchive: () => archive,
+        repoCwd: '/repo',
+        nowMs: 10_000,
+        gitExec,
+        gitReader,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors.some((e) => String(e).includes('commit failed'))).toBe(
+      true,
+    );
+    expect(worktreeStore.removedBranches).not.toContain('co/impl');
+    expect(archive.records).toHaveLength(0);
+    expect(roster.getAgent('impl')).toBeDefined();
+    expect(roster.getAgent('coord-x')).toBeDefined();
+  });
+
   it('ends active sessions during teardown', () => {
     const roster = makeFakeRoster([
       { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
@@ -449,6 +556,673 @@ describe('deleteAgentSubtree', () => {
 
     // all sessions ended
     expect(sessStore.listSessions()).toHaveLength(0);
+  });
+
+  it('clears outstanding actionable mail for each removed agent before roster removal', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec } = makeGitExecSpy();
+    const gitReader = makeGitReader({});
+    const mail = openMailStore('proj');
+    let seq: number;
+    try {
+      seq = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'impl',
+        from: 'worker',
+        subject: 'question',
+        body: 'need input',
+      }).seq;
+      expect(mail.outstanding('impl')).toHaveLength(1);
+    } finally {
+      mail.close();
+    }
+
+    deleteAgentSubtree('proj', 'coord-x', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    const check = openMailStore('proj');
+    try {
+      expect(check.outstanding('impl')).toEqual([]);
+      expect(check.sentBy('worker').find((m) => m.seq === seq)?.retracted).toBe(true);
+    } finally {
+      check.close();
+    }
+    expect(cleanupMailEvents('proj')).toEqual([
+      expect.objectContaining({ type: MAIL_CLARIFY_REQUEST, actor: 'worker', scope: 'mail:impl' }),
+      expect.objectContaining({
+        type: EVENT_MAIL_RECIPIENT_CLEARED,
+        actor: OPERATOR,
+        scope: 'mail:impl',
+      }),
+    ]);
+    expect(cleanupMailEvents('proj').map((event) => event.type)).not.toContain(
+      EVENT_MAIL_RETRACTED,
+    );
+    expect(roster.removed).toEqual(['impl', 'coord-x']);
+  });
+
+  it('does not reopen forwarded mail for deleted descendants during leaf-first subtree cleanup', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'lead', role: 'lead', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec } = makeGitExecSpy();
+    const gitReader = makeGitReader({});
+    const mail = openMailStore('proj');
+    let heldSeq: number;
+    let forwardedSeq: number;
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'worker',
+        subject: 'blocked',
+        body: 'need authority',
+      });
+      const forwarded = mail.forward(held, {
+        type: MAIL_ESCALATION,
+        to: 'coord-x',
+        from: 'lead',
+        subject: held.subject,
+        body: held.body,
+        correlationId: String(held.seq),
+        causationId: String(held.seq),
+      });
+      heldSeq = held.seq;
+      forwardedSeq = forwarded.seq;
+      expect(mail.outstanding('lead')).toEqual([]);
+      expect(mail.outstanding('coord-x').map((m) => m.seq)).toEqual([forwardedSeq]);
+    } finally {
+      mail.close();
+    }
+
+    deleteAgentSubtree('proj', 'coord-x', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    const check = openMailStore('proj');
+    try {
+      expect(check.outstanding('lead')).toEqual([]);
+      expect(check.outstanding('coord-x')).toEqual([]);
+      expect(check.sentBy('worker').find((m) => m.seq === heldSeq)?.retracted).toBe(true);
+      expect(check.sentBy('lead').find((m) => m.seq === forwardedSeq)?.retracted).toBe(true);
+    } finally {
+      check.close();
+    }
+    expect(roster.removed).toEqual(['lead', 'coord-x']);
+  });
+
+  it('clears operator-held actionable mail sent by deleted subtree agents only', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec } = makeGitExecSpy();
+    const gitReader = makeGitReader({});
+    const mail = openMailStore('proj');
+    let deletedSenderSeq: number;
+    let unrelatedSeq: number;
+    try {
+      deletedSenderSeq = mail.send({
+        type: MAIL_APPROVAL,
+        to: OPERATOR,
+        from: 'impl',
+        subject: 'publish',
+        body: 'approve deploy',
+      }).seq;
+      unrelatedSeq = mail.send({
+        type: MAIL_APPROVAL,
+        to: OPERATOR,
+        from: 'other-agent',
+        subject: 'publish other',
+        body: 'approve other deploy',
+      }).seq;
+      expect(mail.outstanding(OPERATOR).map((m) => m.seq)).toEqual([
+        deletedSenderSeq,
+        unrelatedSeq,
+      ]);
+    } finally {
+      mail.close();
+    }
+
+    deleteAgentSubtree('proj', 'coord-x', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    const check = openMailStore('proj');
+    try {
+      expect(check.outstanding(OPERATOR).map((m) => m.seq)).toEqual([unrelatedSeq]);
+      expect(check.sentBy('impl').find((m) => m.seq === deletedSenderSeq)?.retracted).toBe(true);
+      expect(check.sentBy('other-agent').find((m) => m.seq === unrelatedSeq)?.retracted).toBe(
+        false,
+      );
+    } finally {
+      check.close();
+    }
+    const events = cleanupMailEvents('proj');
+    expect(events).toEqual([
+      expect.objectContaining({ type: MAIL_APPROVAL, actor: 'impl', scope: 'mail:@operator' }),
+      expect.objectContaining({
+        type: MAIL_APPROVAL,
+        actor: 'other-agent',
+        scope: 'mail:@operator',
+      }),
+      expect.objectContaining({
+        type: EVENT_MAIL_RECIPIENT_SENDER_CLEARED,
+        actor: OPERATOR,
+        scope: 'mail:@operator',
+      }),
+    ]);
+    expect(events.map((event) => event.type)).not.toContain(EVENT_MAIL_RETRACTED);
+    expect(roster.removed).toEqual(['impl', 'coord-x']);
+  });
+
+  it('fails loud without clearing a pending human review request from a deleted agent', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec } = makeGitExecSpy();
+    const gitReader = makeGitReader({});
+    const mail = openMailStore('proj');
+    let reviewSeq: number;
+    try {
+      const reviewId = 'review-delete-1';
+      const requested = mail.requestHumanReview(
+        {
+          type: MAIL_REVIEW_REQUEST,
+          to: OPERATOR,
+          from: 'impl',
+          subject: 'Review co/impl',
+          body: 'Please review this branch.',
+          idempotencyKey: `review-request:${reviewId}`,
+        },
+        {
+          reviewId,
+          target: 'main',
+          branch: 'co/impl',
+          scope: 'worker_merge',
+          reviewerKind: 'human',
+          requestedBy: 'impl',
+          specRefKind: 'no-locked-spec',
+        },
+      );
+      reviewSeq = requested.mail.seq;
+    } finally {
+      mail.close();
+    }
+
+    let caught: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', {
+        openRoster: () => roster,
+        openWorktrees: () => worktreeStore,
+        openSessions: () => sessions,
+        openArchive: () => archive,
+        repoCwd: '/repo',
+        nowMs: 10_000,
+        gitExec,
+        gitReader,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect(
+      (caught as AggregateError).errors.some((e) => String(e).includes('review_request')),
+    ).toBe(true);
+    const check = openMailStore('proj');
+    try {
+      expect(check.outstanding(OPERATOR).map((m) => m.seq)).toContain(reviewSeq);
+      expect(check.sentBy('impl').find((m) => m.seq === reviewSeq)?.retracted).toBe(false);
+    } finally {
+      check.close();
+    }
+    expect(roster.getAgent('impl')).toBeDefined();
+    expect(roster.getAgent('coord-x')).toBeDefined();
+  });
+
+  it('preflights review mail before removing worktrees, archiving branches, or ending sessions', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl')]);
+    const sessions = makeFakeSessions([session('impl', 'pane-impl')]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec, calls } = makeGitExecSpy();
+    const gitReader = makeGitReader({ mergedBranches: new Set(), dirtyPaths: new Set() });
+    const mail = openMailStore('proj');
+    try {
+      const reviewId = 'review-delete-preflight';
+      mail.requestHumanReview(
+        {
+          type: MAIL_REVIEW_REQUEST,
+          to: OPERATOR,
+          from: 'impl',
+          subject: 'Review co/impl',
+          body: 'Please review this branch.',
+          idempotencyKey: `review-request:${reviewId}`,
+        },
+        {
+          reviewId,
+          target: 'main',
+          branch: 'co/impl',
+          scope: 'worker_merge',
+          reviewerKind: 'human',
+          requestedBy: 'impl',
+          specRefKind: 'no-locked-spec',
+        },
+      );
+    } finally {
+      mail.close();
+    }
+
+    let caught: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', {
+        openRoster: () => roster,
+        openWorktrees: () => worktreeStore,
+        openSessions: () => sessions,
+        openArchive: () => archive,
+        repoCwd: '/repo',
+        nowMs: 10_000,
+        gitExec,
+        gitReader,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect(
+      (caught as AggregateError).errors.some((e) => String(e).includes('review_request')),
+    ).toBe(true);
+    expect(worktreeStore.removedBranches).toEqual([]);
+    expect(archive.records).toEqual([]);
+    expect(sessions.getSession('impl')).toBeDefined();
+    expect(calls).toEqual([]);
+    expect(roster.getAgent('impl')).toBeDefined();
+    expect(roster.getAgent('coord-x')).toBeDefined();
+  });
+
+  it('deletes after resolved human review mail without retracting the review audit row', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl')]);
+    const sessions = makeFakeSessions([session('impl', 'pane-impl')]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec, calls } = makeGitExecSpy();
+    const gitReader = makeGitReader({ mergedBranches: new Set(), dirtyPaths: new Set() });
+    const mail = openMailStore('proj');
+    const reviews = openReviewStore('proj');
+    try {
+      const reviewId = 'review-delete-resolved';
+      const requested = mail.requestHumanReview(
+        {
+          type: MAIL_REVIEW_REQUEST,
+          to: OPERATOR,
+          from: 'impl',
+          subject: 'Review co/impl',
+          body: 'Please review this branch.',
+          idempotencyKey: `review-request:${reviewId}`,
+        },
+        {
+          reviewId,
+          target: 'main',
+          branch: 'co/impl',
+          scope: 'worker_merge',
+          reviewerKind: 'human',
+          requestedBy: 'impl',
+          specRefKind: 'no-locked-spec',
+        },
+      );
+      mail.replyWithReviewVerdict(
+        requested.mail,
+        {
+          type: 'review_response',
+          subject: 're: review',
+          body: 'passes',
+          from: OPERATOR,
+          reviewVerdict: 'PASS',
+        },
+        buildHumanReviewVerdict(reviews, {
+          reviewId,
+          target: 'main',
+          branch: 'co/impl',
+          verdict: 'PASS',
+          body: 'passes',
+        }),
+      );
+      expect(reviews.activeSerialized('main')).toBe('co/impl');
+      expect(mail.outstanding(OPERATOR).map((m) => m.seq)).not.toContain(requested.mail.seq);
+      mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: OPERATOR,
+        from: 'impl',
+        subject: 'non-review cleanup after review',
+        body: 'this should not block delete',
+      });
+    } finally {
+      reviews.close();
+      mail.close();
+    }
+
+    let caught: unknown;
+    try {
+      const result = deleteAgentSubtree('proj', 'coord-x', {
+        openRoster: () => roster,
+        openWorktrees: () => worktreeStore,
+        openSessions: () => sessions,
+        openArchive: () => archive,
+        repoCwd: '/repo',
+        nowMs: 10_000,
+        gitExec,
+        gitReader,
+      });
+      expect(result.removed).toEqual(['impl', 'coord-x']);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeUndefined();
+    expect(worktreeStore.removedBranches).toEqual(['co/impl']);
+    expect(archive.records.map((r) => r.id)).toEqual(['co/impl']);
+    expect(sessions.getSession('impl')).toBeUndefined();
+    expect(calls).toEqual([]);
+    expect(roster.getAgent('impl')).toBeUndefined();
+    expect(roster.getAgent('coord-x')).toBeUndefined();
+    const check = openMailStore('proj');
+    try {
+      const reviewRequest = check.sentBy('impl').find((m) => m.type === MAIL_REVIEW_REQUEST);
+      const clarify = check
+        .sentBy('impl')
+        .find((m) => m.type === MAIL_CLARIFY_REQUEST && m.recipient === OPERATOR);
+      expect(reviewRequest?.retracted).toBe(false);
+      expect(reviewRequest?.resolved).toBe(true);
+      expect(clarify?.retracted).toBe(true);
+    } finally {
+      check.close();
+    }
+    const checkReviews = openReviewStore('proj');
+    try {
+      expect(checkReviews.activeSerialized('main')).toBeUndefined();
+      expect(checkReviews.getVerdict('main', 'co/impl')?.verdict).toBe('PASS');
+    } finally {
+      checkReviews.close();
+    }
+  });
+
+  it('retracts actionable mail sent by a deleted non-root agent to a surviving recipient', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'lead', role: 'lead', parent: 'coord-x', registeredTs: 2 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 3 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec } = makeGitExecSpy();
+    const gitReader = makeGitReader({});
+    const mail = openMailStore('proj');
+    let seq = 0;
+    try {
+      const sent = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'lead',
+        from: 'impl',
+        subject: 'follow-up',
+        body: 'please check this',
+      });
+      seq = sent.seq;
+      expect(mail.outstanding('lead').map((m) => m.seq)).toContain(seq);
+    } finally {
+      mail.close();
+    }
+
+    const result = deleteAgentSubtree('proj', 'impl', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    expect(result.removed).toEqual(['impl']);
+    expect(roster.getAgent('impl')).toBeUndefined();
+    expect(roster.getAgent('lead')).toBeDefined();
+    const check = openMailStore('proj');
+    try {
+      expect(check.outstanding('lead').map((m) => m.seq)).not.toContain(seq);
+      expect(check.sentBy('impl').find((m) => m.seq === seq)?.retracted).toBe(true);
+    } finally {
+      check.close();
+    }
+  });
+
+  it('keeps the roster row when mail cleanup fails, so deletion can be retried', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec } = makeGitExecSpy();
+    const gitReader = makeGitReader({});
+    const mail = {
+      inbox: () => [
+        {
+          seq: 1,
+          recipient: 'impl',
+          sender: 'lead',
+          type: MAIL_CLARIFY_REQUEST,
+          subject: 'question',
+          body: 'answer',
+          ts: 1,
+          kind: 'actionable',
+          resolved: false,
+          retracted: false,
+        },
+      ],
+      outstanding: () => [],
+      sentBy: () => [],
+      clearOutstanding: () => {
+        throw new Error('mail cleanup failed');
+      },
+      clearOutstandingFromSenderToRecipient: () => 0,
+      close() {},
+    } as unknown as MailStore;
+
+    let caught: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', {
+        openRoster: () => roster,
+        openWorktrees: () => worktreeStore,
+        openSessions: () => sessions,
+        openArchive: () => archive,
+        openMail: () => mail,
+        repoCwd: '/repo',
+        nowMs: 10_000,
+        gitExec,
+        gitReader,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect(
+      (caught as AggregateError).errors.some((e) => String(e).includes('mail cleanup failed')),
+    ).toBe(true);
+    expect(roster.getAgent('impl')).toBeDefined();
+    expect(roster.getAgent('coord-x')).toBeDefined();
+  });
+
+  it('retries after a merged branch was already removed and deleted without archiving a missing branch', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const removedWt = { ...worktree('co/impl', 'impl'), removed: true };
+    const worktreeStore = makeFakeWorktrees([removedWt]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const calls: [string, ...string[]][] = [];
+    const gitExec: GitExec = (cwd, args) => {
+      calls.push([cwd, ...args]);
+      if (args[0] === 'branch' && args[1] === '-d' && args[2] === 'co/impl') {
+        throw new Error("error: branch 'co/impl' not found");
+      }
+    };
+    const gitReader = makeGitReader({
+      existingBranches: new Set(['co/coord-x']),
+      mergedBranches: new Set(['co/coord-x']),
+    });
+
+    const result = deleteAgentSubtree('proj', 'coord-x', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    expect(result.removed).toEqual(['impl', 'coord-x']);
+    expect(result.archivedBranches).toEqual([]);
+    expect(archive.records).toEqual([]);
+    expect(calls.some((call) => call.join(' ').includes('branch -d co/impl'))).toBe(true);
+  });
+
+  it('fails loud on retry when a removed worktree branch existence check cannot be trusted', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const removedWt = { ...worktree('co/impl', 'impl'), removed: true };
+    const worktreeStore = makeFakeWorktrees([removedWt]);
+    const sessions = makeFakeSessions([session('impl', 'pane-impl')]);
+    const archive = makeFakeArchive();
+    const gitExec: GitExec = (_cwd, args) => {
+      if (args[0] === 'branch' && args[1] === '-d' && args[2] === 'co/impl') {
+        throw new Error('fatal: not a git repository');
+      }
+    };
+    const gitReader = makeGitReader({
+      existingBranches: new Set(['co/coord-x']),
+      mergedBranches: new Set(['co/coord-x']),
+    });
+
+    let caught: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', {
+        openRoster: () => roster,
+        openWorktrees: () => worktreeStore,
+        openSessions: () => sessions,
+        openArchive: () => archive,
+        repoCwd: '/repo',
+        nowMs: 10_000,
+        gitExec,
+        gitReader,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect(
+      (caught as AggregateError).errors.some((e) => String(e).includes('not a git repository')),
+    ).toBe(true);
+    expect(archive.records).toEqual([]);
+    expect(sessions.getSession('impl')).toBeDefined();
+    expect(roster.getAgent('impl')).toBeDefined();
+    expect(roster.getAgent('coord-x')).toBeDefined();
+  });
+
+  it('fails loud without removing or archiving when a live worktree branch ref is missing', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl')]);
+    const sessions = makeFakeSessions([session('impl', 'pane-impl')]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec, calls } = makeGitExecSpy();
+    const gitReader = makeGitReader({
+      existingBranches: new Set(['co/coord-x']),
+      mergedBranches: new Set(['co/coord-x']),
+    });
+
+    let caught: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', {
+        openRoster: () => roster,
+        openWorktrees: () => worktreeStore,
+        openSessions: () => sessions,
+        openArchive: () => archive,
+        repoCwd: '/repo',
+        nowMs: 10_000,
+        gitExec,
+        gitReader,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors.some((e) => String(e).includes('co/impl'))).toBe(true);
+    expect(worktreeStore.removedBranches).not.toContain('co/impl');
+    expect(archive.records).toEqual([]);
+    expect(calls.some((call) => call.join(' ').includes('branch -d co/impl'))).toBe(false);
+    expect(sessions.getSession('impl')).toBeDefined();
+    expect(roster.getAgent('impl')).toBeDefined();
+    expect(roster.getAgent('coord-x')).toBeDefined();
   });
 
   it('skips session end if session already ended (no active session for that agent)', () => {
@@ -520,16 +1294,17 @@ describe('deleteAgentSubtree', () => {
     expect(caughtError).toBeInstanceOf(AggregateError);
     const ae = caughtError as AggregateError;
     expect(ae.message).toBe('deleteAgentSubtree: partial teardown failure');
-    // exactly 1 error (co/lead's removeWorktree threw)
-    expect(ae.errors).toHaveLength(1);
+    // co/lead's removeWorktree throws, and coord-x cannot be removed while lead remains.
+    expect(ae.errors).toHaveLength(2);
     expect((ae.errors[0] as Error).message).toContain('co/lead');
 
     // Despite the partial failure, impl and coord-x were still processed
-    // roster.removed should contain lead, impl, and coord-x even though lead's worktree threw
     expect(roster.removed).toContain('impl');
-    expect(roster.removed).toContain('coord-x');
-    // lead was also removed from roster (the roster.removeAgent part still ran after worktree failure)
-    expect(roster.removed).toContain('lead');
+    // Failed teardown rows stay rostered so the operator can retry/recover and the fleet reflects reality.
+    expect(roster.removed).not.toContain('lead');
+    expect(roster.removed).not.toContain('coord-x');
+    expect(roster.getAgent('lead')).toBeDefined();
+    expect(roster.getAgent('coord-x')).toBeDefined();
   });
 
   it('roster is empty after full teardown (no worktrees, no sessions)', () => {

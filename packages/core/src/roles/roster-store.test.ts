@@ -217,6 +217,30 @@ describe('RosterStore — record + read agents', () => {
     }
   });
 
+  it('rejects conflicting non-empty names for the same agent id', () => {
+    const store = openRosterStore('p-roster-conflicting-reregister-name');
+    try {
+      store.recordAgent({
+        agentId: 'coord-1',
+        role: 'coordinator',
+        parent: '@operator',
+        name: 'auth refactor',
+      });
+
+      expect(() =>
+        store.recordAgent({
+          agentId: 'coord-1',
+          role: 'coordinator',
+          parent: '@operator',
+          name: 'billing cleanup',
+        }),
+      ).toThrow(/already registered/i);
+      expect(store.getAgent('coord-1')?.name).toBe('auth refactor');
+    } finally {
+      store.close();
+    }
+  });
+
   it('persists across store re-open (same project id)', () => {
     const a = openRosterStore('p-roster-persist');
     try {
@@ -378,6 +402,31 @@ describe('AC-L6a-1 — replay equality: live fold → rebuildAll → byte-equal'
     }
   });
 
+  it('replay fails loud on conflicting non-empty agent names', () => {
+    const store = openProjectStore('p-roster-replay-conflict-name');
+    const events = [
+      makeAgentRegisteredEvent('p-roster-replay-conflict-name', {
+        agentId: 'coord-1',
+        role: 'coordinator',
+        parent: '@operator',
+        name: 'auth refactor',
+      }),
+      makeAgentRegisteredEvent('p-roster-replay-conflict-name', {
+        agentId: 'coord-1',
+        role: 'coordinator',
+        parent: '@operator',
+        name: 'billing cleanup',
+      }),
+    ];
+    try {
+      appendRosterEvents(store, events);
+
+      expect(() => rebuildRoster(store)).toThrow(/already registered/i);
+    } finally {
+      store.close();
+    }
+  });
+
   it('replay fails loud when @operator is registered as an agent id', () => {
     const store = openProjectStore('p-roster-replay-operator');
     const event = makeAgentRegisteredEvent('p-roster-replay-operator', {
@@ -467,7 +516,7 @@ describe('AC-L6a-1 — replay equality: live fold → rebuildAll → byte-equal'
   });
 });
 
-describe('AC-A2 — optional operator name round-trips through the roster', () => {
+describe('AC-A1 — optional operator name round-trips through the roster', () => {
   it('carries an optional operator name through record → read-back', () => {
     const store = openRosterStore('p-roster-name');
     try {

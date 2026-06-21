@@ -126,6 +126,20 @@ export const EVENT_MAIL_FORWARD = 'mail.forwarded' as const;
 export const EVENT_MAIL_RETRACTED = 'mail.retracted' as const;
 
 /**
+ * The internal recipient-cleanup receipt (a bulk tombstone — Principle 14). This is infrastructure,
+ * not a sendable participant type: deleting an agent appends it to clear every actionable item
+ * addressed to that recipient without needing sender ownership and without deleting audit rows.
+ */
+export const EVENT_MAIL_RECIPIENT_CLEARED = 'mail.recipient_cleared' as const;
+
+/**
+ * The internal sender-scoped recipient cleanup receipt. Durable agent deletion appends it to
+ * tombstone operator-held actionables sent by a deleted subtree agent without clearing unrelated
+ * operator work.
+ */
+export const EVENT_MAIL_RECIPIENT_SENDER_CLEARED = 'mail.recipient_sender_cleared' as const;
+
+/**
  * The internal live-delivery side-effect receipt. This is infrastructure, not sendable mail:
  * `LiveDelivery` appends it after the Conductor-side wake/inject side effect succeeds, and the
  * projector folds it into the live-effect read model. Keeping these acknowledgements in the log
@@ -213,6 +227,16 @@ export const mailRetractSchema = z.object({
 });
 export type MailRetract = z.infer<typeof mailRetractSchema>;
 
+/** The recipient-clear receipt carries no payload; the recipient is the mail stream scope. */
+export const mailRecipientClearedSchema = z.object({});
+export type MailRecipientCleared = z.infer<typeof mailRecipientClearedSchema>;
+
+/** Sender-scoped recipient cleanup payload; the recipient is the mail stream scope. */
+export const mailRecipientSenderClearedSchema = z.object({
+  sender: z.string().min(1),
+});
+export type MailRecipientSenderCleared = z.infer<typeof mailRecipientSenderClearedSchema>;
+
 /**
  * The live-effect payload: the mail `seq` plus the successful effect bit(s). At least one effect
  * must be present; both are optional so wake and inject can be acknowledged separately.
@@ -251,6 +275,8 @@ export const mailSchemas: SchemaMap = new Map<string, z.ZodType>([
   [EVENT_MAIL_READ, mailReadSchema],
   [EVENT_MAIL_FORWARD, mailForwardSchema],
   [EVENT_MAIL_RETRACTED, mailRetractSchema], // infrastructure tombstone; never a MAIL_TYPES member
+  [EVENT_MAIL_RECIPIENT_CLEARED, mailRecipientClearedSchema], // infrastructure bulk tombstone
+  [EVENT_MAIL_RECIPIENT_SENDER_CLEARED, mailRecipientSenderClearedSchema],
   [EVENT_MAIL_LIVE_EFFECT, mailLiveEffectSchema], // infrastructure live-effect ack; never sendable
 ]);
 
@@ -445,6 +471,44 @@ export function makeMailRetractEvent(projectId: string, sender: string, seq: num
     payload: mailRetractSchema.parse({ seq }),
     actor: sender,
     causationId: String(seq),
+  };
+}
+
+/**
+ * Build + validate a recipient cleanup {@link EVENT_MAIL_RECIPIENT_CLEARED} event. The receipt lives
+ * in the recipient stream and is operator-authored infrastructure, used by agent deletion to tombstone
+ * non-review outstanding actions without deleting the original mail rows.
+ */
+export function makeMailRecipientClearedEvent(projectId: string, recipient: string): NewEvent {
+  assertAddress('to', recipient);
+  return {
+    projectId,
+    scope: mailScope(recipient),
+    type: EVENT_MAIL_RECIPIENT_CLEARED,
+    v: MAIL_EVENT_V,
+    payload: mailRecipientClearedSchema.parse({}),
+    actor: OPERATOR,
+  };
+}
+
+/**
+ * Build + validate a sender-scoped recipient cleanup {@link EVENT_MAIL_RECIPIENT_SENDER_CLEARED}
+ * event. The receipt lives in the recipient stream and is operator-authored infrastructure.
+ */
+export function makeMailRecipientSenderClearedEvent(
+  projectId: string,
+  recipient: string,
+  sender: string,
+): NewEvent {
+  assertAddress('to', recipient);
+  assertAddress('from', sender);
+  return {
+    projectId,
+    scope: mailScope(recipient),
+    type: EVENT_MAIL_RECIPIENT_SENDER_CLEARED,
+    v: MAIL_EVENT_V,
+    payload: mailRecipientSenderClearedSchema.parse({ sender }),
+    actor: OPERATOR,
   };
 }
 

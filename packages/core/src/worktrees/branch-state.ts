@@ -19,6 +19,15 @@ export function isBranchMerged(
   return gitReader(repoCwd, ['merge-base', '--is-ancestor', branch, baseRef]) != null;
 }
 
+/** True iff the local branch ref exists. */
+export function localBranchExists(
+  repoCwd: string,
+  branch: string,
+  gitReader: GitReader = defaultGitReader,
+): boolean {
+  return gitReader(repoCwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]) != null;
+}
+
 /**
  * True iff the sandbox worktree has uncommitted changes (`git status --porcelain` non-empty).
  */
@@ -27,7 +36,10 @@ export function isWorktreeDirty(
   gitReader: GitReader = defaultGitReader,
 ): boolean {
   const out = gitReader(sandboxPath, ['status', '--porcelain']);
-  return (out ?? '').trim().length > 0;
+  if (out == null) {
+    throw new Error(`unable to read git status for worktree '${sandboxPath}'`);
+  }
+  return out.trim().length > 0;
 }
 
 /**

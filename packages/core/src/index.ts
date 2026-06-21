@@ -39,6 +39,11 @@ export type { JsonValue } from './config/events.js';
 // tree or `.git` (freeze #7), by asserting byte-identity around a wrapped op.
 export { assertRepoPristine } from './config/pristine.js';
 
+// Operator-control state: durable operator STOP suppression, stored in program-data so daemon restarts
+// do not silently cold-start agents that require explicit re-wake.
+export type { AgentControlStore } from './operator-control/control-store.js';
+export { openAgentControlStore } from './operator-control/control-store.js';
+
 // L1 mail bus: a typed, schema-validated, idempotent envelope over the L0 log that
 // activates the four reserved fields, plus send/inbox and the in-process Delivery
 // seam (whose L7 Conductor-side plug-point is now the real `LiveDelivery`). W3 adds actionable/informational
@@ -57,6 +62,7 @@ export type {
   MailRead,
   MailForward,
   MailRetract,
+  MailRecipientCleared,
   MailKind,
   CompletionPredicate,
   ApprovalDecision,
@@ -83,6 +89,7 @@ export {
   EVENT_MAIL_READ,
   EVENT_MAIL_FORWARD,
   EVENT_MAIL_RETRACTED,
+  EVENT_MAIL_RECIPIENT_CLEARED,
   MAIL_EVENT_V,
   mailMessageSchema,
   approvalResponseSchema,
@@ -90,6 +97,7 @@ export {
   mailReadSchema,
   mailForwardSchema,
   mailRetractSchema,
+  mailRecipientClearedSchema,
   mailSchemas,
   mailUpcasters,
   mailScope,
@@ -98,6 +106,7 @@ export {
   makeMailReadEvent,
   makeMailForwardEvent,
   makeMailRetractEvent,
+  makeMailRecipientClearedEvent,
   turnKickoffCorrelationId,
   isTurnKickoffMail,
   mailKinds,
@@ -1234,6 +1243,8 @@ export type {
 } from './session/start-coordinator-session.js';
 export { startCoordinatorSession, rootCoordinatorId } from './session/start-coordinator-session.js';
 export { slugifyCoordinatorName, coordinatorIdFromParts } from './session/coordinator-id.js';
+export type { CoordinatorIdMintDeps } from './session/coordinator-id-mint.js';
+export { mintAvailableCoordinatorId } from './session/coordinator-id-mint.js';
 // A5 cascade-delete primitive: tear down a coordinator's whole subtree leaf-first, archiving
 // unmerged branches, ending sessions, and removing roster rows. Collects errors across all agents
 // and throws a single AggregateError after the full pass (best-effort-complete, then loud).
@@ -1241,9 +1252,14 @@ export type {
   DeleteAgentSubtreeDeps,
   DeleteAgentSubtreeResult,
 } from './session/delete-agent-subtree.js';
-export { deleteAgentSubtree, ARCHIVE_TTL_MS } from './session/delete-agent-subtree.js';
+export {
+  deleteAgentSubtree,
+  assertDeleteAgentSubtreePreflight,
+  ARCHIVE_TTL_MS,
+} from './session/delete-agent-subtree.js';
+export type { DeleteAgentSubtreePreflightDeps } from './session/delete-agent-subtree.js';
 
-// Archive store: event-sourced record of unmerged coordinator branches (cascade-delete writes,
+// Archive store: event-sourced record of unmerged branches (cascade-delete writes,
 // reaper purges expired records, IPC verbs list/restore/purge). Scope: `archive:`. Table: `archive`.
 export type { ArchiveAppended, ArchiveRemoved, ArchiveRecord } from './archive/events.js';
 export {
@@ -1267,10 +1283,11 @@ export {
 } from './archive/archive-projector.js';
 export type { ArchiveStore } from './archive/archive-store.js';
 export { openArchiveStore } from './archive/archive-store.js';
-// A6 archive reaper: purges expired unmerged coordinator branches — collects branch-deletion
+// A6 archive reaper: purges expired unmerged branches — collects branch-deletion
 // errors and aggregates them loudly (Principle 9). Injected clock (nowMs) for replay determinism.
 export type { ReapArchivesDeps } from './session/reap-archives.js';
 export { reapExpiredArchives } from './session/reap-archives.js';
+export { isMissingBranchDeleteError } from './worktrees/branch-delete.js';
 
 // L7 B0 — PtyHost / FakePty contract (FROZEN cross-phase interface — B1/C1/C2/E1/P1 all import).
 // PtyHost.spawn() returns a Pane; NodePtyHost (B1) wraps a real node-pty IPty over this interface.

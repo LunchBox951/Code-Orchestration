@@ -272,9 +272,9 @@ describe('recoverProjectStore — AC-S9-3 holistic byte-equal recovery', () => {
 });
 
 describe('buildProjectProjectors — canonical set', () => {
-  it('contains exactly one instance of each project-level projector (13 total)', () => {
+  it('contains exactly one instance of each project-level projector (14 total)', () => {
     const projectors = buildProjectProjectors();
-    expect(projectors).toHaveLength(13);
+    expect(projectors).toHaveLength(14);
 
     // Each projector name is unique — deduplicated
     const names = projectors.map((p) => p.name);
@@ -288,6 +288,7 @@ describe('buildProjectProjectors — canonical set', () => {
     expect(names).toContain('reviews');
     expect(names).toContain('specs');
     expect(names).toContain('archive');
+    expect(names).toContain('agent_control');
   });
 });
 

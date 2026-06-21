@@ -106,15 +106,16 @@ export function queryObservability(projectId: string): ObservabilitySnapshot {
 // ─── Live overlay (Stage 10 P3 — CTL-OBS) ───────────────────────────────────────
 //
 // The STATIC snapshot above is pure read-model — the cross-process CLI can read it NOW. The LIVE
-// half below is the part ONLY the running engine can answer ("who is warm right now / paused / stuck")
-// — so it enters as an injected {@link LiveStateProvider} seam, filled by `@co/mcp` in the daemon
-// process. The merge ({@link queryLiveObservability}) lives HERE (transport-agnostic, cli-callable) so
-// the same logic serves the in-process daemon today and the deferred cross-process IPC binding later.
+// half below is the part ONLY the running engine can answer ("who is warm right now / paused / stuck /
+// stopped") — so it enters as an injected {@link LiveStateProvider} seam, filled by `@co/mcp` in the
+// daemon process. The merge ({@link queryLiveObservability}) lives HERE (transport-agnostic,
+// cli-callable) so the same logic serves the in-process daemon today and the deferred cross-process IPC
+// binding later.
 
 /**
  * The per-agent LIVE overlay — the slice of an agent's state that ONLY the running engine knows. The
  * static read-models hold roster/cost; they cannot say which agent currently has a WARM pane, nor the
- * operator-control state (paused / stuck). One {@link LiveStateProvider} fills these in the daemon
+ * operator-control state (paused / stuck / stopped). One {@link LiveStateProvider} fills these in the daemon
  * process; a pure-static read leaves them at their cold defaults.
  */
 export interface LiveAgentState {
@@ -128,11 +129,13 @@ export interface LiveAgentState {
   readonly paused: boolean;
   /** True iff the watchdog has escalated this agent to STUCK (awaiting `unstick`/`revertStuck`). */
   readonly stuck: boolean;
+  /** True iff the operator stopped this agent; it is suppressed until Re-wake clears stopped state. */
+  readonly stopped: boolean;
 }
 
 /**
  * The seam that fills the LIVE half of observability. ONLY the running engine (+ its control surface)
- * can answer "which agents are warm / paused / stuck right now", so `@co/mcp` injects this in-process;
+ * can answer "which agents are warm / paused / stuck / stopped right now", so `@co/mcp` injects this in-process;
  * the cross-process CLI cannot fill it (deferred IPC) and reads the pure-static {@link queryObservability}
  * instead. Transport-agnostic: a plain interface, no I/O or wire shape.
  */
@@ -148,6 +151,8 @@ export interface LiveStateProvider {
 /** A roster agent joined with its live overlay + cost rollup — one per-agent row of a live snapshot. */
 export interface AgentLiveView {
   readonly agentId: string;
+  /** Operator-provided display name, when one was recorded in the roster. */
+  readonly name?: string;
   readonly role: AgentRecord['role'];
   /** Present only when the roster records a sub-role (exactOptionalPropertyTypes-safe). */
   readonly subRole?: AgentRecord['subRole'];
@@ -158,6 +163,7 @@ export interface AgentLiveView {
   readonly outstandingMail: number;
   readonly paused: boolean;
   readonly stuck: boolean;
+  readonly stopped: boolean;
   /** This agent's cost rollup total in USD, or 0 when none is recorded. */
   readonly costUsd: number;
 }
@@ -165,7 +171,7 @@ export interface AgentLiveView {
 /**
  * A LIVE observability snapshot: the full static rollup PLUS a per-agent live overlay. Distinguishable
  * from a pure {@link ObservabilitySnapshot} by the `agents` live views (hosted / paused / stuck /
- * outstanding) — the part that needs the running engine. Built by {@link queryLiveObservability} in the
+ * stopped / outstanding) — the part that needs the running engine. Built by {@link queryLiveObservability} in the
  * daemon process; the deferred cross-process IPC binding will ship this same shape to the CLI/app.
  */
 export interface LiveObservabilitySnapshot {
@@ -196,6 +202,7 @@ export function queryLiveObservability(
     const l = byId.get(a.agentId);
     return {
       agentId: a.agentId,
+      ...(a.name != null ? { name: a.name } : {}),
       role: a.role,
       ...(a.subRole != null ? { subRole: a.subRole } : {}),
       parent: a.parent,
@@ -203,6 +210,7 @@ export function queryLiveObservability(
       outstandingMail: l?.outstandingMail ?? 0,
       paused: l?.paused ?? false,
       stuck: l?.stuck ?? false,
+      stopped: l?.stopped ?? false,
       costUsd: costByAgent.get(a.agentId) ?? 0,
     };
   });

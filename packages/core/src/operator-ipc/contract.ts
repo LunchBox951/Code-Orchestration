@@ -27,11 +27,11 @@ import type { Criterion } from '../specs/criteria-schema.js';
 export const OPERATOR_IPC_METHODS = {
   /** Snapshot the LIVE observability view (roster ⊕ warm/paused/stuck + outstanding + cost). */
   observe: 'observe',
-  /** List archived (unmerged) coordinator branches — degrades silently to `[]` when the socket is down. */
+  /** List archived unmerged branches — the client degrades to a static archive-store read when down. */
   listArchive: 'listArchive',
   /**
-   * Un-archive a coordinator branch: remove the archive record (branch STAYS; no git delete). A control
-   * verb — fails loud when the socket is down (Principle 9).
+   * Un-archive a branch: remove the archive record (branch STAYS; no git delete). A control verb —
+   * fails loud when the socket is down (Principle 9).
    */
   restoreArchive: 'restoreArchive',
   /**
@@ -81,10 +81,10 @@ export const OPERATOR_IPC_METHODS = {
    */
   deleteAgent: 'deleteAgent',
   /**
-   * Re-wake a stopped/paused/stuck agent by clearing all suppression state and posting an actionable
-   * `clarify_request` from `@operator` — so `selectEligible` picks it up on the next daemon tick.
+   * Re-wake a stopped/paused/stuck agent by posting an actionable `clarify_request` from `@operator`,
+   * then clearing all suppression state — so `selectEligible` picks it up on the next daemon tick.
    * Unlike {@link OPERATOR_IPC_METHODS.operatorMessage} (which posts but does not unstop), this verb
-   * ALWAYS clears suppression first, then posts.
+   * must post the actionable mail first, then clear suppression state after the mail commit.
    */
   rewake: 'rewake',
   /** Send raw keystroke bytes into a hosted agent's PTY stdin (live xterm → PTY passthrough). */
@@ -144,11 +144,10 @@ export interface ApprovalReply {
  */
 export interface StartSessionParams {
   /**
-   * A human-readable name for this coordinator (e.g. `'Auth Refactor'`). Optional at the type level
-   * so the existing desktop call still compiles before C1 lands, but the server enforces it at
-   * runtime via `requireString` (Principle 9 — fail loud).
+   * A human-readable name for this coordinator (e.g. `'Auth Refactor'`). The public operator-IPC
+   * contract requires it and the server enforces the same rule at runtime (Principle 9 — fail loud).
    */
-  readonly name?: string;
+  readonly name: string;
   /** The operator's free-form kickoff prompt. Exactly one of `prompt` / `specBody`. */
   readonly prompt?: string;
   /** A draft-spec brief to kick off from. Exactly one of `prompt` / `specBody`. */
@@ -156,11 +155,11 @@ export interface StartSessionParams {
 }
 
 /**
- * The result of a `startSession` call: the deterministic root coordinator id + worktree facts. The
+ * The result of a `startSession` call: the registered root coordinator id + worktree facts. The
  * daemon will cold-start the root on its next tick (the start primitive does NOT mint a session).
  */
 export interface StartSessionResult {
-  /** The deterministic root coordinator id, now registered (roster) + provisioned (worktree). */
+  /** The root coordinator id, now registered (roster) + provisioned (worktree). */
   readonly coordinator: string;
   /** Absolute path of the root's provisioned worktree (the daemon's cold-start cwd). */
   readonly worktreePath: string;
@@ -170,17 +169,17 @@ export interface StartSessionResult {
 }
 
 /**
- * One archived coordinator branch entry — a mirror of the store's `ArchiveRecord`, carried over the
- * wire. All six fields are read-only (desktop renders, never mutates). Numbers match the store's
- * epoch-ms convention. Named `ArchiveEntry` (not `ArchiveRecord`) so the contract has no implicit
- * dependency on the store layer's internal type — the desktop never imports from the store directly.
+ * One archived branch entry — a mirror of the store's `ArchiveRecord`, carried over the wire. All six
+ * fields are read-only (desktop renders, never mutates). Numbers match the store's epoch-ms
+ * convention. Named `ArchiveEntry` (not `ArchiveRecord`) so the contract has no implicit dependency
+ * on the store layer's internal type — the desktop never imports from the store directly.
  */
 export interface ArchiveEntry {
   readonly id: string;
   readonly name: string;
   readonly branch: string;
   readonly baseRef: string;
-  /** Epoch ms when the coordinator branch was archived (deleted from the active roster). */
+  /** Epoch ms when the branch was archived during subtree deletion. */
   readonly deletedAt: number;
   /** Epoch ms when the reaper will hard-delete the branch unless the operator restores or purges it first. */
   readonly expiresAt: number;
@@ -237,9 +236,9 @@ export interface OperatorIpcSurface {
    */
   deleteAgent(agentId: string): Promise<void>;
   /**
-   * Re-wake `agentId`: clear all suppression state (stopped/paused/stuck) then post an actionable
-   * `clarify_request` from `@operator` so the daemon's `selectEligible` wakes the recipient on its
-   * next tick. Fails loud when the Conductor socket is down (Principle 9).
+   * Re-wake `agentId`: post an actionable `clarify_request` from `@operator`, then clear all
+   * suppression state (stopped/paused/stuck) so the daemon's `selectEligible` wakes the recipient on
+   * its next tick. Fails loud when the Conductor socket is down (Principle 9).
    */
   rewake(agentId: string, message: string): Promise<DeliveredMail>;
   /** Send raw keystroke bytes into `agentId`'s warm PTY stdin (live xterm → PTY passthrough). */
@@ -247,14 +246,14 @@ export interface OperatorIpcSurface {
   /** Resize `agentId`'s warm PTY to `cols` × `rows` (xterm fit → PTY width sync). */
   resize(agentId: string, cols: number, rows: number): Promise<void>;
   /**
-   * List archived (unmerged) coordinator branches. A READ — degrades silently to `[]` when the
-   * Conductor socket is down (mirrors {@link observe}; never hangs, never throws — Principle 9 / MNR #3).
+   * List archived unmerged branches. A READ — the client degrades to a static archive-store read when
+   * the Conductor socket is down (mirrors {@link observe}; never hangs, never throws — Principle 9 /
+   * MNR #3).
    */
   listArchive(): Promise<readonly ArchiveEntry[]>;
   /**
-   * Un-archive a coordinator branch: remove the archive record so the reaper skips it. The branch STAYS
-   * (Restore = promote to an ordinary branch; no git delete). A control verb — fails loud when down
-   * (Principle 9).
+   * Un-archive a branch: remove the archive record so the reaper skips it. The branch STAYS (Restore =
+   * promote to an ordinary branch; no git delete). A control verb — fails loud when down (Principle 9).
    */
   restoreArchive(id: string): Promise<void>;
   /**

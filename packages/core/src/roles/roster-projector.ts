@@ -68,7 +68,8 @@ function sameRegistration(existing: AgentRecord, rec: AgentRegistered): boolean 
   return (
     existing.role === rec.role &&
     existing.parent === rec.parent &&
-    (existing.subRole ?? undefined) === (rec.subRole ?? undefined)
+    (existing.subRole ?? undefined) === (rec.subRole ?? undefined) &&
+    (rec.name === undefined || existing.name === rec.name)
   );
 }
 

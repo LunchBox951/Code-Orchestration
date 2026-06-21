@@ -346,13 +346,13 @@ describe('startCoordinatorSession — provisions worktree, registers the root, s
     ).toThrow(/exactly one of/i);
   });
 
-  it('rootCoordinatorId is deterministic + branch-safe (same project ⇒ same id)', () => {
+  it('AC-A2 — rootCoordinatorId is deterministic + branch-safe (same project ⇒ same id)', () => {
     expect(rootCoordinatorId('proj-abc')).toBe(rootCoordinatorId('proj-abc'));
     expect(rootCoordinatorId('proj-abc')).toMatch(/^coord-root-[0-9a-f]{8}$/);
     expect(rootCoordinatorId('proj-abc')).not.toBe(rootCoordinatorId('proj-xyz'));
   });
 
-  it('threads name into the roster record when supplied', () => {
+  it('AC-A2 — threads name into the roster record when supplied', () => {
     const { projectId, repo } = makeProject();
     const coordinatorId = 'coord-auth-9f3a1c';
 

@@ -59,6 +59,14 @@ describe('branch-state git helpers', () => {
       const fakeGitReader: GitReader = () => '   \n  ';
       expect(isWorktreeDirty('/sbx', fakeGitReader)).toBe(false);
     });
+
+    it('fails loud when status --porcelain cannot be read', () => {
+      const fakeGitReader: GitReader = () => null;
+
+      expect(() => isWorktreeDirty('/sbx', fakeGitReader)).toThrow(
+        "unable to read git status for worktree '/sbx'",
+      );
+    });
   });
 
   describe('snapshotDirtyWorktree', () => {

@@ -6,7 +6,7 @@
  * that Stage 14 P4's desktop operator-IPC path reuses UNCHANGED — so it lives here in core, never in
  * an adapter (single source of truth; the verb is a thin parse-and-call shell over this).
  *
- * What it does, given `{ projectId, repoCwd, prompt? | specBody? }`:
+ * What it does, given `{ projectId, repoCwd, name?, coordinatorId?, prompt? | specBody? }`:
  *   1. PROVISION the root's worktree via {@link slingWorktree} (a real worktree record + checkout under
  *      program-data) so the daemon's cold-start launch has a recorded cwd + placement to host into.
  *   2. SEED an ACTIONABLE `clarify_request` kickoff addressed to the root, FROM `@operator`, carrying the
@@ -29,8 +29,9 @@
  * cold-start, having no provisioned cwd). On success all three records exist; the set matches the frozen
  * contract regardless of order.
  *
- * DETERMINISTIC (no `Math.random()` / wall clock): the root coordinator id is derived from the project id
- * via {@link rootCoordinatorId}, so a given project always yields the same root id / branch / pane.
+ * DETERMINISTIC (no `Math.random()` / wall clock): the adapter may pass a name-derived
+ * `coordinatorId`; otherwise this preserves the legacy deterministic {@link rootCoordinatorId}
+ * fallback for direct callers and fixtures.
  */
 import { createHash } from 'node:crypto';
 import {

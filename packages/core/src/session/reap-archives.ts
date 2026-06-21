@@ -1,9 +1,9 @@
 /**
- * Archive reaper: purges expired unmerged coordinator branches.
+ * Archive reaper: purges expired unmerged branches.
  *
  * For each archive record with `expiresAt < nowMs`:
  *   1. `git branch -D` the branch (collect errors, never silent skip — Principle 9)
- *   2. Remove the record from the archive
+ *   2. Remove the record from the archive only after the branch deletion succeeds
  *
  * Aggregate errors into an AggregateError; return the purged branch names.
  * `nowMs` is injected (no wall-clock in core). Open the store once; close in finally.
@@ -13,6 +13,7 @@ import type { ArchiveStore } from '../archive/archive-store.js';
 import { openArchiveStore } from '../archive/archive-store.js';
 import type { GitExec } from '../worktrees/sling.js';
 import { defaultGitExec } from '../worktrees/sling.js';
+import { isMissingBranchDeleteError } from '../worktrees/branch-delete.js';
 
 export interface ReapArchivesDeps {
   /** Injected archive store opener; defaults to openArchiveStore. */
@@ -28,7 +29,7 @@ export interface ReapArchivesDeps {
  *
  * For each expired record:
  *   - Calls `gitExec(repoCwd, ['branch', '-D', rec.branch])` (catch → collect errors)
- *   - Calls `archive.removeRecord(rec.id)` (remove from archive)
+ *   - Calls `archive.removeRecord(rec.id)` only after a successful branch deletion
  *
  * Collects all branch-deletion errors and re-throws as AggregateError if any occurred.
  * Returns the list of purged branch names (successful deletions).
@@ -56,16 +57,17 @@ export function reapExpiredArchives(
     const expired = archive.listExpired(nowMs);
 
     for (const rec of expired) {
-      // Try to delete the branch; collect errors if it fails.
       try {
-        gitExec(repoCwd, ['branch', '-D', rec.branch]);
+        try {
+          gitExec(repoCwd, ['branch', '-D', rec.branch]);
+        } catch (gitError) {
+          if (!isMissingBranchDeleteError(gitError, rec.branch)) throw gitError;
+        }
         purgedBranches.push(rec.branch);
+        archive.removeRecord(rec.id);
       } catch (err) {
         errors.push(err instanceof Error ? err : new Error(String(err)));
       }
-
-      // Remove the record from the archive (regardless of branch deletion outcome).
-      archive.removeRecord(rec.id);
     }
   } finally {
     archive.close();

@@ -1,9 +1,9 @@
 /**
- * Event definitions for the durable archive of unmerged coordinator branches.
+ * Event definitions for the durable archive of unmerged branches.
  * Lives in the PROJECT store (one per registered project), program-data only
  * (Principle 12 — pristine-repo).
  *
- * One stream per archived coordinator, keyed by the `archive:<id>` scope pattern.
+ * One stream per archived branch record, keyed by the `archive:<id>` scope pattern.
  * `archive.appended` records the branch record at cascade-delete time.
  * `archive.removed` removes a record (reaper purge or explicit operator action).
  */
@@ -15,12 +15,12 @@ import type { UpcasterRegistry } from '../replay/upcaster.js';
 /** Current payload schema version — v1; no upcasters yet. */
 export const ARCHIVE_EVENT_V = 1;
 
-/** A coordinator branch record was appended to the archive. */
+/** A branch record was appended to the archive. */
 export const EVENT_ARCHIVE_APPENDED = 'archive.appended' as const;
 /** An archived branch record was removed (reaper purge or explicit deletion). */
 export const EVENT_ARCHIVE_REMOVED = 'archive.removed' as const;
 
-/** Scope prefix for the per-archived-coordinator stream; suffix is the coordinator id. */
+/** Scope prefix for the per-archive-record stream; suffix is the archive id. */
 export const ARCHIVE_SCOPE_PREFIX = 'archive:';
 
 /** The per-archive stream scope: `archive:<id>`. */
@@ -29,7 +29,7 @@ export function archiveScope(id: string): string {
 }
 
 /**
- * The `archive.appended` payload: all six fields of the archived coordinator branch record.
+ * The `archive.appended` payload: all six fields of the archived branch record.
  * `deletedAt` and `expiresAt` are CALLER-SUPPLIED payload data (injected clock — never
  * wall-clock in core; replay re-inserts the same payload values, so the reaper is deterministic).
  */

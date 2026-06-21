@@ -117,7 +117,7 @@ describe('reapExpiredArchives', () => {
     expect(archive.stored[0]?.id).toBe('notexp1');
   });
 
-  it('aggregates errors from failed branch deletions and re-throws, but removes records anyway', () => {
+  it('aggregates errors from failed branch deletions and keeps failed records for retry', () => {
     const now = 10_000;
     const archive = makeFakeArchive([
       {
@@ -167,9 +167,36 @@ describe('reapExpiredArchives', () => {
     // Even though exp1 failed, both branch deletion attempts should have been made
     expect(callCount).toBe(2);
 
-    // Both records should be removed from the archive regardless of branch deletion outcome
+    // Only the successfully purged record is removed. The failed one stays archived so a later reaper
+    // or operator Purge can retry rather than losing the handle to a still-existing branch.
     const remaining = archive.stored;
-    expect(remaining).toHaveLength(0);
+    expect(remaining.map((r) => r.id)).toEqual(['exp1']);
+  });
+
+  it('removes expired archive records when the branch was already deleted by an earlier attempt', () => {
+    const now = 10_000;
+    const archive = makeFakeArchive([
+      {
+        id: 'exp1',
+        name: 'coord1',
+        branch: 'co/exp1',
+        baseRef: 'main',
+        deletedAt: 5000,
+        expiresAt: 9000,
+      },
+    ]);
+    const gitExec: GitExec = () => {
+      throw new Error("error: branch 'co/exp1' not found");
+    };
+
+    const result = reapExpiredArchives('proj', now, {
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      gitExec,
+    });
+
+    expect(result).toEqual(['co/exp1']);
+    expect(archive.stored).toEqual([]);
   });
 
   it('returns empty array when no records are expired', () => {

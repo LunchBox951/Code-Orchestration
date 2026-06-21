@@ -1,5 +1,5 @@
 /**
- * The durable archive of unmerged coordinator branches. Opens the PROJECT store, wires the
+ * The durable archive of unmerged branches. Opens the PROJECT store, wires the
  * {@link ArchiveProjector}, and exposes a typed {@link ArchiveStore} facade.
  *
  * The cascade-delete primitive appends records here; the reaper purges expired ones;
