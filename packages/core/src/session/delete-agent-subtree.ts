@@ -29,8 +29,8 @@ import { openRosterStore, type RosterStore } from '../roles/roster-store.js';
 import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
 import { openSessionStore, type SessionStore } from './session-store.js';
 import { openArchiveStore, type ArchiveStore } from '../archive/archive-store.js';
-import type { GitExec } from '../worktrees/sling.js';
-import type { GitReader } from '../worktrees/detect-base.js';
+import { defaultGitExec, type GitExec } from '../worktrees/sling.js';
+import { defaultGitReader, type GitReader } from '../worktrees/detect-base.js';
 
 /** Default archive TTL: 14 days. */
 export const ARCHIVE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
@@ -88,9 +88,9 @@ export function deleteAgentSubtree(
     repoCwd,
     nowMs,
     archiveTtlMs = ARCHIVE_TTL_MS,
-    gitExec,
-    gitReader,
   } = deps;
+  const gitExec = deps.gitExec ?? defaultGitExec;
+  const gitReader = deps.gitReader ?? defaultGitReader;
 
   const roster = openRosterFn(projectId);
   const worktrees = openWorktreesFn(projectId);
@@ -144,9 +144,7 @@ export function deleteAgentSubtree(
             }
 
             try {
-              if (gitExec) {
-                gitExec(repoCwd, ['branch', '-D', wt.branch]);
-              }
+              gitExec(repoCwd, ['branch', '-D', wt.branch]);
             } catch (e) {
               errors.push(e instanceof Error ? e : new Error(String(e)));
             }
@@ -173,9 +171,7 @@ export function deleteAgentSubtree(
             }
 
             try {
-              if (gitExec) {
-                gitExec(repoCwd, ['branch', '-d', wt.branch]);
-              }
+              gitExec(repoCwd, ['branch', '-d', wt.branch]);
             } catch (e) {
               errors.push(e instanceof Error ? e : new Error(String(e)));
             }

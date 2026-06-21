@@ -76,6 +76,7 @@ function makeFakeWorktrees(
       throw new Error('not implemented');
     },
     getFinish: () => undefined,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     removeWorktree(branch: string, _deps: RemoveWorktreeDeps): WorktreeRecord {
       const wt = wts.find((w) => w.branch === branch);
       if (!wt) throw new Error(`removeWorktree: branch '${branch}' not found`);
