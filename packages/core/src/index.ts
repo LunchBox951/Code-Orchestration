@@ -31,7 +31,7 @@ export { openRegistry } from './registry/registry.js';
 
 // Part D config cascade: effective = global ⊕ project-overrides (project wins),
 // stored entirely in the GLOBAL program-data store (never in any repo).
-export type { ConfigStore, EffectiveConfig } from './config/config-store.js';
+export type { ConfigStore, EffectiveConfig, ConfigLayers } from './config/config-store.js';
 export { openConfigStore } from './config/config-store.js';
 export type { JsonValue } from './config/events.js';
 
@@ -717,6 +717,27 @@ export {
 // L4-4 pure throttle-as-WAITING: PlacementDecision + headrooms → PLACED or WAITING (ETA + loud message); canResume predicate (AC4, P9, P13, P16).
 export type { DispatchDiagnostic, DispatchResolution } from './dispatch/throttle.js';
 export { MAXED_THRESHOLD_PCT_DEFAULT, resolveDispatch, canResume } from './dispatch/throttle.js';
+
+// Operator-facing dispatch settings (the dispatch.* config keys + their resolvers).
+export {
+  DISPATCH_ENABLED_PROVIDERS_KEY,
+  DISPATCH_MAXED_THRESHOLD_PCT_KEY,
+  DISPATCH_MODELS_CLAUDE_KEY,
+  DISPATCH_MODELS_CODEX_KEY,
+  DISPATCH_DEFAULT_WORK_SIZE_KEY,
+  DISPATCH_DEFAULT_REASONING_BUDGET_KEY,
+  ALL_PROVIDERS,
+  ENABLED_PROVIDERS_DEFAULT,
+  DEFAULT_WORK_SIZE_DEFAULT,
+  DEFAULT_REASONING_BUDGET_DEFAULT,
+  resolveEnabledProviders,
+  resolveMaxedThresholdPct,
+  resolveModels,
+  resolveDefaultWorkSize,
+  resolveDefaultReasoningBudget,
+} from './dispatch/dispatch-config.js';
+export { CLAUDE_MODELS, CODEX_MODELS } from './dispatch/tier.js';
+export type { ModelOverrides } from './dispatch/tier.js';
 
 // L4-5 dispatch integration: placement.decided event (the WRITER — completes reader-with-writer),
 // DispatchStore.recordPlacement, and operator-only render/preview fns (CLI only, AC8 — no new

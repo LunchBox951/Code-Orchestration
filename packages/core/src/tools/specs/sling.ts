@@ -9,6 +9,10 @@ import {
 import type { MailStore } from '../../mail/mail-store.js';
 import { defaultProviderAccounts } from '../../dispatch/balancer.js';
 import { refreshUsageForAccounts, runDispatchPolicy } from '../../dispatch/cli-render.js';
+import {
+  resolveDefaultWorkSize,
+  resolveDefaultReasoningBudget,
+} from '../../dispatch/dispatch-config.js';
 import { providerSchema } from '../../dispatch/events.js';
 import type { PlacementDecided, PlacementRecord } from '../../dispatch/events.js';
 import {
@@ -348,9 +352,10 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       }
     }
 
-    const workSize: WorkSize = (input.work_size ?? 'average') as WorkSize;
+    const workSize: WorkSize = (input.work_size ??
+      resolveDefaultWorkSize(ctx.projectId)) as WorkSize;
     const reasoningBudget: ReasoningBudget = (input.reasoning_budget ??
-      'standard') as ReasoningBudget;
+      resolveDefaultReasoningBudget(ctx.projectId)) as ReasoningBudget;
     const accounts = defaultProviderAccounts();
 
     // Inject nowMs at handler level (the thin impure shell); pass into pure policy (AC10, P16).

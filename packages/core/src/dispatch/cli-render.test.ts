@@ -11,10 +11,16 @@ import {
   renderDispatchResolution,
   previewPlacement,
   previewPlacementWithUsage,
+  runDispatchPolicy,
 } from './cli-render.js';
 import { accountForProvider } from './provider-source.js';
 import { FakeUsageSource, UsageUnavailableError, type UsageSnapshot } from './usage-source.js';
 import { DISPATCH_PINS_CONFIG_KEY } from './balancer.js';
+import {
+  DISPATCH_ENABLED_PROVIDERS_KEY,
+  DISPATCH_MAXED_THRESHOLD_PCT_KEY,
+  DISPATCH_MODELS_CLAUDE_KEY,
+} from './dispatch-config.js';
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -543,6 +549,133 @@ describe('previewPlacement', () => {
       expect(resolution.kind).toBe('placed');
       if (resolution.kind !== 'placed') throw new Error('unreachable');
       expect(resolution.placement.provider).toBe('claude');
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('runDispatchPolicy — settings wiring (AC-SET-5)', () => {
+  const resetAt = (): string => new Date(Date.now() + 5 * 3600_000).toISOString();
+  const bothAccounts = () => [
+    { provider: 'claude' as const, account: accountForProvider('claude') },
+    { provider: 'codex' as const, account: accountForProvider('codex') },
+  ];
+  function snap(store: ReturnType<typeof openDispatchStore>, provider: 'claude' | 'codex', usedPct: number): void {
+    store.recordSnapshot({
+      provider,
+      account: accountForProvider(provider),
+      available: true,
+      source: 'fake',
+      sampled_at: new Date().toISOString(),
+      windows: [{ kind: 'primary', used_pct: usedPct, reset_at: resetAt() }],
+    });
+  }
+
+  it('dispatch.enabledProviders excludes a provider even when it is the roomier one', () => {
+    const projectId = makeProjectId();
+    const config = openConfigStore();
+    try {
+      config.setProjectOverride(projectId, DISPATCH_ENABLED_PROVIDERS_KEY, ['claude']);
+    } finally {
+      config.close();
+    }
+    const store = openDispatchStore(projectId);
+    try {
+      snap(store, 'claude', 50);
+      snap(store, 'codex', 1); // codex roomier — would win if not filtered out
+      const res = runDispatchPolicy(
+        store,
+        projectId,
+        'implementer',
+        'average',
+        'standard',
+        bothAccounts(),
+        Date.now(),
+      );
+      expect(res.kind).toBe('placed');
+      if (res.kind !== 'placed') throw new Error('unreachable');
+      expect(res.placement.provider).toBe('claude');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('throws loud when dispatch.enabledProviders excludes every candidate account (P9)', () => {
+    const projectId = makeProjectId();
+    const config = openConfigStore();
+    try {
+      config.setProjectOverride(projectId, DISPATCH_ENABLED_PROVIDERS_KEY, ['codex']);
+    } finally {
+      config.close();
+    }
+    const store = openDispatchStore(projectId);
+    try {
+      snap(store, 'claude', 10);
+      expect(() =>
+        runDispatchPolicy(
+          store,
+          projectId,
+          'implementer',
+          'average',
+          'standard',
+          [{ provider: 'claude', account: accountForProvider('claude') }],
+          Date.now(),
+        ),
+      ).toThrow(/no enabled provider/);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('dispatch.maxedThresholdPct lowers the at-capacity bar (placed → waiting)', () => {
+    const projectId = makeProjectId();
+    const accounts = [{ provider: 'claude' as const, account: accountForProvider('claude') }];
+    const store = openDispatchStore(projectId);
+    try {
+      snap(store, 'claude', 50); // 50% used
+      // Default threshold 95 → still placeable.
+      const placed = runDispatchPolicy(store, projectId, 'implementer', 'average', 'standard', accounts, Date.now());
+      expect(placed.kind).toBe('placed');
+
+      const config = openConfigStore();
+      try {
+        config.setProjectOverride(projectId, DISPATCH_MAXED_THRESHOLD_PCT_KEY, 40);
+      } finally {
+        config.close();
+      }
+      // Now 50% > 40% threshold → treated as full → WAITING.
+      const waiting = runDispatchPolicy(store, projectId, 'implementer', 'average', 'standard', accounts, Date.now());
+      expect(waiting.kind).toBe('waiting');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('dispatch.models.claude overrides the resolved tier model for a claude placement', () => {
+    const projectId = makeProjectId();
+    const config = openConfigStore();
+    try {
+      config.setProjectOverride(projectId, DISPATCH_ENABLED_PROVIDERS_KEY, ['claude']);
+      config.setProjectOverride(projectId, DISPATCH_MODELS_CLAUDE_KEY, { technical: 'claude-custom' });
+    } finally {
+      config.close();
+    }
+    const store = openDispatchStore(projectId);
+    try {
+      snap(store, 'claude', 5);
+      const res = runDispatchPolicy(
+        store,
+        projectId,
+        'implementer',
+        'technical',
+        'standard',
+        [{ provider: 'claude', account: accountForProvider('claude') }],
+        Date.now(),
+      );
+      expect(res.kind).toBe('placed');
+      if (res.kind !== 'placed') throw new Error('unreachable');
+      expect(res.placement.model).toBe('claude-custom');
     } finally {
       store.close();
     }

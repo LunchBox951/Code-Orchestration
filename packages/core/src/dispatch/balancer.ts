@@ -9,7 +9,7 @@ import { isStale } from './policy.js';
 import { providerSchema } from './events.js';
 import type { UsageAccountStatus, UsageBucket } from './events.js';
 import { effortSchema, resolveTier } from './tier.js';
-import type { ContextWindow, Effort, ReasoningBudget, WorkSize } from './tier.js';
+import type { ContextWindow, Effort, ModelOverrides, ReasoningBudget, WorkSize } from './tier.js';
 import type { Provider } from './usage-source.js';
 import type { DispatchStore } from './dispatch-store.js';
 
@@ -220,6 +220,8 @@ export interface PlaceAgentInput {
   /** The seat's last placement — drives hysteresis (injected state, never hidden — AC10). */
   readonly previous?: Placement;
   readonly hysteresis?: HysteresisConfig;
+  /** Operator model-table overrides (dispatch.models.*); injected, threaded into {@link resolveTier}. */
+  readonly modelOverrides?: ModelOverrides;
 }
 
 /**
@@ -236,7 +238,8 @@ export interface PlaceAgentInput {
  *      decision (never a throw, never a silent pick) for Phase 4.
  */
 export function placeAgent(input: PlaceAgentInput): PlacementDecision {
-  const { role, workSize, reasoningBudget, pins, candidates, nowMs, previous, hysteresis } = input;
+  const { role, workSize, reasoningBudget, pins, candidates, nowMs, previous, hysteresis, modelOverrides } =
+    input;
 
   // 1) Pinned seats are never overridden (AC1).
   const pin = lookupPin(pins, role);
@@ -244,7 +247,7 @@ export function placeAgent(input: PlaceAgentInput): PlacementDecision {
     const account = accountForPinnedProvider(pin.provider, candidates, nowMs);
     return {
       kind: 'pinned',
-      placement: placementFromPin(role, pin, workSize, reasoningBudget, account),
+      placement: placementFromPin(role, pin, workSize, reasoningBudget, account, modelOverrides),
       reason: `role '${role}' is pinned to provider '${pin.provider}' (pins are never overridden — AC1)`,
     };
   }
@@ -292,7 +295,7 @@ export function placeAgent(input: PlaceAgentInput): PlacementDecision {
   const placement: Placement = {
     role,
     account: chosen.account,
-    ...resolveTier(workSize, reasoningBudget, chosen.provider),
+    ...resolveTier(workSize, reasoningBudget, chosen.provider, modelOverrides),
   };
   return {
     kind: 'floating',
@@ -307,7 +310,7 @@ export function placeAgent(input: PlaceAgentInput): PlacementDecision {
       placement: {
         role,
         account: s.account,
-        ...resolveTier(workSize, reasoningBudget, s.provider),
+        ...resolveTier(workSize, reasoningBudget, s.provider, modelOverrides),
       },
     })),
   };
@@ -368,8 +371,9 @@ function placementFromPin(
   workSize: WorkSize,
   reasoningBudget: ReasoningBudget,
   account: string,
+  modelOverrides?: ModelOverrides,
 ): Placement {
-  const tier = resolveTier(workSize, reasoningBudget, pin.provider);
+  const tier = resolveTier(workSize, reasoningBudget, pin.provider, modelOverrides);
   return {
     role,
     provider: pin.provider,
