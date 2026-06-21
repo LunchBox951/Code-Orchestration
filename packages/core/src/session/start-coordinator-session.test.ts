@@ -351,4 +351,36 @@ describe('startCoordinatorSession — provisions worktree, registers the root, s
     expect(rootCoordinatorId('proj-abc')).toMatch(/^coord-root-[0-9a-f]{8}$/);
     expect(rootCoordinatorId('proj-abc')).not.toBe(rootCoordinatorId('proj-xyz'));
   });
+
+  it('threads name into the roster record when supplied', () => {
+    const { projectId, repo } = makeProject();
+    const coordinatorId = 'coord-auth-9f3a1c';
+
+    const result = startCoordinatorSession(
+      {
+        projectId,
+        repoCwd: repo,
+        prompt: 'auth refactor kickoff',
+        base: 'main',
+        coordinatorId,
+        name: 'auth refactor',
+      },
+      { slingDeps: SLING_DEPS },
+    );
+
+    expect(result.coordinator).toBe(coordinatorId);
+    expect(result.branch).toBe(`co/${coordinatorId}`);
+
+    const roster = openRosterStore(projectId);
+    try {
+      expect(roster.getAgent(coordinatorId)).toMatchObject({
+        agentId: coordinatorId,
+        role: 'coordinator',
+        parent: OPERATOR,
+        name: 'auth refactor',
+      });
+    } finally {
+      roster.close();
+    }
+  });
 });

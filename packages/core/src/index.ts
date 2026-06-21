@@ -1223,6 +1223,7 @@ export type {
   StartCoordinatorSessionResult,
 } from './session/start-coordinator-session.js';
 export { startCoordinatorSession, rootCoordinatorId } from './session/start-coordinator-session.js';
+export { slugifyCoordinatorName, coordinatorIdFromParts } from './session/coordinator-id.js';
 
 // L7 B0 — PtyHost / FakePty contract (FROZEN cross-phase interface — B1/C1/C2/E1/P1 all import).
 // PtyHost.spawn() returns a Pane; NodePtyHost (B1) wraps a real node-pty IPty over this interface.

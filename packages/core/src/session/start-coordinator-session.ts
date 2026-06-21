@@ -64,6 +64,8 @@ export interface StartCoordinatorSessionParams {
   readonly base?: string;
   /** Override the derived root coordinator id (mainly for tests / deterministic fixtures). */
   readonly coordinatorId?: string;
+  /** Human-readable name for the coordinator (e.g. 'Auth Refactor'). Persisted in the roster record. */
+  readonly name?: string;
 }
 
 /** Injectable store/sling seams for {@link startCoordinatorSession}; all default to production. */
@@ -171,7 +173,12 @@ export function startCoordinatorSession(
     // 3) REGISTER the root in the roster (idempotent): a coordinator parented to @operator.
     const roster = openRoster(projectId);
     try {
-      roster.recordAgent({ agentId: coordinator, role: 'coordinator', parent: OPERATOR });
+      roster.recordAgent({
+        agentId: coordinator,
+        role: 'coordinator',
+        parent: OPERATOR,
+        ...(params.name != null ? { name: params.name } : {}),
+      });
     } finally {
       roster.close();
     }
