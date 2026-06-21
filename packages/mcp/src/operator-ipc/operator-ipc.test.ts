@@ -1328,6 +1328,28 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     expect(mail.outstanding('coord-1').some((m) => m.seq === delivered.seq)).toBe(true);
   });
 
+  it('operatorMessage rejects an unregistered recipient before posting mail', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.operatorMessage('missing-agent', 'subject', 'body'),
+    ).rejects.toThrow(/unknown|registered/i);
+
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    expect(mail.outstanding('missing-agent')).toEqual([]);
+  });
+
   it('reply treats an exact same-key retry after resolution as idempotent', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);

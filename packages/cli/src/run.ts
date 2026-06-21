@@ -401,11 +401,14 @@ function runHookCommand(argv: string[], options: RunOptions): RunResult {
   if (hookName !== 'codex-block-list') {
     return { output: `co hook: unknown hook '${hookName ?? ''}'.\n`, exitCode: 1 };
   }
-  const rulesPath = requiredArg(rest, '--rules');
-  if (rulesPath == null) {
-    return { output: hookDeny('BLOCKED: missing codex block-list rules path.'), exitCode: 0 };
-  }
   try {
+    // Arg parsing is INSIDE the try so a malformed invocation (`--rules` with no value) fails CLOSED
+    // with a deny rather than throwing uncaught and killing this PreToolUse gate, which would let the
+    // blocked command through (Principle 7 — gated-by-default; Principle 9 — fail-loud/degrade-safe).
+    const rulesPath = requiredArg(rest, '--rules');
+    if (rulesPath == null) {
+      return { output: hookDeny('BLOCKED: missing codex block-list rules path.'), exitCode: 0 };
+    }
     const allowedRuleIds = readAllowedRuleIds(rulesPath);
     const command = extractHookCommand(readHookStdin(options));
     if (command == null) return { output: '', exitCode: 0 };
