@@ -50,6 +50,8 @@ import { IssuesProjector } from '../issues/issues-projector.js';
 import { issuesSchemas, issuesUpcasters } from '../issues/events.js';
 import { ResearchProjector } from '../research/research-projector.js';
 import { researchSchemas, researchUpcasters } from '../research/events.js';
+import { ArchiveProjector } from '../archive/archive-projector.js';
+import { archiveSchemas, archiveUpcasters } from '../archive/events.js';
 
 // ── P4 running-state selectors ────────────────────────────────────────────────
 // Re-exported so the watchdog-reconcile loop can query the recovered state without
@@ -113,6 +115,7 @@ export function buildProjectProjectors(): readonly Projector[] {
     new CostProjector(),
     new UsageProjector(),
     new ResearchProjector(),
+    new ArchiveProjector(),
   ];
 }
 
@@ -141,6 +144,7 @@ export function buildProjectDecode(): (event: StoredEvent) => StoredEvent {
     worktreeSchemas,
     issuesSchemas,
     researchSchemas,
+    archiveSchemas,
   );
   const upcasters = mergeUpcasters(
     rolesUpcasters,
@@ -153,6 +157,7 @@ export function buildProjectDecode(): (event: StoredEvent) => StoredEvent {
     worktreeUpcasters,
     issuesUpcasters,
     researchUpcasters,
+    archiveUpcasters,
   );
   return (event) => decode(event, upcasters, schemas);
 }

@@ -1225,6 +1225,31 @@ export type {
 export { startCoordinatorSession, rootCoordinatorId } from './session/start-coordinator-session.js';
 export { slugifyCoordinatorName, coordinatorIdFromParts } from './session/coordinator-id.js';
 
+// Archive store: event-sourced record of unmerged coordinator branches (cascade-delete writes,
+// reaper purges expired records, IPC verbs list/restore/purge). Scope: `archive:`. Table: `archive`.
+export type { ArchiveAppended, ArchiveRemoved, ArchiveRecord } from './archive/events.js';
+export {
+  ARCHIVE_EVENT_V,
+  EVENT_ARCHIVE_APPENDED,
+  EVENT_ARCHIVE_REMOVED,
+  ARCHIVE_SCOPE_PREFIX,
+  archiveScope,
+  archiveAppendedSchema,
+  archiveRemovedSchema,
+  archiveSchemas,
+  archiveUpcasters,
+  makeArchiveAppendedEvent,
+  makeArchiveRemovedEvent,
+} from './archive/events.js';
+export {
+  ArchiveProjector,
+  selectArchive,
+  selectAllArchive,
+  selectExpired,
+} from './archive/archive-projector.js';
+export type { ArchiveStore } from './archive/archive-store.js';
+export { openArchiveStore } from './archive/archive-store.js';
+
 // L7 B0 — PtyHost / FakePty contract (FROZEN cross-phase interface — B1/C1/C2/E1/P1 all import).
 // PtyHost.spawn() returns a Pane; NodePtyHost (B1) wraps a real node-pty IPty over this interface.
 // FakePty is the in-sandbox test double: no real binaries, no timers, deterministic CI.
