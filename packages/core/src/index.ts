@@ -1267,6 +1267,10 @@ export {
 } from './archive/archive-projector.js';
 export type { ArchiveStore } from './archive/archive-store.js';
 export { openArchiveStore } from './archive/archive-store.js';
+// A6 archive reaper: purges expired unmerged coordinator branches — collects branch-deletion
+// errors and aggregates them loudly (Principle 9). Injected clock (nowMs) for replay determinism.
+export type { ReapArchivesDeps } from './session/reap-archives.js';
+export { reapExpiredArchives } from './session/reap-archives.js';
 
 // L7 B0 — PtyHost / FakePty contract (FROZEN cross-phase interface — B1/C1/C2/E1/P1 all import).
 // PtyHost.spawn() returns a Pane; NodePtyHost (B1) wraps a real node-pty IPty over this interface.
