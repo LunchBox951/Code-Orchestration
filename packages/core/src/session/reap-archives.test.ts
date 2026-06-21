@@ -5,11 +5,31 @@
  *   - `archive` is a hand-rolled object implementing the ArchiveStore interface.
  *   - `gitExec` is a spy function that records calls and returns controlled outputs.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ArchiveRecord } from '../archive/events.js';
 import type { ArchiveStore } from '../archive/archive-store.js';
 import type { GitExec } from '../worktrees/sling.js';
 import { reapExpiredArchives } from './reap-archives.js';
+import { openArchiveStore } from '../archive/archive-store.js';
+
+// ── test harness ─────────────────────────────────────────────────────────────────────────────────
+
+const ORIGINAL_ENV = process.env;
+let dataDirs: string[] = [];
+
+beforeEach(() => {
+  process.env = { ...ORIGINAL_ENV };
+  dataDirs = [];
+});
+
+afterEach(() => {
+  process.env = ORIGINAL_ENV;
+  for (const dir of dataDirs) rmSync(dir, { recursive: true, force: true });
+  dataDirs = [];
+});
 
 // ── in-memory fake archive store ──────────────────────────────────────────────────────────────────
 
@@ -209,12 +229,51 @@ describe('reapExpiredArchives', () => {
   });
 
   it('uses defaultGitExec and defaultOpenArchive when not provided', () => {
-    // This is more of an integration-style test that verifies the defaults are wired
-    // We'll just test that they are not undefined by having the function
-    // work without those options and not throw a "cannot read property of undefined" error.
-    // In real implementation this needs a real archive store and git repo, so
-    // we'll skip this test for now or do a lighter check.
-    // For now, verify the function signature allows omitting them and provides defaults.
+    // End-to-end test: use real openArchiveStore and defaultGitExec seams.
+    // Set up a fresh isolated CO_DATA_DIR.
+    const dir = mkdtempSync(join(tmpdir(), 'co-reaper-defaults-'));
+    dataDirs.push(dir);
+    process.env.CO_DATA_DIR = dir;
+
+    // Create a test project with one non-expired archive record using the real store.
+    const projectId = 'test-proj-defaults';
+    const archive = openArchiveStore(projectId);
+    try {
+      // Seed one non-expired record.
+      archive.appendRecord({
+        id: 'arch-1',
+        name: 'test-coord',
+        branch: 'co/test-branch',
+        baseRef: 'main',
+        deletedAt: 5000,
+        expiresAt: 100_000, // far in the future relative to nowMs
+      });
+    } finally {
+      archive.close();
+    }
+
+    // Call reapExpiredArchives with only repoCwd (no openArchive or gitExec injection).
+    // This forces the function to use defaultGitExec and openArchiveStore.
+    // Since nowMs = 50_000 and expiresAt = 100_000, the record is NOT expired,
+    // so the reaper should never call git or remove anything.
+    const nowMs = 50_000;
+    const result = reapExpiredArchives(projectId, nowMs, {
+      repoCwd: '/fake/repo',
+      // no openArchive, no gitExec — forces use of defaults
+    });
+
+    // Assert no branches were purged (record not expired).
+    expect(result).toEqual([]);
+
+    // Verify the record still exists in the archive (was not removed).
+    const archive2 = openArchiveStore(projectId);
+    try {
+      const allRecords = archive2.listRecords();
+      expect(allRecords).toHaveLength(1);
+      expect(allRecords[0]?.branch).toBe('co/test-branch');
+    } finally {
+      archive2.close();
+    }
   });
 
   it('processes multiple expired records in stable order', () => {
