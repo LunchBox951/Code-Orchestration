@@ -256,3 +256,36 @@ describe('Per-coordinator Delete with in-app confirm (C3)', () => {
     expect(bridgeSource).toContain('agentsDelete(');
   });
 });
+
+describe('Per-agent Re-wake (C4)', () => {
+  it('renderAgents emits a Re-wake button with data-agent-action="rewake" for non-warm agents', () => {
+    expect(rendererSource).toContain('data-agent-action="rewake"');
+    expect(rendererSource).toContain('aria-label="Re-wake agent ${esc(agent.agentId)}"');
+    // Must be guarded to agents that are not warm
+    expect(rendererSource).toContain("agent.status !== 'warm'");
+  });
+
+  it('renderer wires agentsRewake to the bridge in the agents dispatcher', () => {
+    expect(rendererSource).toContain('bridge.agentsRewake(');
+    expect(rendererSource).toContain("agentAction === 'rewake'");
+  });
+
+  it('agents rewake click handler stops propagation so row selection is not also triggered', () => {
+    const clickBlock = rendererSource.slice(
+      rendererSource.indexOf("const agentBtn = target.closest<HTMLElement>('[data-agent-action]')"),
+    );
+    expect(clickBlock.slice(0, 200)).toContain('e.stopPropagation()');
+  });
+
+  it('main process registers ipcMain.handle for agent:rewake', () => {
+    expect(mainSource).toMatch(/ipcMain\.handle\(\s*'agent:rewake'/);
+  });
+
+  it('bridge exposes agentsRewake in both preload and electron-bridge type declarations', () => {
+    const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+    const bridgeSource = readFileSync(join(here, 'electron-bridge.d.ts'), 'utf8');
+    expect(preloadSource).toContain('agentsRewake(');
+    expect(preloadSource).toContain("'agent:rewake'");
+    expect(bridgeSource).toContain('agentsRewake(');
+  });
+});

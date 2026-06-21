@@ -864,6 +864,9 @@ function renderAgents(state: AgentsConsoleState): void {
             `<span class="sess-actions">`,
             `<button class="btn btn-ghost" data-agent-action="stop" data-agent-id="${esc(agent.agentId)}" type="button" aria-label="Stop agent ${esc(agent.agentId)}">Stop</button>`,
             `<button class="btn btn-ghost" data-agent-action="unstick" data-agent-id="${esc(agent.agentId)}" type="button" aria-label="Unstick agent ${esc(agent.agentId)}">Unstick</button>`,
+            agent.status !== 'warm'
+              ? `<button class="btn btn-ghost" data-agent-action="rewake" data-agent-id="${esc(agent.agentId)}" type="button" aria-label="Re-wake agent ${esc(agent.agentId)}">Re-wake</button>`
+              : '',
             `</span>`,
             `</span>`,
             `<span class="state" style="color:${meta.color}">${meta.label}</span>`,
@@ -1974,6 +1977,37 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (agentAction === 'unstick') {
         void bridge.agentsUnstick(agentId).then((r) => {
           if (!r.ok) showTranscriptError(r.error);
+        });
+      } else if (agentAction === 'rewake') {
+        // Inline composer: inject a small textarea + Send button immediately after the agent row.
+        // Remove any existing inline composer first (only one active at a time).
+        document.querySelector('.rewake-composer')?.remove();
+        const row = agentBtn.closest<HTMLElement>('.sess-row');
+        if (row == null) return;
+        const composer = document.createElement('div');
+        composer.className = 'rewake-composer';
+        composer.dataset['agentId'] = agentId;
+        composer.innerHTML = [
+          `<textarea class="rewake-input" rows="3" placeholder="New task for this agent…" aria-label="Re-wake message for agent ${esc(agentId)}"></textarea>`,
+          `<span class="rewake-actions">`,
+          `<button class="btn btn-ghost rewake-send" type="button">Send</button>`,
+          `<button class="btn btn-ghost rewake-cancel" type="button">Cancel</button>`,
+          `</span>`,
+        ].join('');
+        row.insertAdjacentElement('afterend', composer);
+        composer.querySelector<HTMLTextAreaElement>('.rewake-input')?.focus();
+
+        composer.querySelector('.rewake-cancel')?.addEventListener('click', () => {
+          composer.remove();
+        });
+        composer.querySelector('.rewake-send')?.addEventListener('click', () => {
+          const textarea = composer.querySelector<HTMLTextAreaElement>('.rewake-input');
+          const text = textarea?.value.trim() ?? '';
+          if (!text) return;
+          void bridge.agentsRewake(agentId, text).then((r) => {
+            if (!r.ok) showTranscriptError(r.error);
+          });
+          composer.remove();
         });
       }
       return;

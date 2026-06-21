@@ -75,6 +75,7 @@ interface CoShellBridge {
   agentsStop(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsUnstick(agentId: string): Promise<{ ok: boolean; error?: string }>;
   agentsDelete(agentId: string): Promise<{ ok: boolean; error?: string }>;
+  agentsRewake(agentId: string, message: string): Promise<{ ok: boolean; error?: string }>;
   // ── Review ────────────────────────────────────────────────────────────────
   onReviewState(listener: (state: ReviewState) => void): () => void;
   onReviewError(listener: (message: string) => void): () => void;
@@ -239,6 +240,9 @@ const bridge: CoShellBridge = {
   },
   async agentsDelete(agentId: string): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agent:delete', agentId);
+  },
+  async agentsRewake(agentId: string, message: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('agent:rewake', agentId, message);
   },
   // ── Review ────────────────────────────────────────────────────────────────
   onReviewState(listener: (state: ReviewState) => void) {

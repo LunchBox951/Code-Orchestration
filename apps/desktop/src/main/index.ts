@@ -480,6 +480,22 @@ ipcMain.handle('agent:delete', async (_event, agentId: unknown) => {
   }
 });
 
+ipcMain.handle('agent:rewake', async (_event, agentId: unknown, message: unknown) => {
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  const messageStr =
+    typeof message === 'string' && message.trim().length > 0 ? message.trim() : null;
+  if (messageStr == null) return { ok: false, error: 'Re-wake message must not be empty.' };
+  try {
+    await shell.client.rewake(requireAgentId(agentId), messageStr);
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = desktopErrorMessage(e, 're-wake the agent');
+    sendToRenderer('agentsConsole:error', msg);
+    return { ok: false, error: msg };
+  }
+});
+
 // ── Session IPC channels ─────────────────────────────────────────────────────
 
 ipcMain.handle(
