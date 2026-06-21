@@ -914,6 +914,16 @@ export { openRosterStore } from './roles/roster-store.js';
 // the runtime enforcement gate at spawn time is L7.
 export type { SpawnViolation } from './roles/spawn-rules.js';
 export { SPAWN_RULES, canSpawn, checkSpawnPlan, validateSpawnPlan } from './roles/spawn-rules.js';
+// L6a subtree traversal: post-order descent walk over the flat roster (children before parents),
+// used by cascade-delete and other subtree operations. Stable ordering via registeredTs+agentId.
+export { descendantsLeafFirst } from './roles/subtree.js';
+// L3-E branch-state git helpers: merged detection + dirty-worktree check + atomic snapshot commit.
+// Pure over injectable git seams (defaultGitReader/defaultGitExec); testable with fake readers/execs.
+export {
+  isBranchMerged,
+  isWorktreeDirty,
+  snapshotDirtyWorktree,
+} from './worktrees/branch-state.js';
 
 // L6a Phase C — production role-based ParentResolver + escalation authority cut + co_kickback tool
 // (AC-L6a-4, AC-L6a-5, AC-L6a-8 partial, AC-L6a-9). `roleParentResolver` is the production
