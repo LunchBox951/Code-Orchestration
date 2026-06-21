@@ -30,6 +30,36 @@ describe('scrubIssueText — redactions', () => {
     expect(scrubIssueText('pat github_pat_11ABCDEFG0_abcdefghij')).toBe('pat [redacted-token]');
   });
 
+  it('redacts additional fixed-shape secrets (AWS, GCP, npm, PEM)', () => {
+    expect(scrubIssueText('env AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE rest')).toBe(
+      'env AWS_ACCESS_KEY_ID=[redacted-token] rest',
+    );
+    expect(scrubIssueText('key AIzaSyA_1234567890abcdefghijklmnopqrstu done')).toBe(
+      'key [redacted-token] done',
+    );
+    expect(scrubIssueText('token npm_abcdefghijklmnopqrstuvwxyz0123456789 ok')).toBe(
+      'token [redacted-token] ok',
+    );
+    expect(
+      scrubIssueText('-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'),
+    ).toBe('[redacted-token]');
+  });
+
+  it('redacts bearer credentials case-insensitively and Authorization: Basic', () => {
+    expect(scrubIssueText('authorization: bearer eyJhbGciOi.abc.def')).toBe(
+      'authorization: bearer [redacted-token]',
+    );
+    expect(scrubIssueText('AUTH: BEARER eyJhbGciOi.abc.def')).toBe('AUTH: BEARER [redacted-token]');
+    expect(scrubIssueText('header Authorization: Basic dXNlcjpwYXNzd29yZA== end')).toBe(
+      'header Authorization: Basic [redacted-token] end',
+    );
+  });
+
+  it('does not mangle ordinary prose containing "Basic"', () => {
+    const prose = 'A Basic understanding of the dispatch policy is required.';
+    expect(scrubIssueText(prose)).toBe(prose);
+  });
+
   it('leaves clean text untouched', () => {
     const clean = 'co_finish returned success but no worker_done mail was emitted (seq 42).';
     expect(scrubIssueText(clean)).toBe(clean);
