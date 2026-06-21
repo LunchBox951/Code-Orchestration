@@ -169,6 +169,27 @@ function makeFakeSessions(
   };
 }
 
+/**
+ * Wraps {@link makeFakeSessions} so the FIRST `endSession` call throws (a transient failure that
+ * aborts teardown after the worktree was already removed + archived), then succeeds on retry.
+ */
+function makeFakeSessionsFailingFirstEnd(
+  sessions: SessionRecord[],
+): SessionStore & { listSessions(): readonly SessionRecord[] } {
+  const base = makeFakeSessions(sessions);
+  let failed = false;
+  return {
+    ...base,
+    endSession(agentId: string, pane: string): SessionRecord {
+      if (!failed) {
+        failed = true;
+        throw new Error(`endSession transient failure for ${agentId}`);
+      }
+      return base.endSession(agentId, pane);
+    },
+  };
+}
+
 function makeFakeArchive(): ArchiveStore & { records: ArchiveRecord[] } {
   const records: ArchiveRecord[] = [];
   return {
@@ -187,6 +208,25 @@ function makeFakeArchive(): ArchiveStore & { records: ArchiveRecord[] } {
     },
     listExpired: () => [],
     close() {},
+  };
+}
+
+/**
+ * Wraps {@link makeFakeArchive} so the FIRST `appendRecord` call throws (an archive write that fails
+ * AFTER the worktree was force-removed), then succeeds on retry.
+ */
+function makeFakeArchiveFailingFirstAppend(): ArchiveStore & { records: ArchiveRecord[] } {
+  const base = makeFakeArchive();
+  let failed = false;
+  return {
+    ...base,
+    appendRecord(rec: Parameters<ArchiveStore['appendRecord']>[0]): ArchiveRecord {
+      if (!failed) {
+        failed = true;
+        throw new Error(`archive append transient failure for ${rec.id}`);
+      }
+      return base.appendRecord(rec);
+    },
   };
 }
 
@@ -1138,6 +1178,128 @@ describe('deleteAgentSubtree', () => {
     expect(result.archivedBranches).toEqual([]);
     expect(archive.records).toEqual([]);
     expect(calls.some((call) => call.join(' ').includes('branch -d co/impl'))).toBe(true);
+  });
+
+  it('releases a serialized merge slot held by an archived branch on a retry after the first pass failed post-archive (MC-CD-1)', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl')]);
+    // endSession throws on the first pass (after the worktree is removed + archived), succeeds on retry.
+    const sessions = makeFakeSessionsFailingFirstEnd([session('impl', 'pane-impl')]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec } = makeGitExecSpy();
+    // co/impl exists and is UNMERGED, so the unmerged path archives it (branch kept).
+    const gitReader = makeGitReader({
+      existingBranches: new Set(['co/impl']),
+      mergedBranches: new Set(),
+      dirtyPaths: new Set(),
+    });
+
+    // The branch holds the serialized merge slot for `main` (e.g. a prior PASS verdict).
+    const seed = openReviewStore('proj');
+    try {
+      seed.acquireSerialized({ target: 'main', branch: 'co/impl' });
+      expect(seed.activeSerialized('main')).toBe('co/impl');
+    } finally {
+      seed.close();
+    }
+
+    const opts = {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    };
+
+    // First pass: worktree force-removed + archived, then endSession throws -> partial failure.
+    let firstError: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', opts);
+    } catch (err) {
+      firstError = err;
+    }
+    expect(firstError).toBeInstanceOf(AggregateError);
+    expect(worktreeStore.removeForce).toEqual(['co/impl']);
+    expect(archive.records.map((r) => r.id)).toEqual(['co/impl']);
+    expect(roster.getAgent('impl')).toBeDefined();
+    // The slot is still held after the aborted first pass.
+    const mid = openReviewStore('proj');
+    try {
+      expect(mid.activeSerialized('main')).toBe('co/impl');
+    } finally {
+      mid.close();
+    }
+
+    // Retry: `wt` is now null (worktree removed + archived), but the stale slot must STILL be released
+    // — without the fallback it would be stranded behind a branch that no longer holds a live worktree.
+    const result = deleteAgentSubtree('proj', 'coord-x', opts);
+    expect(result.removed).toEqual(['impl', 'coord-x']);
+    expect(roster.getAgent('impl')).toBeUndefined();
+    expect(roster.getAgent('coord-x')).toBeUndefined();
+
+    const after = openReviewStore('proj');
+    try {
+      expect(after.activeSerialized('main')).toBeUndefined();
+    } finally {
+      after.close();
+    }
+  });
+
+  it('self-heals on retry when the first pass force-removed the worktree but the archive write failed', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl')]);
+    const sessions = makeFakeSessions([]);
+    // appendRecord throws on the first pass (after the worktree is force-removed), succeeds on retry.
+    const archive = makeFakeArchiveFailingFirstAppend();
+    const { spy: gitExec } = makeGitExecSpy();
+    const gitReader = makeGitReader({
+      existingBranches: new Set(['co/impl']),
+      mergedBranches: new Set(),
+      dirtyPaths: new Set(),
+    });
+
+    const opts = {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    };
+
+    // First pass: worktree force-removed, archive append throws -> partial failure, NO record written.
+    let firstError: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', opts);
+    } catch (err) {
+      firstError = err;
+    }
+    expect(firstError).toBeInstanceOf(AggregateError);
+    expect(worktreeStore.removeForce).toEqual(['co/impl']);
+    expect(archive.records).toEqual([]);
+    expect(roster.getAgent('impl')).toBeDefined();
+
+    // Retry: the finder re-selects the removed-but-unarchived worktree (archive.getRecord == null),
+    // skips snapshot/remove (already removed), and re-appends the archive record without data loss.
+    const result = deleteAgentSubtree('proj', 'coord-x', opts);
+    expect(result.removed).toEqual(['impl', 'coord-x']);
+    expect(result.archivedBranches).toEqual(['co/impl']);
+    expect(archive.records.map((r) => r.id)).toEqual(['co/impl']);
+    // The worktree is force-removed exactly once across both passes (no double-remove on retry).
+    expect(worktreeStore.removeForce).toEqual(['co/impl']);
+    expect(roster.getAgent('impl')).toBeUndefined();
+    expect(roster.getAgent('coord-x')).toBeUndefined();
   });
 
   it('fails loud on retry when a removed worktree branch existence check cannot be trusted', () => {
