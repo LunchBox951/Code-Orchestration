@@ -732,13 +732,14 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     expect(closeCompleted).toBe(true);
   });
 
-  it('serveConductor surfaces unhosted stops and release failures through onError', async () => {
+  it('serveConductor logs unhosted stops as benign control info (not onError), surfaces release failures through onError', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
     const clock = makeClock();
     const qw = makeQuietWindow();
     const pty = new FakePty();
     const errors: string[] = [];
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const runner = await serveConductor({
       projectId,
       pty,
@@ -751,7 +752,16 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     });
 
     runner.control!.router.stop('impl-missing');
-    expect(errors.some((e) => /impl-missing.*not hosted/i.test(e))).toBe(true);
+    // Unhosted stop must be logged via the benign control logger, NOT via onError
+    expect(
+      consoleSpy.mock.calls.some(
+        (args) =>
+          typeof args[0] === 'string' &&
+          args[0].includes('[co-mcp serve] control:') &&
+          args[0].includes('impl-missing'),
+      ),
+    ).toBe(true);
+    expect(errors.some((e) => /impl-missing.*not hosted/i.test(e))).toBe(false);
 
     const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
     const ensureP = engine.ensureHosted(makeIdentity('impl-fail-close', projectId, cwd));
@@ -765,7 +775,9 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     runner.control!.router.stop('impl-fail-close');
     await runner.control!.router.drain();
 
+    // Release/teardown failure must still reach onError
     expect(errors.some((e) => /impl-fail-close.*session close failed/i.test(e))).toBe(true);
+    consoleSpy.mockRestore();
     await runner.stop();
   });
 

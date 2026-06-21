@@ -281,6 +281,10 @@ function reportServeControlDiagnostic(
   }
 }
 
+function reportServeControlInfo(message: string): void {
+  console.error(`[co-mcp serve] control: ${message}`);
+}
+
 /**
  * The default `[host-live]` transport seam: binding the co MCP surface to a real pty-bound provider
  * transport is an explicit host-live seam for direct `serveConductor` callers. Throws a clear message
@@ -488,10 +492,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     engine,
     projectId,
     onStopUnhosted: (agent) =>
-      reportServeControlDiagnostic(
-        opts.onError,
-        new Error(`co-mcp serve: stop requested for '${agent}' but it is not hosted.`),
-      ),
+      reportServeControlInfo(`stop requested for '${agent}' but it is not hosted; recorded.`),
     onStopError: (agent, error) =>
       reportServeControlDiagnostic(
         opts.onError,
