@@ -36,15 +36,19 @@ function parseRaw(raw: string): PullRequestInfo[] {
   for (const line of raw.split('\n')) {
     if (!line) continue;
     const parts = line.split(FIELD_SEP);
+    const ref = parts[0]!;
+    const parsed = parsePullRef(ref);
+    // `for-each-ref refs/remotes` also enumerates ordinary remote-tracking branches; skip any row
+    // that is NOT a PR ref before enforcing the field-count invariant, so an unrelated branch whose
+    // commit subject happens to contain the internal separator cannot abort the whole listing. The
+    // refname is always the first field (refnames never contain the separator), so this is safe.
+    if (parsed == null) continue;
     if (parts.length !== 5) {
       throw new Error(
         `co listPullRequests: malformed git for-each-ref row (${parts.length} fields, expected 5) — ` +
           'commit subject may contain the internal field separator.',
       );
     }
-    const ref = parts[0]!;
-    const parsed = parsePullRef(ref);
-    if (parsed == null) continue;
     const sha = parts[1]!;
     const subject = parts[2]!;
     const committedAt = parts[3]!;
@@ -76,7 +80,8 @@ function sortPullRequests(pullRequests: PullRequestInfo[]): readonly PullRequest
     const dateB = dateSortKey(b.lastCommit.committedAt);
     if (dateA !== dateB) return dateA > dateB ? -1 : 1;
     if (a.number !== b.number) return b.number - a.number;
-    return a.ref.localeCompare(b.ref);
+    // Codepoint comparison (not localeCompare) so the tiebreaker is host/locale-independent.
+    return a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0;
   });
 }
 

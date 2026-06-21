@@ -103,6 +103,29 @@ describe('listPullRequests — local git PR refs', () => {
       /co listPullRequests: malformed git for-each-ref row/i,
     );
   });
+
+  it('ignores a non-PR remote branch whose subject contains the separator (does not abort)', () => {
+    const prRow = cannedLine(
+      'refs/pull/7/head',
+      'deadbee',
+      'a normal subject',
+      '2026-06-18T12:00:00+00:00',
+      'A',
+    );
+    // refs/remotes/origin/feature is enumerated by `for-each-ref refs/remotes` but is not a PR ref;
+    // its SOH-bearing subject must be skipped, not throw and take down the whole PR listing.
+    const noisyNonPrRow = cannedLine(
+      'refs/remotes/origin/feature',
+      'cafef00',
+      `subject${SEP}with-soh`,
+      '2026-06-17T12:00:00+00:00',
+      'B',
+    );
+    const result = listPullRequests('/fake', {
+      readGit: cannedReader(`${prRow}\n${noisyNonPrRow}`),
+    });
+    expect(result.map((p) => p.number)).toEqual([7]);
+  });
 });
 
 const tmpDirs: string[] = [];

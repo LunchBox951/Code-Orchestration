@@ -71,7 +71,8 @@ function sortBranches(branches: BranchInfo[]): readonly BranchInfo[] {
     const dateA = dateSortKey(a.lastCommit.committedAt);
     const dateB = dateSortKey(b.lastCommit.committedAt);
     if (dateA !== dateB) return dateA > dateB ? -1 : 1;
-    return a.name.localeCompare(b.name);
+    // Codepoint comparison (not localeCompare) so the tiebreaker is host/locale-independent.
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
   });
 }
 

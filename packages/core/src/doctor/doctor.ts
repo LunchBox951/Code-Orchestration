@@ -19,6 +19,7 @@ import { buildCoreRegistry } from '../tools/core-registry.js';
 import { checkToolCompleteness } from '../tools/completeness.js';
 import { buildProjectProjectors, buildProjectDecode } from '../replay/recovery.js';
 import { rebuildAll } from '../replay/projector.js';
+import { assertNever } from '../assert-never.js';
 
 // ─── Report types ─────────────────────────────────────────────────────────────
 
@@ -238,10 +239,8 @@ export function defaultProviderProbe(options: DefaultProviderProbeOptions = {}):
         return probeClaude(command, expectedVersions);
       case 'codex':
         return probeCodex(command, expectedVersions);
-      default: {
-        const exhaustive: never = provider;
-        return exhaustive;
-      }
+      default:
+        return assertNever(provider);
     }
   };
 }
