@@ -501,7 +501,8 @@ function renderDashboard(): void {
 
   // Empty hero — conductor offline / nothing to show.
   if (phase === 'empty') {
-    if (form) form.innerHTML = '';
+    // Hide the composer but preserve any in-progress draft (don't wipe innerHTML).
+    if (form) form.style.display = 'none';
     const heroTitle =
       status === 'connecting' ? 'Connecting to the Conductor…' : 'Conductor offline';
     const heroBody =
@@ -679,13 +680,12 @@ function renderDashboard(): void {
     ${grid}`;
 
   // Kickoff composer lives in the sibling #session-start-form (so dashboard rerenders
-  // never wipe an in-progress draft). Shown only in the "opened" phase.
+  // never wipe an in-progress draft). Shown whenever the daemon is live (opened/coord/fleet).
   if (form) {
-    if (phase === 'opened') {
-      renderSessionStartForm();
+    if (phase === 'opened' || phase === 'coord' || phase === 'fleet') {
+      if (form.innerHTML === '') renderSessionStartForm();
       form.style.display = '';
     } else {
-      form.innerHTML = '';
       form.style.display = 'none';
     }
   }
@@ -702,6 +702,8 @@ function renderSessionStartForm(): void {
     `<div class="kickoff" style="margin-top:16px">`,
     `<div class="kickoff-hd">Start a coordinator session</div>`,
     `<div class="kickoff-body">`,
+    `<input id="session-name-input" class="field" type="text"`,
+    ` placeholder="Coordinator name" aria-label="Coordinator name">`,
     `<textarea id="session-prompt-input" class="field" style="min-height:90px"`,
     ` placeholder="Describe the task for the root coordinator…  e.g. finish stage-15 convergence and get PR #41 review-ready"`,
     ` aria-label="Coordinator session prompt"></textarea>`,
@@ -1889,10 +1891,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (!target.closest('#session-start-btn')) return;
     const textarea = document.getElementById('session-prompt-input') as HTMLTextAreaElement | null;
-    const prompt = textarea?.value.trim() ?? '';
-    void bridge.sessionStart(prompt.length > 0 ? prompt : null, null).then((r) => {
-      if (r.ok && textarea) textarea.value = '';
-      else if (!r.ok) showAppError(r.error ?? 'Failed to start coordinator session');
+    const nameInput = document.getElementById('session-name-input') as HTMLInputElement | null;
+    const promptVal =
+      (textarea?.value.trim() ?? '').length > 0 ? (textarea?.value.trim() ?? '') : null;
+    const nameVal =
+      (nameInput?.value.trim() ?? '').length > 0 ? (nameInput?.value.trim() ?? '') : null;
+    void bridge.sessionStart(promptVal, null, nameVal).then((r) => {
+      if (r.ok) {
+        if (textarea) textarea.value = '';
+        if (nameInput) nameInput.value = '';
+      } else if (!r.ok) showAppError(r.error ?? 'Failed to start coordinator session');
     });
   });
 

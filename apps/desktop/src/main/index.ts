@@ -469,24 +469,29 @@ ipcMain.handle('agent:unstick', async (_event, agentId: unknown) => {
 
 // ── Session IPC channels ─────────────────────────────────────────────────────
 
-ipcMain.handle('session:start', async (_event, prompt: unknown, specBody: unknown) => {
-  const shell = controller.shell;
-  if (shell == null) return { ok: false, error: 'shell not ready' };
-  try {
-    const promptStr =
-      typeof prompt === 'string' && prompt.trim().length > 0 ? prompt.trim() : undefined;
-    const specStr =
-      typeof specBody === 'string' && specBody.trim().length > 0 ? specBody.trim() : undefined;
-    await shell.client.startSession({
-      ...(promptStr != null ? { prompt: promptStr } : {}),
-      ...(specStr != null ? { specBody: specStr } : {}),
-    });
-    return { ok: true };
-  } catch (e: unknown) {
-    const msg = desktopErrorMessage(e, 'start a session');
-    return { ok: false, error: msg };
-  }
-});
+ipcMain.handle(
+  'session:start',
+  async (_event, prompt: unknown, specBody: unknown, name: unknown) => {
+    const shell = controller.shell;
+    if (shell == null) return { ok: false, error: 'shell not ready' };
+    try {
+      const promptStr =
+        typeof prompt === 'string' && prompt.trim().length > 0 ? prompt.trim() : undefined;
+      const specStr =
+        typeof specBody === 'string' && specBody.trim().length > 0 ? specBody.trim() : undefined;
+      const nameStr = typeof name === 'string' && name.trim().length > 0 ? name.trim() : undefined;
+      await shell.client.startSession({
+        ...(promptStr != null ? { prompt: promptStr } : {}),
+        ...(specStr != null ? { specBody: specStr } : {}),
+        ...(nameStr != null ? { name: nameStr } : {}),
+      });
+      return { ok: true };
+    } catch (e: unknown) {
+      const msg = desktopErrorMessage(e, 'start a session');
+      return { ok: false, error: msg };
+    }
+  },
+);
 
 // Launch a coordinator from the BUNDLED predesigned demo spec (AC-S15-6 — no terminal). Reads
 // dist/renderer/demo-spec.md behind an injectable seam and starts a session via the same

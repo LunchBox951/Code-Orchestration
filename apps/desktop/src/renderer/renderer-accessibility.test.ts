@@ -177,3 +177,34 @@ describe('session start', () => {
     expect(mainSource).not.toContain("sendToRenderer('session:error'");
   });
 });
+
+describe('New-coordinator composer — always-on + name field (C1)', () => {
+  it('New-coordinator composer has a name field and is not gated to total===0', () => {
+    expect(rendererSource).toContain('id="session-name-input"');
+    expect(rendererSource).toContain('bridge.sessionStart('); // still wired
+  });
+
+  it('main session:start accepts a name arg', () => {
+    // prettier may wrap to ipcMain.handle(\n  'session:start', — match both forms
+    expect(mainSource).toMatch(/ipcMain\.handle\(\s*'session:start'/);
+  });
+
+  it('composer is shown in coord and fleet phases (not only opened)', () => {
+    // The phase gate must cover coord and fleet, not just opened
+    const phaseGateRegion = rendererSource.slice(
+      rendererSource.indexOf('// Kickoff composer'),
+      rendererSource.indexOf('// nav badges'),
+    );
+    expect(phaseGateRegion).toContain("'coord'");
+    expect(phaseGateRegion).toContain("'fleet'");
+  });
+
+  it('empty phase does not wipe the form innerHTML (draft survives offline flicker)', () => {
+    // The empty early-return must NOT clear form.innerHTML
+    const emptyBlock = rendererSource.slice(
+      rendererSource.indexOf("if (phase === 'empty')"),
+      rendererSource.indexOf('const stats = dash?.stats'),
+    );
+    expect(emptyBlock).not.toContain('form.innerHTML');
+  });
+});

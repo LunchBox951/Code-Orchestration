@@ -313,6 +313,7 @@ interface CoShellBridge {
   sessionStart(
     prompt: string | null,
     specBody: string | null,
+    name: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
   sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
   // ── Project + Daemon on-ramp ────────────────────────────────────────────────

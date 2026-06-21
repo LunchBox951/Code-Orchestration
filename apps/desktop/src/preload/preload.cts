@@ -87,6 +87,7 @@ interface CoShellBridge {
   sessionStart(
     prompt: string | null,
     specBody: string | null,
+    name: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
   sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
   // ── Project + Daemon on-ramp ────────────────────────────────────────────────
@@ -268,8 +269,14 @@ const bridge: CoShellBridge = {
   async sessionStart(
     prompt: string | null,
     specBody: string | null,
+    name: string | null,
   ): Promise<{ ok: boolean; error?: string }> {
-    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:start', prompt, specBody);
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>(
+      'session:start',
+      prompt,
+      specBody,
+      name,
+    );
   },
   async sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:startFromDemoSpec');
