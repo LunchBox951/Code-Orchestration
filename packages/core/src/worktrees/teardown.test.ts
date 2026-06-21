@@ -202,11 +202,11 @@ describe('removeWorktree — teardown removes the git worktree + sandbox dir', (
     );
   });
 
-  it('prunes git when the dir is already absent, then records the teardown (headless)', () => {
+  it('targets `git worktree remove <path>` when the dir is already absent, then records the teardown (headless)', () => {
     const store = openStore('p-headless');
     const path = worktreePathFor('p-headless', 'co/h');
     store.recordWorktree(rec({ branch: 'co/h', path }));
-    const fs = recordingFs(false); // dir reported absent → prune stale git worktree metadata
+    const fs = recordingFs(false); // dir reported absent → clear only THIS worktree's admin entry
     const calls: Array<{ cwd: string; args: readonly string[] }> = [];
     const deps: RemoveWorktreeDeps = {
       repoCwd: '/main/repo',
@@ -216,8 +216,30 @@ describe('removeWorktree — teardown removes the git worktree + sandbox dir', (
 
     const updated = store.removeWorktree('co/h', deps);
 
-    expect(calls).toEqual([{ cwd: '/main/repo', args: ['worktree', 'prune'] }]);
+    // Targeted remove (NOT a repo-global `git worktree prune`) so a sibling sandbox cannot be detached.
+    expect(calls).toEqual([{ cwd: '/main/repo', args: ['worktree', 'remove', path] }]);
     expect(fs.removed).toEqual([path]); // dir-removal still attempted (idempotent)
+    expect(updated.removed).toBe(true);
+  });
+
+  it('tolerates the admin entry already being gone when the dir is absent (idempotent teardown)', () => {
+    const store = openStore('p-headless-gone');
+    const path = worktreePathFor('p-headless-gone', 'co/g');
+    store.recordWorktree(rec({ branch: 'co/g', path }));
+    const fs = recordingFs(false); // dir absent
+    const deps: RemoveWorktreeDeps = {
+      repoCwd: '/main/repo',
+      // `git worktree remove` throws because the admin entry was already pruned — teardown must
+      // still complete idempotently rather than fail loud on the already-reached goal state.
+      gitExec: () => {
+        throw new Error("fatal: 'co/g' is not a working tree");
+      },
+      fs,
+    };
+
+    const updated = store.removeWorktree('co/g', deps);
+
+    expect(fs.removed).toEqual([path]);
     expect(updated.removed).toBe(true);
   });
 

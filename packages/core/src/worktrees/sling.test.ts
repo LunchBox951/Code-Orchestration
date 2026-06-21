@@ -312,6 +312,35 @@ describe('slingWorktree — create + record from the auto-detected base', () => 
     expect(calls).toContain('branch -D co/cleanup-aggregate');
   });
 
+  it('rolls back the leaked branch when `git worktree add` itself fails', () => {
+    // `git worktree add -b` creates the branch ref first, then materializes the dir; if the dir step
+    // fails (e.g. an occupied path left by a prior crash) the branch is left behind. The create must
+    // therefore sit INSIDE the rollback scope so `branch -D` reaches the leaked branch.
+    const store = openStore('p-add-fails');
+    const calls: string[] = [];
+    const gitExec: GitExec = (_cwd, args) => {
+      calls.push(args.join(' '));
+      if (args[0] === 'worktree' && args[1] === 'add') {
+        throw new Error('fatal: worktree path already exists');
+      }
+    };
+    const gitReader: GitReader = (_cwd, args) => {
+      if (args[0] === 'symbolic-ref') return null;
+      return 'a'.repeat(40);
+    };
+
+    expect(() =>
+      slingWorktree(
+        store,
+        { parent: 'lead-7', branch: 'co/add-fails', repoCwd: '/fake-repo', projectId: 'p-add-fails' },
+        { gitReader, gitExec, provisioner: () => {}, probe: knownProbe },
+      ),
+    ).toThrow(/already exists/);
+
+    // Rollback ran and attempted to delete the leaked branch.
+    expect(calls).toContain('branch -D co/add-fails');
+  });
+
   it('cleans up the git worktree and branch when the durable store record fails', () => {
     const repo = makeMainRepo();
     const path = worktreePathFor('p-store-fail', 'co/store-fail');

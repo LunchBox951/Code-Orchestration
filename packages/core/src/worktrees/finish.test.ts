@@ -130,6 +130,66 @@ describe('finishWorktree — commit + record finish + emit worker_done', () => {
     expect(wd.body).toContain('left b failing on purpose'); // the notes
   });
 
+  it('fails loud and actionably when the tree is clean and the branch is still at its baseline', () => {
+    const { store, mail } = openStores('p-finish-empty');
+    const repoCwd = '/wt/co/empty';
+    store.recordWorktree({
+      branch: 'co/empty',
+      baseRef: 'main',
+      baseSha: 'b'.repeat(40),
+      path: repoCwd,
+      parent: 'lead-7',
+    });
+    const git = recordingGitExec();
+    // Clean tree (status --porcelain empty) and HEAD === baseline ⇒ nothing to finish.
+    const result = (): unknown =>
+      finishWorktree(
+        store,
+        mail,
+        { agent: 'impl-1', repoCwd, intent, tests: [] },
+        {
+          readInfo: () => ({ branch: 'co/empty', headSha: 'b'.repeat(40) }),
+          gitExec: git.exec,
+          gitReader: () => '',
+        },
+      );
+
+    expect(result).toThrow(/nothing to finish/i);
+    // Never attempted an empty commit; recorded no finish (the opaque git error is gone).
+    expect(git.calls.find((c) => c.args[0] === 'commit')).toBeUndefined();
+    expect(store.getFinish('co/empty')).toBeUndefined();
+  });
+
+  it('finishes against the existing HEAD (no new commit) when the agent already committed its work', () => {
+    const { store, mail } = openStores('p-finish-precommitted');
+    const repoCwd = '/wt/co/pre';
+    store.recordWorktree({
+      branch: 'co/pre',
+      baseRef: 'main',
+      baseSha: 'b'.repeat(40),
+      path: repoCwd,
+      parent: 'lead-7',
+    });
+    const git = recordingGitExec();
+    // Clean tree but HEAD advanced past the baseline ⇒ the agent committed directly; finish there.
+    const result = finishWorktree(
+      store,
+      mail,
+      { agent: 'impl-1', repoCwd, intent, tests: [{ name: 'suite/a', passed: true }] },
+      {
+        readInfo: () => ({ branch: 'co/pre', headSha: 'd'.repeat(40) }),
+        gitExec: git.exec,
+        gitReader: () => '',
+      },
+    );
+
+    expect(git.calls.find((c) => c.args[0] === 'commit')).toBeUndefined();
+    expect(result.commitSha).toBe('d'.repeat(40));
+    expect(result.finishRecorded).toBe(true);
+    expect(store.getFinish('co/pre')?.commitSha).toBe('d'.repeat(40));
+    expect(typeof result.workerDoneSeq).toBe('number');
+  });
+
   it('worker_done is informational (non-sticky) — it raises no outstanding action on the parent', () => {
     const { store, mail } = openStores('p-finish-informational');
     const repoCwd = '/wt';

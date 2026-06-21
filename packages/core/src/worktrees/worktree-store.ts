@@ -417,7 +417,17 @@ export function openWorktreeStore(projectId: string): WorktreeStore {
           sandboxPath,
         ]);
       } else {
-        gitExec(deps.repoCwd, ['worktree', 'prune']);
+        // The sandbox dir is already gone; clear only THIS worktree's stale `.git/worktrees/…` admin
+        // entry with a targeted `git worktree remove`. A repo-global `git worktree prune` would also
+        // drop the admin entry of any SIBLING sandbox whose dir is merely transiently absent
+        // (mid-teardown / overlay FS), detaching a live worktree. The dir is confirmed absent here, so
+        // a failure just means the entry was already pruned — tolerate it idempotently (matching the
+        // prior prune's no-throw cleanup semantics).
+        try {
+          gitExec(deps.repoCwd, ['worktree', 'remove', sandboxPath]);
+        } catch {
+          // admin entry already absent — teardown goal already reached.
+        }
       }
       fs.removeDir(sandboxPath); // ensure the program-data sandbox dir is gone (no-op if absent).
 
