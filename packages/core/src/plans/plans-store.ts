@@ -29,33 +29,12 @@ import {
   selectAllPlans,
   selectPlan,
 } from './plans-projector.js';
+import { assertPlanReadyToComplete } from './completion-gate.js';
 
 function assertPlanOpenForMutation(operation: string, plan: PlanRecord): void {
   if (plan.completedTs != null) {
     throw new Error(
       `${operation}: plan '${plan.taskId}' is already completed — task.completed is terminal`,
-    );
-  }
-}
-
-function assertPlanReadyToComplete(operation: string, plan: PlanRecord): void {
-  const unmerged = plan.phases.filter((p) => p.status !== 'merged');
-  if (unmerged.length > 0) {
-    const detail = unmerged.map((p) => `'${p.phaseId}' (${p.status})`).join(', ');
-    throw new Error(
-      `${operation}: refusing task.completed for plan '${plan.taskId}' — ${unmerged.length} ` +
-        `phase(s) not 'merged': ${detail}. Every phase must merge before the task can close.`,
-    );
-  }
-  const unverified = plan.phases.filter((p) => p.verifiedPass !== true);
-  if (unverified.length > 0) {
-    const detail = unverified
-      .map((p) => `'${p.phaseId}' (${p.verifiedPass === false ? 'failed' : 'missing'})`)
-      .join(', ');
-    throw new Error(
-      `${operation}: refusing task.completed for plan '${plan.taskId}' — ${unverified.length} ` +
-        `phase(s) not verified green: ${detail}. Every phase must have phase.verified(pass=true) ` +
-        'before the task can close.',
     );
   }
 }

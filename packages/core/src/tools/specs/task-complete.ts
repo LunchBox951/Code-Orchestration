@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolSpec } from '../registry.js';
 import { assertToolCallerRole } from '../caller-auth.js';
+import { assertPlanReadyToComplete } from '../../plans/completion-gate.js';
 import {
   planRecordOutputSchema,
   planRecordToOutput,
@@ -56,27 +57,10 @@ export const taskCompleteTool: ToolSpec<TaskCompleteInput, PlanRecordOutput> = {
     if (plan == null) {
       throw new Error(`co_task_complete: no plan recorded for task '${input.task_id}'.`);
     }
-    // GATE: refuse unless EVERY phase has merged — never close a task with work still outstanding.
-    const unmerged = plan.phases.filter((p) => p.status !== 'merged');
-    if (unmerged.length > 0) {
-      const detail = unmerged.map((p) => `'${p.phaseId}' (${p.status})`).join(', ');
-      throw new Error(
-        `co_task_complete: refusing to complete task '${input.task_id}' — ${unmerged.length} ` +
-          `phase(s) not 'merged': ${detail}. Every phase must merge before the task can close.`,
-      );
-    }
-
-    const unverified = plan.phases.filter((p) => p.verifiedPass !== true);
-    if (unverified.length > 0) {
-      const detail = unverified
-        .map((p) => `'${p.phaseId}' (${p.verifiedPass === false ? 'failed' : 'missing'})`)
-        .join(', ');
-      throw new Error(
-        `co_task_complete: refusing to complete task '${input.task_id}' — ${unverified.length} ` +
-          `phase(s) not verified green: ${detail}. Every phase must have phase.verified(pass=true) ` +
-          'before the task can close.',
-      );
-    }
+    // GATE: refuse unless EVERY phase has merged + verified green — never close a task with work
+    // still outstanding. The shared helper is the single definition the store + projector also use
+    // (the store re-checks it before appending, so this is the early, friendly-message surface).
+    assertPlanReadyToComplete('co_task_complete', plan);
 
     const rec = ctx.plans.recordTaskCompleted(input.task_id, ctx.agent);
     return planRecordToOutput(rec);
