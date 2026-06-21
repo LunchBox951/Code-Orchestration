@@ -169,9 +169,14 @@ export function slingWorktree(
   // 2) Create the worktree+branch under program-data (never in the repo).
   const worktreePath = worktreePathFor(projectId, branch);
   mkdirSync(dirname(worktreePath), { recursive: true });
-  gitExec(repoCwd, ['worktree', 'add', '-b', branch, worktreePath, baseRef]);
 
   try {
+    // `git worktree add -b` creates the branch ref FIRST and only then materializes the dir; if the
+    // dir step fails (e.g. an occupied path left by a prior crash) git leaves the branch behind. Keep
+    // it INSIDE the try so the rollback below (worktree remove + branch -D) reaches it — otherwise the
+    // branch leaks unrecorded and permanently blocks re-sling of that branch (Principle 9).
+    gitExec(repoCwd, ['worktree', 'add', '-b', branch, worktreePath, baseRef]);
+
     // 2b) Pin the operator persona git identity in the new sandbox (AC-L6a-7): prevents `git commit -s`
     //     from falling through to the global config and leaking personal email in Signed-off-by.
     //     `extensions.worktreeConfig` is a git-admin write in the source repo's .git/config that enables

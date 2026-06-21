@@ -395,13 +395,11 @@ function resumeFilterProviderAccounts(opts: {
     const account = opts.accounts[0]!;
     return opts.providers.map((provider) => ({ provider, account }));
   }
-  if (opts.providers.length !== opts.accounts.length) {
-    throw new Error(
-      'canResume: providers/accounts filters are ambiguous for provider-account matching; pass providerAccounts',
-    );
-  }
-  return opts.providers.map((provider, index) => ({
-    provider,
-    account: opts.accounts![index]!,
-  }));
+  // Neither side is a single value: only 1×N / N×1 fan-outs are unambiguous. An equal-length pair
+  // was previously positionally zipped into diagonal pairs — a silently-wrong resume predicate (it
+  // could answer false for a genuinely-resumable cross combination). Require the caller to pass an
+  // explicit providerAccounts list instead of guessing a pairing (fail loud — Principle 9).
+  throw new Error(
+    'canResume: providers/accounts filters are ambiguous for provider-account matching; pass providerAccounts',
+  );
 }

@@ -171,13 +171,17 @@ export function assertDeleteAgentSubtreePreflight(
   deps: DeleteAgentSubtreePreflightDeps = {},
 ): void {
   const { openRoster: openRosterFn = openRosterStore, openMail: openMailFn = openMailStore } = deps;
+  // Open mail inside roster's try so a throwing mail-open still closes the roster handle.
   const roster = openRosterFn(projectId);
-  const mail = openMailFn(projectId);
   try {
-    assertPreflight(teardownOrder(roster, rootId), mail);
+    const mail = openMailFn(projectId);
+    try {
+      assertPreflight(teardownOrder(roster, rootId), mail);
+    } finally {
+      mail.close();
+    }
   } finally {
     roster.close();
-    mail.close();
   }
 }
 
@@ -210,14 +214,23 @@ export function deleteAgentSubtree(
   const gitExec = deps.gitExec ?? defaultGitExec;
   const gitReader = deps.gitReader ?? defaultGitReader;
 
-  const roster = openRosterFn(projectId);
-  const worktrees = openWorktreesFn(projectId);
-  const sessions = openSessionsFn(projectId);
-  const archive = openArchiveFn(projectId);
-  const mail = openMailFn(projectId);
-  const reviews = openReviewFn(projectId);
+  // Open every store INSIDE the try and track opened handles, so a throw from any open (not just
+  // the first) still closes the handles opened before it. Opening all six before the try would
+  // leak up to five handles if a later open threw (Principle 9 — release resources on every path).
+  const opened: Array<{ close(): void }> = [];
+  const track = <T extends { close(): void }>(store: T): T => {
+    opened.push(store);
+    return store;
+  };
 
   try {
+    const roster = track(openRosterFn(projectId));
+    const worktrees = track(openWorktreesFn(projectId));
+    const sessions = track(openSessionsFn(projectId));
+    const archive = track(openArchiveFn(projectId));
+    const mail = track(openMailFn(projectId));
+    const reviews = track(openReviewFn(projectId));
+
     // Step 1: build the teardown order — leaf-first, root last.
     const order = teardownOrder(roster, rootId);
     assertPreflight(order, mail);
@@ -393,11 +406,13 @@ export function deleteAgentSubtree(
 
     return { removed, archivedBranches, deletedBranches };
   } finally {
-    roster.close();
-    worktrees.close();
-    sessions.close();
-    archive.close();
-    mail.close();
-    reviews.close();
+    // Close in reverse open order; a failing close must not strand the sibling handles.
+    for (const store of opened.reverse()) {
+      try {
+        store.close();
+      } catch {
+        // keep closing the rest.
+      }
+    }
   }
 }

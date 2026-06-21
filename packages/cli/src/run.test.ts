@@ -151,6 +151,18 @@ describe('co hook codex-block-list', () => {
     expect(result.output).toMatch(/permissionDecision.*deny|decision.*block/s);
     expect(result.output).toMatch(/failed closed/);
   });
+
+  it('fails closed (does not crash) when --rules is present but its value is missing', async () => {
+    // A malformed invocation must still emit a deny, never throw past the hook boundary and remove
+    // the gate. Previously requiredArg threw uncaught before the try block.
+    const result = await run(['hook', 'codex-block-list', '--rules'], process.cwd(), {
+      stdin: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git push --force' } }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toMatch(/permissionDecision.*deny|decision.*block/s);
+    expect(result.output).toMatch(/failed closed/);
+  });
 });
 
 describe('co usage', () => {

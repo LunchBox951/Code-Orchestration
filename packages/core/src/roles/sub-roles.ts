@@ -2,7 +2,14 @@
  * Fixed shipped sub-role set (L6a Phase B). A sub-role specializes a base role's *approach* and
  * may narrow its permission profile, but never widen it (agent-roles.md: "inherits its base role's
  * permission profile and may narrow it, never widen it"). Most specialization is prompt-shaped
- * (soft); only researcher sub-roles carry a real permission delta (web-search gating).
+ * (soft); only researcher sub-roles carry a permission delta (web-search gating).
+ *
+ * NOTE (enforcement scope): the web-search capability delta is DECLARED and integrity-checked by
+ * narrow-only.ts (a sub-role may only narrow it), but it is NOT yet enforced at pane launch —
+ * buildPaneLaunchConfig does not gate the provider's native WebSearch/WebFetch tools per capability,
+ * so today the narrowing is declarative, not a hard runtime boundary. Wiring the resolved profile
+ * into the launch builder (and deciding whether the non-researcher base roles, which all have empty
+ * capabilities, should likewise lose the native web tools) is a deliberate follow-up.
  *
  * Coordinator and Lead have no sub-roles — they are owner-tier roles.
  */
@@ -38,8 +45,9 @@ const researcherNoWebProfile: RoleProfile = {
  *   same profile as the base implementer.
  * - **Reviewer** sub-roles (`feature`, `bugfix`, `pr`) are soft/posture specializations — same
  *   profile as the base reviewer (writeScope `read-only-for-code`).
- * - **Researcher** sub-roles carry a real permission delta: only `external` retains the base
- *   researcher's `web-search` capability; `codebase`, `diagnostic`, and `decision` narrow it away.
+ * - **Researcher** sub-roles carry a declared permission delta: only `external` retains the base
+ *   researcher's `web-search` capability; `codebase`, `diagnostic`, and `decision` narrow it away
+ *   (declared + integrity-checked, but not yet enforced at launch — see the header note).
  */
 export const SUB_ROLES: readonly SubRoleSpec[] = [
   // ── Implementer sub-roles (soft/approach, writeScope: code) ──────────────────
@@ -95,7 +103,7 @@ export const SUB_ROLES: readonly SubRoleSpec[] = [
     profile: reviewerProfile,
   },
 
-  // ── Researcher sub-roles (real permission delta: web-search gating) ───────────
+  // ── Researcher sub-roles (declared web-search delta; see header note on enforcement scope) ──
   {
     baseRole: 'researcher',
     name: 'codebase',

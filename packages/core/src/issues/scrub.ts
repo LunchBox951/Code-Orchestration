@@ -21,18 +21,40 @@ const HOME_PATH_RE = /(\/(?:home|Users)\/)(?!\[redacted\])[^/\s]+/gu;
 const EMAIL_RE = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/gu;
 
 /**
- * Credential-shaped tokens: GitHub classic/fine-grained PATs, OpenAI-style `sk-` keys, GitLab
- * PATs, Slack tokens, and any Bearer credential. Each pattern requires a distinctive prefix so
- * ordinary prose is never mangled.
+ * Credential-shaped tokens. Each pattern requires a distinctive prefix or fixed shape so ordinary
+ * prose is never mangled; the per-post human approval remains the real backstop. Covers GitHub
+ * classic/fine-grained PATs, OpenAI-style `sk-` keys, GitLab PATs, Slack tokens, AWS access-key
+ * ids, Google API keys, npm tokens, PEM private-key blocks, and Bearer / HTTP-Basic credentials.
  */
 const TOKEN_RES: readonly RegExp[] = [
-  /\bghp_[A-Za-z0-9]{16,}\b/gu,
-  /\bgithub_pat_[A-Za-z0-9_]{16,}\b/gu,
-  /\bsk-[A-Za-z0-9_-]{16,}\b/gu,
-  /\bglpat-[A-Za-z0-9_-]{16,}\b/gu,
-  /\bxox[a-z]-[A-Za-z0-9-]{10,}\b/gu,
-  /\bBearer\s+(?!\[redacted-token\])[A-Za-z0-9._~+/=-]+/gu,
+  /\bghp_[A-Za-z0-9]{16,}\b/gu, // GitHub classic PAT
+  /\bgithub_pat_[A-Za-z0-9_]{16,}\b/gu, // GitHub fine-grained PAT
+  /\bsk-[A-Za-z0-9_-]{16,}\b/gu, // OpenAI-style secret key
+  /\bglpat-[A-Za-z0-9_-]{16,}\b/gu, // GitLab PAT
+  /\bxox[a-z]-[A-Za-z0-9-]{10,}\b/gu, // Slack token
+  /\b(?:AKIA|ASIA|AROA|AIDA)[A-Z0-9]{16}\b/gu, // AWS access key id
+  /\bAIza[A-Za-z0-9_-]{35}\b/gu, // Google API key
+  /\bnpm_[A-Za-z0-9]{36}\b/gu, // npm access/automation token
+  // PEM private-key block of any key type (multiline) — a leaked private key is the worst case.
+  /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----/gu,
+  // Bearer credential — case-insensitive keyword; log/header dumps frequently lowercase it.
+  /\bbearer\s+(?!\[redacted-token\])[A-Za-z0-9._~+/=-]+/giu,
+  // HTTP Basic auth, anchored on the Authorization header so ordinary "Basic …" prose is untouched.
+  /\bAuthorization:\s*Basic\s+(?!\[redacted-token\])[A-Za-z0-9+/=._-]+/giu,
 ];
+
+/**
+ * Replace one credential match. Keyword-prefixed credentials (Bearer, Authorization: Basic) keep
+ * their label so the surrounding line stays readable and the negative lookahead keeps redaction
+ * idempotent; every other shape is replaced wholesale.
+ */
+function redactTokenMatch(match: string): string {
+  const bearer = /^bearer\b/iu.exec(match);
+  if (bearer != null) return `${match.slice(0, bearer[0].length)} ${REDACTED_TOKEN}`;
+  const basic = /^Authorization:\s*Basic\b/iu.exec(match);
+  if (basic != null) return `${match.slice(0, basic[0].length)} ${REDACTED_TOKEN}`;
+  return REDACTED_TOKEN;
+}
 
 /**
  * Scrub an outward issue text: redact home-directory usernames, email addresses, and
@@ -42,9 +64,7 @@ export function scrubIssueText(text: string): string {
   let scrubbed = text.replace(HOME_PATH_RE, `$1${REDACTED_PATH}`);
   scrubbed = scrubbed.replace(EMAIL_RE, REDACTED_EMAIL);
   for (const re of TOKEN_RES) {
-    scrubbed = scrubbed.replace(re, (match) =>
-      match.startsWith('Bearer') ? `Bearer ${REDACTED_TOKEN}` : REDACTED_TOKEN,
-    );
+    scrubbed = scrubbed.replace(re, redactTokenMatch);
   }
   return scrubbed;
 }

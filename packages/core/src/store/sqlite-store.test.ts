@@ -132,6 +132,47 @@ describe('SqliteStore.transaction', () => {
       store.close();
     }
   });
+
+  it('surfaces the original error, not a masking rollback error, when the tx is already closed', () => {
+    // SQLite auto-rolls-back the active transaction on some failure classes (SQLITE_FULL / IOERR);
+    // the wrapper's explicit ROLLBACK then throws "cannot rollback - no transaction is active". We
+    // simulate that closed-tx state by committing out from under the wrapper, then throwing. The
+    // original cause must propagate, never be masked by the rollback (Principle 9).
+    const store = openProjectStore('p1');
+    try {
+      let caught: unknown;
+      try {
+        store.transaction((tx) => {
+          (tx.raw as DatabaseSync).exec('COMMIT');
+          throw new Error('original-cause');
+        });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toBe('original-cause');
+      expect((caught as Error).message).not.toMatch(/no transaction is active/i);
+
+      // The store is not bricked: the inTransaction guard was reset, so a normal append still commits.
+      expect(store.append([event()])).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('SqliteStore connection PRAGMAs', () => {
+  it('configures a non-zero busy_timeout so a contended cross-process writer waits, not hard-fails', () => {
+    const store = openProjectStore('p1');
+    try {
+      const row = store.transaction((tx) =>
+        (tx.raw as DatabaseSync).prepare('PRAGMA busy_timeout').get(),
+      );
+      expect(Number((row as { timeout: number }).timeout)).toBe(5000);
+    } finally {
+      store.close();
+    }
+  });
 });
 
 describe('open helpers', () => {

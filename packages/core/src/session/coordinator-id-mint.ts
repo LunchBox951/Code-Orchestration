@@ -18,18 +18,26 @@ export function mintAvailableCoordinatorId(
 ): string {
   const openArchive = deps.openArchive ?? openArchiveStore;
   const openRoster = deps.openRoster ?? openRosterStore;
+  // Each store is opened inside the prior store's try so a throw from the SECOND open still closes
+  // the first — opening both before the try would leak the archive handle if openRoster threw.
   const archive = openArchive(projectId);
-  const roster = openRoster(projectId);
   try {
-    const archivedBranches = new Set(archive.listRecords().map((rec) => rec.branch));
-    for (let attempt = 0; attempt < MAX_COORDINATOR_ID_MINT_ATTEMPTS; attempt += 1) {
-      const coordinatorId = coordinatorIdFromParts(name, deps.randomHex());
-      if (roster.getAgent(coordinatorId) == null && !archivedBranches.has(`co/${coordinatorId}`)) {
-        return coordinatorId;
+    const roster = openRoster(projectId);
+    try {
+      const archivedBranches = new Set(archive.listRecords().map((rec) => rec.branch));
+      for (let attempt = 0; attempt < MAX_COORDINATOR_ID_MINT_ATTEMPTS; attempt += 1) {
+        const coordinatorId = coordinatorIdFromParts(name, deps.randomHex());
+        if (
+          roster.getAgent(coordinatorId) == null &&
+          !archivedBranches.has(`co/${coordinatorId}`)
+        ) {
+          return coordinatorId;
+        }
       }
+    } finally {
+      roster.close();
     }
   } finally {
-    roster.close();
     archive.close();
   }
   throw new Error(

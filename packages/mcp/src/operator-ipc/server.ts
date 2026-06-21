@@ -497,6 +497,17 @@ export class OperatorIpcServer {
     const agentId = requireString(params, 'agentId');
     const subject = requireString(params, 'subject');
     const body = requireString(params, 'body');
+    // Reject an unregistered recipient before posting (mirrors handleRewake). mail.send validates
+    // only address SHAPE, not roster membership, so a typo'd/stale id would otherwise deliver into a
+    // phantom inbox no agent ever reads — a silent misaddressed operator action (Principle 9).
+    const roster = this.openRoster(this.projectId);
+    try {
+      if (roster.getAgent(agentId) == null) {
+        throw new Error(`operator IPC message: unknown or unregistered agent '${agentId}'.`);
+      }
+    } finally {
+      roster.close();
+    }
     const mail = this.openMail(this.projectId);
     try {
       return mail.send({

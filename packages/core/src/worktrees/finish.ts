@@ -198,9 +198,29 @@ export function finishWorktree(
     record.provisioned ??
       resolveProvisioningManifestSource(deps.provisioningManifest ?? DEFAULT_PROVISION_MANIFEST),
   );
-  gitExec(repoCwd, ['add', '-A']);
-  gitExec(repoCwd, ['commit', '-s', '-m', commitMessage]);
-  const { headSha: commitSha } = readInfo(repoCwd);
+  // `git commit` exits non-zero on an empty index. Decide up front whether there is anything to
+  // finish so we surface a clear, actionable signal instead of an opaque "nothing to commit" git
+  // error (Principle 9). When `gitReader` is unavailable (headless tests whose cwd is not a real
+  // repo) we keep the original stage+commit path.
+  const status = gitReader?.(repoCwd, ['status', '--porcelain']);
+  const treeIsClean = status != null && status.trim().length === 0;
+  let commitSha: string;
+  if (treeIsClean) {
+    const { headSha } = readInfo(repoCwd);
+    if (headSha === record.baseSha) {
+      throw new Error(
+        `co_finish: nothing to finish on '${branch}' — the working tree is clean and the branch ` +
+          'has no commits beyond its baseline. Make a change, or commit your work, before finishing.',
+      );
+    }
+    // The agent already committed its own work directly; finish against that existing HEAD rather
+    // than failing on an empty `git commit`.
+    commitSha = headSha;
+  } else {
+    gitExec(repoCwd, ['add', '-A']);
+    gitExec(repoCwd, ['commit', '-s', '-m', commitMessage]);
+    commitSha = readInfo(repoCwd).headSha;
+  }
 
   // 4) Record the finish (commit + tests) — the durable L5 input. Do NOT compute the regression diff.
   // 5) Emit worker_done (informational) to the recorded parent — bus-visible, non-sticky.

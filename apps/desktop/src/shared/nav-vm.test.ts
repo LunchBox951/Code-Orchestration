@@ -49,13 +49,14 @@ describe('NavVM', () => {
     expect(vm.state.activeView).toBe('source');
   });
 
-  it('all 6 nav views are defined', () => {
-    expect(NAV_VIEWS).toHaveLength(6);
+  it('all 7 nav views are defined', () => {
+    expect(NAV_VIEWS).toHaveLength(7);
     expect(NAV_VIEWS).toContain('dashboard');
     expect(NAV_VIEWS).toContain('agents');
     expect(NAV_VIEWS).toContain('mail');
     expect(NAV_VIEWS).toContain('review');
     expect(NAV_VIEWS).toContain('source');
     expect(NAV_VIEWS).toContain('usage');
+    expect(NAV_VIEWS).toContain('settings');
   });
 });

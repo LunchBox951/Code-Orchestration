@@ -443,7 +443,9 @@ function assertFinishNotNewerThanVerdict(
 ): void {
   if (finish.recordedSeq != null && verdict.recordedSeq != null) {
     if (finish.recordedSeq < verdict.recordedSeq) return;
-  } else if (finish.recordedTs <= verdict.recordedTs) {
+  } else if (finish.recordedTs < verdict.recordedTs) {
+    // Strict `<` to match the seq path: a finish sharing the verdict's exact millisecond is
+    // concurrent-or-newer and must be refused, not waved through, on the legacy ts fallback.
     return;
   }
   throw new Error(

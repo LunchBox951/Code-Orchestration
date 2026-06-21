@@ -233,6 +233,53 @@ describe('mail.retracted — the sender withdraws a message (tombstone)', () => 
     }
   });
 
+  it('refuses to retract an escalation that has already been forwarded onward (multi-hop)', () => {
+    const mail = openMailStore('p-retract-forwarded-onward');
+    try {
+      const held = mail.send({
+        type: MAIL_ESCALATION,
+        to: 'lead',
+        from: 'worker',
+        subject: 'blocked',
+        body: 'need authority',
+      });
+      const e1 = mail.forward(held, {
+        type: MAIL_ESCALATION,
+        to: 'coordinator',
+        from: 'lead',
+        subject: held.subject,
+        body: held.body,
+        correlationId: String(held.seq),
+        causationId: String(held.seq),
+      });
+      // The coordinator forwards e1 ONWARD to the operator (the thread id stays the original held.seq).
+      const e2 = mail.forward(e1, {
+        type: MAIL_ESCALATION,
+        to: 'operator',
+        from: 'coordinator',
+        subject: e1.subject,
+        body: e1.body,
+        correlationId: e1.correlationId ?? String(held.seq),
+        causationId: String(e1.seq),
+      });
+
+      // Exactly one outstanding obligation, held by the operator at the top of the chain.
+      expect(mail.outstandingCount('operator')).toBe(1);
+      expect(mail.outstandingCount('coordinator')).toBe(0);
+      expect(mail.outstandingCount('lead')).toBe(0);
+
+      // The lead can no longer withdraw e1 — it has climbed the chain and is not the lead's to
+      // retract. Allowing it would strand the e1->e2 link and double-count the obligation.
+      expect(() => mail.retract('lead', e1.seq)).toThrow(/forwarded onward/i);
+
+      // The single obligation and the relay chain are intact.
+      expect(mail.outstandingCount('operator')).toBe(1);
+      expect(e2.recipient).toBe('operator');
+    } finally {
+      mail.close();
+    }
+  });
+
   it('a retracted actionable item cannot be replied to later through a stale handle', () => {
     const mail = openMailStore('p-retract-stale-reply');
     try {

@@ -113,6 +113,21 @@ describe('AC-L2-3 — completeness gate: RED for a stub/partial tool', () => {
     expect(violations.every((v) => v.tool === BOGUS)).toBe(true);
   });
 
+  it('(a) accepts a field described BEFORE a wrapper (.describe().optional()) — order-independent', () => {
+    const violations = checkToolCompleteness(
+      realPlus(
+        bogus({
+          // The description lives on the inner type, not the outer ZodOptional; the gate must still
+          // see it rather than depend on .describe() being applied last.
+          inputSchema: z.object({
+            x: z.number().describe('described, then made optional').optional(),
+          }),
+        }),
+      ),
+    );
+    expect(violations.filter((v) => v.tool === BOGUS)).toEqual([]);
+  });
+
   it('(a) a tool whose inputSchema is not a ZodObject is flagged (self-describing + not mountable)', () => {
     const violations = checkToolCompleteness(
       realPlus(bogus({ inputSchema: z.string().describe('not an object') })),

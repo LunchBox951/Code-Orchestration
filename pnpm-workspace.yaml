@@ -1,3 +1,16 @@
 packages:
   - "packages/*"
   - "apps/*"
+
+# Relocated from package.json#pnpm (no longer read by pnpm 10.33+, which warns it ignores it).
+# esbuild/hono/undici are CVE-motivated security pins; keeping them here keeps them effective.
+overrides:
+  esbuild: "^0.28.1"
+  hono: "^4.12.25"
+  undici: "^6.27.0"
+
+onlyBuiltDependencies:
+  - electron
+  - electron-winstaller
+  - esbuild
+  - node-pty
