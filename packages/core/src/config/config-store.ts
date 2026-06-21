@@ -9,12 +9,19 @@ import {
   configUpcasters,
   globalConfigScope,
   makeConfigSetEvent,
+  makeConfigClearEvent,
   projectConfigScope,
 } from './events.js';
 import { ConfigProjector, ensureConfigTable } from './config-projector.js';
 
 /** Effective config = a resolved key→value map (global ⊕ project-overrides). */
 export type EffectiveConfig = Readonly<Record<string, unknown>>;
+
+/** The two cascade layers read separately (for source indicators in the UI). */
+export interface ConfigLayers {
+  readonly global: EffectiveConfig;
+  readonly project: EffectiveConfig;
+}
 
 /**
  * The config cascade (AC-L0-4). Two layers — a global base and per-project
@@ -28,6 +35,12 @@ export interface ConfigStore {
   setProjectOverride(projectId: ProjectId, key: string, value: unknown): void;
   /** global ⊕ project-overrides; project wins per key; reads program-data ONLY. */
   resolveEffective(projectId: ProjectId): EffectiveConfig;
+  /** Remove a key from the global base layer (reset to its built-in default). */
+  clearGlobal(key: string): void;
+  /** Remove a key from a project override layer (reset to the inherited global). */
+  clearProjectOverride(projectId: ProjectId, key: string): void;
+  /** The global and project layers read separately (NOT merged); reads program-data ONLY. */
+  resolveLayers(projectId: ProjectId): ConfigLayers;
   /** Close the underlying global store (lifecycle helper; not part of the C.3 contract). */
   close(): void;
 }
@@ -48,6 +61,25 @@ export function openConfigStore(): ConfigStore {
     });
   };
 
+  /** One tx: append the `config.clear` event → decode → fold (DELETE the row). */
+  const clearInScope = (scope: string, key: string): void => {
+    store.transaction((tx) => {
+      const [stored] = tx.append([makeConfigClearEvent(scope, key)]);
+      applyEvent(tx, decode(stored!, configUpcasters, configSchemas), projectors);
+    });
+  };
+
+  /** Read ONE layer's rows into a plain key→value map (program-data only). */
+  const readScope = (db: DatabaseSync, layer: string): Record<string, unknown> => {
+    ensureConfigTable(db);
+    const out: Record<string, unknown> = {};
+    const rows = db.prepare('SELECT key, value FROM config WHERE scope = ? ORDER BY key').all(layer);
+    for (const row of rows) {
+      out[String(row.key)] = JSON.parse(String(row.value));
+    }
+    return out;
+  };
+
   return {
     setGlobal(key: string, value: unknown): void {
       setInScope(globalConfigScope(), key, value);
@@ -60,19 +92,28 @@ export function openConfigStore(): ConfigStore {
     resolveEffective(projectId: ProjectId): EffectiveConfig {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
-        ensureConfigTable(db);
-        const merged: Record<string, unknown> = {};
-        const readLayer = (layer: string): void => {
-          const rows = db
-            .prepare('SELECT key, value FROM config WHERE scope = ? ORDER BY key')
-            .all(layer);
-          for (const row of rows) {
-            merged[String(row.key)] = JSON.parse(String(row.value));
-          }
-        };
-        readLayer(GLOBAL_CONFIG_LAYER); // base layer (lower precedence)
-        readLayer(projectId); // project overrides win — same keys overwrite the base
-        return Object.freeze(merged);
+        return Object.freeze({
+          ...readScope(db, GLOBAL_CONFIG_LAYER), // base layer (lower precedence)
+          ...readScope(db, projectId), // project overrides win — same keys overwrite the base
+        });
+      });
+    },
+
+    clearGlobal(key: string): void {
+      clearInScope(globalConfigScope(), key);
+    },
+
+    clearProjectOverride(projectId: ProjectId, key: string): void {
+      clearInScope(projectConfigScope(projectId), key);
+    },
+
+    resolveLayers(projectId: ProjectId): ConfigLayers {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        return Object.freeze({
+          global: Object.freeze(readScope(db, GLOBAL_CONFIG_LAYER)),
+          project: Object.freeze(readScope(db, projectId)),
+        });
       });
     },
 

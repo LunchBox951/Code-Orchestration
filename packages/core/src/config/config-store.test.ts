@@ -9,7 +9,13 @@ import { rebuildAll } from '../replay/projector.js';
 import { decode } from '../replay/decode.js';
 import { openConfigStore } from './config-store.js';
 import { ConfigProjector, ensureConfigTable } from './config-projector.js';
-import { configSchemas, configUpcasters } from './events.js';
+import {
+  configSchemas,
+  configUpcasters,
+  EVENT_CONFIG_CLEAR,
+  configClearSchema,
+  makeConfigClearEvent,
+} from './events.js';
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -302,6 +308,84 @@ describe('ConfigStore — projection determinism', () => {
       }
     } finally {
       store.close();
+    }
+  });
+});
+
+describe('config.clear (AC-SET-2)', () => {
+  it('registers a schema and builds a valid clear event for a layer scope', () => {
+    expect(configSchemas.get(EVENT_CONFIG_CLEAR)).toBeDefined();
+    const ev = makeConfigClearEvent('config:global', 'repo.mode');
+    expect(ev.type).toBe(EVENT_CONFIG_CLEAR);
+    expect(ev.scope).toBe('config:global');
+    expect(configClearSchema.parse(ev.payload)).toEqual({ key: 'repo.mode' });
+  });
+
+  it('clearProjectOverride exposes the inherited global; clearGlobal restores the default', () => {
+    const cfg = openConfigStore();
+    try {
+      cfg.setGlobal('repo.mode', 'owner');
+      cfg.setProjectOverride('p1', 'repo.mode', 'offline');
+      expect(cfg.resolveEffective('p1')['repo.mode']).toBe('offline');
+
+      cfg.clearProjectOverride('p1', 'repo.mode');
+      expect(cfg.resolveEffective('p1')['repo.mode']).toBe('owner'); // inherited from global
+
+      cfg.clearGlobal('repo.mode');
+      expect(Object.prototype.hasOwnProperty.call(cfg.resolveEffective('p1'), 'repo.mode')).toBe(
+        false,
+      );
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('clearing an absent key is a no-op', () => {
+    const cfg = openConfigStore();
+    try {
+      expect(() => cfg.clearGlobal('nope')).not.toThrow();
+      expect(() => cfg.clearProjectOverride('p1', 'nope')).not.toThrow();
+      expect(cfg.resolveEffective('p1')).toEqual({});
+    } finally {
+      cfg.close();
+    }
+  });
+
+  it('AC-SET-2: rebuildAll reproduces the read-model byte-for-byte across set+clear', () => {
+    const cfg = openConfigStore();
+    cfg.setGlobal('a', 1);
+    cfg.setProjectOverride('p', 'a', 2);
+    cfg.clearProjectOverride('p', 'a'); // delete a project row
+    cfg.setGlobal('b', 'x');
+    cfg.clearGlobal('b'); // delete...
+    cfg.setGlobal('b', 'y'); // ...then re-set
+    cfg.close();
+
+    const store = openGlobalStore();
+    try {
+      const live = snapshotConfig(store);
+      rebuildAll(store, [new ConfigProjector()], (e) => decode(e, configUpcasters, configSchemas));
+      const replayed = snapshotConfig(store);
+      expect(replayed).toBe(live);
+      expect(live).not.toBe('[]');
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('ConfigStore — resolveLayers', () => {
+  it('returns the global and project layers separately (for source indicators)', () => {
+    const cfg = openConfigStore();
+    try {
+      cfg.setGlobal('a', 1);
+      cfg.setProjectOverride('p', 'a', 2);
+      cfg.setProjectOverride('p', 'b', 3);
+      const layers = cfg.resolveLayers('p');
+      expect(layers.global).toEqual({ a: 1 });
+      expect(layers.project).toEqual({ a: 2, b: 3 });
+    } finally {
+      cfg.close();
     }
   });
 });

@@ -50,6 +50,9 @@ export const GLOBAL_CONFIG_LAYER = 'global';
 /** Single config event type; one generic key→value set per event (seed schema minimal). */
 export const EVENT_CONFIG_SET = 'config.set' as const;
 
+/** Config-clear event type; removes ONE key from ONE layer (reset to inherited/default). */
+export const EVENT_CONFIG_CLEAR = 'config.clear' as const;
+
 /** Current payload schema version — v1; no upcasters yet (see {@link configUpcasters}). */
 export const CONFIG_EVENT_V = 1;
 
@@ -66,9 +69,21 @@ export const configSetSchema = z.object({
 });
 export type ConfigSet = z.infer<typeof configSetSchema>;
 
+/**
+ * `config.clear` — remove one key from a layer. The companion to `config.set`:
+ * folding it DELETEs the (scope, key) row from the read-model, so the cascade
+ * falls back to the inherited (project-clear) or built-in default (global-clear)
+ * value. Replaying set→clear→set reproduces the final state exactly (ST-1).
+ */
+export const configClearSchema = z.object({
+  key: z.string(),
+});
+export type ConfigClear = z.infer<typeof configClearSchema>;
+
 /** Current-version schema per event type — validated on append AND on read (decode). */
 export const configSchemas: SchemaMap = new Map<string, z.ZodType>([
   [EVENT_CONFIG_SET, configSetSchema],
+  [EVENT_CONFIG_CLEAR, configClearSchema],
 ]);
 
 /** No payload migrations at v1 (an empty chain is the identity upcast). */
@@ -104,5 +119,16 @@ export function makeConfigSetEvent(scope: string, key: string, value: unknown): 
     type: EVENT_CONFIG_SET,
     v: CONFIG_EVENT_V,
     payload: configSetSchema.parse({ key, value }),
+  };
+}
+
+/** Build + validate a `config.clear` event for `scope` (payload validated before append). */
+export function makeConfigClearEvent(scope: string, key: string): NewEvent {
+  return {
+    projectId: GLOBAL_PROJECT_ID,
+    scope,
+    type: EVENT_CONFIG_CLEAR,
+    v: CONFIG_EVENT_V,
+    payload: configClearSchema.parse({ key }),
   };
 }
