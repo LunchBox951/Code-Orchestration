@@ -127,7 +127,11 @@ interface CoShellBridge {
 
 const bridge: CoShellBridge = {
   navigate(view: NavView) {
-    void ipcRenderer.invoke('nav:navigate', view);
+    // Surface (don't void-swallow) a rejected nav IPC so a future main-process guard mismatch fails
+    // loud in the console rather than silently bouncing the operator's view (Principle 9).
+    ipcRenderer.invoke('nav:navigate', view).catch((err: unknown) => {
+      console.error('co: nav:navigate failed', err);
+    });
   },
   async projectInfo(): Promise<ProjectInfo | null> {
     return ipcRenderer.invoke<ProjectInfo | null>('project:info');

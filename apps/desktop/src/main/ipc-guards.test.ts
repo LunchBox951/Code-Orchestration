@@ -16,7 +16,8 @@ import {
 describe('main IPC runtime guards', () => {
   it('accepts registered nav views and rejects arbitrary renderer strings', () => {
     expect(requireNavView('mail')).toBe('mail');
-    expect(() => requireNavView('settings')).toThrow(/nav view/i);
+    expect(requireNavView('settings')).toBe('settings');
+    expect(() => requireNavView('bogus-view')).toThrow(/nav view/i);
   });
 
   it('accepts mail tabs and rejects arbitrary renderer strings', () => {

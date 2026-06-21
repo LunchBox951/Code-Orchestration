@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
-import type { ApprovalReply, ArchiveEntry, OperatorMailRef, ProjectId, ReplyDraft } from '@co/core';
+import type { ArchiveEntry, ProjectId } from '@co/core';
 import { openArchiveStore, openRegistry } from '@co/core';
 import { createAppShell } from './app-shell.js';
 import { createDaemonSupervisor } from './daemon-supervisor.js';
@@ -176,13 +176,6 @@ function requireString(value: unknown, label: string): string {
   throw new Error(`Invalid ${label}: expected a string.`);
 }
 
-function asRecord(value: unknown, label: string): Record<string, unknown> {
-  if (value != null && typeof value === 'object' && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  throw new Error(`Invalid ${label}: expected an object.`);
-}
-
 function listArchiveFromStore(projectId: ProjectId): readonly ArchiveEntry[] {
   const archive = openArchiveStore(projectId);
   try {
@@ -197,49 +190,6 @@ function listArchiveFromStore(projectId: ProjectId): readonly ArchiveEntry[] {
   } finally {
     archive.close();
   }
-}
-
-function requireMailTarget(value: unknown): OperatorMailRef {
-  const target = asRecord(value, 'mail target');
-  return {
-    seq: requireFiniteSeq(target['seq'], 'mail target seq'),
-    recipient: requireNonEmptyString(target['recipient'], 'mail target recipient'),
-  };
-}
-
-function requireReplyDraft(value: unknown): ReplyDraft {
-  const draft = asRecord(value, 'reply draft');
-  return {
-    type: requireMailType(draft['type']),
-    subject: requireString(draft['subject'], 'reply subject'),
-    body: requireString(draft['body'], 'reply body'),
-    ...(typeof draft['from'] === 'string' ? { from: draft['from'] } : {}),
-    ...(typeof draft['idempotencyKey'] === 'string'
-      ? { idempotencyKey: draft['idempotencyKey'] }
-      : {}),
-    ...(draft['decision'] === 'approve' || draft['decision'] === 'decline'
-      ? { decision: draft['decision'] }
-      : {}),
-    ...(draft['reviewVerdict'] === 'PASS' || draft['reviewVerdict'] === 'ISSUES'
-      ? { reviewVerdict: draft['reviewVerdict'] }
-      : {}),
-    ...(typeof draft['reviewContextFingerprint'] === 'string'
-      ? { reviewContextFingerprint: draft['reviewContextFingerprint'] }
-      : {}),
-  };
-}
-
-function requireApprovalReply(value: unknown): ApprovalReply {
-  const reply = asRecord(value, 'approval reply');
-  const decision = reply['decision'];
-  if (decision !== 'approve' && decision !== 'decline') {
-    throw new Error(`Invalid approval decision: ${String(decision)}`);
-  }
-  return {
-    decision,
-    subject: requireString(reply['subject'], 'approval subject'),
-    body: requireString(reply['body'], 'approval body'),
-  };
 }
 
 ipcMain.handle('nav:navigate', (_event, view: unknown) => {
@@ -316,38 +266,6 @@ ipcMain.handle('mail:submitReply', async () => {
   return controller.shell?.mail.state ?? null;
 });
 
-ipcMain.handle('mail:reply', async (_event, target: unknown, draft: unknown) => {
-  const shell = controller.shell;
-  if (shell == null) return { ok: false, error: 'shell not ready' };
-  try {
-    await shell.client.reply(requireMailTarget(target), requireReplyDraft(draft));
-    shell.refreshMail();
-    return { ok: true };
-  } catch (e: unknown) {
-    const msg = desktopErrorMessage(e, 'send mail');
-    sendToRenderer('mail:error', msg);
-    return { ok: false, error: msg };
-  }
-});
-
-ipcMain.handle('mail:approve', async (_event, approvalSeq: unknown, reply: unknown) => {
-  const shell = controller.shell;
-  if (shell == null) return { ok: false, error: 'shell not ready' };
-  try {
-    await shell.client.approve(
-      requireFiniteSeq(approvalSeq, 'approval seq'),
-      requireApprovalReply(reply),
-    );
-    shell.refreshMail();
-    await shell.connection.refresh();
-    return { ok: true };
-  } catch (e: unknown) {
-    const msg = desktopErrorMessage(e, 'approve or decline');
-    sendToRenderer('mail:error', msg);
-    return { ok: false, error: msg };
-  }
-});
-
 ipcMain.handle('mail:quickApprove', async (_event, approvalSeq: unknown) => {
   try {
     await controller.shell?.mail.approve(requireFiniteSeq(approvalSeq, 'approval seq'));
@@ -382,23 +300,6 @@ ipcMain.handle('mail:declineWithComposer', async (_event, approvalSeq: unknown) 
     // createAppShell already emitted a user-visible mail:error; return current draft state.
   }
   return controller.shell?.mail.state ?? null;
-});
-
-ipcMain.handle('mail:markRead', async (_event, recipient: unknown, seq: unknown) => {
-  const shell = controller.shell;
-  if (shell == null) return { ok: false, error: 'shell not ready' };
-  try {
-    await shell.client.markRead(
-      requireNonEmptyString(recipient, 'mail recipient'),
-      requireFiniteSeq(seq, 'mail seq'),
-    );
-    shell.refreshMail();
-    return { ok: true };
-  } catch (e: unknown) {
-    const msg = desktopErrorMessage(e, 'mark mail read');
-    sendToRenderer('mail:error', msg);
-    return { ok: false, error: msg };
-  }
 });
 
 ipcMain.handle('mail:refresh', () => {
