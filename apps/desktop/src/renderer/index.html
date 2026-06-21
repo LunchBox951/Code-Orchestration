@@ -909,6 +909,17 @@
         color: var(--text-faint);
       }
 
+      /* subtree grouping — each top-level coordinator + descendants */
+      .subtree-group {
+        border: 1px solid oklch(0.28 0.006 262);
+        border-radius: 8px;
+        padding: 4px;
+        margin-bottom: 6px;
+      }
+      .subtree-group:last-child {
+        margin-bottom: 0;
+      }
+
       /* action-required cards */
       .action-card {
         display: block;

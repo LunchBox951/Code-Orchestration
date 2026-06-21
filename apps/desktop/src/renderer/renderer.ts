@@ -602,7 +602,9 @@ function renderDashboard(): void {
 
   const fleetBody =
     pruned.tree.length > 0
-      ? renderTreeRows(pruned.tree, 0)
+      ? pruned.tree
+          .map((root) => `<div class="subtree-group">${renderTreeRows([root], 0)}</div>`)
+          .join('')
       : pruned.hidden > 0
         ? `<div class="empty-inline">
            <span class="glyph">✓</span>

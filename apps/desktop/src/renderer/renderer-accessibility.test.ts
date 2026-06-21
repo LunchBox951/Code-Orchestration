@@ -208,3 +208,16 @@ describe('New-coordinator composer — always-on + name field (C1)', () => {
     expect(emptyBlock).not.toContain('form.innerHTML');
   });
 });
+
+describe('Subtree grouping in the fleet tree (C2)', () => {
+  it('renderer wraps each top-level node in a subtree-group div', () => {
+    expect(rendererSource).toContain('subtree-group');
+    // Each root is individually mapped — confirm the per-root renderTreeRows call pattern
+    expect(rendererSource).toContain('.map((root) =>');
+    expect(rendererSource).toContain('renderTreeRows([root]');
+  });
+
+  it('index.html defines .subtree-group CSS', () => {
+    expect(htmlSource).toContain('.subtree-group');
+  });
+});
