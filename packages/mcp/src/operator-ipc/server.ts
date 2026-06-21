@@ -24,7 +24,6 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   assertNever,
-  coordinatorIdFromParts,
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
   MAIL_CLARIFY_REQUEST,
@@ -35,10 +34,13 @@ import {
   OPERATOR_IPC_TICK,
   OPERATOR_IPC_TRANSCRIPT,
   buildHumanReviewVerdict,
+  mintAvailableCoordinatorId,
   openMailStore,
   openRegistry,
   openReviewStore,
+  openRosterStore,
   startCoordinatorSession,
+  type ArchiveStore,
   type ApprovalDecision,
   type DeliveredMail,
   type LiveObservabilitySnapshot,
@@ -47,6 +49,7 @@ import {
   type OperatorIpcMethod,
   type ProjectId,
   type ProjectRegistry,
+  type RosterStore,
   type ReviewContext,
   type ReviewStore,
   type ReviewVerdictValue,
@@ -90,6 +93,12 @@ export interface OperatorIpcServerDeps {
   readonly chmodSocket?: (socketPath: string, mode: number) => void;
   /** Opens the global registry to resolve the repo path for `startSession`. Default: {@link openRegistry}. */
   readonly openRegistryFn?: () => ProjectRegistry;
+  /** Opens the roster to avoid coordinator id collisions while minting startSession ids. */
+  readonly openRoster?: (projectId: ProjectId) => RosterStore;
+  /** Opens archived branches to avoid coordinator id collisions with archived roots. */
+  readonly openArchive?: (projectId: ProjectId) => ArchiveStore;
+  /** Entropy seam for name-derived coordinator ids. */
+  readonly randomHex?: () => string;
   /** The start primitive for `startSession`. Default: {@link startCoordinatorSession}. */
   readonly startFn?: typeof startCoordinatorSession;
 }
@@ -103,6 +112,10 @@ function isOperatorIpcMethod(method: string): method is OperatorIpcMethod {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof AggregateError) {
+    const inner = error.errors.map((e) => errorMessage(e)).filter((msg) => msg.length > 0);
+    return inner.length > 0 ? `${error.message}: ${inner.join('; ')}` : error.message;
+  }
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -233,6 +246,9 @@ export class OperatorIpcServer {
   private readonly onError: ((error: unknown) => void) | undefined;
   private readonly chmodSocket: (socketPath: string, mode: number) => void;
   private readonly openRegistryFn: () => ProjectRegistry;
+  private readonly openRoster: (projectId: ProjectId) => RosterStore;
+  private readonly openArchive: ((projectId: ProjectId) => ArchiveStore) | undefined;
+  private readonly randomHex: () => string;
   private readonly startFn: typeof startCoordinatorSession;
   private readonly transport: SocketServerTransport;
   private readonly pendingTranscriptPushes = new Map<string, { offset: number; chunk: string }>();
@@ -248,6 +264,9 @@ export class OperatorIpcServer {
     this.onError = deps.onError;
     this.chmodSocket = deps.chmodSocket ?? chmodSync;
     this.openRegistryFn = deps.openRegistryFn ?? openRegistry;
+    this.openRoster = deps.openRoster ?? openRosterStore;
+    this.openArchive = deps.openArchive;
+    this.randomHex = deps.randomHex ?? (() => randomBytes(3).toString('hex'));
     this.startFn = deps.startFn ?? startCoordinatorSession;
     this.transport = new SocketServerTransport(this.socketPath);
     this.transport.onmessage = (message): void => this.onMessage(message);
@@ -387,7 +406,7 @@ export class OperatorIpcServer {
         await this.control.deleteAgent(requireString(params, 'agentId'));
         return {};
       case OPERATOR_IPC_METHODS.rewake:
-        // B4 — clear suppression then post an actionable clarify_request from @operator.
+        // B4 — post actionable follow-up work, then clear suppression.
         return (await this.handleRewake(params)) as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.sendInput:
         // Stage 15 §7 — raw keystroke passthrough: operator writes into the agent's warm PTY stdin.
@@ -402,7 +421,7 @@ export class OperatorIpcServer {
         );
         return {};
       case OPERATOR_IPC_METHODS.listArchive:
-        // B5 — READ: list archived coordinator branches; wrapped in { entries } so the result is an
+        // B5 — READ: list archived branches; wrapped in { entries } so the result is an
         // object (JSON-RPC 2.0 result MUST be an object — never an array on the wire).
         return { entries: await this.control.listArchive() } as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.restoreArchive:
@@ -424,7 +443,12 @@ export class OperatorIpcServer {
    * (Principle 9) unless exactly one of `prompt` / `specBody` is supplied.
    */
   private async handleStartSession(params: WirePayload): Promise<StartSessionResult> {
-    const name = requireString(params, 'name');
+    const name = requireString(params, 'name').trim();
+    if (name.length === 0) {
+      throw new InvalidParamsError(
+        "operator IPC: missing/invalid 'name' (expected a non-empty string).",
+      );
+    }
     const prompt = typeof params['prompt'] === 'string' ? params['prompt'].trim() : '';
     const specBody = typeof params['specBody'] === 'string' ? params['specBody'].trim() : '';
     const fromPrompt = prompt.length > 0;
@@ -445,10 +469,13 @@ export class OperatorIpcServer {
     if (repoCwd == null) {
       throw new Error(`operator IPC startSession: unknown project id '${this.projectId}'.`);
     }
-    // Mint a name-derived unique coordinator id (adapter-side entropy; 24-bit hex makes collision
-    // astronomically unlikely — a genuine collision fails loud when slingWorktree's `git worktree add`
-    // hits an existing branch, Principle 9). No roster collision re-roll needed.
-    const coordinatorId = coordinatorIdFromParts(name, randomBytes(3).toString('hex'));
+    // Mint a name-derived unique coordinator id through the core policy; retry boundedly on roster and
+    // archive collisions so duplicate names remain valid.
+    const coordinatorId = mintAvailableCoordinatorId(this.projectId, name, {
+      randomHex: this.randomHex,
+      ...(this.openArchive != null ? { openArchive: this.openArchive } : {}),
+      openRoster: this.openRoster,
+    });
     return this.startFn({
       projectId: this.projectId,
       repoCwd,
@@ -485,14 +512,27 @@ export class OperatorIpcServer {
   }
 
   /**
-   * Re-wake an agent: clear all suppression state (stopped/paused/stuck) via
-   * `this.control.router.unstop`, then post an actionable `clarify_request` from `@operator` through
-   * the daemon's own store (single writer — MNR #2), so `selectEligible` wakes the recipient on its
-   * next tick. Mirrors {@link handleOperatorMessage} but ALWAYS unstops first.
+   * Re-wake an agent: post an actionable `clarify_request` from `@operator` through the daemon's own
+   * store (single writer — MNR #2), then clear suppression via `this.control.router.unstop`, so
+   * `selectEligible` wakes the recipient on its next tick. Mirrors {@link handleOperatorMessage} but
+   * also unstops after the mail commit.
    */
   private async handleRewake(params: WirePayload): Promise<DeliveredMail> {
     const agentId = requireString(params, 'agentId');
-    const message = requireString(params, 'message');
+    const message = requireString(params, 'message').trim();
+    if (message.length === 0) {
+      throw new InvalidParamsError(
+        "operator IPC: missing/invalid 'message' (expected a non-empty string).",
+      );
+    }
+    const roster = this.openRoster(this.projectId);
+    try {
+      if (roster.getAgent(agentId) == null) {
+        throw new Error(`operator IPC rewake: unknown or unregistered agent '${agentId}'.`);
+      }
+    } finally {
+      roster.close();
+    }
     const mail = this.openMail(this.projectId);
     let delivered: DeliveredMail;
     try {

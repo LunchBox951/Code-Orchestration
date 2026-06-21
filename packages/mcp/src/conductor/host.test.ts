@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  MAIL_REVIEW_REQUEST,
   OPERATOR,
   ReconcileLoop,
   defaultMailRenderer,
@@ -26,6 +27,7 @@ import {
   openSessionStore,
   openWorktreeStore,
   WEDGE_MS,
+  worktreePathFor,
   type BreakInfo,
   type DeliveredMail,
   type MailStore,
@@ -1021,11 +1023,146 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     await runner.stop();
   });
 
-  it('control.purgeArchive removes the record even when `git branch -D` fails (already-gone branch)', async () => {
+  it('control.deleteAgent keeps router suppression when durable teardown fails', async () => {
+    const { projectId } = makeProject();
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    worktrees.recordWorktree({
+      branch: 'co/coord-x',
+      baseRef: 'main',
+      baseSha: 'abc123',
+      path: worktreePathFor(projectId, 'co/coord-x'),
+      parent: OPERATOR,
+      agent: 'coord-x',
+      role: 'coordinator',
+    });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const runner = await serveConductor({
+      projectId,
+      pty: new FakePty(),
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+
+    expect(runner.control!.router.shouldSkip(projectId, 'coord-x')).toBe(false);
+
+    await expect(runner.control!.deleteAgent('coord-x')).rejects.toBeInstanceOf(AggregateError);
+
+    expect(runner.control!.router.shouldSkip(projectId, 'coord-x')).toBe(true);
+
+    const rosterCheck = openRosterStore(projectId);
+    try {
+      expect(rosterCheck.getAgent('coord-x')).toBeDefined();
+    } finally {
+      rosterCheck.close();
+    }
+
+    await runner.stop();
+  });
+
+  it('control.deleteAgent preflights review mail before suppressing or releasing panes', async () => {
+    const { projectId, cwd } = makeProject();
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+    roster.recordAgent({ agentId: 'child-x', role: 'implementer', parent: 'coord-x' });
+
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    mail.requestHumanReview(
+      {
+        type: MAIL_REVIEW_REQUEST,
+        to: OPERATOR,
+        from: 'child-x',
+        subject: 'Review co/child-x',
+        body: 'Please review this branch.',
+        idempotencyKey: 'review-request:delete-preflight-host',
+      },
+      {
+        reviewId: 'delete-preflight-host',
+        target: 'main',
+        branch: 'co/child-x',
+        scope: 'worker_merge',
+        reviewerKind: 'human',
+        requestedBy: 'child-x',
+        specRefKind: 'no-locked-spec',
+      },
+    );
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+
+    const ensureChild = engine.ensureHosted({
+      ...makeIdentity('child-x', projectId, cwd),
+      role: 'implementer',
+      parent: 'coord-x',
+    });
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    await ensureChild;
+
+    await expect(runner.control!.deleteAgent('coord-x')).rejects.toThrow(
+      /review mail blocks teardown/i,
+    );
+
+    expect(engine.isHosted(projectId, 'child-x')).toBe(true);
+    expect(runner.control!.router.shouldSkip(projectId, 'coord-x')).toBe(false);
+    expect(runner.control!.router.shouldSkip(projectId, 'child-x')).toBe(false);
+
+    await runner.stop();
+  });
+
+  it('control.deleteAgent rejects an unknown root without poisoning router suppression', async () => {
+    const { projectId } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const runner = await serveConductor({
+      projectId,
+      pty: new FakePty(),
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+
+    expect(runner.control!.router.shouldSkip(projectId, 'missing-agent')).toBe(false);
+
+    await expect(runner.control!.deleteAgent('missing-agent')).rejects.toThrow(
+      /not found|unknown/i,
+    );
+
+    expect(runner.control!.router.shouldSkip(projectId, 'missing-agent')).toBe(false);
+
+    await runner.stop();
+  });
+
+  it('control.purgeArchive keeps the record and rejects when `git branch -D` fails', async () => {
     const { projectId } = makeProject();
 
     // Seed an archive record. The test `cwd` is NOT a real git repo, so the real `git branch -D` the
-    // host wiring runs WILL fail — exactly the F3 race (branch already gone). The record must still go.
+    // host wiring runs WILL fail. The record must remain so a later Purge/Restore can retry/recover.
     const seed = openArchiveStore(projectId);
     try {
       seed.appendRecord({
@@ -1055,23 +1192,118 @@ describe('serveConductor — wires the full stack over injected seams (no real b
       onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
     });
 
-    // purgeArchive must NOT throw even though the underlying `git branch -D` fails.
-    await expect(runner.control!.purgeArchive('coord-archived')).resolves.toBeUndefined();
+    // purgeArchive must fail loud when the underlying `git branch -D` fails.
+    await expect(runner.control!.purgeArchive('coord-archived')).rejects.toThrow(/branch -D/i);
 
     // The git failure was reported diagnostically (never silently swallowed — Principle 9)...
     expect(errors.some((e) => /purgeArchive.*git branch -D/i.test(e))).toBe(true);
 
-    // ...and the archive record is gone REGARDLESS of the git outcome (record not stranded).
+    // ...and the archive record remains for retry/recovery.
     const check = openArchiveStore(projectId);
     try {
-      expect(check.getRecord('coord-archived')).toBeUndefined();
-      expect(check.listRecords()).toHaveLength(0);
+      expect(check.getRecord('coord-archived')).toBeDefined();
+      expect(check.listRecords()).toHaveLength(1);
     } finally {
       check.close();
     }
 
-    // A repeat purge on the now-unknown id is an idempotent benign no-op (no throw).
+    await runner.stop();
+  });
+
+  it('control.purgeArchive removes the archive record when the branch was already deleted', async () => {
+    const { projectId } = makeProject();
+
+    const seed = openArchiveStore(projectId);
+    try {
+      seed.appendRecord({
+        id: 'coord-archived',
+        name: 'archived coord',
+        branch: 'co/coord-archived',
+        baseRef: 'main',
+        deletedAt: Date.now(),
+        expiresAt: Date.now() + 86_400_000,
+      });
+    } finally {
+      seed.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const errors: string[] = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+      gitExec: () => {
+        throw new Error("error: branch 'co/coord-archived' not found");
+      },
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
     await expect(runner.control!.purgeArchive('coord-archived')).resolves.toBeUndefined();
+
+    const check = openArchiveStore(projectId);
+    try {
+      expect(check.getRecord('coord-archived')).toBeUndefined();
+    } finally {
+      check.close();
+    }
+    expect(errors.some((e) => /purgeArchive.*git branch -D/i.test(e))).toBe(false);
+
+    await runner.stop();
+  });
+
+  it('control.restoreArchive keeps the record and rejects when the archived branch is missing', async () => {
+    const { projectId } = makeProject();
+
+    const seed = openArchiveStore(projectId);
+    try {
+      seed.appendRecord({
+        id: 'coord-archived',
+        name: 'archived coord',
+        branch: 'co/coord-archived',
+        baseRef: 'main',
+        deletedAt: Date.now(),
+        expiresAt: Date.now() + 86_400_000,
+      });
+    } finally {
+      seed.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const errors: string[] = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+      gitExec: () => {
+        throw new Error('fatal: Needed a single revision: refs/heads/co/coord-archived');
+      },
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
+    await expect(runner.control!.restoreArchive('coord-archived')).rejects.toThrow(
+      /restoreArchive/i,
+    );
+
+    const check = openArchiveStore(projectId);
+    try {
+      expect(check.getRecord('coord-archived')).toBeDefined();
+    } finally {
+      check.close();
+    }
+    expect(errors.some((e) => /restoreArchive.*rev-parse/i.test(e))).toBe(true);
 
     await runner.stop();
   });

@@ -18,6 +18,7 @@ import {
   OPERATOR_IPC_METHODS,
   OPERATOR_IPC_TICK,
   OPERATOR_IPC_TRANSCRIPT,
+  openArchiveStore,
   queryObservability,
   type ApprovalReply,
   type ArchiveEntry,
@@ -54,6 +55,22 @@ function errorCode(error: unknown): string | undefined {
 function isExpectedConnectUnavailable(error: unknown): boolean {
   const code = errorCode(error);
   return code !== undefined && EXPECTED_CONNECT_UNAVAILABLE_CODES.has(code);
+}
+
+function archiveEntriesFromStore(projectId: ProjectId): readonly ArchiveEntry[] {
+  const archive = openArchiveStore(projectId);
+  try {
+    return archive.listRecords().map((record) => ({
+      id: record.id,
+      name: record.name,
+      branch: record.branch,
+      baseRef: record.baseRef,
+      deletedAt: record.deletedAt,
+      expiresAt: record.expiresAt,
+    }));
+  } finally {
+    archive.close();
+  }
 }
 
 /** A pending in-flight request awaiting its response by id. */
@@ -183,7 +200,7 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     await this.call(OPERATOR_IPC_METHODS.deleteAgent, { agentId });
   }
 
-  /** B4 — re-wake `agentId`: clear suppression then post a `clarify_request` from `@operator`. */
+  /** B4 — re-wake `agentId`: post follow-up mail, then clear suppression. */
   async rewake(agentId: string, message: string): Promise<DeliveredMail> {
     return (await this.call(OPERATOR_IPC_METHODS.rewake, {
       agentId,
@@ -205,7 +222,7 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     } as unknown as WirePayload);
   }
 
-  /** B5 — list archived coordinator branches (the cross-process read; degraded to `[]` by the facade). */
+  /** B5 — list archived branches (the cross-process read; static-store fallback by the facade). */
   async listArchive(): Promise<readonly ArchiveEntry[]> {
     // The server wraps the array in { entries } so the result is an object (JSON-RPC 2.0 constraint).
     const result = await this.call(OPERATOR_IPC_METHODS.listArchive, {});
@@ -534,7 +551,7 @@ export class OperatorIpcClient {
   }
 
   /**
-   * B4 — re-wake `agentId`: clear suppression then post a `clarify_request` from `@operator`. A
+   * B4 — re-wake `agentId`: post follow-up mail, then clear suppression. A
    * control verb: throws a clear {@link ConductorUnavailableError} when the socket is down (Principle 9).
    */
   rewake(agentId: string, message: string): Promise<DeliveredMail> {
@@ -552,9 +569,8 @@ export class OperatorIpcClient {
   }
 
   /**
-   * B5 — list archived coordinator branches. READ/degrade (mirrors {@link transcript}): with NO socket it
-   * returns an empty `[]` rather than hanging or throwing — the renderer shows nothing until the
-   * Conductor is back. A live socket returns the daemon's list.
+   * B5 — list archived branches. READ/degrade (mirrors {@link observe}): with NO socket it reads the
+   * static archive store rather than hiding preserved branches. A live socket returns the daemon's list.
    */
   async listArchive(): Promise<readonly ArchiveEntry[]> {
     const connection = await this.ensureConnection();
@@ -568,7 +584,7 @@ export class OperatorIpcClient {
         if (this.connection != null) this.report(error);
       }
     }
-    return [];
+    return archiveEntriesFromStore(this.projectId);
   }
 
   /**

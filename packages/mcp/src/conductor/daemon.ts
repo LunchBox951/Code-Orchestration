@@ -34,12 +34,14 @@
  */
 import {
   OPERATOR,
+  openMailStore,
   openRosterStore,
   openSessionStore,
   openWorktreeStore,
   recoverProjectStore,
   type AgentRecord,
   type DeliveredMail,
+  type MailStore,
   type ProjectId,
   type ReconcileLoop,
   type ReconcileTickResult,
@@ -48,7 +50,7 @@ import {
   type SessionStore,
   type WorktreeStore,
 } from '@co/core';
-import type { ConductorEngine, CycleOutcome } from './engine.js';
+import { firstEligibleMail, type ConductorEngine, type CycleOutcome } from './engine.js';
 import type { HostedIdentity } from '../live-session-host.js';
 
 /**
@@ -93,6 +95,8 @@ export interface ConductorDaemonDeps {
    * (the start primitive recorded the worktree keyed to the root's agent id). Default: {@link openWorktreeStore}.
    */
   readonly openWorktrees?: (projectId: ProjectId) => WorktreeStore;
+  /** Opens the mail store to discover cold stopped agents with wake mail. Default: {@link openMailStore}. */
+  readonly openMail?: (projectId: ProjectId) => MailStore;
   /**
    * Stage 10 P3 (§3c) — the OPERATOR-CONTROL candidate-skip predicate. Consulted when the daemon builds
    * its candidate set; an agent for which this returns `true` is FILTERED OUT (not driven this tick). The
@@ -122,6 +126,12 @@ export interface DaemonTickOutcome {
    * drivable. Empty on every tick that launches no root (the common case).
    */
   readonly coldStarted: readonly string[];
+  /** Root cold-start launch failures observed this tick; other launchable roots still continue. */
+  readonly coldStartErrors: readonly LaunchError[];
+  /** Stopped/cold NON-root agents re-woken this tick via the cold launch authority. */
+  readonly coldRewoke: readonly string[];
+  /** Stopped/cold NON-root re-wake launch failures observed this tick; other agents still continue. */
+  readonly coldRewakeErrors: readonly LaunchError[];
   /**
    * Stage 15 P-E (AC-S15-2 / ST-2) — cold recovered NON-root agents RE-WARMED this tick: agents whose
    * recovered session was COLD in this engine process and that the daemon drove back through the single
@@ -162,6 +172,11 @@ export interface ReWarmError {
   readonly message: string;
 }
 
+export interface LaunchError {
+  readonly agent: string;
+  readonly message: string;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -190,6 +205,7 @@ export class ConductorDaemon {
   private readonly openSessions: (projectId: ProjectId) => SessionStore;
   private readonly openRoster: (projectId: ProjectId) => RosterStore;
   private readonly openWorktrees: (projectId: ProjectId) => WorktreeStore;
+  private readonly openMail: (projectId: ProjectId) => MailStore;
   private readonly isSkipped: (projectId: ProjectId, agent: string) => boolean;
   private tickCount = 0;
   private recovered = false;
@@ -218,6 +234,7 @@ export class ConductorDaemon {
     this.openSessions = deps.openSessions ?? openSessionStore;
     this.openRoster = deps.openRoster ?? openRosterStore;
     this.openWorktrees = deps.openWorktrees ?? openWorktreeStore;
+    this.openMail = deps.openMail ?? openMailStore;
     this.isSkipped = deps.isSkipped ?? (() => false);
   }
 
@@ -303,6 +320,9 @@ export class ConductorDaemon {
    *      coordinator (the start primitive registered it + provisioned its worktree but minted NO
    *      session) and LAUNCH it via the engine's single launch authority — which MINTS its session, so
    *      the rebuilt live set below includes it and `runCycle` drives its FIRST turn THIS tick;
+   *   0a. STOPPED NON-ROOT RE-WAKE ({@link coldRewakeNonRootAgents}): discover registered children
+   *      with no running session, a live worktree, and outstanding wake mail, then launch them through
+   *      the same single launch authority so `runCycle` can drive the re-wake mail this tick;
    *   1. reconstruct the live set ({@link buildCandidates});
    *   1a. RE-WARM ATTEMPT ({@link reWarmRecoveredAgents}, Stage 15 P-E / AC-S15-2): offer every COLD
    *      recovered NON-root agent to the SAME single launch authority — generalizing step 0's cold-start
@@ -327,7 +347,9 @@ export class ConductorDaemon {
     // Step 0 (AC-S14-1): cold-start any registered-but-unhosted ROOT coordinator BEFORE building the
     // candidate set, so a freshly-started root (no session yet) is hosted + minted in time to be
     // selected + driven THIS tick. GATED to the root — a recovered child session is never cold-launched.
-    const coldStarted = await this.coldStartRootCoordinators();
+    const { launched: coldStarted, errors: coldStartErrors } =
+      await this.coldStartRootCoordinators();
+    const { launched: coldRewoke, errors: coldRewakeErrors } = await this.coldRewakeNonRootAgents();
 
     const candidates = this.buildCandidates();
     // Step 1a (AC-S15-2 / ST-2): offer the cold recovered NON-root agents to the SAME single launch
@@ -362,6 +384,9 @@ export class ConductorDaemon {
       tick: this.tickCount,
       candidateCount: candidates.length,
       coldStarted,
+      coldStartErrors,
+      coldRewoke,
+      coldRewakeErrors,
       reWarmed,
       reWarmErrors,
       coldCandidates,
@@ -390,14 +415,37 @@ export class ConductorDaemon {
    * minimal spec, while `co-mcp serve` supplies the isolated MCP bridge/config spec in `host.ts`.
    * No wall clock — discovery is pure store reads and the launch carries the daemon's injected seams.
    */
-  private async coldStartRootCoordinators(): Promise<readonly string[]> {
+  private async coldStartRootCoordinators(): Promise<{
+    readonly launched: readonly string[];
+    readonly errors: readonly LaunchError[];
+  }> {
     const roots = this.discoverColdStartRoots();
-    const started: string[] = [];
-    for (const identity of roots) {
-      await this.engine.ensureHosted(identity);
-      started.push(identity.agent);
+    return this.launchColdIdentities(roots);
+  }
+
+  private async coldRewakeNonRootAgents(): Promise<{
+    readonly launched: readonly string[];
+    readonly errors: readonly LaunchError[];
+  }> {
+    const identities = this.discoverColdRewakeAgents();
+    return this.launchColdIdentities(identities);
+  }
+
+  private async launchColdIdentities(identities: readonly HostedIdentity[]): Promise<{
+    readonly launched: readonly string[];
+    readonly errors: readonly LaunchError[];
+  }> {
+    const launched: string[] = [];
+    const errors: LaunchError[] = [];
+    for (const identity of identities) {
+      try {
+        await this.engine.ensureHosted(identity);
+        launched.push(identity.agent);
+      } catch (error: unknown) {
+        errors.push({ agent: identity.agent, message: errorMessage(error) });
+      }
     }
-    return started;
+    return { launched, errors };
   }
 
   /**
@@ -531,10 +579,60 @@ export class ConductorDaemon {
   }
 
   /**
+   * Discover stopped/idle NON-root agents that can be re-woken without an active session row. This is
+   * deliberately separate from recovered-session re-warm: these agents have no running session because
+   * operator Stop closed it, but they still have a registered identity, a live worktree, and actionable
+   * mail written by Re-wake. Launching still goes through `engine.ensureHosted` only.
+   */
+  private discoverColdRewakeAgents(): readonly HostedIdentity[] {
+    const roster = this.openRoster(this.projectId);
+    try {
+      const sessions = this.openSessions(this.projectId);
+      try {
+        const live = new Set(sessions.listSessions().map((session) => session.agentId));
+        const agents = roster
+          .listAgents()
+          .filter(
+            (agent) =>
+              !(agent.role === 'coordinator' && agent.parent === OPERATOR) &&
+              !live.has(agent.agentId) &&
+              !this.engine.isHosted(this.projectId, agent.agentId) &&
+              !this.isSkipped(this.projectId, agent.agentId),
+          );
+        if (agents.length === 0) return [];
+        const worktrees = this.openWorktrees(this.projectId);
+        const mail = this.openMail(this.projectId);
+        try {
+          const liveWorktrees = worktrees.listWorktrees();
+          const identities: HostedIdentity[] = [];
+          for (const agent of agents) {
+            if (firstEligibleMail(mail, agent.agentId) == null) continue;
+            const worktree = liveWorktrees.find((w) => !w.removed && w.agent === agent.agentId);
+            if (worktree == null) continue;
+            identities.push(this.toColdAgentIdentity(agent, worktree.path));
+          }
+          return identities;
+        } finally {
+          mail.close();
+          worktrees.close();
+        }
+      } finally {
+        sessions.close();
+      }
+    } finally {
+      roster.close();
+    }
+  }
+
+  /**
    * Build a root coordinator's launch {@link HostedIdentity}: cwd = its provisioned worktree path,
    * `pane = pane-<id>`, provider `claude`, resume `{ provider:'claude', sessionId:<id> }`.
    */
   private toRootIdentity(agent: AgentRecord, cwd: string): HostedIdentity {
+    return this.toColdAgentIdentity(agent, cwd);
+  }
+
+  private toColdAgentIdentity(agent: AgentRecord, cwd: string): HostedIdentity {
     return {
       agent: agent.agentId,
       role: agent.role,
