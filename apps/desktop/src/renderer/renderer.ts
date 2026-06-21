@@ -679,7 +679,7 @@ function renderDashboard(): void {
   const archivedSection =
     latestArchive.length > 0
       ? `<div class="panel" style="margin-top:16px">
-           <div class="panel-hd"><span class="ttl">Archived</span><span class="meta">unmerged coordinator branches · expires in N days</span></div>
+           <div class="panel-hd"><span class="ttl">Archived</span><span class="meta">unmerged coordinator branches</span></div>
            <div class="panel-body">
              ${latestArchive
                .map((e) => {

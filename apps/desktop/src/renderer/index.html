@@ -1085,6 +1085,38 @@
         border-color: var(--accent);
       }
 
+      /* Inline Re-wake composer — injected after an agent row (renderer.ts). */
+      .rewake-composer {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin: 4px 6px 8px;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg-panel-2);
+      }
+      .rewake-composer .rewake-input {
+        resize: none;
+        border: 1px solid var(--border-strong);
+        border-radius: 6px;
+        outline: none;
+        background: var(--bg-input);
+        color: oklch(0.88 0.005 262);
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 12.5px;
+        line-height: 1.5;
+        padding: 8px;
+      }
+      .rewake-composer .rewake-input:focus {
+        border-color: var(--accent);
+      }
+      .rewake-composer .rewake-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+
       /* ════════════════════════ Agents console ══════════════════════════════ */
       .agents-layout {
         flex: 1;
