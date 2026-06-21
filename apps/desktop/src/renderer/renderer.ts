@@ -712,12 +712,6 @@ function renderDashboard(): void {
       color: 'var(--st-stuck)',
       sub: stats.stuck > 0 ? 'needs decision' : 'all clear',
     },
-    {
-      label: 'Action req.',
-      value: actionCount,
-      color: 'var(--warn)',
-      sub: actionCount > 0 ? 'in your inbox' : 'inbox clear',
-    },
   ];
   const tilesHtml = tiles
     .map(
