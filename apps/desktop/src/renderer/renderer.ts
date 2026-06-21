@@ -104,6 +104,9 @@ let latestDaemon: DaemonStatusPayload | null = null;
 let latestSource: SourceState | null = null;
 // The agentId of a Delete button currently in the pending-confirm state (two-step confirm).
 let pendingDeleteId: string | null = null;
+// The latest archive list from archive:list — refreshed on every dashboard push. Empty until
+// the first fetch resolves or when the shell is down.
+let latestArchive: readonly ArchiveEntry[] = [];
 
 const OPERATOR_BUS = '@operator';
 const knownMailBuses = new Set<string>([OPERATOR_BUS]);
@@ -672,6 +675,26 @@ function renderDashboard(): void {
            <div class="mc-right">${rightCol}</div>
          </div>`;
 
+  // Archived section — rendered below the fleet only when there are archived entries.
+  const archivedSection =
+    latestArchive.length > 0
+      ? `<div class="panel" style="margin-top:16px">
+           <div class="panel-hd"><span class="ttl">Archived</span><span class="meta">unmerged coordinator branches · expires in N days</span></div>
+           <div class="panel-body">
+             ${latestArchive
+               .map((e) => {
+                 const days = Math.max(0, Math.ceil((e.expiresAt - Date.now()) / 86_400_000));
+                 return `<div class="fleet-row" style="display:flex;align-items:center;gap:8px;padding:8px 0">
+                   <span style="flex:1">${esc(e.name)} · <code>${esc(e.branch)}</code> · expires in ${days} day${days === 1 ? '' : 's'}</span>
+                   <button class="btn btn-ghost" data-archive-action="restore" data-archive-id="${esc(e.id)}" type="button">Restore</button>
+                   <button class="btn btn-ghost" data-archive-action="purge" data-archive-id="${esc(e.id)}" type="button">Purge</button>
+                 </div>`;
+               })
+               .join('')}
+           </div>
+         </div>`
+      : '';
+
   container.innerHTML = `
     <div class="mc-head">
       <div>
@@ -682,7 +705,8 @@ function renderDashboard(): void {
     </div>
     ${degradedBanner}
     <div class="stat-tiles">${tilesHtml}</div>
-    ${grid}`;
+    ${grid}
+    ${archivedSection}`;
 
   // Kickoff composer lives in the sibling #session-start-form (so dashboard rerenders
   // never wipe an in-progress draft). Shown whenever the daemon is live (opened/coord/fleet).
@@ -1788,6 +1812,17 @@ document.addEventListener('DOMContentLoaded', () => {
     renderHeader();
     renderDashboard();
     if (latestMailState != null) renderMail(latestMailState);
+    // Fetch the archive list on every dashboard push and re-render once it arrives.
+    // Loop-avoidance: archiveList() resolves to a plain data fetch — it does NOT push another
+    // dashboard:state event, so this callback is not re-entered. We only re-render if the
+    // serialised value actually changed (cheap JSON compare on small lists).
+    void bridge.archiveList().then((a) => {
+      const next = JSON.stringify(a);
+      if (JSON.stringify(latestArchive) !== next) {
+        latestArchive = a;
+        renderDashboard();
+      }
+    });
   });
 
   // ── Mail ──────────────────────────────────────────────────────────────────────
@@ -1886,6 +1921,33 @@ document.addEventListener('DOMContentLoaded', () => {
         prev.textContent = 'Delete';
       }
       pendingDeleteId = null;
+    }
+
+    // ── Archive actions (Restore / Purge) ────────────────────────────────────
+    const archiveBtn = target.closest<HTMLElement>('[data-archive-action]');
+    if (archiveBtn?.dataset['archiveId'] != null) {
+      e.stopPropagation();
+      const archiveAction = archiveBtn.dataset['archiveAction'];
+      const archiveId = archiveBtn.dataset['archiveId'];
+      /** Re-fetch the archive list and re-render the dashboard after an action. */
+      const refreshArchive = (): void => {
+        void bridge.archiveList().then((a) => {
+          latestArchive = a;
+          renderDashboard();
+        });
+      };
+      if (archiveAction === 'restore') {
+        void bridge.archiveRestore(archiveId).then((r) => {
+          if (!r.ok) showAppError(r.error ?? 'Failed to restore the archived coordinator');
+          else refreshArchive();
+        });
+      } else if (archiveAction === 'purge') {
+        void bridge.archivePurge(archiveId).then((r) => {
+          if (!r.ok) showAppError(r.error ?? 'Failed to purge the archived coordinator');
+          else refreshArchive();
+        });
+      }
+      return;
     }
 
     const fleetRow = target.closest<HTMLElement>('.fleet-row');

@@ -26,6 +26,16 @@ const { contextBridge, ipcRenderer } = require('electron') as {
 
 type ReviewState = unknown;
 type SourceState = unknown;
+
+/** One archived coordinator branch — mirrors ArchiveEntry from @co/core contract (inline, no Node import). */
+interface ArchiveEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly branch: string;
+  readonly baseRef: string;
+  readonly deletedAt: number;
+  readonly expiresAt: number;
+}
 type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
 type DaemonStatusPayload = { status: DaemonStatus; detail: string | null };
 type CurrentProjectState = { projectId: string; path: string | null } | null;
@@ -100,6 +110,10 @@ interface CoShellBridge {
   onAppError(listener: (message: string) => void): () => void;
   // ── Source ──────────────────────────────────────────────────────────────────
   refreshSource(): Promise<SourceState | null>;
+  // ── Archive ──────────────────────────────────────────────────────────────────
+  archiveList(): Promise<readonly ArchiveEntry[]>;
+  archiveRestore(id: string): Promise<{ ok: boolean; error?: string }>;
+  archivePurge(id: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 const bridge: CoShellBridge = {
@@ -314,6 +328,16 @@ const bridge: CoShellBridge = {
   // ── Source ──────────────────────────────────────────────────────────────────
   async refreshSource(): Promise<SourceState | null> {
     return ipcRenderer.invoke<SourceState | null>('source:refresh');
+  },
+  // ── Archive ──────────────────────────────────────────────────────────────────
+  async archiveList(): Promise<readonly ArchiveEntry[]> {
+    return ipcRenderer.invoke<readonly ArchiveEntry[]>('archive:list');
+  },
+  async archiveRestore(id: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('archive:restore', id);
+  },
+  async archivePurge(id: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('archive:purge', id);
   },
 };
 

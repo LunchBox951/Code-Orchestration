@@ -532,6 +532,45 @@ ipcMain.handle('session:startFromDemoSpec', () =>
   }),
 );
 
+// ── Archive IPC channels ─────────────────────────────────────────────────────
+
+// READ — degrade to [] when the shell is missing or the conductor is down (never throw to renderer).
+ipcMain.handle('archive:list', async () => {
+  const shell = controller.shell;
+  if (shell == null) return [];
+  try {
+    return await shell.client.listArchive();
+  } catch {
+    return [];
+  }
+});
+
+ipcMain.handle('archive:restore', async (_event, id: unknown) => {
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  const idStr = requireNonEmptyString(id, 'archive id');
+  try {
+    await shell.client.restoreArchive(idStr);
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = desktopErrorMessage(e, 'restore the archived coordinator');
+    return { ok: false, error: msg };
+  }
+});
+
+ipcMain.handle('archive:purge', async (_event, id: unknown) => {
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'shell not ready' };
+  const idStr = requireNonEmptyString(id, 'archive id');
+  try {
+    await shell.client.purgeArchive(idStr);
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = desktopErrorMessage(e, 'purge the archived coordinator');
+    return { ok: false, error: msg };
+  }
+});
+
 // ── Source IPC channels ──────────────────────────────────────────────────────
 
 // The read-only Source view's branch surface (AC-S15-7): a direct, offline-safe LOCAL read in main

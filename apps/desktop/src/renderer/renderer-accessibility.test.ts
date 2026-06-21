@@ -289,3 +289,46 @@ describe('Per-agent Re-wake (C4)', () => {
     expect(bridgeSource).toContain('agentsRewake(');
   });
 });
+
+describe('Archived section with Restore/Purge (C5)', () => {
+  it('renderDashboard emits archive action buttons with data-archive-action attributes', () => {
+    expect(rendererSource).toContain('data-archive-action="restore"');
+    expect(rendererSource).toContain('data-archive-action="purge"');
+  });
+
+  it('renderer wires archiveList, archiveRestore, archivePurge to the bridge', () => {
+    expect(rendererSource).toContain('bridge.archiveList(');
+    expect(rendererSource).toContain('bridge.archiveRestore(');
+    expect(rendererSource).toContain('bridge.archivePurge(');
+  });
+
+  it('dashboard dispatcher handles data-archive-action and calls e.stopPropagation()', () => {
+    const dashSection = rendererSource.slice(
+      rendererSource.indexOf("document.getElementById('view-dashboard')"),
+    );
+    expect(dashSection).toContain('[data-archive-action]');
+    // stopPropagation must appear within the archive branch
+    const archiveBranch = dashSection.slice(dashSection.indexOf('[data-archive-action]'));
+    expect(archiveBranch.slice(0, 400)).toContain('e.stopPropagation()');
+  });
+
+  it('main process registers ipcMain.handle for archive:list, archive:restore, archive:purge', () => {
+    expect(mainSource).toMatch(/ipcMain\.handle\(\s*'archive:list'/);
+    expect(mainSource).toMatch(/ipcMain\.handle\(\s*'archive:restore'/);
+    expect(mainSource).toMatch(/ipcMain\.handle\(\s*'archive:purge'/);
+  });
+
+  it('bridge exposes archiveList, archiveRestore, archivePurge in both preload and electron-bridge type declarations', () => {
+    const preloadSource = readFileSync(join(here, '../preload/preload.cts'), 'utf8');
+    const bridgeSource = readFileSync(join(here, 'electron-bridge.d.ts'), 'utf8');
+    expect(preloadSource).toContain('archiveList(');
+    expect(preloadSource).toContain('archiveRestore(');
+    expect(preloadSource).toContain('archivePurge(');
+    expect(preloadSource).toContain("'archive:list'");
+    expect(preloadSource).toContain("'archive:restore'");
+    expect(preloadSource).toContain("'archive:purge'");
+    expect(bridgeSource).toContain('archiveList(');
+    expect(bridgeSource).toContain('archiveRestore(');
+    expect(bridgeSource).toContain('archivePurge(');
+  });
+});

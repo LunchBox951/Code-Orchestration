@@ -218,6 +218,18 @@ interface LimitsCostState {
   taskCosts: readonly LimitsCostCostRow[];
 }
 
+// ── Archive (inline — renderer is isolated from Node context) ────────────────
+
+/** One archived coordinator branch — mirrors ArchiveEntry from @co/core contract. */
+interface ArchiveEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly branch: string;
+  readonly baseRef: string;
+  readonly deletedAt: number;
+  readonly expiresAt: number;
+}
+
 // ── Source / Daemon / Project on-ramp (inline — renderer is isolated from Node context) ──────
 
 interface BranchCommit {
@@ -326,6 +338,10 @@ interface CoShellBridge {
   onAppError(listener: (message: string) => void): () => void;
   // ── Source ──────────────────────────────────────────────────────────────────
   refreshSource(): Promise<SourceState | null>;
+  // ── Archive ──────────────────────────────────────────────────────────────────
+  archiveList(): Promise<readonly ArchiveEntry[]>;
+  archiveRestore(id: string): Promise<{ ok: boolean; error?: string }>;
+  archivePurge(id: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 interface Window {
