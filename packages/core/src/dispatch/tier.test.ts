@@ -195,3 +195,25 @@ describe('normalizeLegacyDifficulty — legacy → (workSize, reasoningBudget)',
     expect(() => normalizeLegacyDifficulty('bogus')).toThrow(/bogus/);
   });
 });
+
+describe('resolveTier — model overrides (dispatch.models.*)', () => {
+  it('applies a per-provider, per-tier override and falls back to defaults elsewhere', () => {
+    const ov = { claude: { technical: 'claude-custom' } } as const;
+    expect(resolveTier('technical', 'standard', 'claude', ov).model).toBe('claude-custom');
+    // unset tier for the overridden provider keeps the default
+    expect(resolveTier('simple', 'standard', 'claude', ov).model).toBe('claude-haiku-4-5-20251001');
+    // the other provider is untouched
+    expect(resolveTier('technical', 'standard', 'codex', ov).model).toBe('gpt-5.5');
+  });
+
+  it('ignores an empty-string override (keeps the default)', () => {
+    const ov = { codex: { average: '' } } as const;
+    expect(resolveTier('average', 'standard', 'codex', ov).model).toBe('gpt-5.4');
+  });
+
+  it('no overrides reproduces the v1 defaults (effort/context unaffected)', () => {
+    const a = resolveTier('average', 'deep', 'claude');
+    const b = resolveTier('average', 'deep', 'claude', {});
+    expect(b).toEqual(a);
+  });
+});
