@@ -552,12 +552,19 @@ ipcMain.handle('settings:set', (_event, payload: unknown) => {
   const { layer, key, value } = payload as { layer?: unknown; key?: unknown; value?: unknown };
   const shell = controller.shell;
   if (shell == null) return { ok: false, error: 'No project open.' };
-  return shell.setSetting(requireSettingsLayer(layer), requireNonEmptyString(key, 'setting key'), value);
+  return shell.setSetting(
+    requireSettingsLayer(layer),
+    requireNonEmptyString(key, 'setting key'),
+    value,
+  );
 });
 
 ipcMain.handle('settings:clear', (_event, payload: unknown) => {
   const { layer, key } = payload as { layer?: unknown; key?: unknown };
-  controller.shell?.clearSetting(requireSettingsLayer(layer), requireNonEmptyString(key, 'setting key'));
+  controller.shell?.clearSetting(
+    requireSettingsLayer(layer),
+    requireNonEmptyString(key, 'setting key'),
+  );
   return { ok: true };
 });
 

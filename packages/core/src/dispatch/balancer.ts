@@ -238,8 +238,17 @@ export interface PlaceAgentInput {
  *      decision (never a throw, never a silent pick) for Phase 4.
  */
 export function placeAgent(input: PlaceAgentInput): PlacementDecision {
-  const { role, workSize, reasoningBudget, pins, candidates, nowMs, previous, hysteresis, modelOverrides } =
-    input;
+  const {
+    role,
+    workSize,
+    reasoningBudget,
+    pins,
+    candidates,
+    nowMs,
+    previous,
+    hysteresis,
+    modelOverrides,
+  } = input;
 
   // 1) Pinned seats are never overridden (AC1).
   const pin = lookupPin(pins, role);

@@ -73,7 +73,9 @@ export function openConfigStore(): ConfigStore {
   const readScope = (db: DatabaseSync, layer: string): Record<string, unknown> => {
     ensureConfigTable(db);
     const out: Record<string, unknown> = {};
-    const rows = db.prepare('SELECT key, value FROM config WHERE scope = ? ORDER BY key').all(layer);
+    const rows = db
+      .prepare('SELECT key, value FROM config WHERE scope = ? ORDER BY key')
+      .all(layer);
     for (const row of rows) {
       out[String(row.key)] = JSON.parse(String(row.value));
     }

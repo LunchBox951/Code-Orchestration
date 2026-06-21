@@ -67,8 +67,14 @@ describe('settings registry (AC-SET-1)', () => {
   it('issue toggles declare their gating dependencies', () => {
     const byKey = new Map(settingsDescriptors().map((d) => [d.key, d]));
     expect(byKey.get(ISSUE_CAPTURE_KEY)?.dependsOn).toBeUndefined();
-    expect(byKey.get(ISSUE_PUBLISH_KEY)?.dependsOn).toEqual({ key: ISSUE_CAPTURE_KEY, equals: true });
-    expect(byKey.get(ISSUE_SELF_ASSIGN_KEY)?.dependsOn).toEqual({ key: ISSUE_PUBLISH_KEY, equals: true });
+    expect(byKey.get(ISSUE_PUBLISH_KEY)?.dependsOn).toEqual({
+      key: ISSUE_CAPTURE_KEY,
+      equals: true,
+    });
+    expect(byKey.get(ISSUE_SELF_ASSIGN_KEY)?.dependsOn).toEqual({
+      key: ISSUE_PUBLISH_KEY,
+      equals: true,
+    });
   });
 });
 
@@ -108,9 +114,13 @@ describe('validateSettingValue (AC-SET-4) — mirrors resolver rules', () => {
   });
 
   it('persona: name + valid email', () => {
-    expect(validateSettingValue(IDENTITY_PERSONA_KEY, { name: 'A', email: 'a@b.co' }).ok).toBe(true);
+    expect(validateSettingValue(IDENTITY_PERSONA_KEY, { name: 'A', email: 'a@b.co' }).ok).toBe(
+      true,
+    );
     expect(validateSettingValue(IDENTITY_PERSONA_KEY, { name: 'A', email: 'bad' }).ok).toBe(false);
-    expect(validateSettingValue(IDENTITY_PERSONA_KEY, { name: '', email: 'a@b.co' }).ok).toBe(false);
+    expect(validateSettingValue(IDENTITY_PERSONA_KEY, { name: '', email: 'a@b.co' }).ok).toBe(
+      false,
+    );
   });
 
   it('model tier: non-empty model ids, no unknown tiers', () => {

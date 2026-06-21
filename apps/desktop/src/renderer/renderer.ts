@@ -1772,7 +1772,8 @@ function renderSettingRow(row: SettingsRow, activeLayer: SettingsLayer): string 
   const reset = row.canReset
     ? `<button class="set-reset" data-setting-reset="${esc(d.key)}" title="Reset to inherited/default">↺</button>`
     : '';
-  const note = row.disabledReason != null ? `<div class="set-note">${esc(row.disabledReason)}</div>` : '';
+  const note =
+    row.disabledReason != null ? `<div class="set-note">${esc(row.disabledReason)}</div>` : '';
   return `
     <div class="set-row${row.disabledReason != null ? ' disabled' : ''}">
       <div class="set-meta">
@@ -1852,10 +1853,16 @@ function settingChangeValue(container: HTMLElement): { clear: boolean; value?: u
       };
     case 'persona': {
       const name =
-        container.querySelector<HTMLInputElement>('input[data-persona-field="name"]')?.value.trim() ?? '';
+        container
+          .querySelector<HTMLInputElement>('input[data-persona-field="name"]')
+          ?.value.trim() ?? '';
       const email =
-        container.querySelector<HTMLInputElement>('input[data-persona-field="email"]')?.value.trim() ?? '';
-      return name === '' && email === '' ? { clear: true } : { clear: false, value: { name, email } };
+        container
+          .querySelector<HTMLInputElement>('input[data-persona-field="email"]')
+          ?.value.trim() ?? '';
+      return name === '' && email === ''
+        ? { clear: true }
+        : { clear: false, value: { name, email } };
     }
     case 'model-tier': {
       const obj: Record<string, string> = {};
@@ -1889,7 +1896,8 @@ function bindSettingsView(): void {
       return;
     }
     const resetBtn = (e.target as HTMLElement).closest<HTMLElement>('[data-setting-reset]');
-    if (resetBtn?.dataset['settingReset'] != null) applySettingClear(resetBtn.dataset['settingReset']);
+    if (resetBtn?.dataset['settingReset'] != null)
+      applySettingClear(resetBtn.dataset['settingReset']);
   });
 
   root.addEventListener('change', (e) => {

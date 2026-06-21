@@ -561,7 +561,11 @@ describe('runDispatchPolicy — settings wiring (AC-SET-5)', () => {
     { provider: 'claude' as const, account: accountForProvider('claude') },
     { provider: 'codex' as const, account: accountForProvider('codex') },
   ];
-  function snap(store: ReturnType<typeof openDispatchStore>, provider: 'claude' | 'codex', usedPct: number): void {
+  function snap(
+    store: ReturnType<typeof openDispatchStore>,
+    provider: 'claude' | 'codex',
+    usedPct: number,
+  ): void {
     store.recordSnapshot({
       provider,
       account: accountForProvider(provider),
@@ -635,7 +639,15 @@ describe('runDispatchPolicy — settings wiring (AC-SET-5)', () => {
     try {
       snap(store, 'claude', 50); // 50% used
       // Default threshold 95 → still placeable.
-      const placed = runDispatchPolicy(store, projectId, 'implementer', 'average', 'standard', accounts, Date.now());
+      const placed = runDispatchPolicy(
+        store,
+        projectId,
+        'implementer',
+        'average',
+        'standard',
+        accounts,
+        Date.now(),
+      );
       expect(placed.kind).toBe('placed');
 
       const config = openConfigStore();
@@ -645,7 +657,15 @@ describe('runDispatchPolicy — settings wiring (AC-SET-5)', () => {
         config.close();
       }
       // Now 50% > 40% threshold → treated as full → WAITING.
-      const waiting = runDispatchPolicy(store, projectId, 'implementer', 'average', 'standard', accounts, Date.now());
+      const waiting = runDispatchPolicy(
+        store,
+        projectId,
+        'implementer',
+        'average',
+        'standard',
+        accounts,
+        Date.now(),
+      );
       expect(waiting.kind).toBe('waiting');
     } finally {
       store.close();
@@ -657,7 +677,9 @@ describe('runDispatchPolicy — settings wiring (AC-SET-5)', () => {
     const config = openConfigStore();
     try {
       config.setProjectOverride(projectId, DISPATCH_ENABLED_PROVIDERS_KEY, ['claude']);
-      config.setProjectOverride(projectId, DISPATCH_MODELS_CLAUDE_KEY, { technical: 'claude-custom' });
+      config.setProjectOverride(projectId, DISPATCH_MODELS_CLAUDE_KEY, {
+        technical: 'claude-custom',
+      });
     } finally {
       config.close();
     }

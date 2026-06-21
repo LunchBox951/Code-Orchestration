@@ -55,7 +55,10 @@ const modelTierSchema = z
   .strict();
 
 /** Which providers may float for dispatch. Default both; rejects an empty or unknown-member set. */
-export function resolveEnabledProviders(projectId: string, config?: ConfigStore): readonly Provider[] {
+export function resolveEnabledProviders(
+  projectId: string,
+  config?: ConfigStore,
+): readonly Provider[] {
   return withConfig(config, (cfg) => {
     const eff = cfg.resolveEffective(projectId);
     if (!Object.prototype.hasOwnProperty.call(eff, DISPATCH_ENABLED_PROVIDERS_KEY)) {
@@ -101,7 +104,10 @@ export function resolveModels(projectId: string, config?: ConfigStore): ModelOve
       }
       return parsed.data;
     };
-    const out: { claude?: Partial<Record<WorkSize, string>>; codex?: Partial<Record<WorkSize, string>> } = {};
+    const out: {
+      claude?: Partial<Record<WorkSize, string>>;
+      codex?: Partial<Record<WorkSize, string>>;
+    } = {};
     const claude = readProvider(DISPATCH_MODELS_CLAUDE_KEY);
     const codex = readProvider(DISPATCH_MODELS_CODEX_KEY);
     if (claude) out.claude = claude;
@@ -119,7 +125,9 @@ export function resolveDefaultWorkSize(projectId: string, config?: ConfigStore):
     }
     const parsed = workSizeSchema.safeParse(eff[DISPATCH_DEFAULT_WORK_SIZE_KEY]);
     if (!parsed.success) {
-      throw new Error(`${DISPATCH_DEFAULT_WORK_SIZE_KEY}: expected one of simple|average|technical.`);
+      throw new Error(
+        `${DISPATCH_DEFAULT_WORK_SIZE_KEY}: expected one of simple|average|technical.`,
+      );
     }
     return parsed.data;
   });

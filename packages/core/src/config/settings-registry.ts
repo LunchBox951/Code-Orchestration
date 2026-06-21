@@ -3,7 +3,10 @@ import { MAX_ACTIVE_CHILDREN_KEY, MAX_ACTIVE_CHILDREN_DEFAULT } from '../plans/c
 import { REPO_MODE_CONFIG_KEY } from '../worktrees/repo-mode.js';
 import { reviewReviewerKey } from '../review/human-review.js';
 import { REVIEW_ROUND_BUDGET_KEY, REVIEW_ROUND_BUDGET_DEFAULT } from '../review/strikes.js';
-import { CLARIFY_TIMEOUT_SECONDS_KEY, CLARIFY_TIMEOUT_SECONDS_DEFAULT } from '../mail/escalation.js';
+import {
+  CLARIFY_TIMEOUT_SECONDS_KEY,
+  CLARIFY_TIMEOUT_SECONDS_DEFAULT,
+} from '../mail/escalation.js';
 import { IDENTITY_PERSONA_KEY } from '../permissions/identity-guard.js';
 import { ISSUE_CAPTURE_KEY, ISSUE_PUBLISH_KEY, ISSUE_SELF_ASSIGN_KEY } from '../issues/opt-in.js';
 import { MAXED_THRESHOLD_PCT_DEFAULT } from '../dispatch/throttle.js';
@@ -44,8 +47,17 @@ export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 /** The control to render for a setting; plain data so it is JSON-serializable across IPC. */
 export type SettingControl =
   | { readonly kind: 'toggle' }
-  | { readonly kind: 'integer'; readonly min: number; readonly max?: number; readonly unit?: string }
-  | { readonly kind: 'enum'; readonly options: readonly { value: string; label: string }[]; readonly clearable?: boolean }
+  | {
+      readonly kind: 'integer';
+      readonly min: number;
+      readonly max?: number;
+      readonly unit?: string;
+    }
+  | {
+      readonly kind: 'enum';
+      readonly options: readonly { value: string; label: string }[];
+      readonly clearable?: boolean;
+    }
   | { readonly kind: 'persona' }
   | { readonly kind: 'provider-set'; readonly providers: readonly string[] }
   | {
@@ -74,7 +86,9 @@ export interface SettingEntry extends SettingDescriptor {
   readonly validate: (value: unknown) => SettingValidation;
 }
 
-export type SettingValidation = { readonly ok: true } | { readonly ok: false; readonly error: string };
+export type SettingValidation =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
 
 /** Email shape mirroring identity-guard's persona validation (`^[^\s@<>]+@[^\s@<>]+$`). */
 const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+$/;
@@ -106,7 +120,8 @@ const personaSchema = z
  * gate; `message` is the human explanation shown inline.
  */
 function zodValidate(schema: z.ZodType, message: string): (value: unknown) => SettingValidation {
-  return (value) => (schema.safeParse(value).success ? { ok: true } : { ok: false, error: message });
+  return (value) =>
+    schema.safeParse(value).success ? { ok: true } : { ok: false, error: message };
 }
 
 const REVIEWER_OPTIONS = [
@@ -115,7 +130,10 @@ const REVIEWER_OPTIONS = [
 ] as const;
 
 /** One reviewer-kind entry per merge scope (agent vs human). */
-function reviewerEntry(scope: 'worker_merge' | 'phase_merge' | 'pr_merge', label: string): SettingEntry {
+function reviewerEntry(
+  scope: 'worker_merge' | 'phase_merge' | 'pr_merge',
+  label: string,
+): SettingEntry {
   return {
     key: reviewReviewerKey(scope),
     section: 'Review & Merge',
@@ -141,7 +159,12 @@ function modelEntry(
     section: 'Models & Effort',
     label: `${label} models`,
     description: `Which ${label} model each work-size tier uses. Unset tiers keep the built-in default.`,
-    control: { kind: 'model-tier', provider, tiers: MODEL_TIERS, suggestions: Object.values(defaults) },
+    control: {
+      kind: 'model-tier',
+      provider,
+      tiers: MODEL_TIERS,
+      suggestions: Object.values(defaults),
+    },
     defaultValue: defaults,
     perProject: true,
     primaryLayer: 'project',
@@ -198,7 +221,10 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
     defaultValue: MAXED_THRESHOLD_PCT_DEFAULT,
     perProject: true,
     primaryLayer: 'project',
-    validate: zodValidate(z.number().finite().min(0).max(100), 'must be a number between 0 and 100'),
+    validate: zodValidate(
+      z.number().finite().min(0).max(100),
+      'must be a number between 0 and 100',
+    ),
   },
   {
     key: MAX_ACTIVE_CHILDREN_KEY,
@@ -270,7 +296,10 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
     defaultValue: null, // unset → auto-detected
     perProject: true,
     primaryLayer: 'project',
-    validate: zodValidate(z.enum(['owner', 'contributor', 'offline']), 'choose owner, contributor, or offline'),
+    validate: zodValidate(
+      z.enum(['owner', 'contributor', 'offline']),
+      'choose owner, contributor, or offline',
+    ),
   },
   reviewerEntry('worker_merge', 'Worker merge'),
   reviewerEntry('phase_merge', 'Phase merge'),
@@ -335,9 +364,24 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 /** Index for O(1) lookups by key. */
 const BY_KEY = new Map<string, SettingEntry>(SETTINGS_REGISTRY.map((e) => [e.key, e]));
 
+/** Project a registry entry down to its serializable descriptor (drops the validator function). */
+function toDescriptor(e: SettingEntry): SettingDescriptor {
+  return {
+    key: e.key,
+    section: e.section,
+    label: e.label,
+    description: e.description,
+    control: e.control,
+    defaultValue: e.defaultValue,
+    perProject: e.perProject,
+    primaryLayer: e.primaryLayer,
+    ...(e.dependsOn ? { dependsOn: e.dependsOn } : {}),
+  };
+}
+
 /** The serializable descriptors (validators stripped) for the renderer / IPC. */
 export function settingsDescriptors(): readonly SettingDescriptor[] {
-  return SETTINGS_REGISTRY.map(({ validate: _validate, ...descriptor }) => descriptor);
+  return SETTINGS_REGISTRY.map(toDescriptor);
 }
 
 /** Validate a value for one setting key against its registry rule (the write gate). */

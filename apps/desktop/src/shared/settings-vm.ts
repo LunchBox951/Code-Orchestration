@@ -56,11 +56,14 @@ export function buildSettingsRows(args: {
     d: SettingDescriptor,
   ): { effectiveValue: unknown; source: SettingSource; canReset: boolean } => {
     if (activeLayer === 'project') {
-      if (has(project, d.key)) return { effectiveValue: project[d.key], source: 'override', canReset: true };
-      if (has(global, d.key)) return { effectiveValue: global[d.key], source: 'inherited', canReset: false };
+      if (has(project, d.key))
+        return { effectiveValue: project[d.key], source: 'override', canReset: true };
+      if (has(global, d.key))
+        return { effectiveValue: global[d.key], source: 'inherited', canReset: false };
       return { effectiveValue: d.defaultValue, source: 'default', canReset: false };
     }
-    if (has(global, d.key)) return { effectiveValue: global[d.key], source: 'override', canReset: true };
+    if (has(global, d.key))
+      return { effectiveValue: global[d.key], source: 'override', canReset: true };
     return { effectiveValue: d.defaultValue, source: 'default', canReset: false };
   };
 

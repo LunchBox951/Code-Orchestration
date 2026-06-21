@@ -282,7 +282,11 @@ const bridge: CoShellBridge = {
   async settingsGetState(): Promise<SettingsState | null> {
     return ipcRenderer.invoke<SettingsState | null>('settings:getState');
   },
-  async settingsSet(layer: SettingsLayer, key: string, value: unknown): Promise<SettingWriteResult> {
+  async settingsSet(
+    layer: SettingsLayer,
+    key: string,
+    value: unknown,
+  ): Promise<SettingWriteResult> {
     return ipcRenderer.invoke<SettingWriteResult>('settings:set', { layer, key, value });
   },
   async settingsClear(layer: SettingsLayer, key: string): Promise<{ ok: boolean }> {

@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import type { SettingDescriptor } from '@co/core';
 import { buildSettingsRows, SettingsVM, type SettingsData } from './settings-vm.js';
 
-function desc(over: Partial<SettingDescriptor> & Pick<SettingDescriptor, 'key'>): SettingDescriptor {
+function desc(
+  over: Partial<SettingDescriptor> & Pick<SettingDescriptor, 'key'>,
+): SettingDescriptor {
   return {
     section: 'Issues',
     label: over.key,
@@ -16,7 +18,11 @@ function desc(over: Partial<SettingDescriptor> & Pick<SettingDescriptor, 'key'>)
 }
 
 const CAPTURE = desc({ key: 'issues.capture', label: 'Capture' });
-const PUBLISH = desc({ key: 'issues.publish', label: 'Publish', dependsOn: { key: 'issues.capture', equals: true } });
+const PUBLISH = desc({
+  key: 'issues.publish',
+  label: 'Publish',
+  dependsOn: { key: 'issues.capture', equals: true },
+});
 const MAXED = desc({
   key: 'dispatch.maxedThresholdPct',
   label: 'Threshold',
