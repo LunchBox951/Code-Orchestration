@@ -100,13 +100,13 @@ const personaSchema = z
   })
   .strict();
 
-/** Turn a zod schema into a friendly value validator (uses `message` if the schema sets one). */
-function zodValidate(schema: z.ZodType, fallback: string): (value: unknown) => SettingValidation {
-  return (value) => {
-    const r = schema.safeParse(value);
-    if (r.success) return { ok: true };
-    return { ok: false, error: r.error.issues[0]?.message ?? fallback };
-  };
+/**
+ * Turn a zod schema into a value validator that reports a single friendly, setting-specific message
+ * on failure (zod's own per-issue text is too low-level for the Settings UI). The schema is the
+ * gate; `message` is the human explanation shown inline.
+ */
+function zodValidate(schema: z.ZodType, message: string): (value: unknown) => SettingValidation {
+  return (value) => (schema.safeParse(value).success ? { ok: true } : { ok: false, error: message });
 }
 
 const REVIEWER_OPTIONS = [

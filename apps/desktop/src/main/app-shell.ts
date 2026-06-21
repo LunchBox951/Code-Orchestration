@@ -1,6 +1,7 @@
 import { operatorIpcSocketPath } from '@co/mcp';
 import type {
   ApprovalReply,
+  ConfigStore,
   CostRollup,
   DeliveredMail,
   OperatorIpcTick,
@@ -9,6 +10,7 @@ import type {
   ProjectId,
   RendererRegistry,
   ReplyDraft,
+  SettingValidation,
   UsageAccountStatus,
   UsageBucket,
 } from '@co/core';
@@ -19,9 +21,12 @@ import {
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   OPERATOR,
+  openConfigStore,
   openDispatchStore,
   openMailStore,
   projectDataDir,
+  settingsDescriptors,
+  validateSettingValue,
 } from '@co/core';
 import { ConductorUnavailableError, OperatorIpcClient } from '@co/mcp';
 import { NavVM } from '../shared/nav-vm.js';
@@ -31,6 +36,8 @@ import { LimitsCostVM } from '../shared/limits-cost-vm.js';
 import { MailVM } from '../shared/mail-vm.js';
 import { AgentsConsoleVM } from '../shared/agents-console-vm.js';
 import { ReviewVM } from '../shared/review-vm.js';
+import { SettingsVM } from '../shared/settings-vm.js';
+import type { SettingsState, SettingsLayer } from '../shared/settings-vm.js';
 import type { ConnectionState } from '../shared/connection-vm.js';
 import type { NavState } from '../shared/nav-vm.js';
 import type { DashboardState } from '../shared/dashboard-vm.js';
@@ -67,6 +74,8 @@ export interface AppShellDeps {
   readonly accountStatusesReader?: () => readonly UsageAccountStatus[];
   /** Injectable for tests — reads cost rollups (default: real DispatchStore). */
   readonly rollupsReader?: () => readonly CostRollup[];
+  /** Injectable for tests — the config cascade store (default: real openConfigStore()). */
+  readonly configStore?: ConfigStore;
   readonly onNavState?: (state: NavState) => void;
   readonly onConnectionState?: (state: ConnectionState) => void;
   readonly onConnectionError?: (message: string) => void;
@@ -77,6 +86,7 @@ export interface AppShellDeps {
   readonly onAgentsConsoleState?: (state: AgentsConsoleState) => void;
   readonly onReviewState?: (state: ReviewState) => void;
   readonly onReviewError?: (message: string) => void;
+  readonly onSettingsState?: (state: SettingsState) => void;
 }
 
 export interface AppShell {
@@ -98,6 +108,14 @@ export interface AppShell {
   reviewCancelVerdict(): ReviewState;
   reviewSubmitVerdict(): Promise<ReviewState>;
   reviewRefresh(): ReviewState;
+  readonly settings: SettingsVM;
+  getSettingsState(): SettingsState;
+  /** Validate then persist a setting to the given layer; returns the validation result (no throw). */
+  setSetting(layer: SettingsLayer, key: string, value: unknown): SettingValidation;
+  /** Clear a setting from the given layer (reset to inherited/default). */
+  clearSetting(layer: SettingsLayer, key: string): void;
+  setSettingsLayer(layer: SettingsLayer): void;
+  refreshSettings(): void;
 }
 
 function buildRegistry(override?: RendererRegistry): RendererRegistry {
@@ -157,9 +175,55 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     deps.rollupsReader ??
     (ownedDispatchStore != null ? () => ownedDispatchStore.readRollups() : () => []);
 
+  // Open the config cascade store for the app's lifetime (D5 hybrid: static reads go direct,
+  // daemon-down-safe). Opened in production; tests inject a fake. The global store is project-agnostic
+  // (resolveLayers reads both the global base and this project's overrides).
+  const ownedConfigStore = deps.configStore == null ? openConfigStore() : null;
+  const configStore: ConfigStore | null = deps.configStore ?? ownedConfigStore;
+
   const dash = new DashboardVM();
   const limitsCostVm = new LimitsCostVM();
   const agentsConsoleVm = new AgentsConsoleVM();
+  const settingsVm = new SettingsVM();
+  settingsVm.subscribe((state) => deps.onSettingsState?.(state));
+
+  function doRefreshSettings(): void {
+    if (configStore == null) {
+      settingsVm.setData({
+        descriptors: settingsDescriptors(),
+        global: {},
+        project: {},
+        projectId: null,
+        hasProject: false,
+      });
+      return;
+    }
+    const layers = configStore.resolveLayers(deps.projectId);
+    settingsVm.setData({
+      descriptors: settingsDescriptors(),
+      global: layers.global,
+      project: layers.project,
+      projectId: deps.projectId,
+      hasProject: true,
+    });
+  }
+
+  function doSetSetting(layer: SettingsLayer, key: string, value: unknown): SettingValidation {
+    const verdict = validateSettingValue(key, value);
+    if (!verdict.ok) return verdict;
+    if (configStore == null) return { ok: false, error: 'config store unavailable' };
+    if (layer === 'global') configStore.setGlobal(key, value);
+    else configStore.setProjectOverride(deps.projectId, key, value);
+    doRefreshSettings();
+    return { ok: true };
+  }
+
+  function doClearSetting(layer: SettingsLayer, key: string): void {
+    if (configStore == null) return;
+    if (layer === 'global') configStore.clearGlobal(key);
+    else configStore.clearProjectOverride(deps.projectId, key);
+    doRefreshSettings();
+  }
   let transcriptRequestSeq = 0;
   agentsConsoleVm.subscribe((state) => deps.onAgentsConsoleState?.(state));
 
@@ -342,6 +406,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   connVmRef.current = connVm;
 
   doRefreshReviews();
+  doRefreshSettings();
 
   return {
     nav,
@@ -385,6 +450,22 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       doRefreshReviews();
       return reviewVm.state;
     },
+    settings: settingsVm,
+    getSettingsState(): SettingsState {
+      return settingsVm.state;
+    },
+    setSetting(layer: SettingsLayer, key: string, value: unknown): SettingValidation {
+      return doSetSetting(layer, key, value);
+    },
+    clearSetting(layer: SettingsLayer, key: string): void {
+      doClearSetting(layer, key);
+    },
+    setSettingsLayer(layer: SettingsLayer): void {
+      settingsVm.setActiveLayer(layer);
+    },
+    refreshSettings(): void {
+      doRefreshSettings();
+    },
     async start() {
       await connVm.start();
     },
@@ -393,6 +474,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       await client.close();
       ownedStore?.close();
       ownedDispatchStore?.close();
+      ownedConfigStore?.close();
     },
   };
 }

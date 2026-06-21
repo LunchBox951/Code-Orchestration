@@ -27,6 +27,10 @@ export function requireComposerField(value: unknown): ComposerField {
   return requireOneOf(value, ['type', 'subject', 'body'] as const, 'composer field');
 }
 
+export function requireSettingsLayer(value: unknown): 'global' | 'project' {
+  return requireOneOf(value, ['global', 'project'] as const, 'settings layer');
+}
+
 export function requireFiniteSeq(value: unknown, label: string): number {
   if (typeof value === 'number' && Number.isInteger(value) && Number.isFinite(value) && value > 0) {
     return value;

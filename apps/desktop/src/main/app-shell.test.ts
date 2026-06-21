@@ -1,8 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAppShell, defaultOperatorSocketPath } from './app-shell.js';
+import type { SettingsState } from '../shared/settings-vm.js';
 import type {
   OperatorObservation,
   DeliveredMail,
@@ -13,6 +14,7 @@ import type {
 } from '@co/core';
 import type { ProjectId } from '@co/core';
 import { MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE, OPERATOR, projectDataDir } from '@co/core';
+import { openConfigStore, MAX_ACTIVE_CHILDREN_KEY, type ConfigStore } from '@co/core';
 import { operatorIpcSocketPath } from '@co/mcp';
 import type { OperatorIpcClient } from '@co/mcp';
 
@@ -1060,5 +1062,85 @@ describe('createAppShell — agentsConsole VM wiring', () => {
       selectedAgentId: 'impl-x',
       transcript: 'fresh tail\n',
     });
+  });
+});
+
+describe('createAppShell — settings ops (AC-SET-3/4/6)', () => {
+  const ORIGINAL_ENV = process.env;
+  let dataDir: string;
+  let cfg: ConfigStore;
+
+  beforeEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    dataDir = mkdtempSync(join(tmpdir(), 'co-shell-settings-'));
+    process.env.CO_DATA_DIR = dataDir;
+    cfg = openConfigStore();
+  });
+
+  afterEach(() => {
+    cfg.close();
+    process.env = ORIGINAL_ENV;
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  function shellWithSettings(onSettingsState?: (s: SettingsState) => void) {
+    return createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+      bucketsReader: () => [],
+      configStore: cfg, // inject the temp-dir cascade; writes go to program-data, never a repo
+      onSettingsState,
+    });
+  }
+
+  const hasKey = (m: Readonly<Record<string, unknown>>, k: string): boolean =>
+    Object.prototype.hasOwnProperty.call(m, k);
+
+  it('serves the full registry as rows and round-trips a valid write through the cascade', () => {
+    const states: SettingsState[] = [];
+    const shell = shellWithSettings((s) => states.push(s));
+    const initial = shell.getSettingsState();
+    expect(initial.rows.length).toBe(17);
+    expect(initial.hasProject).toBe(true);
+
+    const res = shell.setSetting('project', MAX_ACTIVE_CHILDREN_KEY, 5);
+    expect(res.ok).toBe(true);
+    // Persisted to program-data (AC-SET-6: ConfigStore writes never touch a repo), visible via cascade.
+    expect(cfg.resolveEffective(FAKE_PROJECT_ID)[MAX_ACTIVE_CHILDREN_KEY]).toBe(5);
+    const row = states.at(-1)?.rows.find((r) => r.descriptor.key === MAX_ACTIVE_CHILDREN_KEY);
+    expect(row?.effectiveValue).toBe(5);
+    expect(row?.source).toBe('override');
+    expect(row?.canReset).toBe(true);
+  });
+
+  it('rejects an invalid value inline and writes nothing (AC-SET-4)', () => {
+    const shell = shellWithSettings();
+    const res = shell.setSetting('project', MAX_ACTIVE_CHILDREN_KEY, 0);
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('unreachable');
+    expect(res.error).toMatch(/1 or more/);
+    expect(hasKey(cfg.resolveEffective(FAKE_PROJECT_ID), MAX_ACTIVE_CHILDREN_KEY)).toBe(false);
+  });
+
+  it('rejects an unknown setting key', () => {
+    const shell = shellWithSettings();
+    expect(shell.setSetting('global', 'nope.key', 1).ok).toBe(false);
+  });
+
+  it('clearSetting resets an override back to inherited/default', () => {
+    const shell = shellWithSettings();
+    shell.setSetting('project', MAX_ACTIVE_CHILDREN_KEY, 7);
+    expect(cfg.resolveEffective(FAKE_PROJECT_ID)[MAX_ACTIVE_CHILDREN_KEY]).toBe(7);
+    shell.clearSetting('project', MAX_ACTIVE_CHILDREN_KEY);
+    expect(hasKey(cfg.resolveEffective(FAKE_PROJECT_ID), MAX_ACTIVE_CHILDREN_KEY)).toBe(false);
+  });
+
+  it('setSettingsLayer switches the active layer', () => {
+    const shell = shellWithSettings();
+    expect(shell.getSettingsState().activeLayer).toBe('project');
+    shell.setSettingsLayer('global');
+    expect(shell.getSettingsState().activeLayer).toBe('global');
   });
 });
