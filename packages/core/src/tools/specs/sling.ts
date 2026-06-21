@@ -13,6 +13,7 @@ import {
   resolveDefaultWorkSize,
   resolveDefaultReasoningBudget,
 } from '../../dispatch/dispatch-config.js';
+import { openConfigStore } from '../../config/config-store.js';
 import { providerSchema } from '../../dispatch/events.js';
 import type { PlacementDecided, PlacementRecord } from '../../dispatch/events.js';
 import {
@@ -352,10 +353,17 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       }
     }
 
-    const workSize: WorkSize = (input.work_size ??
-      resolveDefaultWorkSize(ctx.projectId)) as WorkSize;
-    const reasoningBudget: ReasoningBudget = (input.reasoning_budget ??
-      resolveDefaultReasoningBudget(ctx.projectId)) as ReasoningBudget;
+    // Resolve the routing defaults over a single shared config store (one open, not two).
+    const routingCfg = openConfigStore();
+    let workSize: WorkSize;
+    let reasoningBudget: ReasoningBudget;
+    try {
+      workSize = (input.work_size ?? resolveDefaultWorkSize(ctx.projectId, routingCfg)) as WorkSize;
+      reasoningBudget = (input.reasoning_budget ??
+        resolveDefaultReasoningBudget(ctx.projectId, routingCfg)) as ReasoningBudget;
+    } finally {
+      routingCfg.close();
+    }
     const accounts = defaultProviderAccounts();
 
     // Inject nowMs at handler level (the thin impure shell); pass into pure policy (AC10, P16).

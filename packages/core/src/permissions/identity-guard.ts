@@ -180,7 +180,8 @@ function parseIdentity(identity: string): ParsedIdentity | undefined {
   };
 }
 
-function isEmailAddress(email: string): boolean {
+/** The canonical persona-email predicate — reused by the settings registry's write-gate (one rule). */
+export function isEmailAddress(email: string): boolean {
   return /^[^\s@<>]+@[^\s@<>]+$/u.test(email);
 }
 

@@ -389,3 +389,35 @@ describe('ConfigStore — resolveLayers', () => {
     }
   });
 });
+
+describe('config.clear — from-scratch rebuild semantics (AC-SET-2, independent oracle)', () => {
+  it('a set-then-cleared key is ABSENT after a reset+replay, and a cleared-then-reset key holds its final value', () => {
+    const cfg = openConfigStore();
+    cfg.setGlobal('a', 1);
+    cfg.setProjectOverride('p', 'a', 2);
+    cfg.clearProjectOverride('p', 'a'); // delete the project override
+    cfg.setGlobal('b', 'x');
+    cfg.clearGlobal('b'); // delete...
+    cfg.setGlobal('b', 'y'); // ...then re-set
+    cfg.close();
+
+    // rebuildAll resets (DELETE FROM config) then re-folds the WHOLE log from empty — so this asserts
+    // the clear events DELETE during replay, independently of whatever the live fold produced.
+    const store = openGlobalStore();
+    try {
+      rebuildAll(store, [new ConfigProjector()], (e) => decode(e, configUpcasters, configSchemas));
+    } finally {
+      store.close();
+    }
+
+    const reopened = openConfigStore();
+    try {
+      const layers = reopened.resolveLayers('p');
+      expect(Object.prototype.hasOwnProperty.call(layers.project, 'a')).toBe(false); // cleared
+      expect(layers.global).toEqual({ a: 1, b: 'y' }); // 'b' is the re-set value, not the stale 'x'
+      expect(reopened.resolveEffective('p')).toEqual({ a: 1, b: 'y' });
+    } finally {
+      reopened.close();
+    }
+  });
+});

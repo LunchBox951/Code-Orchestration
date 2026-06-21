@@ -15,6 +15,7 @@ import {
   DISPATCH_DEFAULT_WORK_SIZE_KEY,
   DISPATCH_DEFAULT_REASONING_BUDGET_KEY,
 } from './dispatch-config.js';
+import { validateSettingValue } from '../config/settings-registry.js';
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -140,8 +141,120 @@ describe('resolveDefaultWorkSize / resolveDefaultReasoningBudget', () => {
       expect(resolveDefaultReasoningBudget('p', c)).toBe('deep');
       c.setGlobal(DISPATCH_DEFAULT_WORK_SIZE_KEY, 'huge');
       expect(() => resolveDefaultWorkSize('p', c)).toThrow();
+      c.setGlobal(DISPATCH_DEFAULT_REASONING_BUDGET_KEY, 'unlimited');
+      expect(() => resolveDefaultReasoningBudget('p', c)).toThrow();
     } finally {
       c.close();
     }
   });
+});
+
+// AC-SET-4: the settings registry's write-gate (validateSettingValue) must accept/reject EXACTLY what
+// the dispatch resolvers fail loud on. They now share the same schemas; this pins that they cannot drift.
+describe('settings validators mirror the dispatch resolvers (AC-SET-4 parity)', () => {
+  const cases: {
+    key: string;
+    value: unknown;
+    resolve: (c: ReturnType<typeof openConfigStore>) => unknown;
+  }[] = [
+    {
+      key: DISPATCH_ENABLED_PROVIDERS_KEY,
+      value: ['claude'],
+      resolve: (c) => resolveEnabledProviders('p', c),
+    },
+    {
+      key: DISPATCH_ENABLED_PROVIDERS_KEY,
+      value: ['claude', 'codex'],
+      resolve: (c) => resolveEnabledProviders('p', c),
+    },
+    {
+      key: DISPATCH_ENABLED_PROVIDERS_KEY,
+      value: [],
+      resolve: (c) => resolveEnabledProviders('p', c),
+    },
+    {
+      key: DISPATCH_ENABLED_PROVIDERS_KEY,
+      value: ['bogus'],
+      resolve: (c) => resolveEnabledProviders('p', c),
+    },
+    {
+      key: DISPATCH_MAXED_THRESHOLD_PCT_KEY,
+      value: 95,
+      resolve: (c) => resolveMaxedThresholdPct('p', c),
+    },
+    {
+      key: DISPATCH_MAXED_THRESHOLD_PCT_KEY,
+      value: 0,
+      resolve: (c) => resolveMaxedThresholdPct('p', c),
+    },
+    {
+      key: DISPATCH_MAXED_THRESHOLD_PCT_KEY,
+      value: 100,
+      resolve: (c) => resolveMaxedThresholdPct('p', c),
+    },
+    {
+      key: DISPATCH_MAXED_THRESHOLD_PCT_KEY,
+      value: 101,
+      resolve: (c) => resolveMaxedThresholdPct('p', c),
+    },
+    {
+      key: DISPATCH_MAXED_THRESHOLD_PCT_KEY,
+      value: 'high',
+      resolve: (c) => resolveMaxedThresholdPct('p', c),
+    },
+    {
+      key: DISPATCH_MODELS_CLAUDE_KEY,
+      value: { technical: 'm' },
+      resolve: (c) => resolveModels('p', c),
+    },
+    { key: DISPATCH_MODELS_CLAUDE_KEY, value: {}, resolve: (c) => resolveModels('p', c) },
+    {
+      key: DISPATCH_MODELS_CLAUDE_KEY,
+      value: { technical: '' },
+      resolve: (c) => resolveModels('p', c),
+    },
+    {
+      key: DISPATCH_MODELS_CLAUDE_KEY,
+      value: { huge: 'm' },
+      resolve: (c) => resolveModels('p', c),
+    },
+    {
+      key: DISPATCH_DEFAULT_WORK_SIZE_KEY,
+      value: 'simple',
+      resolve: (c) => resolveDefaultWorkSize('p', c),
+    },
+    {
+      key: DISPATCH_DEFAULT_WORK_SIZE_KEY,
+      value: 'huge',
+      resolve: (c) => resolveDefaultWorkSize('p', c),
+    },
+    {
+      key: DISPATCH_DEFAULT_REASONING_BUDGET_KEY,
+      value: 'deep',
+      resolve: (c) => resolveDefaultReasoningBudget('p', c),
+    },
+    {
+      key: DISPATCH_DEFAULT_REASONING_BUDGET_KEY,
+      value: 'unlimited',
+      resolve: (c) => resolveDefaultReasoningBudget('p', c),
+    },
+  ];
+
+  for (const { key, value, resolve } of cases) {
+    it(`${key} = ${JSON.stringify(value)}: UI validator agrees with the resolver`, () => {
+      const c = openConfigStore();
+      try {
+        c.setProjectOverride('p', key, value);
+        let resolverThrew = false;
+        try {
+          resolve(c);
+        } catch {
+          resolverThrew = true;
+        }
+        expect(validateSettingValue(key, value).ok).toBe(!resolverThrew);
+      } finally {
+        c.close();
+      }
+    });
+  }
 });

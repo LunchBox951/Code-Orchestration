@@ -7,10 +7,17 @@ import {
   CLARIFY_TIMEOUT_SECONDS_KEY,
   CLARIFY_TIMEOUT_SECONDS_DEFAULT,
 } from '../mail/escalation.js';
-import { IDENTITY_PERSONA_KEY } from '../permissions/identity-guard.js';
+import { IDENTITY_PERSONA_KEY, isEmailAddress } from '../permissions/identity-guard.js';
 import { ISSUE_CAPTURE_KEY, ISSUE_PUBLISH_KEY, ISSUE_SELF_ASSIGN_KEY } from '../issues/opt-in.js';
 import { MAXED_THRESHOLD_PCT_DEFAULT } from '../dispatch/throttle.js';
-import { CLAUDE_MODELS, CODEX_MODELS } from '../dispatch/tier.js';
+import {
+  CLAUDE_MODELS,
+  CODEX_MODELS,
+  workSizeSchema,
+  reasoningBudgetSchema,
+  type WorkSize,
+} from '../dispatch/tier.js';
+import type { Provider } from '../dispatch/usage-source.js';
 import {
   DISPATCH_ENABLED_PROVIDERS_KEY,
   DISPATCH_MAXED_THRESHOLD_PCT_KEY,
@@ -22,6 +29,10 @@ import {
   ENABLED_PROVIDERS_DEFAULT,
   DEFAULT_WORK_SIZE_DEFAULT,
   DEFAULT_REASONING_BUDGET_DEFAULT,
+  // Shared validation schemas — the SAME predicates the dispatch resolvers fail loud on (AC-SET-4).
+  enabledProvidersSchema,
+  modelTierSchema,
+  maxedThresholdPctSchema,
 } from '../dispatch/dispatch-config.js';
 
 /**
@@ -59,11 +70,11 @@ export type SettingControl =
       readonly clearable?: boolean;
     }
   | { readonly kind: 'persona' }
-  | { readonly kind: 'provider-set'; readonly providers: readonly string[] }
+  | { readonly kind: 'provider-set'; readonly providers: readonly Provider[] }
   | {
       readonly kind: 'model-tier';
-      readonly provider: 'claude' | 'codex';
-      readonly tiers: readonly { readonly key: string; readonly label: string }[];
+      readonly provider: Provider;
+      readonly tiers: readonly { readonly key: WorkSize; readonly label: string }[];
       readonly suggestions: readonly string[];
     };
 
@@ -77,8 +88,12 @@ export interface SettingDescriptor {
   readonly defaultValue: unknown;
   readonly perProject: boolean;
   readonly primaryLayer: 'global' | 'project';
-  /** Gating: this setting is inert unless the named key currently equals `equals`. */
-  readonly dependsOn?: { readonly key: string; readonly equals: unknown };
+  /**
+   * Gating: this setting is inert unless the named key currently equals `equals`. Restricted to
+   * JSON primitives so the consumer's `===` comparison is sound (a non-primitive sentinel would
+   * never compare equal across a JSON round-trip).
+   */
+  readonly dependsOn?: { readonly key: string; readonly equals: string | number | boolean | null };
 }
 
 /** A descriptor plus its write-path validator (core-side only; not serialized). */
@@ -90,27 +105,18 @@ export type SettingValidation =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: string };
 
-/** Email shape mirroring identity-guard's persona validation (`^[^\s@<>]+@[^\s@<>]+$`). */
-const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+$/;
-
-const MODEL_TIERS = [
+const MODEL_TIERS: readonly { readonly key: WorkSize; readonly label: string }[] = [
   { key: 'simple', label: 'Simple' },
   { key: 'average', label: 'Average' },
   { key: 'technical', label: 'Technical' },
-] as const;
+];
 
-const enabledProvidersSchema = z.array(z.enum(['claude', 'codex'])).nonempty();
-const modelTierSchema = z
-  .object({
-    simple: z.string().min(1).optional(),
-    average: z.string().min(1).optional(),
-    technical: z.string().min(1).optional(),
-  })
-  .strict();
+// Persona reuses identity-guard's canonical email predicate so the UI rejects exactly what the
+// worktree-identity guard would (one rule, not a re-spelled regex).
 const personaSchema = z
   .object({
     name: z.string().trim().min(1),
-    email: z.string().regex(EMAIL_RE),
+    email: z.string().refine(isEmailAddress, 'invalid email'),
   })
   .strict();
 
@@ -180,7 +186,7 @@ function issueToggle(
   key: string,
   label: string,
   description: string,
-  dependsOn?: { key: string; equals: unknown },
+  dependsOn?: { key: string; equals: string | number | boolean | null },
 ): SettingEntry {
   return {
     key,
@@ -221,10 +227,7 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
     defaultValue: MAXED_THRESHOLD_PCT_DEFAULT,
     perProject: true,
     primaryLayer: 'project',
-    validate: zodValidate(
-      z.number().finite().min(0).max(100),
-      'must be a number between 0 and 100',
-    ),
+    validate: zodValidate(maxedThresholdPctSchema, 'must be a number between 0 and 100'),
   },
   {
     key: MAX_ACTIVE_CHILDREN_KEY,
@@ -257,7 +260,7 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
     defaultValue: DEFAULT_WORK_SIZE_DEFAULT,
     perProject: true,
     primaryLayer: 'project',
-    validate: zodValidate(z.enum(['simple', 'average', 'technical']), 'choose a work size'),
+    validate: zodValidate(workSizeSchema, 'choose a work size'),
   },
   {
     key: DISPATCH_DEFAULT_REASONING_BUDGET_KEY,
@@ -275,7 +278,7 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
     defaultValue: DEFAULT_REASONING_BUDGET_DEFAULT,
     perProject: true,
     primaryLayer: 'project',
-    validate: zodValidate(z.enum(['economy', 'standard', 'deep']), 'choose a reasoning budget'),
+    validate: zodValidate(reasoningBudgetSchema, 'choose a reasoning budget'),
   },
   // ── Review & Merge ──────────────────────────────────────────────────────────
   {

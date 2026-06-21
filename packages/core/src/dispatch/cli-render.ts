@@ -273,10 +273,13 @@ export function runDispatchPolicy(
   try {
     const enabled = new Set(resolveEnabledProviders(projectId, cfg));
     const enabledAccounts = accounts.filter((a) => enabled.has(a.provider));
-    if (enabledAccounts.length === 0) {
+    // Fail loud only when the operator's config actively excluded EVERY offered account (a real
+    // misconfiguration). A genuinely empty `accounts` input stays on the graceful no-candidate ->
+    // WAITING path that placeAgent/resolveDispatch already provide (never a throw — balancer AC3).
+    if (accounts.length > 0 && enabledAccounts.length === 0) {
       throw new Error(
         `co dispatch: no enabled provider to dispatch to — 'dispatch.enabledProviders' excludes ` +
-          `every candidate account (${accounts.map((a) => a.provider).join(', ') || 'none'}).`,
+          `every candidate account (${accounts.map((a) => a.provider).join(', ')}).`,
       );
     }
     const pins = resolvePinTable(projectId, cfg);

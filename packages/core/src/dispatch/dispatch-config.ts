@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
+import { providerSchema } from './events.js';
 import type { Provider } from './usage-source.js';
 import {
   workSizeSchema,
@@ -44,15 +45,20 @@ function withConfig<T>(config: ConfigStore | undefined, fn: (cfg: ConfigStore) =
   }
 }
 
-const providerSchema = z.enum(['claude', 'codex']);
-const enabledProvidersSchema = z.array(providerSchema).nonempty();
-const modelTierSchema = z
+// These schemas are the SINGLE SOURCE of each dispatch-setting's validation rule: the resolvers below
+// (the read gate) and the settings registry (the write gate) both use them, so the UI rejects exactly
+// what the dispatch path would fail loud on (AC-SET-4, Principle 9). `providerSchema` is the canonical
+// frozen-Provider guard from events.js — never re-spell it.
+export const enabledProvidersSchema = z.array(providerSchema).nonempty();
+export const modelTierSchema = z
   .object({
     simple: z.string().min(1).optional(),
     average: z.string().min(1).optional(),
     technical: z.string().min(1).optional(),
   })
   .strict();
+/** Utilization-% threshold: a finite number in [0, 100]. */
+export const maxedThresholdPctSchema = z.number().finite().min(0).max(100);
 
 /** Which providers may float for dispatch. Default both; rejects an empty or unknown-member set. */
 export function resolveEnabledProviders(
@@ -82,15 +88,21 @@ export function resolveMaxedThresholdPct(projectId: string, config?: ConfigStore
     if (!Object.prototype.hasOwnProperty.call(eff, DISPATCH_MAXED_THRESHOLD_PCT_KEY)) {
       return MAXED_THRESHOLD_PCT_DEFAULT;
     }
-    const raw = eff[DISPATCH_MAXED_THRESHOLD_PCT_KEY];
-    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0 || raw > 100) {
+    const parsed = maxedThresholdPctSchema.safeParse(eff[DISPATCH_MAXED_THRESHOLD_PCT_KEY]);
+    if (!parsed.success) {
       throw new Error(`${DISPATCH_MAXED_THRESHOLD_PCT_KEY}: expected a number between 0 and 100.`);
     }
-    return raw;
+    return parsed.data;
   });
 }
 
-/** Per-provider model-table overrides (partial; unset tiers keep the built-in defaults). */
+/**
+ * Per-provider model-table overrides. "Partial" is WITHIN A SINGLE LAYER: unset tiers keep the
+ * built-in default. It is NOT a cross-layer deep merge — `resolveEffective` replaces the whole
+ * `dispatch.models.<provider>` object per key (a project override REPLACES the global table, it does
+ * not merge tier-by-tier onto it), consistent with every other object-valued config key. The desktop
+ * model-tier editor mirrors this (it merges over the built-in defaults, not over an inherited global).
+ */
 export function resolveModels(projectId: string, config?: ConfigStore): ModelOverrides {
   return withConfig(config, (cfg) => {
     const eff = cfg.resolveEffective(projectId);
