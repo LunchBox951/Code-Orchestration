@@ -49,12 +49,14 @@ function makeFakeRoster(agents: AgentRecord[]): RosterStore & { removed: string[
 
 function makeFakeWorktrees(
   worktrees: WorktreeRecord[],
-): WorktreeStore & { removedBranches: string[] } {
+): WorktreeStore & { removedBranches: string[]; removeForce: string[] } {
   const wts = [...worktrees];
   const removedSet = new Set<string>();
   const removedBranches: string[] = [];
+  const removeForce: string[] = [];
   return {
     removedBranches,
+    removeForce,
     recordWorktree: () => {
       throw new Error('not implemented');
     },
@@ -76,12 +78,12 @@ function makeFakeWorktrees(
       throw new Error('not implemented');
     },
     getFinish: () => undefined,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    removeWorktree(branch: string, _deps: RemoveWorktreeDeps): WorktreeRecord {
+    removeWorktree(branch: string, deps: RemoveWorktreeDeps): WorktreeRecord {
       const wt = wts.find((w) => w.branch === branch);
       if (!wt) throw new Error(`removeWorktree: branch '${branch}' not found`);
       removedSet.add(branch);
       removedBranches.push(branch);
+      if (deps.force === true) removeForce.push(branch);
       return { ...wt, removed: true };
     },
     detectOrphans: () => [],
@@ -284,7 +286,58 @@ describe('deleteAgentSubtree', () => {
     expect(archive.records).toHaveLength(0);
   });
 
-  it('archives unmerged branches with branch -D and correct expiresAt', () => {
+  it('does NOT record a merged branch as deleted when its `git branch -d` throws (result-honesty)', () => {
+    // Two merged siblings: co/lead's `branch -d` throws; co/impl's succeeds. The single AggregateError
+    // surfaces co/lead's failure, and the surviving result (re-derived from the spy) proves co/lead is
+    // NOT in deletedBranches while co/impl is — the push now lives INSIDE the successful `branch -d` try.
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'lead', role: 'lead', parent: 'coord-x', registeredTs: 2 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 3 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([
+      worktree('co/lead', 'lead'),
+      worktree('co/impl', 'impl'),
+    ]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    // gitExec throws specifically on `git branch -d co/lead` (the safe delete fails); co/impl succeeds.
+    const branchDeleteOk: string[] = [];
+    const gitExec: GitExec = (_cwd, args) => {
+      if (args[0] === 'branch' && args[1] === '-d') {
+        if (args[2] === 'co/lead') throw new Error('git branch -d failed for co/lead');
+        branchDeleteOk.push(args[2]!);
+      }
+    };
+    const gitReader = makeGitReader({ mergedBranches: new Set(['co/lead', 'co/impl']) });
+
+    let caughtError: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', {
+        openRoster: () => roster,
+        openWorktrees: () => worktreeStore,
+        openSessions: () => sessions,
+        openArchive: () => archive,
+        repoCwd: '/repo',
+        nowMs: 10_000,
+        gitExec,
+        gitReader,
+      });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    // The AggregateError still fires (co/lead's branch -d failure is collected).
+    expect(caughtError).toBeInstanceOf(AggregateError);
+    const ae = caughtError as AggregateError;
+    expect(ae.errors).toHaveLength(1);
+    expect((ae.errors[0] as Error).message).toContain('co/lead');
+    // co/lead's `branch -d` never returned, so it must NOT be reported as deleted; co/impl's did.
+    expect(branchDeleteOk).toContain('co/impl');
+    expect(branchDeleteOk).not.toContain('co/lead');
+  });
+
+  it('archives unmerged branches by removing the worktree (force) WITHOUT deleting the branch', () => {
     const roster = makeFakeRoster([
       { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
       { agentId: 'lead', role: 'lead', parent: 'coord-x', registeredTs: 2 },
@@ -312,8 +365,12 @@ describe('deleteAgentSubtree', () => {
 
     expect(result.archivedBranches).toContain('co/impl');
     expect(result.deletedBranches).toHaveLength(0);
-    // should use branch -D for unmerged
-    expect(calls.some((c) => c[1] === 'branch' && c[2] === '-D' && c[3] === 'co/impl')).toBe(true);
+    // The worktree was force-removed (the force flag is load-bearing for an unmerged branch)...
+    expect(worktreeStore.removedBranches).toContain('co/impl');
+    expect(worktreeStore.removeForce).toContain('co/impl');
+    // ...but the branch ref must SURVIVE: NEITHER `git branch -D` NOR `-d` is issued for it at delete
+    // time. The reaper / purgeArchive delete it after expiry (the archive record stores only metadata).
+    expect(calls.some((c) => c[1] === 'branch' && c[2] === '-D' && c[3] === 'co/impl')).toBe(false);
     expect(calls.some((c) => c[1] === 'branch' && c[2] === '-d')).toBe(false);
     // archive should have an entry for impl's branch
     expect(archive.records).toHaveLength(1);
@@ -353,12 +410,14 @@ describe('deleteAgentSubtree', () => {
       gitReader,
     });
 
-    // snapshot commit was called (add -A then commit -s)
+    // snapshot commit was called (add -A then commit -s) — the dirty work is committed to the branch
     expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'add' && c[2] === '-A')).toBe(true);
     expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'commit')).toBe(true);
-    // removeWorktree was called (tracked via fake store) + branch -D via gitExec
+    // removeWorktree was force-called (tracked via fake store); the branch ref is NOT deleted so the
+    // snapshot commit stays reachable until expiry.
     expect(worktreeStore.removedBranches).toContain('co/impl');
-    expect(calls.some((c) => c[1] === 'branch' && c[2] === '-D' && c[3] === 'co/impl')).toBe(true);
+    expect(worktreeStore.removeForce).toContain('co/impl');
+    expect(calls.some((c) => c[1] === 'branch' && c[2] === '-D' && c[3] === 'co/impl')).toBe(false);
     // archive still recorded
     expect(archive.records).toHaveLength(1);
   });

@@ -147,13 +147,22 @@ describe('reapExpiredArchives', () => {
       // co/exp2 succeeds
     };
 
-    expect(() =>
+    let caught: unknown;
+    try {
       reapExpiredArchives('proj', now, {
         openArchive: () => archive,
         repoCwd: '/repo',
         gitExec,
-      }),
-    ).toThrow(AggregateError);
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    // The single failure (co/exp1) is surfaced as a one-element AggregateError naming the failing branch.
+    expect(caught).toBeInstanceOf(AggregateError);
+    const ae = caught as AggregateError;
+    expect(ae.errors).toHaveLength(1);
+    expect((ae.errors[0] as Error).message).toContain('co/exp1');
 
     // Even though exp1 failed, both branch deletion attempts should have been made
     expect(callCount).toBe(2);

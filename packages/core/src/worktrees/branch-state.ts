@@ -5,6 +5,10 @@ import { defaultGitReader, type GitReader } from './detect-base.js';
  * True iff every commit of `branch` is reachable from `baseRef` (i.e. fully merged).
  * Exit-code based: `defaultGitReader` returns `''` (empty string) on exit 0 (merged)
  * and `null` on exit 1 (not merged).
+ *
+ * Any non-zero `merge-base --is-ancestor` exit — including a broken-git / bad-ref exit 128 — is
+ * collapsed to `null` by the reader and therefore treated as "not merged". That is a deliberately
+ * SAFE default: an ambiguous result archives/preserves the branch rather than hard-deleting it.
  */
 export function isBranchMerged(
   repoCwd: string,

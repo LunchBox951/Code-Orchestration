@@ -39,4 +39,15 @@ describe('descendantsLeafFirst', () => {
     // Should sort by agentId when registeredTs is same
     expect(result).toEqual(['a', 'z']);
   });
+
+  it('throws a clear cycle error on a corrupt roster with a parent cycle (fail-loud, not stack-overflow)', () => {
+    // A corrupt roster with conflicting parent edges: r → a, a → b, b → a (a appears as both b's
+    // parent and b's child). Without the visited-set guard this would recurse forever and overflow.
+    const agents: readonly AgentRecord[] = [
+      { agentId: 'a', role: 'lead', parent: 'r', registeredTs: 1 },
+      { agentId: 'b', role: 'implementer', parent: 'a', registeredTs: 2 },
+      { agentId: 'a', role: 'lead', parent: 'b', registeredTs: 3 },
+    ];
+    expect(() => descendantsLeafFirst(agents, 'r')).toThrow(/roster cycle detected at 'a'/);
+  });
 });

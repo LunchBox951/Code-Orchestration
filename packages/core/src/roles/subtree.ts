@@ -33,10 +33,16 @@ export function descendantsLeafFirst(
     });
   }
 
-  // Post-order traversal: recurse then push.
+  // Post-order traversal: recurse then push. A `visited` set guards against a corrupt roster with a
+  // parent cycle, which would otherwise overflow the stack — fail loud instead (Principle 9).
   const result: AgentRecord[] = [];
+  const visited = new Set<string>();
 
   function traverse(parentId: string): void {
+    if (visited.has(parentId)) {
+      throw new Error(`roster cycle detected at '${parentId}'`);
+    }
+    visited.add(parentId);
     const children = childrenOf.get(parentId);
     if (!children) return;
 

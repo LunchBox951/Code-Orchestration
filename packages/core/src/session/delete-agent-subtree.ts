@@ -7,8 +7,10 @@
  *   2. Per agent:
  *      a. Find its live worktree (`!w.removed && w.agent === agentId`).
  *      b. If merged: `removeWorktree` + `git branch -d`.
- *         If unmerged: (snapshot if dirty) + `removeWorktree --force` + `git branch -D` + archive.
- *         ORDER IS LOAD-BEARING: removeWorktree BEFORE `git branch -D/-d`.
+ *         If unmerged: (snapshot if dirty) + `removeWorktree --force` + archive — the branch ref is
+ *         KEPT (no `git branch -D`) so the snapshot commit stays reachable until expiry; the reaper /
+ *         `purgeArchive` delete it after the TTL. ORDER IS LOAD-BEARING: removeWorktree BEFORE any
+ *         (merged-path) `git branch -d`.
  *      c. End the session if still active.
  *      d. Remove from roster.
  *   3. Collect errors, attempt ALL of `order`, then `throw AggregateError` if any.
@@ -123,7 +125,11 @@ export function deleteAgentSubtree(
           const merged = isBranchMerged(repoCwd, wt.branch, wt.baseRef, gitReader);
 
           if (!merged) {
-            // Unmerged: snapshot if dirty, then force-remove worktree, force-delete branch, archive.
+            // Unmerged: snapshot if dirty, then force-remove the worktree, archive — but DO NOT delete
+            // the branch. The branch ref `co/<id>` must SURVIVE: the archive record stores only metadata
+            // (no ref), so a `git branch -D` here would make the snapshot commit unreachable (GC-eligible)
+            // — unmerged work would be LOST and "Restore" would have no branch to restore to. The reaper
+            // (`reapExpiredArchives`) / `purgeArchive` delete it after expiry.
             try {
               if (isWorktreeDirty(wt.path, gitReader)) {
                 snapshotDirtyWorktree(
@@ -139,12 +145,6 @@ export function deleteAgentSubtree(
 
             try {
               worktrees.removeWorktree(wt.branch, { repoCwd, gitExec, force: true });
-            } catch (e) {
-              errors.push(e instanceof Error ? e : new Error(String(e)));
-            }
-
-            try {
-              gitExec(repoCwd, ['branch', '-D', wt.branch]);
             } catch (e) {
               errors.push(e instanceof Error ? e : new Error(String(e)));
             }
@@ -172,11 +172,12 @@ export function deleteAgentSubtree(
 
             try {
               gitExec(repoCwd, ['branch', '-d', wt.branch]);
+              // Result-honesty: only record the branch as deleted once `git branch -d` actually
+              // returned (mirrors how the unmerged path pushes `archivedBranches` inside its try).
+              deletedBranches.push(wt.branch);
             } catch (e) {
               errors.push(e instanceof Error ? e : new Error(String(e)));
             }
-
-            deletedBranches.push(wt.branch);
           }
         } catch (e) {
           errors.push(e instanceof Error ? e : new Error(String(e)));

@@ -467,7 +467,7 @@ describe('AC-L6a-1 — replay equality: live fold → rebuildAll → byte-equal'
   });
 });
 
-describe('AC-L6a-1 — optional operator name', () => {
+describe('AC-A2 — optional operator name round-trips through the roster', () => {
   it('carries an optional operator name through record → read-back', () => {
     const store = openRosterStore('p-roster-name');
     try {
