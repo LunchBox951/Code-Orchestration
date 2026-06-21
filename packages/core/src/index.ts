@@ -1234,6 +1234,14 @@ export type {
 } from './session/start-coordinator-session.js';
 export { startCoordinatorSession, rootCoordinatorId } from './session/start-coordinator-session.js';
 export { slugifyCoordinatorName, coordinatorIdFromParts } from './session/coordinator-id.js';
+// A5 cascade-delete primitive: tear down a coordinator's whole subtree leaf-first, archiving
+// unmerged branches, ending sessions, and removing roster rows. Collects errors across all agents
+// and throws a single AggregateError after the full pass (best-effort-complete, then loud).
+export type {
+  DeleteAgentSubtreeDeps,
+  DeleteAgentSubtreeResult,
+} from './session/delete-agent-subtree.js';
+export { deleteAgentSubtree, ARCHIVE_TTL_MS } from './session/delete-agent-subtree.js';
 
 // Archive store: event-sourced record of unmerged coordinator branches (cascade-delete writes,
 // reaper purges expired records, IPC verbs list/restore/purge). Scope: `archive:`. Table: `archive`.
