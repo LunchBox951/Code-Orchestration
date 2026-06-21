@@ -27,7 +27,7 @@ const { contextBridge, ipcRenderer } = require('electron') as {
 type ReviewState = unknown;
 type SourceState = unknown;
 
-/** One archived coordinator branch — mirrors ArchiveEntry from @co/core contract (inline, no Node import). */
+/** One archived branch — mirrors ArchiveEntry from @co/core contract (inline, no Node import). */
 interface ArchiveEntry {
   readonly id: string;
   readonly name: string;
@@ -101,7 +101,7 @@ interface CoShellBridge {
     specBody: string | null,
     name: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
-  sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
+  sessionStartFromDemoSpec(name: string | null): Promise<{ ok: boolean; error?: string }>;
   // ── Project + Daemon on-ramp ────────────────────────────────────────────────
   openProject(): Promise<void>;
   daemonRetry(): Promise<{ ok: boolean; error?: string }>;
@@ -300,8 +300,8 @@ const bridge: CoShellBridge = {
       name,
     );
   },
-  async sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }> {
-    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:startFromDemoSpec');
+  async sessionStartFromDemoSpec(name: string | null): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke<{ ok: boolean; error?: string }>('session:startFromDemoSpec', name);
   },
   // ── Project + Daemon on-ramp ────────────────────────────────────────────────
   async openProject(): Promise<void> {

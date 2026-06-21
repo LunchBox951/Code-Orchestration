@@ -7,7 +7,7 @@ type ConnectionStatus = 'connecting' | 'live' | 'degraded';
 interface ProjectInfo {
   id: string;
 }
-type AgentStatus = 'warm' | 'waiting' | 'stuck' | 'paused' | 'unknown';
+type AgentStatus = 'warm' | 'waiting' | 'stopped' | 'stuck' | 'paused' | 'unknown';
 
 interface ConnectionObservation {
   kind: 'live' | 'static';
@@ -21,6 +21,7 @@ interface ConnectionState {
 
 interface TreeNode {
   agentId: string;
+  name?: string;
   role: string;
   subRole?: string;
   parent: string;
@@ -32,6 +33,7 @@ interface FleetStats {
   total: number;
   warm: number;
   waiting: number;
+  stopped: number;
   stuck: number;
   paused: number;
 }
@@ -93,6 +95,7 @@ interface MailState {
 
 interface AgentConsoleRow {
   agentId: string;
+  name?: string;
   role: string;
   parent: string;
   status: AgentStatus;
@@ -220,7 +223,7 @@ interface LimitsCostState {
 
 // ── Archive (inline — renderer is isolated from Node context) ────────────────
 
-/** One archived coordinator branch — mirrors ArchiveEntry from @co/core contract. */
+/** One archived branch — mirrors ArchiveEntry from @co/core contract. */
 interface ArchiveEntry {
   readonly id: string;
   readonly name: string;
@@ -329,7 +332,7 @@ interface CoShellBridge {
     specBody: string | null,
     name: string | null,
   ): Promise<{ ok: boolean; error?: string }>;
-  sessionStartFromDemoSpec(): Promise<{ ok: boolean; error?: string }>;
+  sessionStartFromDemoSpec(name: string | null): Promise<{ ok: boolean; error?: string }>;
   // ── Project + Daemon on-ramp ────────────────────────────────────────────────
   openProject(): Promise<void>;
   daemonRetry(): Promise<{ ok: boolean; error?: string }>;

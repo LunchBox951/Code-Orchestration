@@ -157,13 +157,25 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     deps.rollupsReader ??
     (ownedDispatchStore != null ? () => ownedDispatchStore.readRollups() : () => []);
 
+  let closed = false;
+  const shellSubscriptions: Array<() => void> = [];
+  const publish = <T>(cb: ((state: T) => void) | undefined, state: T): void => {
+    if (!closed) cb?.(state);
+  };
+  const publishError = (cb: ((message: string) => void) | undefined, message: string): void => {
+    if (!closed) cb?.(message);
+  };
+
   const dash = new DashboardVM();
   const limitsCostVm = new LimitsCostVM();
   const agentsConsoleVm = new AgentsConsoleVM();
   let transcriptRequestSeq = 0;
-  agentsConsoleVm.subscribe((state) => deps.onAgentsConsoleState?.(state));
+  shellSubscriptions.push(
+    agentsConsoleVm.subscribe((state) => publish(deps.onAgentsConsoleState, state)),
+  );
 
   function refreshSelectedTranscript(opts: { resetGeneration?: boolean } = {}): void {
+    if (closed) return;
     const agentId = agentsConsoleVm.state.selectedAgentId;
     if (agentId == null) return;
     if (opts.resetGeneration === true) agentsConsoleVm.clearSelectedTranscript();
@@ -172,6 +184,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       .transcript(agentId)
       .then((tail) => {
         if (
+          !closed &&
           requestSeq === transcriptRequestSeq &&
           agentsConsoleVm.state.selectedAgentId === agentId
         ) {
@@ -185,6 +198,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     observation: OperatorObservation | null,
     backfill: 'none' | 'live' | 'live-transition',
   ): void {
+    if (closed) return;
     const wasLive = agentsConsoleVm.state.connection === 'live';
     agentsConsoleVm.update(observation);
     if (
@@ -196,12 +210,13 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   }
 
   function doRefreshLimitsCost(): void {
+    if (closed) return;
     limitsCostVm.update({
       buckets: readBuckets(),
       accountStatuses: readAccountStatuses(),
       rollups: readRollups(),
     });
-    deps.onLimitsCostState?.(limitsCostVm.state);
+    publish(deps.onLimitsCostState, limitsCostVm.state);
   }
 
   // Declare the ref before the client so the onState closure is TDZ-safe and
@@ -214,16 +229,21 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       projectId: deps.projectId,
       socketPath,
       onState: (s) => {
+        if (closed) return;
         if (s === 'disconnected') {
           void connVmRef.current?.refresh();
         }
       },
       onError: (e) => {
-        deps.onConnectionError?.(`operator IPC connection error: ${safeError(e)}`);
+        publishError(deps.onConnectionError, `operator IPC connection error: ${safeError(e)}`);
       },
     });
 
-  client.onTranscript((t) => agentsConsoleVm.appendChunk(t));
+  shellSubscriptions.push(
+    client.onTranscript((t) => {
+      if (!closed) agentsConsoleVm.appendChunk(t);
+    }),
+  );
 
   const mailVm = new MailVM({
     registry: buildRegistry(deps.registry),
@@ -234,9 +254,10 @@ export function createAppShell(deps: AppShellDeps): AppShell {
           doRefreshMail();
         })
         .catch((e: unknown) => {
+          if (closed) return;
           // Conductor down or gone mid-call — show a clear message, never crash.
           if (!(e instanceof ConductorUnavailableError)) {
-            deps.onMailError?.(safeError(e));
+            publishError(deps.onMailError, safeError(e));
           }
         });
     },
@@ -245,7 +266,8 @@ export function createAppShell(deps: AppShellDeps): AppShell {
         await client.reply(target, draft);
         doRefreshMail();
       } catch (e: unknown) {
-        deps.onMailError?.(
+        publishError(
+          deps.onMailError,
           e instanceof ConductorUnavailableError
             ? 'Conductor not running — start `co-mcp serve <projectId>` to send mail.'
             : safeError(e),
@@ -260,7 +282,8 @@ export function createAppShell(deps: AppShellDeps): AppShell {
         // Refresh dashboard to update outstandingCount after actionable clears.
         void connVmRef.current?.refresh();
       } catch (e: unknown) {
-        deps.onMailError?.(
+        publishError(
+          deps.onMailError,
           e instanceof ConductorUnavailableError
             ? 'Conductor not running — start `co-mcp serve <projectId>` to approve/decline.'
             : safeError(e),
@@ -274,22 +297,24 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   });
 
   function doRefreshMail(busId?: string): void {
+    if (closed) return;
     const bus = busId ?? mailVm.state.activeBus;
     const inbox = readInbox(bus);
     const outbox = readOutbox(bus);
     mailVm.update(inbox, outbox);
   }
 
-  mailVm.subscribe((state) => deps.onMailState?.(state));
+  shellSubscriptions.push(mailVm.subscribe((state) => publish(deps.onMailState, state)));
 
   let reviewContextRequestSeq = 0;
   const reviewVm = new ReviewVM({
     onFetchReviewContext: (reviewId) => {
+      if (closed) return;
       const seq = ++reviewContextRequestSeq;
       void client
         .reviewContext(reviewId)
         .then((ctx) => {
-          if (seq === reviewContextRequestSeq) reviewVm.setReviewContext(reviewId, ctx);
+          if (!closed && seq === reviewContextRequestSeq) reviewVm.setReviewContext(reviewId, ctx);
         })
         .catch(() => {});
     },
@@ -299,7 +324,8 @@ export function createAppShell(deps: AppShellDeps): AppShell {
         doRefreshReviews();
         void connVmRef.current?.refresh();
       } catch (e) {
-        deps.onReviewError?.(
+        publishError(
+          deps.onReviewError,
           e instanceof ConductorUnavailableError
             ? 'Conductor not running — start `co-mcp serve <projectId>` to submit a verdict.'
             : safeError(e),
@@ -310,29 +336,34 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   });
 
   function doRefreshReviews(): void {
+    if (closed) return;
     reviewVm.update(readInbox(OPERATOR));
   }
 
-  reviewVm.subscribe((state) => deps.onReviewState?.(state));
+  shellSubscriptions.push(reviewVm.subscribe((state) => publish(deps.onReviewState, state)));
 
   const nav = new NavVM();
-  if (deps.onNavState) nav.subscribe(deps.onNavState);
+  if (deps.onNavState) {
+    shellSubscriptions.push(nav.subscribe((state) => publish(deps.onNavState, state)));
+  }
 
   const connVm = new ConnectionVM({
     client,
     onState: (state: ConnectionState) => {
-      deps.onConnectionState?.(state);
+      if (closed) return;
+      publish(deps.onConnectionState, state);
       dash.update(state.observation, readActionables());
-      deps.onDashboardState?.(dash.state);
+      publish(deps.onDashboardState, dash.state);
       updateAgentsConsole(state.observation, 'live');
       doRefreshMail();
       doRefreshReviews();
       doRefreshLimitsCost();
     },
     onTick: (tick: OperatorIpcTick) => {
+      if (closed) return;
       const liveObs: OperatorObservation = { kind: 'live', snapshot: tick.snapshot };
       dash.update(liveObs, readActionables());
-      deps.onDashboardState?.(dash.state);
+      publish(deps.onDashboardState, dash.state);
       updateAgentsConsole(liveObs, 'live-transition');
       doRefreshMail();
       doRefreshReviews();
@@ -386,9 +417,15 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       return reviewVm.state;
     },
     async start() {
+      if (closed) return;
       await connVm.start();
     },
     async close() {
+      if (closed) return;
+      closed = true;
+      transcriptRequestSeq += 1;
+      reviewContextRequestSeq += 1;
+      for (const unsubscribe of shellSubscriptions.splice(0)) unsubscribe();
       connVm.close();
       await client.close();
       ownedStore?.close();

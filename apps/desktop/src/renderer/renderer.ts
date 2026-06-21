@@ -56,6 +56,8 @@ function statusMeta(status: AgentStatus): StatusMeta {
       return { color: 'var(--st-running)', label: 'WARM', pulse: true };
     case 'waiting':
       return { color: 'var(--st-waiting)', label: 'WAITING', pulse: false };
+    case 'stopped':
+      return { color: 'var(--st-stopped)', label: 'STOPPED', pulse: false };
     case 'stuck':
       return { color: 'var(--st-stuck)', label: 'STUCK', pulse: false };
     case 'paused':
@@ -102,14 +104,64 @@ let latestDaemon: DaemonStatusPayload | null = null;
 // The latest read-only Source view state (P-ON4) from `source:refresh` — real branches/PR refs or a
 // named empty/error state. `null` until the first fetch resolves.
 let latestSource: SourceState | null = null;
+let sourceRefreshGeneration = 0;
+let reviewInvokeGeneration = 0;
 // The agentId of a Delete button currently in the pending-confirm state (two-step confirm).
 let pendingDeleteId: string | null = null;
-// The latest archive list from archive:list — refreshed on every dashboard push. Empty until
-// the first fetch resolves or when the shell is down.
+// The archive id of a Purge button currently in the pending-confirm state (two-step confirm).
+let pendingArchivePurgeId: string | null = null;
+// Re-wake inline composer state. Kept outside the DOM so live roster rerenders preserve draft text.
+let activeRewakeAgentId: string | null = null;
+let activeRewakeDraft = '';
+// The latest archive list from archive:list — refreshed on every dashboard push. Empty until the
+// first fetch resolves; the main process can read static archive records when the daemon is down.
 let latestArchive: readonly ArchiveEntry[] = [];
+let archiveRefreshGeneration = 0;
 
 const OPERATOR_BUS = '@operator';
+
+const EMPTY_LIMITS_STATE: LimitsCostState = { headroomRows: [], agentCosts: [], taskCosts: [] };
+const EMPTY_MAIL_STATE: MailState = {
+  activeBus: OPERATOR_BUS,
+  tab: 'inbox',
+  inbox: [],
+  outbox: [],
+  selected: null,
+  composer: {
+    active: false,
+    targetSeq: null,
+    targetRecipient: null,
+    type: 'clarify_response',
+    subject: '',
+    body: '',
+    pending: false,
+    idempotencyKey: null,
+  },
+};
+const EMPTY_AGENTS_STATE: AgentsConsoleState = {
+  roster: [],
+  selectedAgentId: null,
+  selectedStatus: null,
+  transcript: '',
+  connection: 'degraded',
+};
+const EMPTY_REVIEW_STATE: ReviewState = {
+  pending: [],
+  selectedReviewId: null,
+  context: null,
+  composer: { active: false, verdict: 'PASS', body: '', pending: false },
+};
 const knownMailBuses = new Set<string>([OPERATOR_BUS]);
+
+function agentDisplayName(agent: { agentId: string; name?: string | null }): string {
+  const name = agent.name?.trim();
+  return name != null && name.length > 0 ? name : agent.agentId;
+}
+
+function agentAccessibleName(agent: { agentId: string; name?: string | null }): string {
+  const name = agentDisplayName(agent);
+  return name === agent.agentId ? name : `${name} (${agent.agentId})`;
+}
 
 function collectAgentIds(nodes: readonly TreeNode[], out: string[] = []): string[] {
   for (const node of nodes) {
@@ -121,7 +173,7 @@ function collectAgentIds(nodes: readonly TreeNode[], out: string[] = []): string
 
 // ── Cleared agents — declutter the viewport of idle, finished agents (e.g. accumulated host-proof
 // coordinators). VIEW-only: persisted in localStorage, never touches the roster/conductor, so nothing
-// is lost. A cleared agent that becomes active (warm/stuck) again is auto-restored.
+// is lost. A cleared agent that becomes active or explicitly operator-suppressed again is auto-restored.
 const DISMISSED_AGENTS_KEY = 'co.dismissedAgents';
 
 function loadDismissedAgents(): Set<string> {
@@ -146,9 +198,16 @@ function persistDismissedAgents(): void {
   }
 }
 
-/** True iff this node or any descendant is active (WARM or STUCK) — such a subtree is never hidden. */
+/** True iff this node or any descendant is still relevant — such a subtree is never hidden. */
 function subtreeActive(node: TreeNode): boolean {
-  return node.status === 'warm' || node.status === 'stuck' || node.children.some(subtreeActive);
+  return (
+    node.status === 'warm' ||
+    node.status === 'waiting' ||
+    node.status === 'stopped' ||
+    node.status === 'stuck' ||
+    node.status === 'paused' ||
+    node.children.some(subtreeActive)
+  );
 }
 
 function countSubtree(nodes: readonly TreeNode[]): number {
@@ -179,7 +238,7 @@ function pruneDismissedAgents(nodes: readonly TreeNode[]): { tree: TreeNode[]; h
   return { tree, hidden };
 }
 
-/** Agent ids eligible to be cleared now: an idle subtree (no warm/stuck node) not already cleared. */
+/** Agent ids eligible to be cleared now: a fully idle subtree not already cleared. */
 function clearableAgentIds(nodes: readonly TreeNode[], out: string[] = []): string[] {
   for (const node of nodes) {
     if (!subtreeActive(node)) {
@@ -222,6 +281,62 @@ function derivePhase(): Phase {
     }
   }
   return 'fleet';
+}
+
+interface CoordinatorPhaseCopy {
+  title: string;
+  body: string;
+  subline: string;
+  pulse: boolean;
+}
+
+function coordinatorPhaseCopy(status: AgentStatus): CoordinatorPhaseCopy {
+  switch (status) {
+    case 'warm':
+      return {
+        title: 'Coordinator session is live',
+        body:
+          'The root coordinator is reading the handoff and may be waiting on operator approval; ' +
+          'it fans out after you lock the spec with `co spec lock`.',
+        subline: 'Conductor driving 1 agent · coordinator session live',
+        pulse: true,
+      };
+    case 'waiting':
+      return {
+        title: 'Coordinator waiting',
+        body: 'The root coordinator has queued work and will run on the next eligible Conductor tick.',
+        subline: '1 coordinator registered · waiting',
+        pulse: false,
+      };
+    case 'stopped':
+      return {
+        title: 'Coordinator stopped',
+        body: 'The root coordinator is stopped and requires re-wake before the Conductor will select it again.',
+        subline: '1 coordinator registered · stopped · requires re-wake',
+        pulse: false,
+      };
+    case 'stuck':
+      return {
+        title: 'Coordinator stuck',
+        body: 'The root coordinator needs operator attention before the Conductor will select it again.',
+        subline: '1 coordinator registered · stuck · needs decision',
+        pulse: false,
+      };
+    case 'paused':
+      return {
+        title: 'Coordinator paused',
+        body: 'The root coordinator is paused. Resume it or send a re-wake when it should continue.',
+        subline: '1 coordinator registered · paused',
+        pulse: false,
+      };
+    case 'unknown':
+      return {
+        title: 'Coordinator not running',
+        body: 'The root coordinator is registered, but the Conductor has no live status for it yet.',
+        subline: '1 coordinator registered · status unknown',
+        pulse: false,
+      };
+  }
 }
 
 // ── Navigation ──────────────────────────────────────────────────────────────────
@@ -464,23 +579,42 @@ function renderTreeRows(nodes: readonly TreeNode[], depth: number): string {
       const meta = statusMeta(node.status);
       const rc = roleColor(node.role);
       const roleLabel = node.subRole ? `${node.role}:${node.subRole}` : node.role;
+      const displayName = agentDisplayName(node);
+      const accessibleName = agentAccessibleName(node);
       const indent = depth * 16;
+      const isRootCoordinator = depth === 0 && node.role.toLowerCase() === 'coordinator';
+      const subtreeCount = 1 + countSubtree(node.children);
+      const subtreeLabel = `${subtreeCount} agent${subtreeCount === 1 ? '' : 's'}`;
+      const deleteConfirm =
+        pendingDeleteId === node.agentId
+          ? `<div class="delete-confirm" role="alert" data-agent-id="${esc(node.agentId)}">
+               <span class="lead">Delete subtree (${subtreeLabel}), including ${esc(node.agentId)}.</span>
+               <span class="sub">Hosted panes stop, sessions end, merged branches are removed, and unmerged branches archive for 14 days.</span>
+               <span class="actions">
+                 <button class="btn btn-ghost" data-agent-action="delete-cancel" data-agent-id="${esc(node.agentId)}" type="button">Cancel</button>
+                 <button class="btn btn-danger" data-agent-action="delete-confirm" data-agent-id="${esc(node.agentId)}" type="button">Delete subtree</button>
+               </span>
+             </div>`
+          : '';
       return `
-        <button class="fleet-row" data-agent-id="${esc(node.agentId)}" type="button">
-          <span style="width:${indent}px;flex:0 0 ${indent}px"></span>
-          <span class="state-dot${meta.pulse ? ' pulse' : ''}" style="background:${meta.color};box-shadow:0 0 0 3px ${tint(meta.color, '22%')}"></span>
-          <span class="mid">
-            <span class="line1">
-              <span class="name">${esc(node.agentId)}</span>
-              <span class="role-badge" style="background:${tint(rc, '18%')};color:${rc}">${esc(roleLabel)}</span>
+        <div class="fleet-row" data-agent-id="${esc(node.agentId)}">
+          <button class="fleet-row-open" data-agent-id="${esc(node.agentId)}" type="button" aria-label="Open agent ${esc(accessibleName)}">
+            <span style="width:${indent}px;flex:0 0 ${indent}px"></span>
+            <span class="state-dot${meta.pulse ? ' pulse' : ''}" style="background:${meta.color};box-shadow:0 0 0 3px ${tint(meta.color, '22%')}"></span>
+            <span class="mid">
+              <span class="line1">
+                <span class="name">${esc(displayName)}</span>
+                <span class="role-badge" style="background:${tint(rc, '18%')};color:${rc}">${esc(roleLabel)}</span>
+              </span>
+              <span class="last">${esc(node.name != null ? `${node.agentId} · child of ${node.parent}` : node.parent ? `child of ${node.parent}` : 'root coordinator')}</span>
             </span>
-            <span class="last">${esc(node.parent ? `child of ${node.parent}` : 'root coordinator')}</span>
-          </span>
-          <span class="right">
-            <span class="state" style="color:${meta.color}">${meta.label}</span>
-            ${depth === 0 && node.role.toLowerCase() === 'coordinator' ? `<button class="btn btn-ghost" data-agent-action="delete" data-agent-id="${esc(node.agentId)}" type="button" aria-label="Delete coordinator ${esc(node.agentId)}">Delete</button>` : ''}
-          </span>
-        </button>
+            <span class="right">
+              <span class="state" style="color:${meta.color}">${meta.label}</span>
+            </span>
+          </button>
+          ${isRootCoordinator ? `<button class="btn btn-ghost" data-agent-action="delete" data-agent-id="${esc(node.agentId)}" type="button" aria-label="Delete coordinator ${esc(accessibleName)}">Delete</button>` : ''}
+        </div>
+        ${deleteConfirm}
         ${renderTreeRows(node.children, depth + 1)}`;
     })
     .join('');
@@ -525,15 +659,24 @@ function renderDashboard(): void {
     return;
   }
 
-  const stats = dash?.stats ?? { total: 0, warm: 0, waiting: 0, stuck: 0, paused: 0 };
+  const stats = dash?.stats ?? {
+    total: 0,
+    warm: 0,
+    waiting: 0,
+    stopped: 0,
+    stuck: 0,
+    paused: 0,
+  };
   const actionables = dash?.actionables ?? [];
   const actionCount = actionables.length;
+  const coordRoot = phase === 'coord' ? dash?.tree[0] : null;
+  const coordCopy = coordRoot != null ? coordinatorPhaseCopy(coordRoot.status) : null;
 
   const subline =
     phase === 'fleet'
       ? `Conductor driving ${stats.total} agent${stats.total !== 1 ? 's' : ''}`
       : phase === 'coord'
-        ? 'Conductor driving 1 agent · coordinator session live'
+        ? (coordCopy?.subline ?? '1 coordinator registered · status unknown')
         : 'Project open · Conductor idle · start a session to begin';
 
   const tiles: Array<{ label: string; value: number; color: string; sub: string }> = [
@@ -554,6 +697,12 @@ function renderDashboard(): void {
       value: stats.waiting,
       color: 'var(--st-waiting)',
       sub: stats.waiting > 0 ? 'eligible to wake' : '—',
+    },
+    {
+      label: 'Stopped',
+      value: stats.stopped,
+      color: 'var(--st-stopped)',
+      sub: stats.stopped > 0 ? 'requires re-wake' : '—',
     },
     {
       label: 'Stuck',
@@ -620,16 +769,18 @@ function renderDashboard(): void {
         : `<div class="empty-inline">
            <span class="glyph">∅</span>
            <span class="lead">No agents yet.</span>
-           <span class="sub">Start a coordinator session — it locks the spec and spawns the fleet.</span>
+          <span class="sub">Start a coordinator session — the fleet starts after you lock the spec with \`co spec lock\`.</span>
          </div>`;
 
   // Right column varies by phase
   let rightCol = '';
   if (phase === 'coord') {
+    const copy = coordCopy ?? coordinatorPhaseCopy('unknown');
+    const meta = statusMeta(coordRoot?.status ?? 'unknown');
     rightCol = `
       <div class="coord-cta">
-        <div class="row"><span class="dot pulse"></span><span class="ttl">Coordinator session is live</span></div>
-        <p>The root coordinator is reading the handoff and may be waiting on an approval before it locks the spec and fans out the fleet.</p>
+        <div class="row"><span class="dot${copy.pulse ? ' pulse' : ''}" style="background:${meta.color}"></span><span class="ttl">${esc(copy.title)}</span></div>
+        <p>${esc(copy.body)}</p>
         <button class="btn btn-primary" data-mc-action="console" type="button" style="align-self:flex-start">Open console →</button>
       </div>`;
   } else if (phase === 'fleet') {
@@ -679,15 +830,26 @@ function renderDashboard(): void {
   const archivedSection =
     latestArchive.length > 0
       ? `<div class="panel" style="margin-top:16px">
-           <div class="panel-hd"><span class="ttl">Archived</span><span class="meta">unmerged coordinator branches</span></div>
+           <div class="panel-hd"><span class="ttl">Archived</span><span class="meta">unmerged branches</span></div>
            <div class="panel-body">
              ${latestArchive
                .map((e) => {
                  const days = Math.max(0, Math.ceil((e.expiresAt - Date.now()) / 86_400_000));
+                 const purgeConfirm =
+                   pendingArchivePurgeId === e.id
+                     ? `<span class="delete-confirm" role="alert" data-archive-id="${esc(e.id)}" style="flex:1">
+                          <span class="lead">Permanently delete ${esc(e.branch)}.</span>
+                          <span class="detail">This removes the archived branch and cannot be undone from co.</span>
+                          <span class="actions">
+                            <button class="btn btn-ghost" data-archive-action="purge-cancel" data-archive-id="${esc(e.id)}" type="button">Cancel</button>
+                            <button class="btn btn-danger" data-archive-action="purge-confirm" data-archive-id="${esc(e.id)}" type="button">Purge branch</button>
+                          </span>
+                        </span>`
+                     : `<button class="btn btn-ghost" data-archive-action="purge" data-archive-id="${esc(e.id)}" type="button">Purge</button>`;
                  return `<div class="fleet-row" style="display:flex;align-items:center;gap:8px;padding:8px 0">
                    <span style="flex:1">${esc(e.name)} · <code>${esc(e.branch)}</code> · expires in ${days} day${days === 1 ? '' : 's'}</span>
                    <button class="btn btn-ghost" data-archive-action="restore" data-archive-id="${esc(e.id)}" type="button">Restore</button>
-                   <button class="btn btn-ghost" data-archive-action="purge" data-archive-id="${esc(e.id)}" type="button">Purge</button>
+                   ${purgeConfirm}
                  </div>`;
                })
                .join('')}
@@ -862,8 +1024,22 @@ function setSteerEnabled(enabled: boolean): void {
   }
 }
 
+function syncActiveRewakeDraft(): void {
+  if (activeRewakeAgentId == null) return;
+  const input = document.querySelector<HTMLTextAreaElement>('.rewake-input');
+  if (input != null) activeRewakeDraft = input.value;
+}
+
 function renderAgents(state: AgentsConsoleState): void {
+  syncActiveRewakeDraft();
   latestAgentsState = state;
+  if (
+    activeRewakeAgentId != null &&
+    !state.roster.some((agent) => agent.agentId === activeRewakeAgentId)
+  ) {
+    activeRewakeAgentId = null;
+    activeRewakeDraft = '';
+  }
 
   const railHd = document.getElementById('agents-rail-hd');
   if (railHd) railHd.textContent = `Sessions · ${state.roster.length}`;
@@ -878,23 +1054,40 @@ function renderAgents(state: AgentsConsoleState): void {
           const isSelected = agent.agentId === state.selectedAgentId;
           const meta = statusMeta(agent.status);
           const rc = roleColor(agent.role);
+          const displayName = agentDisplayName(agent);
+          const accessibleName = agentAccessibleName(agent);
+          const rewakeComposer =
+            activeRewakeAgentId === agent.agentId
+              ? `<div class="rewake-composer" data-agent-id="${esc(agent.agentId)}">
+                   <textarea class="rewake-input" rows="3" placeholder="New task for this agent…" aria-label="Re-wake message for agent ${esc(accessibleName)}">${esc(activeRewakeDraft)}</textarea>
+                   <span class="rewake-actions">
+                     <button class="btn btn-ghost rewake-send" type="button">Send</button>
+                     <button class="btn btn-ghost rewake-cancel" type="button">Cancel</button>
+                   </span>
+                 </div>`
+              : '';
           return [
-            `<button class="sess-row${isSelected ? ' selected' : ''}" data-agent-id="${esc(agent.agentId)}"`,
-            ` role="option" aria-selected="${isSelected ? 'true' : 'false'}" type="button">`,
+            `<div class="sess-item" role="listitem">`,
+            `<div class="sess-row${isSelected ? ' selected' : ''}" data-agent-id="${esc(agent.agentId)}">`,
+            `<button class="sess-row-open" data-agent-id="${esc(agent.agentId)}" type="button" aria-current="${isSelected ? 'true' : 'false'}" aria-label="Open agent ${esc(accessibleName)}">`,
             `<span class="state-dot${meta.pulse ? ' pulse' : ''}" style="background:${meta.color}"></span>`,
             `<span class="mid">`,
-            `<span class="name">${esc(agent.agentId)}</span>`,
+            `<span class="name">${esc(displayName)}</span>`,
+            agent.name != null ? `<span class="role">${esc(agent.agentId)}</span>` : '',
             `<span class="role" style="color:${rc}">${esc(agent.role)}</span>`,
-            `<span class="sess-actions">`,
-            `<button class="btn btn-ghost" data-agent-action="stop" data-agent-id="${esc(agent.agentId)}" type="button" aria-label="Stop agent ${esc(agent.agentId)}">Stop</button>`,
-            `<button class="btn btn-ghost" data-agent-action="unstick" data-agent-id="${esc(agent.agentId)}" type="button" aria-label="Unstick agent ${esc(agent.agentId)}">Unstick</button>`,
-            agent.status !== 'warm'
-              ? `<button class="btn btn-ghost" data-agent-action="rewake" data-agent-id="${esc(agent.agentId)}" type="button" aria-label="Re-wake agent ${esc(agent.agentId)}">Re-wake</button>`
-              : '',
-            `</span>`,
             `</span>`,
             `<span class="state" style="color:${meta.color}">${meta.label}</span>`,
             `</button>`,
+            `<span class="sess-actions">`,
+            `<button class="btn btn-ghost" data-agent-action="stop" data-agent-id="${esc(agent.agentId)}" type="button" aria-label="Stop agent ${esc(accessibleName)}">Stop</button>`,
+            `<button class="btn btn-ghost" data-agent-action="unstick" data-agent-id="${esc(agent.agentId)}" type="button" aria-label="Unstick agent ${esc(accessibleName)}">Unstick</button>`,
+            agent.status !== 'warm'
+              ? `<button class="btn btn-ghost" data-agent-action="rewake" data-agent-id="${esc(agent.agentId)}" type="button" aria-label="Re-wake agent ${esc(accessibleName)}">Re-wake</button>`
+              : '',
+            `</span>`,
+            `</div>`,
+            rewakeComposer,
+            `</div>`,
           ].join('');
         })
         .join('');
@@ -917,15 +1110,17 @@ function renderAgents(state: AgentsConsoleState): void {
   } else {
     const meta = statusMeta(selected.status);
     const rc = roleColor(selected.role);
+    const displayName = agentDisplayName(selected);
     consoleEl?.classList.remove('codex');
     if (consoleHd) {
       consoleHd.hidden = false;
       consoleHd.innerHTML = [
         `<span class="state-dot${meta.pulse ? ' pulse' : ''}" style="background:${meta.color}"></span>`,
-        `<span class="name">${esc(selected.agentId)}</span>`,
+        `<span class="name">${esc(displayName)}</span>`,
         `<span class="role-badge" style="background:${tint(rc, '18%')};color:${rc}">${esc(selected.role)}</span>`,
         `<span class="spacer"></span>`,
         `<span class="meta" style="color:${meta.color}">${meta.label}</span>`,
+        selected.name != null ? `<span class="meta">${esc(selected.agentId)}</span>` : '',
         `<span class="meta">${esc(selected.parent ? `child of ${selected.parent}` : 'root')}</span>`,
       ].join('');
     }
@@ -1730,6 +1925,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Derive the header pill's project identity from a projectId + optional path: prefer the repo dir name
   // from the path (the operator's mental model), falling back to the id.
   function applyCurrentProject(state: CurrentProjectState): void {
+    const previousProjectId = projectInfo?.id ?? null;
+    const nextProjectId = state?.projectId ?? null;
     if (state == null) {
       projectInfo = null;
     } else {
@@ -1739,6 +1936,40 @@ document.addEventListener('DOMContentLoaded', () => {
           ? (path.split(/[/\\]/).filter(Boolean).pop() ?? state.projectId)
           : state.projectId;
       projectInfo = { id: state.projectId, name };
+    }
+    if (previousProjectId !== nextProjectId) {
+      latestConnection = null;
+      latestDashboard = null;
+      latestMailState = null;
+      latestAgentsState = null;
+      latestReviewState = null;
+      latestLimitsState = null;
+      latestDaemon = null;
+      latestSource = null;
+      sourceRefreshGeneration += 1;
+      reviewInvokeGeneration += 1;
+      latestArchive = [];
+      pendingDeleteId = null;
+      pendingArchivePurgeId = null;
+      activeRewakeAgentId = null;
+      activeRewakeDraft = '';
+      knownMailBuses.clear();
+      knownMailBuses.add(OPERATOR_BUS);
+      lastAgentId = null;
+      lastTranscript = '';
+      archiveRefreshGeneration += 1;
+      renderDashboard();
+      renderAgents(EMPTY_AGENTS_STATE);
+      latestAgentsState = null;
+      renderMail(EMPTY_MAIL_STATE);
+      latestMailState = null;
+      renderReview(EMPTY_REVIEW_STATE);
+      latestReviewState = null;
+      renderLimitsPopover(EMPTY_LIMITS_STATE);
+      renderLimitsSummary();
+      renderUsage(EMPTY_LIMITS_STATE);
+      renderSource();
+      latestLimitsState = null;
     }
     renderHeader();
     // A project change means the open repo changed — re-read its branches.
@@ -1766,10 +1997,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Read the open repo's branches / local PR refs for the Source view.
   async function refreshSource(): Promise<void> {
-    latestSource = (await bridge.refreshSource?.()) ?? null;
+    const generation = ++sourceRefreshGeneration;
+    const source = (await bridge.refreshSource?.()) ?? null;
+    if (generation !== sourceRefreshGeneration) return;
+    latestSource = source;
     renderSource();
   }
   void refreshSource();
+
+  function applyReviewResult(promise: Promise<ReviewState | null>): void {
+    const generation = reviewInvokeGeneration;
+    void promise.then((state) => {
+      if (generation !== reviewInvokeGeneration || state == null) return;
+      renderReview(state);
+    });
+  }
 
   // Project pill → the in-app "Open project" on-ramp (directory picker → register → start daemon + shell).
   document.getElementById('project-pill')?.addEventListener('click', () => {
@@ -1806,23 +2048,30 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   bridge.onConnectionError((message) => showAppError(message));
 
-  bridge.onDashboardState((state) => {
-    latestDashboard = state;
-    rememberMailBuses(state);
-    renderHeader();
-    renderDashboard();
-    if (latestMailState != null) renderMail(latestMailState);
-    // Fetch the archive list on every dashboard push and re-render once it arrives.
-    // Loop-avoidance: archiveList() resolves to a plain data fetch — it does NOT push another
-    // dashboard:state event, so this callback is not re-entered. We only re-render if the
-    // serialised value actually changed (cheap JSON compare on small lists).
+  // Fetch the archive list on every dashboard push and re-render once it arrives.
+  // Loop-avoidance: archiveList() resolves to a plain data fetch — it does NOT push another
+  // dashboard:state event, so this callback is not re-entered. We only re-render if the
+  // serialised value actually changed (cheap JSON compare on small lists). The generation guard keeps
+  // older in-flight reads from overwriting a newer post-Restore/Purge refresh.
+  const refreshArchive = (): void => {
+    const generation = ++archiveRefreshGeneration;
     void bridge.archiveList().then((a) => {
+      if (generation !== archiveRefreshGeneration) return;
       const next = JSON.stringify(a);
       if (JSON.stringify(latestArchive) !== next) {
         latestArchive = a;
         renderDashboard();
       }
     });
+  };
+
+  bridge.onDashboardState((state) => {
+    latestDashboard = state;
+    rememberMailBuses(state);
+    renderHeader();
+    renderDashboard();
+    if (latestMailState != null) renderMail(latestMailState);
+    refreshArchive();
   });
 
   // ── Mail ──────────────────────────────────────────────────────────────────────
@@ -1872,6 +2121,36 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  const openFleetRow = (id: string): void => {
+    activateView('agents');
+    bridge.navigate('agents');
+    void bridge.agentsSelect(id);
+  };
+
+  const focusDashboardAgentAction = (agentAction: string, agentId: string): void => {
+    for (const control of document.querySelectorAll<HTMLElement>('[data-agent-action]')) {
+      if (
+        control.dataset['agentAction'] === agentAction &&
+        control.dataset['agentId'] === agentId
+      ) {
+        control.focus();
+        return;
+      }
+    }
+  };
+
+  const focusDashboardArchiveAction = (archiveAction: string, archiveId: string): void => {
+    for (const control of document.querySelectorAll<HTMLElement>('[data-archive-action]')) {
+      if (
+        control.dataset['archiveAction'] === archiveAction &&
+        control.dataset['archiveId'] === archiveId
+      ) {
+        control.focus();
+        return;
+      }
+    }
+  };
+
   // ── Mission Control interactions ──────────────────────────────────────────────
   document.getElementById('view-dashboard')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
@@ -1883,44 +2162,27 @@ document.addEventListener('DOMContentLoaded', () => {
       const agentAction = agentActionBtn.dataset['agentAction'];
       const agentId = agentActionBtn.dataset['agentId'];
       if (agentAction === 'delete') {
-        if (agentActionBtn.dataset['confirm'] === '1') {
-          // Second click — confirmed; execute the delete.
-          agentActionBtn.removeAttribute('data-confirm');
-          agentActionBtn.textContent = 'Delete';
-          pendingDeleteId = null;
-          void bridge.agentsDelete(agentId).then((r) => {
-            if (!r.ok) showAppError(r.error ?? 'Failed to delete the coordinator');
-          });
-        } else {
-          // First click — enter pending-confirm state.
-          // Reset any previously-pending button first.
-          if (pendingDeleteId != null && pendingDeleteId !== agentId) {
-            const prev = document.querySelector<HTMLElement>(
-              `[data-agent-action="delete"][data-agent-id="${pendingDeleteId}"]`,
-            );
-            if (prev) {
-              prev.removeAttribute('data-confirm');
-              prev.textContent = 'Delete';
-            }
-          }
-          agentActionBtn.dataset['confirm'] = '1';
-          agentActionBtn.textContent = 'Confirm delete?';
-          pendingDeleteId = agentId;
-        }
+        pendingDeleteId = agentId;
+        renderDashboard();
+        focusDashboardAgentAction('delete-cancel', agentId);
+      } else if (agentAction === 'delete-cancel') {
+        pendingDeleteId = null;
+        renderDashboard();
+      } else if (agentAction === 'delete-confirm') {
+        pendingDeleteId = null;
+        renderDashboard();
+        void bridge.agentsDelete(agentId).then((r) => {
+          if (!r.ok) showAppError(r.error ?? 'Failed to delete the coordinator');
+        });
       }
       return;
     }
 
     // Reset any pending-confirm button when clicking elsewhere in the dashboard.
     if (pendingDeleteId != null) {
-      const prev = document.querySelector<HTMLElement>(
-        `[data-agent-action="delete"][data-agent-id="${pendingDeleteId}"]`,
-      );
-      if (prev) {
-        prev.removeAttribute('data-confirm');
-        prev.textContent = 'Delete';
-      }
       pendingDeleteId = null;
+      renderDashboard();
+      return;
     }
 
     // ── Archive actions (Restore / Purge) ────────────────────────────────────
@@ -1929,33 +2191,39 @@ document.addEventListener('DOMContentLoaded', () => {
       e.stopPropagation();
       const archiveAction = archiveBtn.dataset['archiveAction'];
       const archiveId = archiveBtn.dataset['archiveId'];
-      /** Re-fetch the archive list and re-render the dashboard after an action. */
-      const refreshArchive = (): void => {
-        void bridge.archiveList().then((a) => {
-          latestArchive = a;
-          renderDashboard();
-        });
-      };
       if (archiveAction === 'restore') {
+        pendingArchivePurgeId = null;
         void bridge.archiveRestore(archiveId).then((r) => {
-          if (!r.ok) showAppError(r.error ?? 'Failed to restore the archived coordinator');
+          if (!r.ok) showAppError(r.error ?? 'Failed to restore the archived branch');
           else refreshArchive();
         });
       } else if (archiveAction === 'purge') {
+        pendingArchivePurgeId = archiveId;
+        renderDashboard();
+        focusDashboardArchiveAction('purge-cancel', archiveId);
+      } else if (archiveAction === 'purge-cancel') {
+        pendingArchivePurgeId = null;
+        renderDashboard();
+      } else if (archiveAction === 'purge-confirm') {
+        pendingArchivePurgeId = null;
+        renderDashboard();
         void bridge.archivePurge(archiveId).then((r) => {
-          if (!r.ok) showAppError(r.error ?? 'Failed to purge the archived coordinator');
+          if (!r.ok) showAppError(r.error ?? 'Failed to purge the archived branch');
           else refreshArchive();
         });
       }
       return;
     }
 
-    const fleetRow = target.closest<HTMLElement>('.fleet-row');
-    if (fleetRow?.dataset['agentId'] != null) {
-      const id = fleetRow.dataset['agentId'];
-      activateView('agents');
-      bridge.navigate('agents');
-      void bridge.agentsSelect(id);
+    if (pendingArchivePurgeId != null) {
+      pendingArchivePurgeId = null;
+      renderDashboard();
+      return;
+    }
+
+    const fleetOpen = target.closest<HTMLElement>('.fleet-row-open');
+    if (fleetOpen?.dataset['agentId'] != null) {
+      openFleetRow(fleetOpen.dataset['agentId']);
       return;
     }
 
@@ -2000,7 +2268,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (target.closest('#session-demo-spec')) {
       // P-ON3 — one-click launch a coordinator from the bundled predesigned demo spec (no terminal). The
       // main process reads dist/renderer/demo-spec.md and starts a root session from its body.
-      void bridge.sessionStartFromDemoSpec?.().then((r) => {
+      const nameInput = document.getElementById('session-name-input') as HTMLInputElement | null;
+      const nameVal =
+        (nameInput?.value.trim() ?? '').length > 0 ? (nameInput?.value.trim() ?? '') : null;
+      void bridge.sessionStartFromDemoSpec?.(nameVal).then((r) => {
         if (r.ok) flashToast('Launching coordinator from the demo spec…');
         else showAppError(r.error ?? 'Failed to start from the demo spec');
       });
@@ -2013,6 +2284,11 @@ document.addEventListener('DOMContentLoaded', () => {
       (textarea?.value.trim() ?? '').length > 0 ? (textarea?.value.trim() ?? '') : null;
     const nameVal =
       (nameInput?.value.trim() ?? '').length > 0 ? (nameInput?.value.trim() ?? '') : null;
+    if (nameVal == null) {
+      showAppError('Coordinator name is required.');
+      nameInput?.focus();
+      return;
+    }
     void bridge.sessionStart(promptVal, null, nameVal).then((r) => {
       if (r.ok) {
         if (textarea) textarea.value = '';
@@ -2024,8 +2300,42 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Agents Console ──────────────────────────────────────────────────────────
   bridge.onAgentsConsoleState((state) => renderAgents(state));
 
+  document.getElementById('view-agents')?.addEventListener('input', (e) => {
+    const target = e.target as HTMLElement;
+    if (target instanceof HTMLTextAreaElement && target.classList.contains('rewake-input')) {
+      activeRewakeDraft = target.value;
+    }
+  });
+
   document.getElementById('view-agents')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
+
+    const rewakeComposer = target.closest<HTMLElement>('.rewake-composer');
+    if (rewakeComposer != null) {
+      e.stopPropagation();
+      const agentId = rewakeComposer.dataset['agentId'] ?? activeRewakeAgentId;
+      if (target.closest('.rewake-cancel')) {
+        activeRewakeAgentId = null;
+        activeRewakeDraft = '';
+        if (latestAgentsState != null) renderAgents(latestAgentsState);
+        return;
+      }
+      if (target.closest('.rewake-send') && agentId != null) {
+        const textarea = rewakeComposer.querySelector<HTMLTextAreaElement>('.rewake-input');
+        const text = textarea?.value.trim() ?? activeRewakeDraft.trim();
+        if (!text) return;
+        void bridge.agentsRewake(agentId, text).then((r) => {
+          if (r.ok) {
+            activeRewakeAgentId = null;
+            activeRewakeDraft = '';
+            if (latestAgentsState != null) renderAgents(latestAgentsState);
+          } else {
+            showTranscriptError(r.error);
+          }
+        });
+        return;
+      }
+    }
 
     const agentBtn = target.closest<HTMLElement>('[data-agent-action]');
     if (agentBtn?.dataset['agentId'] != null) {
@@ -2041,43 +2351,18 @@ document.addEventListener('DOMContentLoaded', () => {
           if (!r.ok) showTranscriptError(r.error);
         });
       } else if (agentAction === 'rewake') {
-        // Inline composer: inject a small textarea + Send button immediately after the agent row.
-        // Remove any existing inline composer first (only one active at a time).
-        document.querySelector('.rewake-composer')?.remove();
-        const row = agentBtn.closest<HTMLElement>('.sess-row');
-        if (row == null) return;
-        const composer = document.createElement('div');
-        composer.className = 'rewake-composer';
-        composer.dataset['agentId'] = agentId;
-        composer.innerHTML = [
-          `<textarea class="rewake-input" rows="3" placeholder="New task for this agent…" aria-label="Re-wake message for agent ${esc(agentId)}"></textarea>`,
-          `<span class="rewake-actions">`,
-          `<button class="btn btn-ghost rewake-send" type="button">Send</button>`,
-          `<button class="btn btn-ghost rewake-cancel" type="button">Cancel</button>`,
-          `</span>`,
-        ].join('');
-        row.insertAdjacentElement('afterend', composer);
-        composer.querySelector<HTMLTextAreaElement>('.rewake-input')?.focus();
-
-        composer.querySelector('.rewake-cancel')?.addEventListener('click', () => {
-          composer.remove();
-        });
-        composer.querySelector('.rewake-send')?.addEventListener('click', () => {
-          const textarea = composer.querySelector<HTMLTextAreaElement>('.rewake-input');
-          const text = textarea?.value.trim() ?? '';
-          if (!text) return;
-          void bridge.agentsRewake(agentId, text).then((r) => {
-            if (!r.ok) showTranscriptError(r.error);
-          });
-          composer.remove();
-        });
+        syncActiveRewakeDraft();
+        activeRewakeDraft = activeRewakeAgentId === agentId ? activeRewakeDraft : '';
+        activeRewakeAgentId = agentId;
+        if (latestAgentsState != null) renderAgents(latestAgentsState);
+        document.querySelector<HTMLTextAreaElement>('.rewake-input')?.focus();
       }
       return;
     }
 
-    const row = target.closest<HTMLElement>('.sess-row');
-    if (row?.dataset['agentId'] != null) {
-      void bridge.agentsSelect(row.dataset['agentId']);
+    const rowOpen = target.closest<HTMLElement>('.sess-row-open');
+    if (rowOpen?.dataset['agentId'] != null) {
+      void bridge.agentsSelect(rowOpen.dataset['agentId']);
       return;
     }
 
@@ -2110,14 +2395,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         break;
     }
-  });
-
-  document.getElementById('view-agents')?.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    const row = (e.target as HTMLElement).closest<HTMLElement>('.sess-row');
-    if (row?.dataset['agentId'] == null) return;
-    e.preventDefault();
-    void bridge.agentsSelect(row.dataset['agentId']);
   });
 
   // ── Mail interactions ─────────────────────────────────────────────────────────
@@ -2185,10 +2462,8 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'open-review': {
         bridge.navigate('review');
         const reviewId = btn.dataset['reviewId'];
-        const loaded = reviewId != null ? bridge.reviewSelect(reviewId) : bridge.reviewRefresh();
-        void loaded.then((s) => {
-          if (s != null) renderReview(s);
-        });
+        if (reviewId != null) applyReviewResult(bridge.reviewSelect(reviewId));
+        else applyReviewResult(bridge.reviewRefresh());
         break;
       }
     }
@@ -2205,12 +2480,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Review (the SH-1 human gate) ───────────────────────────────────────────────
   bridge.onReviewState((state) => renderReview(state));
   bridge.onReviewError((message) => showAppError(message));
-  void bridge.reviewRefresh();
+  applyReviewResult(bridge.reviewRefresh());
 
   const handleReviewSelect = (reviewId: string): void => {
-    void bridge.reviewSelect(reviewId).then((s) => {
-      if (s != null) renderReview(s);
-    });
+    applyReviewResult(bridge.reviewSelect(reviewId));
   };
 
   document.getElementById('view-review')?.addEventListener('click', (e) => {
@@ -2224,23 +2497,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const btn = target.closest<HTMLElement>('[data-review-action]');
     if (!btn) return;
-    const apply = (p: Promise<ReviewState | null>): void => {
-      void p.then((s) => {
-        if (s != null) renderReview(s);
-      });
-    };
     switch (btn.dataset['reviewAction']) {
       case 'begin-pass':
-        apply(bridge.reviewBeginVerdict('PASS'));
+        applyReviewResult(bridge.reviewBeginVerdict('PASS'));
         break;
       case 'begin-issues':
-        apply(bridge.reviewBeginVerdict('ISSUES'));
+        applyReviewResult(bridge.reviewBeginVerdict('ISSUES'));
         break;
       case 'cancel-verdict':
-        apply(bridge.reviewCancelVerdict());
+        applyReviewResult(bridge.reviewCancelVerdict());
         break;
       case 'submit-verdict':
-        apply(bridge.reviewSubmitVerdict());
+        applyReviewResult(bridge.reviewSubmitVerdict());
         break;
     }
   });

@@ -23,11 +23,46 @@ describe('startFromDemoSpec (P-ON3 demo-spec launch)', () => {
     const client = new FakeStartSessionClient();
     const result = await startFromDemoSpec({
       client,
+      name: 'Demo docs',
       readDemoSpec: () => '# co improves its own docs\n\nbody',
     });
     expect(result).toEqual({ ok: true });
     // Assert the VALUE passed to startSession (not merely that it was called) — review craft.
-    expect(client.calls).toEqual([{ specBody: '# co improves its own docs\n\nbody' }]);
+    expect(client.calls).toEqual([
+      { name: 'Demo docs', specBody: '# co improves its own docs\n\nbody' },
+    ]);
+  });
+
+  it('requires an operator-provided name before reading the bundled spec', async () => {
+    const client = new FakeStartSessionClient();
+    let readCalled = false;
+    const result = await startFromDemoSpec({
+      client,
+      name: '  ',
+      readDemoSpec: () => {
+        readCalled = true;
+        return '# co improves its own docs\n\nbody';
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('Coordinator name is required');
+    expect(readCalled).toBe(false);
+    expect(client.calls).toEqual([]);
+  });
+
+  it('uses the operator-provided name for demo-spec launches', async () => {
+    const client = new FakeStartSessionClient();
+    const result = await startFromDemoSpec({
+      client,
+      name: 'Docs On-Ramp',
+      readDemoSpec: () => '# co improves its own docs\n\nbody',
+    } as Parameters<typeof startFromDemoSpec>[0] & { name: string });
+
+    expect(result).toEqual({ ok: true });
+    expect(client.calls).toEqual([
+      { name: 'Docs On-Ramp', specBody: '# co improves its own docs\n\nbody' },
+    ]);
   });
 
   it('returns a visible error and never reads the spec when no project is open', async () => {
@@ -48,6 +83,7 @@ describe('startFromDemoSpec (P-ON3 demo-spec launch)', () => {
     const client = new FakeStartSessionClient();
     const result = await startFromDemoSpec({
       client,
+      name: 'Demo docs',
       readDemoSpec: () => {
         throw new Error("ENOENT: no such file 'demo-spec.md'");
       },
@@ -59,7 +95,11 @@ describe('startFromDemoSpec (P-ON3 demo-spec launch)', () => {
 
   it('rejects an empty/whitespace-only spec without starting a session', async () => {
     const client = new FakeStartSessionClient();
-    const result = await startFromDemoSpec({ client, readDemoSpec: () => '   \n  ' });
+    const result = await startFromDemoSpec({
+      client,
+      name: 'Demo docs',
+      readDemoSpec: () => '   \n  ',
+    });
     expect(result.ok).toBe(false);
     expect(result.error).toBeTruthy();
     expect(client.calls).toEqual([]);
@@ -71,7 +111,11 @@ describe('startFromDemoSpec (P-ON3 demo-spec launch)', () => {
         throw new Error('conductor unavailable');
       },
     };
-    const result = await startFromDemoSpec({ client, readDemoSpec: () => 'spec body' });
+    const result = await startFromDemoSpec({
+      client,
+      name: 'Demo docs',
+      readDemoSpec: () => 'spec body',
+    });
     expect(result).toEqual({ ok: false, error: 'conductor unavailable' });
   });
 
@@ -81,7 +125,11 @@ describe('startFromDemoSpec (P-ON3 demo-spec launch)', () => {
         throw new ConductorUnavailableError('Conductor unavailable; run `co-mcp serve test`.');
       },
     };
-    const result = await startFromDemoSpec({ client, readDemoSpec: () => 'spec body' });
+    const result = await startFromDemoSpec({
+      client,
+      name: 'Demo docs',
+      readDemoSpec: () => 'spec body',
+    });
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain('the app manages the daemon');

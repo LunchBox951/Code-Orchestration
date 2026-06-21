@@ -570,6 +570,38 @@ describe('createAppShell — review VM bridge wiring', () => {
     expect(state.pending).toEqual([]);
     expect(state.composer.active).toBe(false);
   });
+
+  it('does not publish a review context that resolves after close()', async () => {
+    let resolveContext!: (ctx: typeof REVIEW_CONTEXT) => void;
+    const contextP = new Promise<typeof REVIEW_CONTEXT>((resolve) => {
+      resolveContext = resolve;
+    });
+    const client = {
+      ...makeClient(),
+      reviewContext: vi.fn().mockReturnValue(contextP),
+    } as unknown as OperatorIpcClient;
+    const onReviewState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => [REVIEW_MAIL],
+      outboxReader: () => [],
+      onReviewState,
+    });
+
+    shell.reviewRefresh();
+    shell.reviewSelect('rev-shell');
+    expect(client.reviewContext).toHaveBeenCalledWith('rev-shell');
+    onReviewState.mockClear();
+
+    await shell.close();
+    resolveContext(REVIEW_CONTEXT);
+    await flushPromises();
+
+    expect(onReviewState).not.toHaveBeenCalled();
+  });
 });
 
 describe('createAppShell — agentsConsole VM wiring', () => {
@@ -610,6 +642,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
             outstandingMail: 0,
             paused: false,
             stuck: false,
+            stopped: false,
             costUsd: 0,
           },
         ],
@@ -659,6 +692,41 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     });
   });
 
+  it('does not publish a transcript backfill that resolves after close()', async () => {
+    let resolveTranscript!: (tail: TranscriptTail) => void;
+    const transcriptP = new Promise<TranscriptTail>((resolve) => {
+      resolveTranscript = resolve;
+    });
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockReturnValue(() => {}),
+      transcript: vi.fn().mockReturnValue(transcriptP),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    expect(client.transcript).toHaveBeenCalledWith('impl-x');
+    onAgentsConsoleState.mockClear();
+
+    await shell.close();
+    resolveTranscript(transcriptTail('impl-x', 'stale tail\n'));
+    await flushPromises();
+
+    expect(onAgentsConsoleState).not.toHaveBeenCalled();
+  });
+
   it('backfills the selected transcript again after a live tick reconnects', async () => {
     const tickListeners: Array<(tick: OperatorIpcTick) => void> = [];
     const client = {
@@ -703,6 +771,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
             outstandingMail: 0,
             paused: false,
             stuck: false,
+            stopped: false,
             costUsd: 0,
           },
         ],
@@ -760,6 +829,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
             outstandingMail: 0,
             paused: false,
             stuck: false,
+            stopped: false,
             costUsd: 0,
           },
         ],
@@ -785,6 +855,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
             outstandingMail: 0,
             paused: false,
             stuck: false,
+            stopped: false,
             costUsd: 0,
           },
         ],
@@ -843,6 +914,7 @@ describe('createAppShell — agentsConsole VM wiring', () => {
             outstandingMail: 0,
             paused: false,
             stuck: false,
+            stopped: false,
             costUsd: 0,
           },
         ],
