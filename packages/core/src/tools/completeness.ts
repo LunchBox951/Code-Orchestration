@@ -29,13 +29,23 @@ function hasText(value: unknown): boolean {
 }
 
 /**
- * A schema's `.description`, or `undefined` when absent/blank. Robust to wrapper schemas
- * (`.optional()`, `.default()` …): `.describe()` is applied last in every `co_*` spec, so the
- * description sits on the outermost schema, which is what `ZodObject.shape` hands back.
+ * A field schema's `.description`, or `undefined` when absent/blank. Order-INDEPENDENT: Zod stores
+ * the description on the schema instance `.describe()` was called on, so `z.string().describe('d')
+ * .optional()` carries it on the inner type, not the outer wrapper. We walk `.def.innerType` through
+ * any `.optional()`/`.default()`/`.nullable()` wrappers and accept a description found at any layer,
+ * so the gate cannot be falsely tripped by `.describe()` placement (it exists to catch description
+ * DRIFT, not to enforce a call order).
  */
 function describedText(schema: unknown): string | undefined {
-  const description = (schema as { readonly description?: unknown }).description;
-  return typeof description === 'string' && description.trim().length > 0 ? description : undefined;
+  let current: unknown = schema;
+  const seen = new Set<unknown>();
+  while (current != null && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const description = (current as { readonly description?: unknown }).description;
+    if (typeof description === 'string' && description.trim().length > 0) return description;
+    current = (current as { readonly def?: { readonly innerType?: unknown } }).def?.innerType;
+  }
+  return undefined;
 }
 
 /** The message of a thrown value, for a human-readable mountability reason. */
