@@ -2577,6 +2577,8 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     const startCalls: Array<{
       projectId: string;
       repoCwd: string;
+      name?: string;
+      coordinatorId?: string;
       prompt?: string;
       specBody?: string;
     }> = [];
@@ -2584,6 +2586,8 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
       startCalls.push({
         projectId: params.projectId,
         repoCwd: params.repoCwd,
+        name: params.name,
+        coordinatorId: params.coordinatorId,
         prompt: params.prompt,
         specBody: params.specBody,
       });
@@ -2605,15 +2609,21 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     await server.start();
     const client = makeClient(projectId, socketPath);
 
-    const result = await client.startSession({ prompt: 'orchestrate the new feature' });
+    const result = await client.startSession({
+      name: 'new feature',
+      prompt: 'orchestrate the new feature',
+    });
 
     expect(result).toEqual(fakeResult);
     expect(startCalls).toHaveLength(1);
     expect(startCalls[0]).toMatchObject({
       projectId,
       repoCwd: cwd,
+      name: 'new feature',
       prompt: 'orchestrate the new feature',
     });
+    // The server mints a name-derived coordinatorId — just verify shape (hex suffix varies).
+    expect(startCalls[0]?.coordinatorId).toMatch(/^coord-new-feature-[0-9a-f]{6}$/);
     expect(startCalls[0]?.specBody).toBeUndefined();
   });
 
@@ -2629,9 +2639,9 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
       baseRef: 'main',
       baseSha: 'def',
     };
-    const startCalls: Array<{ prompt?: string; specBody?: string }> = [];
+    const startCalls: Array<{ name?: string; prompt?: string; specBody?: string }> = [];
     const startFn: typeof startCoordinatorSession = (params) => {
-      startCalls.push({ prompt: params.prompt, specBody: params.specBody });
+      startCalls.push({ name: params.name, prompt: params.prompt, specBody: params.specBody });
       return fakeResult;
     };
 
@@ -2650,10 +2660,16 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     await server.start();
     const client = makeClient(projectId, socketPath);
 
-    const result = await client.startSession({ specBody: '# spec\n\n- Do the thing' });
+    const result = await client.startSession({
+      name: 'draft spec task',
+      specBody: '# spec\n\n- Do the thing',
+    });
 
     expect(result).toEqual(fakeResult);
-    expect(startCalls[0]).toMatchObject({ specBody: '# spec\n\n- Do the thing' });
+    expect(startCalls[0]).toMatchObject({
+      name: 'draft spec task',
+      specBody: '# spec\n\n- Do the thing',
+    });
     expect(startCalls[0]?.prompt).toBeUndefined();
   });
 
@@ -2679,9 +2695,9 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     await server.start();
     const client = makeClient(projectId, socketPath);
 
-    await expect(client.startSession({ prompt: 'a prompt', specBody: 'a spec' })).rejects.toThrow(
-      /exactly one/i,
-    );
+    await expect(
+      client.startSession({ name: 'my coord', prompt: 'a prompt', specBody: 'a spec' }),
+    ).rejects.toThrow(/exactly one/i);
   });
 
   it('exactly-one-of: neither prompt nor specBody → InvalidParams error across the socket', async () => {
@@ -2707,6 +2723,151 @@ describe('AC-S14-4 — startSession over the operator-IPC wire (operator-only, n
     const client = makeClient(projectId, socketPath);
 
     // Neither prompt nor specBody supplied (both undefined/empty).
-    await expect(client.startSession({})).rejects.toThrow(/exactly one/i);
+    await expect(client.startSession({ name: 'my coord' })).rejects.toThrow(/exactly one/i);
+  });
+
+  it('startSession name: the coordinator id encodes the slug with a 6-hex suffix', async () => {
+    // B4: the server mints a name-derived coordinator id from coordinatorIdFromParts(name, randomHex).
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const startCalls: Array<{ coordinatorId?: string; name?: string }> = [];
+    const startFn: typeof startCoordinatorSession = (params) => {
+      startCalls.push({ coordinatorId: params.coordinatorId, name: params.name });
+      // Return the coordinator id the server minted (pass it through so the client sees it).
+      return {
+        coordinator: params.coordinatorId ?? 'coord-unknown',
+        worktreePath: '/tmp/wt',
+        branch: `co/${params.coordinatorId ?? 'coord-unknown'}`,
+        baseRef: 'main',
+        baseSha: 'abc',
+      };
+    };
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      startFn,
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    const res = await client.startSession({ name: 'auth refactor', prompt: 'do the thing' });
+
+    // The coordinator id encodes the name-slug + a 6-hex entropy suffix.
+    expect(res.coordinator).toMatch(/^coord-auth-refactor-[0-9a-f]{6}$/);
+    expect(startCalls[0]?.coordinatorId).toMatch(/^coord-auth-refactor-[0-9a-f]{6}$/);
+    expect(startCalls[0]?.name).toBe('auth refactor');
+  });
+
+  it('startSession without name → InvalidParams (name is runtime-required)', async () => {
+    const { projectId, cwd } = makeProject();
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openRegistryFn: makeOpenRegistryFn(projectId, cwd),
+      startFn: () => {
+        throw new Error('should not reach startFn');
+      },
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    // Bypass the typed client (name is optional at the type level) to exercise the runtime guard.
+    const raw = client as unknown as {
+      startSession: (p: Record<string, unknown>) => Promise<unknown>;
+    };
+    await expect(raw.startSession({ prompt: 'something' })).rejects.toThrow(/name/i);
+  });
+});
+
+// ── B4: deleteAgent + rewake IPC verbs ───────────────────────────────────────
+describe('B4 — deleteAgent + rewake operator-IPC verbs', () => {
+  it('deleteAgent dispatches end-to-end: control.deleteAgent is called with the right agentId', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+
+    // Wire a recording deleteAgent into the control surface so we can assert dispatch.
+    const deletedAgentIds: string[] = [];
+    const { router, control: baseControl } = makeControl(engine, projectId);
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      deleteAgent: (agentId) => {
+        deletedAgentIds.push(agentId);
+        return Promise.resolve();
+      },
+    };
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.deleteAgent('impl-x');
+
+    expect(deletedAgentIds).toEqual(['impl-x']);
+    // The connection must survive a successful control verb.
+    expect(client.connected).toBe(true);
+
+    // Suppress unused-variable warning for the router that `makeControl` returns.
+    void router;
+  });
+
+  it('rewake clears suppression and posts an actionable clarify_request from @operator', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { router, control } = makeControl(engine, projectId);
+
+    // Suppress the agent (stopped + paused so unstop must clear both).
+    router.stop('impl-x');
+    router.pause('impl-x');
+    expect(router.isStopped('impl-x')).toBe(true);
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const delivered = await client.rewake('impl-x', 'address PR review comments');
+
+    // unstop cleared all suppression sets.
+    expect(router.isStopped('impl-x')).toBe(false);
+    expect(router.isPaused('impl-x')).toBe(false);
+
+    // A clarify_request from @operator landed in impl-x's inbox.
+    expect(delivered.type).toBe('clarify_request');
+    expect(delivered.sender).toBe('@operator');
+    expect(delivered.recipient).toBe('impl-x');
+    expect(delivered.body).toBe('address PR review comments');
+
+    // Verify the mail is outstanding (actionable) in the daemon's store.
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    expect(mail.outstanding('impl-x').some((m) => m.seq === delivered.seq)).toBe(true);
   });
 });

@@ -171,9 +171,23 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
   /** Stage 14 P4 — start a ROOT coordinator session (operator-only; mirrors {@link reviewContext}). */
   async startSession(params: StartSessionParams): Promise<StartSessionResult> {
     return (await this.call(OPERATOR_IPC_METHODS.startSession, {
+      ...(params.name != null ? { name: params.name } : {}),
       ...(params.prompt != null ? { prompt: params.prompt } : {}),
       ...(params.specBody != null ? { specBody: params.specBody } : {}),
     } as unknown as WirePayload)) as unknown as StartSessionResult;
+  }
+
+  /** B4 — delete `agentId` and its entire subtree (recursive; cascade via the daemon's control surface). */
+  async deleteAgent(agentId: string): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.deleteAgent, { agentId });
+  }
+
+  /** B4 — re-wake `agentId`: clear suppression then post a `clarify_request` from `@operator`. */
+  async rewake(agentId: string, message: string): Promise<DeliveredMail> {
+    return (await this.call(OPERATOR_IPC_METHODS.rewake, {
+      agentId,
+      message,
+    } as unknown as WirePayload)) as unknown as DeliveredMail;
   }
 
   /** Stage 15 §7 — send raw keystroke bytes into `agentId`'s warm PTY stdin. */
@@ -491,6 +505,22 @@ export class OperatorIpcClient {
    */
   async startSession(params: StartSessionParams): Promise<StartSessionResult> {
     return this.withConnection((c) => c.startSession(params));
+  }
+
+  /**
+   * B4 — delete `agentId` and its entire subtree. A control verb: throws a clear
+   * {@link ConductorUnavailableError} when the Conductor socket is down (Principle 9).
+   */
+  async deleteAgent(agentId: string): Promise<void> {
+    await this.withConnection((c) => c.deleteAgent(agentId));
+  }
+
+  /**
+   * B4 — re-wake `agentId`: clear suppression then post a `clarify_request` from `@operator`. A
+   * control verb: throws a clear {@link ConductorUnavailableError} when the socket is down (Principle 9).
+   */
+  rewake(agentId: string, message: string): Promise<DeliveredMail> {
+    return this.withConnection((c) => c.rewake(agentId, message));
   }
 
   /** Stage 15 §7 — send raw keystroke bytes into `agentId`'s warm PTY stdin. */

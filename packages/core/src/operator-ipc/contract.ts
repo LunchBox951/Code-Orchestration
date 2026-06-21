@@ -62,6 +62,19 @@ export const OPERATOR_IPC_METHODS = {
    * cold-starts the root on its next tick. Exactly one of `prompt` / `specBody` is required.
    */
   startSession: 'startSession',
+  /**
+   * Delete an agent and its entire subtree (recursive descendants + their worktrees + branches). The
+   * daemon's single writer: callers never act on the stores directly. Delegates to
+   * `ConductorControlSurface.deleteAgent` which cascades through the core primitive.
+   */
+  deleteAgent: 'deleteAgent',
+  /**
+   * Re-wake a stopped/paused/stuck agent by clearing all suppression state and posting an actionable
+   * `clarify_request` from `@operator` — so `selectEligible` picks it up on the next daemon tick.
+   * Unlike {@link OPERATOR_IPC_METHODS.operatorMessage} (which posts but does not unstop), this verb
+   * ALWAYS clears suppression first, then posts.
+   */
+  rewake: 'rewake',
   /** Send raw keystroke bytes into a hosted agent's PTY stdin (live xterm → PTY passthrough). */
   sendInput: 'session:input',
   /** Resize a hosted agent's PTY to the given cols × rows (xterm fit → PTY width sync). */
@@ -118,6 +131,12 @@ export interface ApprovalReply {
  * permission; this is NEVER an agent-callable MCP tool (Principle 4 + D4).
  */
 export interface StartSessionParams {
+  /**
+   * A human-readable name for this coordinator (e.g. `'Auth Refactor'`). Optional at the type level
+   * so the existing desktop call still compiles before C1 lands, but the server enforces it at
+   * runtime via `requireString` (Principle 9 — fail loud).
+   */
+  readonly name?: string;
   /** The operator's free-form kickoff prompt. Exactly one of `prompt` / `specBody`. */
   readonly prompt?: string;
   /** A draft-spec brief to kick off from. Exactly one of `prompt` / `specBody`. */
@@ -181,6 +200,19 @@ export interface OperatorIpcSurface {
    * `specBody` is supplied (Principle 9).
    */
   startSession(params: StartSessionParams): Promise<StartSessionResult>;
+  /**
+   * Delete `agentId` and its entire subtree (recursive descendants + worktrees + branches). A
+   * control verb that requires the daemon socket — throws a clear error when the Conductor is down
+   * (Principle 9). Delegates to `ConductorControlSurface.deleteAgent` which cascades through the
+   * core primitive.
+   */
+  deleteAgent(agentId: string): Promise<void>;
+  /**
+   * Re-wake `agentId`: clear all suppression state (stopped/paused/stuck) then post an actionable
+   * `clarify_request` from `@operator` so the daemon's `selectEligible` wakes the recipient on its
+   * next tick. Fails loud when the Conductor socket is down (Principle 9).
+   */
+  rewake(agentId: string, message: string): Promise<DeliveredMail>;
   /** Send raw keystroke bytes into `agentId`'s warm PTY stdin (live xterm → PTY passthrough). */
   sendInput(agentId: string, data: string): Promise<void>;
   /** Resize `agentId`'s warm PTY to `cols` × `rows` (xterm fit → PTY width sync). */

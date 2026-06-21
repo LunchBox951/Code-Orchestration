@@ -21,8 +21,10 @@
  */
 import { chmodSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import {
   assertNever,
+  coordinatorIdFromParts,
   MAIL_APPROVAL,
   MAIL_APPROVAL_RESPONSE,
   MAIL_CLARIFY_REQUEST,
@@ -380,6 +382,13 @@ export class OperatorIpcServer {
         // Resolve the project's repo path via the registry exactly as `runStartSessionCommand` does,
         // then delegate to the same core primitive (single source of truth; never duplicated here).
         return (await this.handleStartSession(params)) as unknown as WirePayload;
+      case OPERATOR_IPC_METHODS.deleteAgent:
+        // B4 — cascade-delete the agent and its entire subtree via the daemon's control surface.
+        await this.control.deleteAgent(requireString(params, 'agentId'));
+        return {};
+      case OPERATOR_IPC_METHODS.rewake:
+        // B4 — clear suppression then post an actionable clarify_request from @operator.
+        return (await this.handleRewake(params)) as unknown as WirePayload;
       case OPERATOR_IPC_METHODS.sendInput:
         // Stage 15 §7 — raw keystroke passthrough: operator writes into the agent's warm PTY stdin.
         await router.sendInput(requireString(params, 'agentId'), requireInputData(params, 'data'));
@@ -403,6 +412,7 @@ export class OperatorIpcServer {
    * (Principle 9) unless exactly one of `prompt` / `specBody` is supplied.
    */
   private async handleStartSession(params: WirePayload): Promise<StartSessionResult> {
+    const name = requireString(params, 'name');
     const prompt = typeof params['prompt'] === 'string' ? params['prompt'].trim() : '';
     const specBody = typeof params['specBody'] === 'string' ? params['specBody'].trim() : '';
     const fromPrompt = prompt.length > 0;
@@ -423,9 +433,15 @@ export class OperatorIpcServer {
     if (repoCwd == null) {
       throw new Error(`operator IPC startSession: unknown project id '${this.projectId}'.`);
     }
+    // Mint a name-derived unique coordinator id (adapter-side entropy; 24-bit hex makes collision
+    // astronomically unlikely — a genuine collision fails loud when slingWorktree's `git worktree add`
+    // hits an existing branch, Principle 9). No roster collision re-roll needed.
+    const coordinatorId = coordinatorIdFromParts(name, randomBytes(3).toString('hex'));
     return this.startFn({
       projectId: this.projectId,
       repoCwd,
+      name,
+      coordinatorId,
       ...(fromPrompt ? { prompt } : { specBody }),
     });
   }
@@ -454,6 +470,33 @@ export class OperatorIpcServer {
     } finally {
       mail.close();
     }
+  }
+
+  /**
+   * Re-wake an agent: clear all suppression state (stopped/paused/stuck) via
+   * `this.control.router.unstop`, then post an actionable `clarify_request` from `@operator` through
+   * the daemon's own store (single writer — MNR #2), so `selectEligible` wakes the recipient on its
+   * next tick. Mirrors {@link handleOperatorMessage} but ALWAYS unstops first.
+   */
+  private async handleRewake(params: WirePayload): Promise<DeliveredMail> {
+    const agentId = requireString(params, 'agentId');
+    const message = requireString(params, 'message');
+    const mail = this.openMail(this.projectId);
+    let delivered: DeliveredMail;
+    try {
+      delivered = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: agentId,
+        from: OPERATOR,
+        subject: 'Operator rewake',
+        body: message,
+      });
+    } finally {
+      mail.close();
+    }
+    // Unstop AFTER the mail is committed so the agent is immediately eligible on the next tick.
+    this.control.router.unstop(agentId);
+    return delivered;
   }
 
   /** Reply to an actionable mail named by `target`, through the daemon's own store (single writer). */
