@@ -12,10 +12,15 @@ import {
   DISPATCH_ENABLED_PROVIDERS_KEY,
   DISPATCH_MAXED_THRESHOLD_PCT_KEY,
   DISPATCH_MODELS_CLAUDE_KEY,
+  DISPATCH_MODELS_CODEX_KEY,
   DISPATCH_DEFAULT_WORK_SIZE_KEY,
   DISPATCH_DEFAULT_REASONING_BUDGET_KEY,
 } from './dispatch-config.js';
 import { validateSettingValue } from '../config/settings-registry.js';
+import { resolveMaxActiveChildren, MAX_ACTIVE_CHILDREN_KEY } from '../plans/child-cap.js';
+import { resolveReviewRoundBudget, REVIEW_ROUND_BUDGET_KEY } from '../review/strikes.js';
+import { resolveRepoMode, REPO_MODE_CONFIG_KEY } from '../worktrees/repo-mode.js';
+import { resolveReviewerKind, reviewReviewerKey } from '../review/human-review.js';
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -238,6 +243,39 @@ describe('settings validators mirror the dispatch resolvers (AC-SET-4 parity)', 
       value: 'unlimited',
       resolve: (c) => resolveDefaultReasoningBudget('p', c),
     },
+    // Non-dispatch fail-loud resolvers — AC-SET-4 parity extended beyond the dispatch.* keys so a
+    // future edit to one of these resolver rules is caught the same way the dispatch keys are.
+    { key: MAX_ACTIVE_CHILDREN_KEY, value: 4, resolve: (c) => resolveMaxActiveChildren('p', c) },
+    { key: MAX_ACTIVE_CHILDREN_KEY, value: 0, resolve: (c) => resolveMaxActiveChildren('p', c) },
+    { key: MAX_ACTIVE_CHILDREN_KEY, value: 1.5, resolve: (c) => resolveMaxActiveChildren('p', c) },
+    {
+      key: MAX_ACTIVE_CHILDREN_KEY,
+      value: 'lots',
+      resolve: (c) => resolveMaxActiveChildren('p', c),
+    },
+    { key: REVIEW_ROUND_BUDGET_KEY, value: 3, resolve: (c) => resolveReviewRoundBudget('p', c) },
+    { key: REVIEW_ROUND_BUDGET_KEY, value: 0, resolve: (c) => resolveReviewRoundBudget('p', c) },
+    {
+      key: REVIEW_ROUND_BUDGET_KEY,
+      value: 'three',
+      resolve: (c) => resolveReviewRoundBudget('p', c),
+    },
+    {
+      key: DISPATCH_MODELS_CODEX_KEY,
+      value: { average: 'm' },
+      resolve: (c) => resolveModels('p', c),
+    },
+    { key: DISPATCH_MODELS_CODEX_KEY, value: {}, resolve: (c) => resolveModels('p', c) },
+    {
+      key: DISPATCH_MODELS_CODEX_KEY,
+      value: { technical: '' },
+      resolve: (c) => resolveModels('p', c),
+    },
+    {
+      key: DISPATCH_MODELS_CODEX_KEY,
+      value: { bogus: 'm' },
+      resolve: (c) => resolveModels('p', c),
+    },
   ];
 
   for (const { key, value, resolve } of cases) {
@@ -256,5 +294,53 @@ describe('settings validators mirror the dispatch resolvers (AC-SET-4 parity)', 
         c.close();
       }
     });
+  }
+});
+
+describe('repo.mode validator mirrors the fail-loud resolveRepoMode resolver (AC-SET-4)', () => {
+  // resolveRepoMode never reaches the remote probe when an override is set, so a throwing stub proves
+  // the override path is what is exercised (and keeps the test hermetic — no real git/gh).
+  const noProbe = (): never => {
+    throw new Error('probe must not run when a repo.mode override is set');
+  };
+  for (const mode of ['owner', 'contributor', 'offline'] as const) {
+    it(`accepts the valid repo.mode '${mode}' in both gates`, () => {
+      const c = openConfigStore();
+      try {
+        c.setProjectOverride('p', REPO_MODE_CONFIG_KEY, mode);
+        expect(validateSettingValue(REPO_MODE_CONFIG_KEY, mode).ok).toBe(true);
+        expect(resolveRepoMode('p', '/repo', { config: c, probe: noProbe })).toBe(mode);
+      } finally {
+        c.close();
+      }
+    });
+  }
+  it('rejects an invalid repo.mode override in both gates', () => {
+    const c = openConfigStore();
+    try {
+      c.setProjectOverride('p', REPO_MODE_CONFIG_KEY, 'bogus');
+      expect(validateSettingValue(REPO_MODE_CONFIG_KEY, 'bogus').ok).toBe(false);
+      expect(() => resolveRepoMode('p', '/repo', { config: c, probe: noProbe })).toThrow();
+    } finally {
+      c.close();
+    }
+  });
+});
+
+it('reviewer validator is intentionally stricter than the lenient resolveReviewerKind (safe-direction)', () => {
+  // resolveReviewerKind coerces any non-'human' value to 'agent' and never throws, so the throw-parity
+  // table cannot cover it. The UI validator is deliberately STRICTER (rejects unknown values), so the
+  // operator can never PERSIST a value the resolver would silently coerce — UI-stricter is the safe
+  // direction of AC-SET-4 ("rejects exactly what dispatch fails loud on", and never accepts more).
+  const key = reviewReviewerKey('worker_merge');
+  const c = openConfigStore();
+  try {
+    c.setProjectOverride('p', key, 'bogus');
+    expect(resolveReviewerKind(c, 'p', 'worker_merge')).toBe('agent'); // resolver coerces, no throw
+    expect(validateSettingValue(key, 'bogus').ok).toBe(false); // validator rejects outright
+    expect(validateSettingValue(key, 'agent').ok).toBe(true);
+    expect(validateSettingValue(key, 'human').ok).toBe(true);
+  } finally {
+    c.close();
   }
 });
