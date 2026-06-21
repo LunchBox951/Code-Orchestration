@@ -2478,6 +2478,223 @@
         color: oklch(0.88 0.18 25);
         font-family: 'IBM Plex Mono', monospace;
       }
+
+      /* ── Settings ─────────────────────────────────────────────────────────── */
+      .settings {
+        flex: 1;
+        overflow-y: auto;
+        padding: 18px 22px 24px;
+      }
+      .settings h1 {
+        margin: 0 0 5px;
+        font-size: 20px;
+        font-weight: 600;
+        color: var(--text-hi);
+      }
+      .settings .lede {
+        margin: 0 0 18px;
+        font-size: 12.5px;
+        color: var(--text-dim);
+        max-width: 760px;
+        line-height: 1.5;
+      }
+      .set-layer-toggle {
+        display: inline-flex;
+        gap: 2px;
+        padding: 3px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        margin-bottom: 18px;
+      }
+      .set-layer {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: var(--text-dim);
+        font: inherit;
+        font-size: 12px;
+        padding: 5px 14px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .set-layer.active {
+        background: var(--bg-raised);
+        color: var(--text-hi);
+      }
+      .set-layer.disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .set-section {
+        margin-bottom: 22px;
+        max-width: 880px;
+      }
+      .set-section h2 {
+        margin: 0 0 8px;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-dim);
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 6px;
+      }
+      .set-row {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 12px 2px;
+        border-bottom: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+      }
+      .set-row.disabled {
+        opacity: 0.55;
+      }
+      .set-meta {
+        min-width: 0;
+        flex: 1;
+      }
+      .set-label {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-hi);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .set-desc {
+        font-size: 12px;
+        color: var(--text-dim);
+        margin-top: 3px;
+        line-height: 1.45;
+      }
+      .set-note {
+        font-size: 11.5px;
+        color: var(--warn, oklch(0.8 0.12 80));
+        margin-top: 4px;
+      }
+      .set-source {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 1px 6px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        color: var(--text-faint);
+        font-weight: 500;
+      }
+      .set-source-override {
+        color: var(--accent);
+        border-color: color-mix(in oklch, var(--accent) 50%, transparent);
+      }
+      .set-control {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        max-width: 440px;
+      }
+      .set-control input[type='text'],
+      .set-control input[type='email'],
+      .set-control input[type='number'],
+      .set-control select {
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        color: var(--text-body);
+        font: inherit;
+        font-size: 12px;
+        padding: 5px 8px;
+        border-radius: 6px;
+      }
+      .set-int input {
+        width: 84px;
+      }
+      .set-unit {
+        font-size: 11px;
+        color: var(--text-faint);
+        margin-left: 4px;
+      }
+      .set-providers,
+      .set-models,
+      .set-persona {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .set-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 12px;
+        color: var(--text-body);
+      }
+      .set-model {
+        display: inline-flex;
+        flex-direction: column;
+        gap: 3px;
+        font-size: 10.5px;
+        color: var(--text-faint);
+      }
+      .set-model input {
+        width: 152px;
+      }
+      .set-switch {
+        position: relative;
+        display: inline-block;
+        width: 34px;
+        height: 18px;
+      }
+      .set-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .set-switch span {
+        position: absolute;
+        inset: 0;
+        background: var(--bg-raised);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        transition: background 0.15s;
+      }
+      .set-switch span::before {
+        content: '';
+        position: absolute;
+        height: 12px;
+        width: 12px;
+        left: 2px;
+        top: 2px;
+        background: var(--text-dim);
+        border-radius: 50%;
+        transition: transform 0.15s;
+      }
+      .set-switch input:checked + span {
+        background: color-mix(in oklch, var(--accent) 55%, transparent);
+      }
+      .set-switch input:checked + span::before {
+        transform: translateX(16px);
+        background: var(--text-hi);
+      }
+      .set-reset {
+        appearance: none;
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        border-radius: 6px;
+        cursor: pointer;
+        width: 26px;
+        height: 26px;
+        font-size: 13px;
+        line-height: 1;
+      }
+      .set-reset:hover {
+        color: var(--text-hi);
+        border-color: var(--accent);
+      }
     </style>
     <link rel="stylesheet" href="./vendor/xterm.css" />
   </head>
@@ -2584,6 +2801,11 @@
           <span class="bar"></span>
           <span class="glyph">%</span>
           <span class="label">Usage</span>
+        </button>
+        <button class="nav-item" data-view="settings" type="button">
+          <span class="bar"></span>
+          <span class="glyph">⚙</span>
+          <span class="label">Settings</span>
         </button>
 
         <div class="rail-spacer"></div>
@@ -2795,6 +3017,20 @@
             </p>
             <div id="usage-content">
               <div class="empty-inline"><span class="lead">Loading usage data…</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Settings -->
+        <div class="view" id="view-settings">
+          <div class="settings">
+            <h1>Settings</h1>
+            <p class="lede">
+              Tune the orchestrator's behavior. Changes apply to the open project — or to all
+              projects via the toggle — and persist in program-data, never in your repo.
+            </p>
+            <div id="settings-content">
+              <div class="empty-inline"><span class="lead">Loading settings…</span></div>
             </div>
           </div>
         </div>

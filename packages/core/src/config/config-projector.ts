@@ -1,7 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Projector } from '../replay/projector.js';
 import type { StoredEvent, StoreTx } from '../store/types.js';
-import { EVENT_CONFIG_SET, configLayerForScope, type ConfigSet } from './events.js';
+import {
+  EVENT_CONFIG_SET,
+  EVENT_CONFIG_CLEAR,
+  configLayerForScope,
+  type ConfigSet,
+  type ConfigClear,
+} from './events.js';
 
 const CREATE_CONFIG_TABLE = `
   CREATE TABLE IF NOT EXISTS config (
@@ -22,21 +28,21 @@ export function ensureConfigTable(db: DatabaseSync): void {
 }
 
 /**
- * Folds `config.set` events into the `config` read-model in the GLOBAL db. The
- * row layer is derived from the event scope (`config:global` → `global`,
- * `config:<id>` → `<id>`), so each layer is an independent partition keyed by
- * (scope, key). Maintained in the SAME tx as the append, so the log and the
- * projection commit atomically; carries NO wall-clock field (freeze #6).
+ * Folds `config.set` / `config.clear` events into the `config` read-model in the
+ * GLOBAL db. The row layer is derived from the event scope (`config:global` →
+ * `global`, `config:<id>` → `<id>`), so each layer is an independent partition
+ * keyed by (scope, key). Maintained in the SAME tx as the append, so the log and
+ * the projection commit atomically; carries NO wall-clock field (freeze #6).
  *
- * `config.set` is config's only event type — config is a generic key→value map
- * that grows by KEYS, not by event types — so `apply` needs no discriminated
- * switch: `handles()` already guarantees the type before `apply` runs.
+ * Config is a generic key→value map that grows by KEYS, not by event types. The
+ * two event types map to the two row operations: `config.set` upserts the
+ * (scope, key) row; `config.clear` deletes it (reset to inherited/default).
  */
 export class ConfigProjector implements Projector {
   readonly name = 'config';
 
   handles(type: string): boolean {
-    return type === EVENT_CONFIG_SET;
+    return type === EVENT_CONFIG_SET || type === EVENT_CONFIG_CLEAR;
   }
 
   reset(tx: StoreTx): void {
@@ -48,8 +54,13 @@ export class ConfigProjector implements Projector {
   apply(tx: StoreTx, event: StoredEvent): void {
     const db = tx.raw as DatabaseSync;
     ensureConfigTable(db);
-    const { key, value } = event.payload as ConfigSet;
     const layer = configLayerForScope(event.scope);
+    if (event.type === EVENT_CONFIG_CLEAR) {
+      const { key } = event.payload as ConfigClear;
+      db.prepare('DELETE FROM config WHERE scope = ? AND key = ?').run(layer, key);
+      return;
+    }
+    const { key, value } = event.payload as ConfigSet;
     const json = JSON.stringify(value);
     db.prepare(
       'INSERT INTO config (scope, key, value) VALUES (?, ?, ?) ON CONFLICT(scope, key) DO UPDATE SET value = ?',

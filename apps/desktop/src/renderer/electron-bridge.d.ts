@@ -1,7 +1,7 @@
 // Renderer-side type declarations for the contextBridge surface exposed by preload.cts.
 // Declared inline (no Node/shared imports) because the renderer is isolated from Node context.
 
-type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'usage';
+type NavView = 'dashboard' | 'agents' | 'mail' | 'review' | 'source' | 'usage' | 'settings';
 type ConnectionStatus = 'connecting' | 'live' | 'degraded';
 
 interface ProjectInfo {
@@ -271,6 +271,52 @@ interface DaemonStatusPayload {
 
 type CurrentProjectState = { projectId: string; path: string | null } | null;
 
+// ── Settings (inline mirror of @co/core SettingDescriptor + shared SettingsVM types) ──────────
+type SettingsLayer = 'global' | 'project';
+type SettingSource = 'override' | 'inherited' | 'default';
+
+type SettingControl =
+  | { kind: 'toggle' }
+  | { kind: 'integer'; min: number; max?: number; unit?: string }
+  | { kind: 'enum'; options: readonly { value: string; label: string }[]; clearable?: boolean }
+  | { kind: 'persona' }
+  | { kind: 'provider-set'; providers: readonly string[] }
+  | {
+      kind: 'model-tier';
+      provider: 'claude' | 'codex';
+      tiers: readonly { key: string; label: string }[];
+      suggestions: readonly string[];
+    };
+
+interface SettingDescriptor {
+  key: string;
+  section: string;
+  label: string;
+  description: string;
+  control: SettingControl;
+  defaultValue: unknown;
+  perProject: boolean;
+  primaryLayer: SettingsLayer;
+  dependsOn?: { key: string; equals: string | number | boolean | null };
+}
+
+interface SettingsRow {
+  descriptor: SettingDescriptor;
+  effectiveValue: unknown;
+  source: SettingSource;
+  canReset: boolean;
+  disabledReason: string | null;
+}
+
+interface SettingsState {
+  activeLayer: SettingsLayer;
+  projectId: string | null;
+  hasProject: boolean;
+  rows: readonly SettingsRow[];
+}
+
+type SettingWriteResult = { ok: boolean; error?: string };
+
 interface CoShellBridge {
   navigate(view: NavView): void;
   projectInfo(): Promise<ProjectInfo | null>;
@@ -326,6 +372,12 @@ interface CoShellBridge {
   reviewCancelVerdict(): Promise<ReviewState | null>;
   reviewSubmitVerdict(): Promise<ReviewState | null>;
   reviewRefresh(): Promise<ReviewState | null>;
+  // ── Settings ────────────────────────────────────────────────────────────────
+  onSettingsState(listener: (state: SettingsState) => void): () => void;
+  settingsGetState(): Promise<SettingsState | null>;
+  settingsSet(layer: SettingsLayer, key: string, value: unknown): Promise<SettingWriteResult>;
+  settingsClear(layer: SettingsLayer, key: string): Promise<SettingWriteResult>;
+  settingsSetLayer(layer: SettingsLayer): Promise<SettingsState | null>;
   // ── Session ───────────────────────────────────────────────────────────────
   sessionStart(
     prompt: string | null,

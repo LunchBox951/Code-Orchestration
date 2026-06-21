@@ -1,6 +1,12 @@
 import { openDispatchStore, type DispatchStore } from './dispatch-store.js';
 import { candidatesFromStore, placeAgent, resolvePinTable } from './balancer.js';
 import type { ProviderAccount } from './balancer.js';
+import { openConfigStore } from '../config/config-store.js';
+import {
+  resolveEnabledProviders,
+  resolveModels,
+  resolveMaxedThresholdPct,
+} from './dispatch-config.js';
 import { resolveDispatch } from './throttle.js';
 import type { DispatchDiagnostic, DispatchResolution } from './throttle.js';
 import type { WorkSize, ReasoningBudget } from './tier.js';
@@ -262,18 +268,38 @@ export function runDispatchPolicy(
   nowMs: number,
   agent?: string,
 ): DispatchResolution {
-  const pins = resolvePinTable(projectId);
-  const candidates = candidatesFromStore(store, accounts, { nowMs });
-  const decision = placeAgent({
-    role,
-    workSize,
-    reasoningBudget,
-    pins,
-    candidates,
-    nowMs,
-    previous: previousPlacement(store, role, agent),
-  });
-  return resolveDispatch(decision, candidates, { nowMs });
+  // One config store for the whole policy run (pins + the operator dispatch settings), closed at the end.
+  const cfg = openConfigStore();
+  try {
+    const enabled = new Set(resolveEnabledProviders(projectId, cfg));
+    const enabledAccounts = accounts.filter((a) => enabled.has(a.provider));
+    // Fail loud only when the operator's config actively excluded EVERY offered account (a real
+    // misconfiguration). A genuinely empty `accounts` input stays on the graceful no-candidate ->
+    // WAITING path that placeAgent/resolveDispatch already provide (never a throw — balancer AC3).
+    if (accounts.length > 0 && enabledAccounts.length === 0) {
+      throw new Error(
+        `co dispatch: no enabled provider to dispatch to — 'dispatch.enabledProviders' excludes ` +
+          `every candidate account (${accounts.map((a) => a.provider).join(', ')}).`,
+      );
+    }
+    const pins = resolvePinTable(projectId, cfg);
+    const modelOverrides = resolveModels(projectId, cfg);
+    const maxedThresholdPct = resolveMaxedThresholdPct(projectId, cfg);
+    const candidates = candidatesFromStore(store, enabledAccounts, { nowMs });
+    const decision = placeAgent({
+      role,
+      workSize,
+      reasoningBudget,
+      pins,
+      candidates,
+      nowMs,
+      previous: previousPlacement(store, role, agent),
+      modelOverrides,
+    });
+    return resolveDispatch(decision, candidates, { nowMs, maxedThresholdPct });
+  } finally {
+    cfg.close();
+  }
 }
 
 /**

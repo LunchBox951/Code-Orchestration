@@ -26,6 +26,9 @@ function fakeConfig(overrides: Record<string, unknown> = {}): ConfigStore {
     setGlobal: () => undefined,
     setProjectOverride: () => undefined,
     resolveEffective: () => overrides,
+    clearGlobal: () => undefined,
+    clearProjectOverride: () => undefined,
+    resolveLayers: () => ({ global: {}, project: overrides }),
     close: () => undefined,
   };
 }

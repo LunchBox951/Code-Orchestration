@@ -19,6 +19,11 @@ import { invokeTool } from '../invoke.js';
 import type { ToolContext } from '../context.js';
 import { slingTool } from './sling.js';
 import type { ReviewerSpawnGate } from '../../review/merge.js';
+import { openConfigStore } from '../../config/config-store.js';
+import {
+  DISPATCH_DEFAULT_WORK_SIZE_KEY,
+  DISPATCH_DEFAULT_REASONING_BUDGET_KEY,
+} from '../../dispatch/dispatch-config.js';
 
 // AC-L3-1, headless through invokeTool (no MCP server, no Conductor): co_sling slings from the
 // auto-detected base, records the sandbox + a readable baseline, requires an explicit parent and a
@@ -366,6 +371,31 @@ function makeContextWithDispatch(
 }
 
 describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () => {
+  it('AC-SET-5: falls back to dispatch.defaultWorkSize/ReasoningBudget when unspecified', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const config = openConfigStore();
+    try {
+      config.setProjectOverride(ctx.projectId, DISPATCH_DEFAULT_WORK_SIZE_KEY, 'technical');
+      config.setProjectOverride(ctx.projectId, DISPATCH_DEFAULT_REASONING_BUDGET_KEY, 'deep');
+    } finally {
+      config.close();
+    }
+    const reg = buildCoreRegistry();
+
+    // No work_size / reasoning_budget on the call — the configured defaults must apply.
+    await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-default',
+      branch: 'co/uses-default-routing',
+    });
+
+    const placements = ctx.dispatch?.readPlacements('lead-7') ?? [];
+    expect(placements).toHaveLength(1);
+    expect(placements[0]?.workSize).toBe('technical');
+    expect(placements[0]?.reasoningBudget).toBe('deep');
+  });
+
   it('placed: records placement.decided and returns placement in output; creates sandbox', async () => {
     const repo = makeMainRepo();
     const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);

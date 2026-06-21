@@ -77,17 +77,29 @@ export interface TierPlacement {
   readonly context: ContextWindow;
 }
 
+/**
+ * Operator overrides for the default per-provider model table (the `dispatch.models.*` config
+ * keys). Partial at every level: an unset provider or an unset work-size tier keeps the built-in
+ * default below. Resolved from config by `resolveModels` and threaded through `placeAgent` →
+ * `resolveTier`; a per-role `dispatch.pins.model` still wins over these tier-level overrides.
+ */
+export interface ModelOverrides {
+  readonly claude?: Partial<Record<WorkSize, string>>;
+  readonly codex?: Partial<Record<WorkSize, string>>;
+}
+
 // ─── Default model tables (v1 defaults, operator-overridable) ─────────────────
 
-// v1 default model ids — operator-overridable via Phase 3 pins; commented as such per spec.
-const CLAUDE_MODELS: Record<WorkSize, string> = {
+// v1 default model ids — operator-overridable via the dispatch.models.* config keys and Phase 3 pins.
+// Exported so the settings registry can present them as defaults / picker suggestions.
+export const CLAUDE_MODELS: Record<WorkSize, string> = {
   simple: 'claude-haiku-4-5-20251001', // v1 default, operator-overridable
   average: 'claude-sonnet-4-6', // v1 default, operator-overridable
   technical: 'claude-opus-4-8', // v1 default, operator-overridable
 };
 
 // v1 placeholder model ids consistent with the prototype config — operator-overridable.
-const CODEX_MODELS: Record<WorkSize, string> = {
+export const CODEX_MODELS: Record<WorkSize, string> = {
   simple: 'gpt-5.4-mini', // v1 default, operator-overridable
   average: 'gpt-5.4', // v1 default, operator-overridable
   technical: 'gpt-5.5', // v1 default, operator-overridable
@@ -142,7 +154,10 @@ function resolveContext(workSize: WorkSize, reasoningBudget: ReasoningBudget): C
 
 // ─── Model resolution ─────────────────────────────────────────────────────────
 
-function resolveModel(workSize: WorkSize, provider: Provider): string {
+function resolveModel(workSize: WorkSize, provider: Provider, overrides?: ModelOverrides): string {
+  // A per-provider, per-tier override (a non-empty string) wins over the built-in default.
+  const override = overrides?.[provider]?.[workSize];
+  if (override !== undefined && override !== '') return override;
   switch (provider) {
     case 'claude':
       return CLAUDE_MODELS[workSize];
@@ -164,10 +179,11 @@ export function resolveTier(
   workSize: WorkSize,
   reasoningBudget: ReasoningBudget,
   provider: Provider,
+  modelOverrides?: ModelOverrides,
 ): TierPlacement {
   return {
     provider,
-    model: resolveModel(workSize, provider),
+    model: resolveModel(workSize, provider, modelOverrides),
     effort: resolveEffort(workSize, reasoningBudget),
     context: resolveContext(workSize, reasoningBudget),
   };

@@ -11,7 +11,7 @@ import { mailDetailNeedsRebuild, mailDetailSignature } from './mail-render-helpe
 import { applyTermFeed, createAgentsTerminal, decideTermFeed } from './agents-terminal-helpers.js';
 import { reviewDetailNeedsRebuild, reviewDetailSignature } from './review-render-helpers.js';
 
-const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'usage'] as const;
+const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'usage', 'settings'] as const;
 type LocalNavView = (typeof NAV_VIEWS)[number];
 
 function isNavView(v: unknown): v is LocalNavView {
@@ -96,6 +96,7 @@ let latestMailState: MailState | null = null;
 let latestAgentsState: AgentsConsoleState | null = null;
 let latestReviewState: ReviewState | null = null;
 let latestLimitsState: LimitsCostState | null = null;
+let latestSettingsState: SettingsState | null = null;
 let projectInfo: { id: string; name: string; branch?: string } | null = null;
 let sourceTab: 'branches' | 'prs' | 'commits' = 'branches';
 // The app-supervised Conductor daemon's lifecycle status (P-ON1), pushed over `daemon:status`. Drives
@@ -350,6 +351,7 @@ function activateView(view: LocalNavView): void {
   }
   if (view === 'agents' && latestAgentsState != null) renderAgentsTranscript(latestAgentsState);
   if (view === 'review' && latestReviewState != null) renderReview(latestReviewState);
+  if (view === 'settings' && latestSettingsState != null) renderSettings(latestSettingsState);
 }
 
 function setNavEnabled(enabled: boolean): void {
@@ -1914,6 +1916,261 @@ function renderUsage(state: LimitsCostState): void {
     </div>`;
 }
 
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+function settingSourceLabel(row: SettingsRow, activeLayer: SettingsLayer): string {
+  if (row.source === 'inherited') return 'inherited';
+  if (row.source === 'default') return 'default';
+  return activeLayer === 'project' ? 'project override' : 'set';
+}
+
+function renderSettingControl(row: SettingsRow): string {
+  const d = row.descriptor;
+  const c = d.control;
+  const dis = row.disabledReason != null ? 'disabled' : '';
+  const key = esc(d.key);
+  switch (c.kind) {
+    case 'toggle': {
+      const on = row.effectiveValue === true;
+      return `<label class="set-switch"><input type="checkbox" data-setting-key="${key}" data-control="toggle" ${on ? 'checked' : ''} ${dis}/><span></span></label>`;
+    }
+    case 'integer': {
+      const v = typeof row.effectiveValue === 'number' ? String(row.effectiveValue) : '';
+      const max = c.max != null ? `max="${c.max}"` : '';
+      const unit = c.unit != null ? `<span class="set-unit">${esc(c.unit)}</span>` : '';
+      return `<span class="set-int"><input type="number" data-setting-key="${key}" data-control="integer" value="${esc(v)}" min="${c.min}" ${max} ${dis}/>${unit}</span>`;
+    }
+    case 'enum': {
+      const cur = typeof row.effectiveValue === 'string' ? row.effectiveValue : '';
+      const clearOpt = c.clearable === true ? `<option value="">Auto-detect</option>` : '';
+      const opts = c.options
+        .map(
+          (o) =>
+            `<option value="${esc(o.value)}" ${o.value === cur ? 'selected' : ''}>${esc(o.label)}</option>`,
+        )
+        .join('');
+      return `<select data-setting-key="${key}" data-control="enum" data-clearable="${c.clearable === true ? '1' : '0'}" ${dis}>${clearOpt}${opts}</select>`;
+    }
+    case 'provider-set': {
+      const arr = Array.isArray(row.effectiveValue)
+        ? (row.effectiveValue as unknown[]).map(String)
+        : [];
+      const boxes = c.providers
+        .map(
+          (p) =>
+            `<label class="set-chip"><input type="checkbox" data-provider="${esc(p)}" ${arr.includes(p) ? 'checked' : ''} ${dis}/>${esc(p)}</label>`,
+        )
+        .join('');
+      return `<span class="set-providers" data-setting-key="${key}" data-control="provider-set">${boxes}</span>`;
+    }
+    case 'persona': {
+      const v =
+        row.effectiveValue != null && typeof row.effectiveValue === 'object'
+          ? (row.effectiveValue as { name?: string; email?: string })
+          : {};
+      return `<span class="set-persona" data-setting-key="${key}" data-control="persona"><input type="text" data-persona-field="name" placeholder="Name" value="${esc(v.name ?? '')}" ${dis}/><input type="email" data-persona-field="email" placeholder="email@example.com" value="${esc(v.email ?? '')}" ${dis}/></span>`;
+    }
+    case 'model-tier': {
+      const obj = (v: unknown): Record<string, unknown> =>
+        v != null && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+      // Only the ACTIVE layer's explicit override should fill the input value; an inherited/default
+      // value is shown as a placeholder so editing one tier creates a partial override of JUST that
+      // tier (it must NOT silently pin the other tiers' current defaults — review finding).
+      const explicit = row.source === 'override' ? obj(row.effectiveValue) : {};
+      const effective = obj(row.effectiveValue);
+      const def = obj(d.defaultValue);
+      const listId = `co-models-${esc(c.provider)}`;
+      const datalist = `<datalist id="${listId}">${c.suggestions
+        .map((s) => `<option value="${esc(s)}"></option>`)
+        .join('')}</datalist>`;
+      const inputs = c.tiers
+        .map((t) => {
+          const own = Object.prototype.hasOwnProperty.call(explicit, t.key) ? explicit[t.key] : '';
+          const value = own != null && own !== '' ? String(own) : '';
+          const placeholder = String(effective[t.key] ?? def[t.key] ?? '');
+          return `<label class="set-model"><span>${esc(t.label)}</span><input type="text" list="${listId}" data-tier="${esc(t.key)}" value="${esc(value)}" placeholder="${esc(placeholder)}" ${dis}/></label>`;
+        })
+        .join('');
+      // A per-project override REPLACES the whole table for this provider (config keys don't deep-merge
+      // across layers). When the current values are inherited from the global layer, say so — otherwise
+      // the placeholders read like a promise that a partial override would silently break.
+      const hint =
+        row.source === 'inherited'
+          ? `<div class="set-note">Setting any tier creates a per-project override that replaces the inherited table; tiers you leave blank then use the built-in default.</div>`
+          : '';
+      return `<span class="set-models" data-setting-key="${key}" data-control="model-tier">${datalist}${inputs}${hint}</span>`;
+    }
+    default: {
+      // Exhaustiveness guard: a new SettingControl kind without a case here is a compile error,
+      // and an unknown kind renders a visible marker rather than nothing (Principle 9).
+      const exhaustive: never = c;
+      return `<span class="set-note">Unsupported control: ${esc((exhaustive as { kind?: string }).kind ?? 'unknown')}</span>`;
+    }
+  }
+}
+
+function renderSettingRow(row: SettingsRow, activeLayer: SettingsLayer): string {
+  const d = row.descriptor;
+  const reset = row.canReset
+    ? `<button class="set-reset" data-setting-reset="${esc(d.key)}" title="Reset to inherited/default">↺</button>`
+    : '';
+  const note =
+    row.disabledReason != null ? `<div class="set-note">${esc(row.disabledReason)}</div>` : '';
+  return `
+    <div class="set-row${row.disabledReason != null ? ' disabled' : ''}">
+      <div class="set-meta">
+        <div class="set-label">${esc(d.label)}<span class="set-source set-source-${row.source}">${esc(settingSourceLabel(row, activeLayer))}</span></div>
+        <div class="set-desc">${esc(d.description)}</div>
+        ${note}
+      </div>
+      <div class="set-control">${renderSettingControl(row)}${reset}</div>
+    </div>`;
+}
+
+function renderSettings(state: SettingsState): void {
+  const container = document.getElementById('settings-content');
+  if (!container) return;
+  const sections: { title: string; rows: SettingsRow[] }[] = [];
+  for (const row of state.rows) {
+    let group = sections.find((s) => s.title === row.descriptor.section);
+    if (group == null) {
+      group = { title: row.descriptor.section, rows: [] };
+      sections.push(group);
+    }
+    group.rows.push(row);
+  }
+  const toggle = `
+    <div class="set-layer-toggle" role="tablist">
+      <button class="set-layer${state.activeLayer === 'project' ? ' active' : ''}${state.hasProject ? '' : ' disabled'}" data-settings-layer="project" role="tab">This project</button>
+      <button class="set-layer${state.activeLayer === 'global' ? ' active' : ''}" data-settings-layer="global" role="tab">All projects</button>
+    </div>`;
+  const body = sections
+    .map(
+      (s) => `
+      <section class="set-section">
+        <h2>${esc(s.title)}</h2>
+        ${s.rows.map((r) => renderSettingRow(r, state.activeLayer)).join('')}
+      </section>`,
+    )
+    .join('');
+  container.innerHTML = `${toggle}${body}`;
+}
+
+function revertSettings(): void {
+  if (latestSettingsState != null) renderSettings(latestSettingsState);
+}
+
+function applySettingSet(key: string, value: unknown): void {
+  const layer: SettingsLayer = latestSettingsState?.activeLayer ?? 'project';
+  void window.coShell
+    .settingsSet(layer, key, value)
+    .then((res) => {
+      if (!res.ok) {
+        flashToast(res.error ?? 'Invalid value');
+        revertSettings(); // restore the input to the last good effective value
+      }
+      // On success the settings:state push re-renders with the new effective value + source badge.
+    })
+    .catch((err: unknown) => {
+      flashToast(String(err));
+      revertSettings();
+    });
+}
+
+function applySettingClear(key: string): void {
+  const layer: SettingsLayer = latestSettingsState?.activeLayer ?? 'project';
+  void window.coShell
+    .settingsClear(layer, key)
+    .then((res) => {
+      if (!res.ok) flashToast(res.error ?? 'Could not reset this setting');
+      // On success the settings:state push re-renders.
+    })
+    .catch((err: unknown) => flashToast(String(err)));
+}
+
+/** Read the edited value (or a clear signal) out of a settings control's DOM. */
+function settingChangeValue(container: HTMLElement): { clear: boolean; value?: unknown } {
+  switch (container.dataset['control']) {
+    case 'toggle':
+      return { clear: false, value: (container as HTMLInputElement).checked };
+    case 'integer': {
+      const raw = (container as HTMLInputElement).value.trim();
+      return raw === '' ? { clear: true } : { clear: false, value: Number(raw) };
+    }
+    case 'enum': {
+      const v = (container as HTMLSelectElement).value;
+      if (v === '' && container.dataset['clearable'] === '1') return { clear: true };
+      return { clear: false, value: v };
+    }
+    case 'provider-set':
+      return {
+        clear: false,
+        value: [...container.querySelectorAll<HTMLInputElement>('input[data-provider]')]
+          .filter((i) => i.checked)
+          .map((i) => i.dataset['provider'] as string),
+      };
+    case 'persona': {
+      const name =
+        container
+          .querySelector<HTMLInputElement>('input[data-persona-field="name"]')
+          ?.value.trim() ?? '';
+      const email =
+        container
+          .querySelector<HTMLInputElement>('input[data-persona-field="email"]')
+          ?.value.trim() ?? '';
+      return name === '' && email === ''
+        ? { clear: true }
+        : { clear: false, value: { name, email } };
+    }
+    case 'model-tier': {
+      const obj: Record<string, string> = {};
+      for (const input of container.querySelectorAll<HTMLInputElement>('input[data-tier]')) {
+        const v = input.value.trim();
+        if (v !== '') obj[input.dataset['tier'] as string] = v;
+      }
+      return Object.keys(obj).length === 0 ? { clear: true } : { clear: false, value: obj };
+    }
+    default:
+      return { clear: false };
+  }
+}
+
+function bindSettingsView(): void {
+  const root = document.getElementById('view-settings');
+  if (root == null) return;
+
+  root.addEventListener('click', (e) => {
+    const layerBtn = (e.target as HTMLElement).closest<HTMLElement>('[data-settings-layer]');
+    if (layerBtn != null && !layerBtn.classList.contains('disabled')) {
+      const layer = layerBtn.dataset['settingsLayer'];
+      if (layer === 'global' || layer === 'project') {
+        void window.coShell
+          .settingsSetLayer(layer)
+          .then((s) => {
+            if (s != null) {
+              latestSettingsState = s;
+              renderSettings(s);
+            }
+          })
+          .catch((err: unknown) => flashToast(String(err)));
+      }
+      return;
+    }
+    const resetBtn = (e.target as HTMLElement).closest<HTMLElement>('[data-setting-reset]');
+    if (resetBtn?.dataset['settingReset'] != null)
+      applySettingClear(resetBtn.dataset['settingReset']);
+  });
+
+  root.addEventListener('change', (e) => {
+    const container = (e.target as HTMLElement).closest<HTMLElement>('[data-setting-key]');
+    const key = container?.dataset['settingKey'];
+    if (container == null || key == null) return;
+    const { clear, value } = settingChangeValue(container);
+    if (clear) applySettingClear(key);
+    else applySettingSet(key, value);
+  });
+}
+
 // ── Bootstrap ───────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -2481,6 +2738,19 @@ document.addEventListener('DOMContentLoaded', () => {
   bridge.onReviewState((state) => renderReview(state));
   bridge.onReviewError((message) => showAppError(message));
   applyReviewResult(bridge.reviewRefresh());
+
+  // ── Settings ──────────────────────────────────────────────────────────────────
+  bridge.onSettingsState((state) => {
+    latestSettingsState = state;
+    renderSettings(state);
+  });
+  void bridge.settingsGetState().then((state) => {
+    if (state != null) {
+      latestSettingsState = state;
+      renderSettings(state);
+    }
+  });
+  bindSettingsView();
 
   const handleReviewSelect = (reviewId: string): void => {
     applyReviewResult(bridge.reviewSelect(reviewId));

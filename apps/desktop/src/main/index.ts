@@ -26,6 +26,7 @@ import {
   requireNonEmptyString,
   requirePositiveDim,
   requireReviewVerdict,
+  requireSettingsLayer,
   requireSteer,
 } from './ipc-guards.js';
 
@@ -78,6 +79,7 @@ const controller = createProjectController({
       onAgentsConsoleState: (state) => sendToRenderer('agentsConsole:state', state),
       onReviewState: (state) => sendToRenderer('review:state', state),
       onReviewError: (message) => sendToRenderer('review:error', message),
+      onSettingsState: (state) => sendToRenderer('settings:state', state),
     }),
   openRegistry,
   pickDirectory: showDirectoryDialog,
@@ -641,6 +643,33 @@ ipcMain.handle('review:submitVerdict', async () => {
 
 ipcMain.handle('review:refresh', () => {
   return controller.shell?.reviewRefresh() ?? null;
+});
+
+ipcMain.handle('settings:getState', () => {
+  return controller.shell?.getSettingsState() ?? null;
+});
+
+ipcMain.handle('settings:set', (_event, payload: unknown) => {
+  const { layer, key, value } = payload as { layer?: unknown; key?: unknown; value?: unknown };
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'No project open.' };
+  return shell.setSetting(
+    requireSettingsLayer(layer),
+    requireNonEmptyString(key, 'setting key'),
+    value,
+  );
+});
+
+ipcMain.handle('settings:clear', (_event, payload: unknown) => {
+  const { layer, key } = payload as { layer?: unknown; key?: unknown };
+  const shell = controller.shell;
+  if (shell == null) return { ok: false, error: 'No project open.' };
+  return shell.clearSetting(requireSettingsLayer(layer), requireNonEmptyString(key, 'setting key'));
+});
+
+ipcMain.handle('settings:setLayer', (_event, layer: unknown) => {
+  controller.shell?.setSettingsLayer(requireSettingsLayer(layer));
+  return controller.shell?.getSettingsState() ?? null;
 });
 
 app.whenReady().then(openWindow).catch(handleStartupFailure);
