@@ -1341,9 +1341,9 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     await startServer(control, projectId, socketPath);
     const client = makeClient(projectId, socketPath);
 
-    await expect(
-      client.operatorMessage('missing-agent', 'subject', 'body'),
-    ).rejects.toThrow(/unknown|registered/i);
+    await expect(client.operatorMessage('missing-agent', 'subject', 'body')).rejects.toThrow(
+      /unknown|registered/i,
+    );
 
     const mail = openMailStore(projectId);
     mailStores.push(mail);

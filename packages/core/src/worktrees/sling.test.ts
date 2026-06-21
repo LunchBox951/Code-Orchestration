@@ -332,7 +332,12 @@ describe('slingWorktree — create + record from the auto-detected base', () => 
     expect(() =>
       slingWorktree(
         store,
-        { parent: 'lead-7', branch: 'co/add-fails', repoCwd: '/fake-repo', projectId: 'p-add-fails' },
+        {
+          parent: 'lead-7',
+          branch: 'co/add-fails',
+          repoCwd: '/fake-repo',
+          projectId: 'p-add-fails',
+        },
         { gitReader, gitExec, provisioner: () => {}, probe: knownProbe },
       ),
     ).toThrow(/already exists/);

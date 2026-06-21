@@ -119,7 +119,9 @@ describe('AC-L2-3 — completeness gate: RED for a stub/partial tool', () => {
         bogus({
           // The description lives on the inner type, not the outer ZodOptional; the gate must still
           // see it rather than depend on .describe() being applied last.
-          inputSchema: z.object({ x: z.number().describe('described, then made optional').optional() }),
+          inputSchema: z.object({
+            x: z.number().describe('described, then made optional').optional(),
+          }),
         }),
       ),
     );

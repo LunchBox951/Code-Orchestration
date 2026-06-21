@@ -41,7 +41,9 @@ describe('scrubIssueText — redactions', () => {
       'token [redacted-token] ok',
     );
     expect(
-      scrubIssueText('-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'),
+      scrubIssueText(
+        '-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
+      ),
     ).toBe('[redacted-token]');
   });
 
