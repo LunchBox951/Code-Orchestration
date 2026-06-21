@@ -29,14 +29,15 @@ starting a session.
 ### Step 3 — Start a coordinator session
 
 Navigate to the **Dashboard** view in the left-hand nav (`Dashboard / Agents / Mail / Review /
-Source / Cost`).
+Source / Usage`).
 
 The Dashboard shows a **"Start a coordinator session"** form. You have two options:
 
 - **"Start from demo spec"** — launches the predesigned on-ramp coordinator using the bundled
-  `docs/demo-spec-co-improves-its-docs.md` spec. Recommended for your first session.
-- **"Start session"** — type (or paste) a free-form prompt and click **Start session** to launch a
-  coordinator from scratch.
+  `docs/demo-spec-co-improves-its-docs.md` spec. Enter a coordinator name first; recommended for
+  your first session.
+- **"Start session"** — enter a coordinator name, type (or paste) a free-form prompt, and click
+  **Start session** to launch a coordinator from scratch.
 
 The coordinator is registered and the daemon cold-starts it on the next tick.
 
@@ -51,7 +52,7 @@ Use the left-nav views to monitor the running session:
 | **Mail** | Your operator inbox — coordinators mail you for clarification and approvals |
 | **Review** | Pending review requests: diff + acceptance criteria → click **PASS** or **ISSUES** |
 | **Source** | Read-only **Branches** and local **Pull request refs** for fetched PR heads |
-| **Cost** | Cumulative token spend and per-session cost rollup |
+| **Usage** | Cumulative token spend and per-session cost rollup |
 
 When the coordinator mails you a clarification or brainstorm request it lands in **Mail** — reply
 there. When a worker finishes and requests a review it appears in **Review** — read the diff and
@@ -63,8 +64,9 @@ triggers the gated merge onto the integration branch.
 ## Power-user tooling — CLI
 
 The commands below are for operators who want scripted control, CI integration, need to debug
-without the app, or need to bridge the temporary `co_spec_lock` app-surface gap. The app handles the
-daemon, session launch, mail, review, and live monitoring in the primary flow.
+without the app, or need to run the operator-owned `co spec lock <taskId>` gate until the in-app Lock
+button ships. The app handles the daemon, session launch, mail, review, and live monitoring in the
+primary flow.
 
 ### Auth check
 
@@ -105,11 +107,11 @@ are operating headlessly.
 ### Start a coordinator session from the CLI
 
 ```sh
-co-mcp start-session <projectId> --prompt "Draft a small doc clarification."
-co-mcp start-session <projectId> --spec /path/to/draft-spec.md
+co-mcp start-session <projectId> --name "Doc clarification" --prompt "Draft a small doc clarification."
+co-mcp start-session <projectId> --name "Draft spec" --spec /path/to/draft-spec.md
 ```
 
-Exactly one of `--prompt` / `--spec` is required; both or neither fails loud.
+`--name` is required. Exactly one of `--prompt` / `--spec` is required; both or neither fails loud.
 
 ### Read your inbox and check status
 
@@ -129,7 +131,7 @@ summary gate; the full host-live SH-1 proof lives in [`docs/sh1-runbook.md`](sh1
 Operator host-live acceptance (run before merging):
 [ ] App healthy: daemon status indicator shows "healthy" for the project.
 [ ] Auth: co doctor --live → [ok] provider-compatibility for both monitored providers (claude, codex).
-[ ] Session started: used "Start from demo spec" or "Start session" in the Dashboard.
+[ ] Session started: named the coordinator and used "Start from demo spec" or "Start session" in the Dashboard.
 [ ] Plan-with-operator: the coordinator mails a clarify/brainstorm; you reply in-app; it drafts a spec.
 [ ] Lock: you approve the spec with `co spec lock <taskId>` (operator-only CLI, PR #50); agents cannot lock it.
     An in-app Lock button is a remaining UX nicety, not an automation gap.
