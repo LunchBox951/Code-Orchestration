@@ -593,20 +593,56 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         roster.close();
       }
 
-      // Release every warm pane and clear router suppression for each id.
+      // Release every warm pane and clear router suppression for each id — error-isolated so one
+      // rejecting `hosted.session.close()` cannot strand the remaining releases OR the durable teardown
+      // below (mirrors the best-effort spirit of `engine.closeAll`). Collect any failures and surface
+      // them after the durable teardown still runs (never silently swallowed — Principle 9).
+      const releaseErrors: Error[] = [];
       for (const id of ids) {
-        await engine.release(projectId, id, {});
-        router.unstop(id);
+        try {
+          await engine.release(projectId, id, {});
+        } catch (e) {
+          const err = e instanceof Error ? e : new Error(String(e));
+          releaseErrors.push(err);
+          reportServeControlDiagnostic(
+            opts.onError,
+            new Error(`co-mcp serve: deleteAgent: pane release for '${id}' failed: ${err.message}`),
+          );
+        } finally {
+          router.unstop(id); // ALWAYS clear suppression, even when the release threw.
+        }
       }
 
       // Durable cascade teardown via the core primitive (roster/worktree/session/archive, leaf-first).
+      // Runs REGARDLESS of pane-release failures — the durable teardown must not be stranded.
       // AggregateError on partial failure — Principle 9: let it propagate to the IPC layer.
-      deleteAgentSubtree(projectId, agentId, {
-        repoCwd,
-        nowMs: Date.now(),
-        gitExec: defaultGitExec,
-        gitReader: defaultGitReader,
-      });
+      try {
+        deleteAgentSubtree(projectId, agentId, {
+          repoCwd,
+          nowMs: Date.now(),
+          gitExec: defaultGitExec,
+          gitReader: defaultGitReader,
+        });
+      } catch (teardownError) {
+        // Combine the teardown failure with any collected pane-release errors so the operator sees both.
+        const teardownErrors =
+          teardownError instanceof AggregateError
+            ? teardownError.errors
+            : [teardownError instanceof Error ? teardownError : new Error(String(teardownError))];
+        throw new AggregateError(
+          [...releaseErrors, ...teardownErrors],
+          'co-mcp serve: deleteAgent: teardown failure',
+          { cause: teardownError },
+        );
+      }
+
+      // The durable teardown succeeded; surface any pane-release errors that were collected.
+      if (releaseErrors.length > 0) {
+        throw new AggregateError(
+          releaseErrors,
+          'co-mcp serve: deleteAgent: pane release(s) failed (durable teardown completed)',
+        );
+      }
     },
     // B5 (listArchive) — list all archived branch records; open/close per call (mirrors reviewContext).
     listArchive: async (): Promise<readonly ArchiveEntry[]> => {
@@ -652,8 +688,21 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       const archive = openArchiveStore(projectId);
       try {
         const rec = archive.getRecord(id);
+        // Idempotent: an unknown id (getRecord → null) makes removeRecord a benign no-op — a stale or
+        // double purge is NOT an error. When the record exists, the `git branch -D` is wrapped so an
+        // already-gone branch (reaper raced / operator deleted it) cannot strand the record; the record
+        // is removed REGARDLESS of the git outcome (matches the reaper's contract).
         if (rec != null) {
-          defaultGitExec(repoCwd, ['branch', '-D', rec.branch]);
+          try {
+            defaultGitExec(repoCwd, ['branch', '-D', rec.branch]);
+          } catch (gitError) {
+            reportServeControlDiagnostic(
+              opts.onError,
+              new Error(
+                `co-mcp serve: purgeArchive: git branch -D '${rec.branch}' failed (record removed anyway): ${errorMessage(gitError)}`,
+              ),
+            );
+          }
         }
         archive.removeRecord(id);
       } finally {

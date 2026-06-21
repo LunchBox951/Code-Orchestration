@@ -2958,6 +2958,10 @@ describe('B5 — listArchive / restoreArchive / purgeArchive operator-IPC verbs'
     expect(entries[0]?.id).toBe(id);
     expect(entries[0]?.branch).toBe(branch);
     expect(typeof entries[0]?.expiresAt).toBe('number');
+    // The remaining wire fields must also survive the round-trip — a silent field-drop is caught here.
+    expect(entries[0]?.name).toBe(`coord-${id}`); // the name seedArchiveRecord wrote
+    expect(entries[0]?.baseRef).toBe('main'); // the baseRef seedArchiveRecord wrote
+    expect(typeof entries[0]?.deletedAt).toBe('number');
     expect(client.connected).toBe(true);
   });
 

@@ -19,6 +19,7 @@ import {
   OPERATOR,
   ReconcileLoop,
   defaultMailRenderer,
+  openArchiveStore,
   openMailStore,
   openRegistry,
   openRosterStore,
@@ -951,6 +952,126 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     } finally {
       rosterCheck.close();
     }
+
+    await runner.stop();
+  });
+
+  it('control.deleteAgent isolates pane-release failures: durable teardown still runs, error surfaced', async () => {
+    const { projectId, cwd } = makeProject();
+
+    // Coordinator + child in the roster (no worktrees — no real git in the durable teardown path).
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+    roster.recordAgent({ agentId: 'child-x', role: 'implementer', parent: 'coord-x' });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const errors: string[] = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+
+    // Host the CHILD (leaf — released first) and rig its session.close to throw, so engine.release rejects.
+    const ensureChild = engine.ensureHosted({
+      ...makeIdentity('child-x', projectId, cwd),
+      role: 'implementer',
+      parent: 'coord-x',
+    });
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    await ensureChild;
+    const hostedChild = engine.getHosted(projectId, 'child-x')!;
+    (hostedChild.session as { close: () => Promise<void> }).close = async () => {
+      throw new Error('child session close failed');
+    };
+
+    // Suppress both so we can verify unstop still clears suppression even when the release threw.
+    runner.control!.router.pause('coord-x');
+    runner.control!.router.pause('child-x');
+
+    // deleteAgent must REJECT (the release failure is surfaced, never swallowed)...
+    await expect(runner.control!.deleteAgent('coord-x')).rejects.toBeInstanceOf(AggregateError);
+
+    // ...the failing release was diagnostically reported via onError...
+    expect(errors.some((e) => /child-x.*child session close failed/i.test(e))).toBe(true);
+
+    // ...router suppression was cleared for BOTH despite the leaf release throwing (unstop ran in finally)...
+    expect(runner.control!.router.shouldSkip(projectId, 'coord-x')).toBe(false);
+    expect(runner.control!.router.shouldSkip(projectId, 'child-x')).toBe(false);
+
+    // ...and the durable cascade teardown STILL ran: neither agent remains in the roster.
+    const rosterCheck = openRosterStore(projectId);
+    try {
+      const agents = rosterCheck.listAgents().map((a) => a.agentId);
+      expect(agents).not.toContain('coord-x');
+      expect(agents).not.toContain('child-x');
+    } finally {
+      rosterCheck.close();
+    }
+
+    await runner.stop();
+  });
+
+  it('control.purgeArchive removes the record even when `git branch -D` fails (already-gone branch)', async () => {
+    const { projectId } = makeProject();
+
+    // Seed an archive record. The test `cwd` is NOT a real git repo, so the real `git branch -D` the
+    // host wiring runs WILL fail — exactly the F3 race (branch already gone). The record must still go.
+    const seed = openArchiveStore(projectId);
+    try {
+      seed.appendRecord({
+        id: 'coord-archived',
+        name: 'archived coord',
+        branch: 'co/coord-archived',
+        baseRef: 'main',
+        deletedAt: Date.now(),
+        expiresAt: Date.now() + 86_400_000,
+      });
+    } finally {
+      seed.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const errors: string[] = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
+    // purgeArchive must NOT throw even though the underlying `git branch -D` fails.
+    await expect(runner.control!.purgeArchive('coord-archived')).resolves.toBeUndefined();
+
+    // The git failure was reported diagnostically (never silently swallowed — Principle 9)...
+    expect(errors.some((e) => /purgeArchive.*git branch -D/i.test(e))).toBe(true);
+
+    // ...and the archive record is gone REGARDLESS of the git outcome (record not stranded).
+    const check = openArchiveStore(projectId);
+    try {
+      expect(check.getRecord('coord-archived')).toBeUndefined();
+      expect(check.listRecords()).toHaveLength(0);
+    } finally {
+      check.close();
+    }
+
+    // A repeat purge on the now-unknown id is an idempotent benign no-op (no throw).
+    await expect(runner.control!.purgeArchive('coord-archived')).resolves.toBeUndefined();
 
     await runner.stop();
   });
