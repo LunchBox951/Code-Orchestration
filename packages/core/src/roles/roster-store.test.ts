@@ -51,7 +51,7 @@ function makeRepo(): string {
 function snapshot(db: DatabaseSync): string {
   const rows = db
     .prepare(
-      'SELECT agent_id, role, sub_role, parent, registered_ts FROM roster ORDER BY registered_ts, agent_id',
+      'SELECT agent_id, role, sub_role, name, parent, registered_ts FROM roster ORDER BY registered_ts, agent_id',
     )
     .all();
   return JSON.stringify(rows);
@@ -461,6 +461,31 @@ describe('AC-L6a-1 — replay equality: live fold → rebuildAll → byte-equal'
       ]);
 
       expect(() => rebuildRoster(store)).toThrow(/unknown sub-role/i);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('AC-L6a-1 — optional operator name', () => {
+  it('carries an optional operator name through record → read-back', () => {
+    const store = openRosterStore('p-roster-name');
+    try {
+      const coord = store.recordAgent({
+        agentId: 'coord-auth-9f3a1c',
+        role: 'coordinator',
+        parent: '@operator',
+        name: 'auth refactor',
+      });
+      expect(coord.name).toBe('auth refactor');
+      expect(store.getAgent('coord-auth-9f3a1c')?.name).toBe('auth refactor');
+      // a registration without a name still works (legacy/no-name path)
+      const worker = store.recordAgent({
+        agentId: 'impl-1',
+        role: 'implementer',
+        parent: 'coord-auth-9f3a1c',
+      });
+      expect(worker.name).toBeUndefined();
     } finally {
       store.close();
     }
