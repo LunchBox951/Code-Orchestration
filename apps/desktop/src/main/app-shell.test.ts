@@ -1150,12 +1150,15 @@ describe('createAppShell — agentsConsole VM wiring', () => {
   });
 });
 
-/** Recursive {relativePath -> file contents} snapshot of a directory tree, for pristine-repo checks. */
+/**
+ * Recursive {relativePath -> contents-or-marker} snapshot of a directory tree, for pristine-repo
+ * checks. Directories are recorded too (as '<dir>') so a stray empty dir is also caught.
+ */
 function snapshotDir(root: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const rel of readdirSync(root, { recursive: true, encoding: 'utf8' })) {
     const abs = join(root, rel);
-    if (statSync(abs).isFile()) out[rel] = readFileSync(abs, 'utf8');
+    out[rel] = statSync(abs).isDirectory() ? '<dir>' : readFileSync(abs, 'utf8');
   }
   return out;
 }
