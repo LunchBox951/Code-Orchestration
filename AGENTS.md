@@ -36,7 +36,5 @@ This repo is a TypeScript pnpm-workspace monorepo:
   only if every agent truly needs the pointer.
 - Follow the check and contribution flow in [`CONTRIBUTING.md`](CONTRIBUTING.md) before considering a
   diff done.
-- Do not bypass the review gate: use the gated MCP tools (`co_merge`, `co_push`, `co_pr_merge`)
-  instead of raw `git push`, `gh pr create`, or `gh pr merge`.
 - Do not treat `.co/`, `.claude/`, or `.codex/` as product code; they are temporary prototype
   residue documented in [`docs/migration.md`](docs/migration.md).

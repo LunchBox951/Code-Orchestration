@@ -43,7 +43,6 @@ living document; advance and mark criteria as work lands.
 
 ## Things agents should not do
 
-- Do not bypass the review gate: no raw `git push` / `gh pr merge`. Use the gated path.
 - Do not put orchestration state in the repo (Principle 12 — pristine-repo). The only
   sanctioned repo files are these memory files.
 - Do not duplicate core logic into `cli`/`mcp`.
