@@ -362,8 +362,16 @@ export function deleteAgentSubtree(
 
       // 2e: Release PASS-held serialized review/merge slots for branches this delete just made
       // non-live. Resolved human review mail remains auditable; only the stale slot is toggled.
+      // On the normal pass `wt` is the live row. On a RETRY where the worktree was already
+      // removed+archived the 2a finder skips it, so `wt` is null — fall back to ALL of the agent's
+      // worktree rows (removed included) so a slot held by ANY torn-down branch is released, not just
+      // the first. Without this a stale slot is stranded behind a deleted branch and every later merge
+      // into that target queues forever (MC-CD-1). `releaseDeletedBranchSlot` is idempotent (no-op
+      // unless that branch currently holds the slot), so releasing across passes/rows is safe.
       try {
-        if (wt != null) releaseDeletedBranchSlot(reviews, wt.baseRef, wt.branch);
+        const slotWts =
+          wt != null ? [wt] : worktrees.listWorktrees().filter((w) => w.agent === agentId);
+        for (const sw of slotWts) releaseDeletedBranchSlot(reviews, sw.baseRef, sw.branch);
       } catch (e) {
         errors.push(e instanceof Error ? e : new Error(String(e)));
         continue;

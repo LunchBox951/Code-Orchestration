@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAppShell, defaultOperatorSocketPath } from './app-shell.js';
@@ -1142,6 +1150,19 @@ describe('createAppShell — agentsConsole VM wiring', () => {
   });
 });
 
+/**
+ * Recursive {relativePath -> contents-or-marker} snapshot of a directory tree, for pristine-repo
+ * checks. Directories are recorded too (as '<dir>') so a stray empty dir is also caught.
+ */
+function snapshotDir(root: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rel of readdirSync(root, { recursive: true, encoding: 'utf8' })) {
+    const abs = join(root, rel);
+    out[rel] = statSync(abs).isDirectory() ? '<dir>' : readFileSync(abs, 'utf8');
+  }
+  return out;
+}
+
 describe('createAppShell — settings ops (AC-SET-3/4/6)', () => {
   const ORIGINAL_ENV = process.env;
   let dataDir: string;
@@ -1190,6 +1211,32 @@ describe('createAppShell — settings ops (AC-SET-3/4/6)', () => {
     expect(row?.effectiveValue).toBe(5);
     expect(row?.source).toBe('override');
     expect(row?.canReset).toBe(true);
+  });
+
+  it('leaves the target repo working tree byte-for-byte pristine — writes land only in program-data (AC-SET-6)', () => {
+    // A stand-in target-repo working tree, seeded with files, living OUTSIDE program-data (CO_DATA_DIR).
+    const repoDir = mkdtempSync(join(tmpdir(), 'co-target-repo-'));
+    try {
+      writeFileSync(join(repoDir, 'README.md'), '# target repo\n');
+      mkdirSync(join(repoDir, 'src'));
+      writeFileSync(join(repoDir, 'src', 'index.ts'), 'export const x = 1;\n');
+      const before = snapshotDir(repoDir);
+
+      const shell = shellWithSettings();
+      // Exercise every write verb: a project override, a global write, and a clear.
+      expect(shell.setSetting('project', MAX_ACTIVE_CHILDREN_KEY, 6).ok).toBe(true);
+      expect(shell.setSetting('global', DISPATCH_MAXED_THRESHOLD_PCT_KEY, 70).ok).toBe(true);
+      expect(shell.clearSetting('project', MAX_ACTIVE_CHILDREN_KEY).ok).toBe(true);
+
+      // The repo tree is unchanged (nothing created, modified, or removed) — a real filesystem check,
+      // not just a cascade read-back. And the writes did land under the project's program-data dir.
+      expect(snapshotDir(repoDir)).toEqual(before);
+      const dataHome = projectDataDir(FAKE_PROJECT_ID);
+      expect(dataHome.startsWith(repoDir)).toBe(false);
+      expect(dataHome.startsWith(dataDir)).toBe(true);
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 
   it('rejects an invalid value inline and writes nothing (AC-SET-4)', () => {
