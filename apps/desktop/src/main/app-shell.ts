@@ -112,8 +112,8 @@ export interface AppShell {
   getSettingsState(): SettingsState;
   /** Validate then persist a setting to the given layer; returns the validation result (no throw). */
   setSetting(layer: SettingsLayer, key: string, value: unknown): SettingValidation;
-  /** Clear a setting from the given layer (reset to inherited/default). */
-  clearSetting(layer: SettingsLayer, key: string): void;
+  /** Clear a setting from the given layer (reset to inherited/default); returns the result (no throw). */
+  clearSetting(layer: SettingsLayer, key: string): SettingValidation;
   setSettingsLayer(layer: SettingsLayer): void;
   refreshSettings(): void;
 }
@@ -218,11 +218,12 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     return { ok: true };
   }
 
-  function doClearSetting(layer: SettingsLayer, key: string): void {
-    if (configStore == null) return;
+  function doClearSetting(layer: SettingsLayer, key: string): SettingValidation {
+    if (configStore == null) return { ok: false, error: 'config store unavailable' };
     if (layer === 'global') configStore.clearGlobal(key);
     else configStore.clearProjectOverride(deps.projectId, key);
     doRefreshSettings();
+    return { ok: true };
   }
   let transcriptRequestSeq = 0;
   agentsConsoleVm.subscribe((state) => deps.onAgentsConsoleState?.(state));
@@ -457,8 +458,8 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     setSetting(layer: SettingsLayer, key: string, value: unknown): SettingValidation {
       return doSetSetting(layer, key, value);
     },
-    clearSetting(layer: SettingsLayer, key: string): void {
-      doClearSetting(layer, key);
+    clearSetting(layer: SettingsLayer, key: string): SettingValidation {
+      return doClearSetting(layer, key);
     },
     setSettingsLayer(layer: SettingsLayer): void {
       settingsVm.setActiveLayer(layer);

@@ -14,7 +14,12 @@ import type {
 } from '@co/core';
 import type { ProjectId } from '@co/core';
 import { MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE, OPERATOR, projectDataDir } from '@co/core';
-import { openConfigStore, MAX_ACTIVE_CHILDREN_KEY, type ConfigStore } from '@co/core';
+import {
+  openConfigStore,
+  MAX_ACTIVE_CHILDREN_KEY,
+  DISPATCH_MAXED_THRESHOLD_PCT_KEY,
+  type ConfigStore,
+} from '@co/core';
 import { operatorIpcSocketPath } from '@co/mcp';
 import type { OperatorIpcClient } from '@co/mcp';
 
@@ -1133,8 +1138,26 @@ describe('createAppShell — settings ops (AC-SET-3/4/6)', () => {
     const shell = shellWithSettings();
     shell.setSetting('project', MAX_ACTIVE_CHILDREN_KEY, 7);
     expect(cfg.resolveEffective(FAKE_PROJECT_ID)[MAX_ACTIVE_CHILDREN_KEY]).toBe(7);
-    shell.clearSetting('project', MAX_ACTIVE_CHILDREN_KEY);
+    const cleared = shell.clearSetting('project', MAX_ACTIVE_CHILDREN_KEY);
+    expect(cleared.ok).toBe(true);
     expect(hasKey(cfg.resolveEffective(FAKE_PROJECT_ID), MAX_ACTIVE_CHILDREN_KEY)).toBe(false);
+  });
+
+  it('setSetting("global", ...) writes the global layer and the global view reflects it', () => {
+    const shell = shellWithSettings();
+    const res = shell.setSetting('global', DISPATCH_MAXED_THRESHOLD_PCT_KEY, 80);
+    expect(res.ok).toBe(true);
+    // Written to the GLOBAL layer (not the project override).
+    expect(cfg.resolveLayers(FAKE_PROJECT_ID).global[DISPATCH_MAXED_THRESHOLD_PCT_KEY]).toBe(80);
+    expect(
+      hasKey(cfg.resolveLayers(FAKE_PROJECT_ID).project, DISPATCH_MAXED_THRESHOLD_PCT_KEY),
+    ).toBe(false);
+    shell.setSettingsLayer('global');
+    const row = shell
+      .getSettingsState()
+      .rows.find((r) => r.descriptor.key === DISPATCH_MAXED_THRESHOLD_PCT_KEY);
+    expect(row?.effectiveValue).toBe(80);
+    expect(row?.source).toBe('override');
   });
 
   it('setSettingsLayer switches the active layer', () => {

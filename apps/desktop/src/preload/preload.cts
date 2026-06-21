@@ -90,7 +90,7 @@ interface CoShellBridge {
   onSettingsState(listener: (state: SettingsState) => void): () => void;
   settingsGetState(): Promise<SettingsState | null>;
   settingsSet(layer: SettingsLayer, key: string, value: unknown): Promise<SettingWriteResult>;
-  settingsClear(layer: SettingsLayer, key: string): Promise<{ ok: boolean }>;
+  settingsClear(layer: SettingsLayer, key: string): Promise<SettingWriteResult>;
   settingsSetLayer(layer: SettingsLayer): Promise<SettingsState | null>;
   // ── Session ───────────────────────────────────────────────────────────────
   sessionStart(
@@ -289,8 +289,8 @@ const bridge: CoShellBridge = {
   ): Promise<SettingWriteResult> {
     return ipcRenderer.invoke<SettingWriteResult>('settings:set', { layer, key, value });
   },
-  async settingsClear(layer: SettingsLayer, key: string): Promise<{ ok: boolean }> {
-    return ipcRenderer.invoke<{ ok: boolean }>('settings:clear', { layer, key });
+  async settingsClear(layer: SettingsLayer, key: string): Promise<SettingWriteResult> {
+    return ipcRenderer.invoke<SettingWriteResult>('settings:clear', { layer, key });
   },
   async settingsSetLayer(layer: SettingsLayer): Promise<SettingsState | null> {
     return ipcRenderer.invoke<SettingsState | null>('settings:setLayer', layer);

@@ -52,6 +52,11 @@ export function buildSettingsRows(args: {
   const { descriptors, global, project, activeLayer, hasProject } = args;
   const labelByKey = new Map(descriptors.map((d) => [d.key, d.label]));
 
+  // The project-wins-over-global precedence below MUST stay in step with core's canonical cascade in
+  // ConfigStore.resolveEffective (packages/core/src/config/config-store.ts). It is duplicated here only
+  // because the UI additionally needs per-layer SOURCE attribution (override/inherited/default), which
+  // the flattened resolveEffective cannot supply. If core ever adds a cascade layer, update both.
+
   const resolve = (
     d: SettingDescriptor,
   ): { effectiveValue: unknown; source: SettingSource; canReset: boolean } => {

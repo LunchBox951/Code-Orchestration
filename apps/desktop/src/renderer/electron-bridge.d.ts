@@ -282,7 +282,7 @@ interface SettingDescriptor {
   defaultValue: unknown;
   perProject: boolean;
   primaryLayer: SettingsLayer;
-  dependsOn?: { key: string; equals: unknown };
+  dependsOn?: { key: string; equals: string | number | boolean | null };
 }
 
 interface SettingsRow {
@@ -359,7 +359,7 @@ interface CoShellBridge {
   onSettingsState(listener: (state: SettingsState) => void): () => void;
   settingsGetState(): Promise<SettingsState | null>;
   settingsSet(layer: SettingsLayer, key: string, value: unknown): Promise<SettingWriteResult>;
-  settingsClear(layer: SettingsLayer, key: string): Promise<{ ok: boolean }>;
+  settingsClear(layer: SettingsLayer, key: string): Promise<SettingWriteResult>;
   settingsSetLayer(layer: SettingsLayer): Promise<SettingsState | null>;
   // ── Session ───────────────────────────────────────────────────────────────
   sessionStart(

@@ -96,6 +96,28 @@ describe('buildSettingsRows — gating & no-project', () => {
     expect(rowFor(on, 'issues.publish').disabledReason).toBeNull();
   });
 
+  it('gates a dependent in the GLOBAL layer on the global parent (project value ignored)', () => {
+    // In the global view, a project-only capture must NOT ungate publish.
+    const projectOnly = buildSettingsRows({
+      descriptors: DESCRIPTORS,
+      global: {},
+      project: { 'issues.capture': true },
+      activeLayer: 'global',
+      hasProject: true,
+    });
+    expect(rowFor(projectOnly, 'issues.publish').disabledReason).toMatch(/Requires/);
+
+    // A global capture ungates publish in the global view.
+    const globalSet = buildSettingsRows({
+      descriptors: DESCRIPTORS,
+      global: { 'issues.capture': true },
+      project: {},
+      activeLayer: 'global',
+      hasProject: true,
+    });
+    expect(rowFor(globalSet, 'issues.publish').disabledReason).toBeNull();
+  });
+
   it('disables every row in the project layer when no project is open', () => {
     const rows = buildSettingsRows({
       descriptors: DESCRIPTORS,

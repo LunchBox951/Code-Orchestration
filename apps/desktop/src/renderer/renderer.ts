@@ -1742,28 +1742,34 @@ function renderSettingControl(row: SettingsRow): string {
       return `<span class="set-persona" data-setting-key="${key}" data-control="persona"><input type="text" data-persona-field="name" placeholder="Name" value="${esc(v.name ?? '')}" ${dis}/><input type="email" data-persona-field="email" placeholder="email@example.com" value="${esc(v.email ?? '')}" ${dis}/></span>`;
     }
     case 'model-tier': {
-      const ov =
-        row.effectiveValue != null && typeof row.effectiveValue === 'object'
-          ? (row.effectiveValue as Record<string, unknown>)
-          : {};
-      const def =
-        d.defaultValue != null && typeof d.defaultValue === 'object'
-          ? (d.defaultValue as Record<string, unknown>)
-          : {};
+      const obj = (v: unknown): Record<string, unknown> =>
+        v != null && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+      // Only the ACTIVE layer's explicit override should fill the input value; an inherited/default
+      // value is shown as a placeholder so editing one tier creates a partial override of JUST that
+      // tier (it must NOT silently pin the other tiers' current defaults — review finding).
+      const explicit = row.source === 'override' ? obj(row.effectiveValue) : {};
+      const effective = obj(row.effectiveValue);
+      const def = obj(d.defaultValue);
       const listId = `co-models-${esc(c.provider)}`;
       const datalist = `<datalist id="${listId}">${c.suggestions
         .map((s) => `<option value="${esc(s)}"></option>`)
         .join('')}</datalist>`;
       const inputs = c.tiers
         .map((t) => {
-          const val = ov[t.key] ?? def[t.key] ?? '';
-          return `<label class="set-model"><span>${esc(t.label)}</span><input type="text" list="${listId}" data-tier="${esc(t.key)}" value="${esc(String(val))}" ${dis}/></label>`;
+          const own = Object.prototype.hasOwnProperty.call(explicit, t.key) ? explicit[t.key] : '';
+          const value = own != null && own !== '' ? String(own) : '';
+          const placeholder = String(effective[t.key] ?? def[t.key] ?? '');
+          return `<label class="set-model"><span>${esc(t.label)}</span><input type="text" list="${listId}" data-tier="${esc(t.key)}" value="${esc(value)}" placeholder="${esc(placeholder)}" ${dis}/></label>`;
         })
         .join('');
       return `<span class="set-models" data-setting-key="${key}" data-control="model-tier">${datalist}${inputs}</span>`;
     }
-    default:
-      return '';
+    default: {
+      // Exhaustiveness guard: a new SettingControl kind without a case here is a compile error,
+      // and an unknown kind renders a visible marker rather than nothing (Principle 9).
+      const exhaustive: never = c;
+      return `<span class="set-note">Unsupported control: ${esc((exhaustive as { kind?: string }).kind ?? 'unknown')}</span>`;
+    }
   }
 }
 
@@ -1814,20 +1820,36 @@ function renderSettings(state: SettingsState): void {
   container.innerHTML = `${toggle}${body}`;
 }
 
+function revertSettings(): void {
+  if (latestSettingsState != null) renderSettings(latestSettingsState);
+}
+
 function applySettingSet(key: string, value: unknown): void {
   const layer: SettingsLayer = latestSettingsState?.activeLayer ?? 'project';
-  void window.coShell.settingsSet(layer, key, value).then((res) => {
-    if (!res.ok) {
-      flashToast(res.error ?? 'Invalid value');
-      if (latestSettingsState != null) renderSettings(latestSettingsState); // revert the bad input
-    }
-    // On success the settings:state push re-renders with the new effective value + source badge.
-  });
+  void window.coShell
+    .settingsSet(layer, key, value)
+    .then((res) => {
+      if (!res.ok) {
+        flashToast(res.error ?? 'Invalid value');
+        revertSettings(); // restore the input to the last good effective value
+      }
+      // On success the settings:state push re-renders with the new effective value + source badge.
+    })
+    .catch((err: unknown) => {
+      flashToast(String(err));
+      revertSettings();
+    });
 }
 
 function applySettingClear(key: string): void {
   const layer: SettingsLayer = latestSettingsState?.activeLayer ?? 'project';
-  void window.coShell.settingsClear(layer, key); // the settings:state push re-renders
+  void window.coShell
+    .settingsClear(layer, key)
+    .then((res) => {
+      if (!res.ok) flashToast(res.error ?? 'Could not reset this setting');
+      // On success the settings:state push re-renders.
+    })
+    .catch((err: unknown) => flashToast(String(err)));
 }
 
 /** Read the edited value (or a clear signal) out of a settings control's DOM. */
@@ -1886,12 +1908,15 @@ function bindSettingsView(): void {
     if (layerBtn != null && !layerBtn.classList.contains('disabled')) {
       const layer = layerBtn.dataset['settingsLayer'];
       if (layer === 'global' || layer === 'project') {
-        void window.coShell.settingsSetLayer(layer).then((s) => {
-          if (s != null) {
-            latestSettingsState = s;
-            renderSettings(s);
-          }
-        });
+        void window.coShell
+          .settingsSetLayer(layer)
+          .then((s) => {
+            if (s != null) {
+              latestSettingsState = s;
+              renderSettings(s);
+            }
+          })
+          .catch((err: unknown) => flashToast(String(err)));
       }
       return;
     }
