@@ -601,19 +601,24 @@ export class ConductorDaemon {
           );
         if (agents.length === 0) return [];
         const worktrees = this.openWorktrees(this.projectId);
-        const mail = this.openMail(this.projectId);
         try {
-          const liveWorktrees = worktrees.listWorktrees();
-          const identities: HostedIdentity[] = [];
-          for (const agent of agents) {
-            if (firstEligibleMail(mail, agent.agentId) == null) continue;
-            const worktree = liveWorktrees.find((w) => !w.removed && w.agent === agent.agentId);
-            if (worktree == null) continue;
-            identities.push(this.toColdAgentIdentity(agent, worktree.path));
+          // Open mail inside worktrees' try so a throwing mail-open still closes the worktrees
+          // handle. This runs every daemon tick, so a recurring leak would exhaust fds.
+          const mail = this.openMail(this.projectId);
+          try {
+            const liveWorktrees = worktrees.listWorktrees();
+            const identities: HostedIdentity[] = [];
+            for (const agent of agents) {
+              if (firstEligibleMail(mail, agent.agentId) == null) continue;
+              const worktree = liveWorktrees.find((w) => !w.removed && w.agent === agent.agentId);
+              if (worktree == null) continue;
+              identities.push(this.toColdAgentIdentity(agent, worktree.path));
+            }
+            return identities;
+          } finally {
+            mail.close();
           }
-          return identities;
         } finally {
-          mail.close();
           worktrees.close();
         }
       } finally {
