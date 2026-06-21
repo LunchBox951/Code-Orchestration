@@ -876,4 +876,82 @@ describe('serveConductor — wires the full stack over injected seams (no real b
   it('runServeConductor fails loud on an unknown project id', async () => {
     await expect(runServeConductor(['missing-project-id'])).rejects.toThrow(/unknown project id/i);
   });
+
+  it('control.deleteAgent releases panes + clears router suppression + removes from roster', async () => {
+    const { projectId, cwd } = makeProject();
+
+    // Seed a coordinator and a child agent in the roster (no worktrees — avoids real git ops in test).
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+    roster.recordAgent({ agentId: 'child-x', role: 'implementer', parent: 'coord-x' });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+
+    // Host both agents in warm panes.
+    const coordIdentity = makeIdentity('coord-x', projectId, cwd);
+    const childIdentity = makeIdentity('child-x', projectId, cwd);
+
+    const ensureCoord = engine.ensureHosted({
+      ...coordIdentity,
+      agent: 'coord-x',
+      role: 'coordinator',
+      parent: OPERATOR,
+    });
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    await ensureCoord;
+
+    const ensureChild = engine.ensureHosted({
+      ...childIdentity,
+      agent: 'child-x',
+      role: 'implementer',
+      parent: 'coord-x',
+    });
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    await ensureChild;
+
+    expect(engine.isHosted(projectId, 'coord-x')).toBe(true);
+    expect(engine.isHosted(projectId, 'child-x')).toBe(true);
+
+    // Pause both agents so we can verify router suppression is cleared by deleteAgent.
+    runner.control!.router.pause('coord-x');
+    runner.control!.router.pause('child-x');
+    expect(runner.control!.router.shouldSkip(projectId, 'coord-x')).toBe(true);
+    expect(runner.control!.router.shouldSkip(projectId, 'child-x')).toBe(true);
+
+    // deleteAgent on the coordinator should cascade through the whole subtree.
+    await runner.control!.deleteAgent('coord-x');
+
+    // Engine no longer hosts either agent.
+    expect(engine.isHosted(projectId, 'coord-x')).toBe(false);
+    expect(engine.isHosted(projectId, 'child-x')).toBe(false);
+
+    // Router suppression cleared for both.
+    expect(runner.control!.router.shouldSkip(projectId, 'coord-x')).toBe(false);
+    expect(runner.control!.router.shouldSkip(projectId, 'child-x')).toBe(false);
+
+    // Roster no longer lists either agent.
+    const rosterCheck = openRosterStore(projectId);
+    try {
+      const agents = rosterCheck.listAgents().map((a) => a.agentId);
+      expect(agents).not.toContain('coord-x');
+      expect(agents).not.toContain('child-x');
+    } finally {
+      rosterCheck.close();
+    }
+
+    await runner.stop();
+  });
 });

@@ -1115,6 +1115,7 @@ async function operatorPassViaIpc(
         },
         rid,
       ),
+    deleteAgent: () => Promise.reject(new Error('sh1-dry-run: deleteAgent is not used here')),
   };
   const server = new OperatorIpcServer({ control, projectId, socketPath });
   ipcServers.push(server);

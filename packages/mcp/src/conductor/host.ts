@@ -21,7 +21,11 @@ import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
 import {
   NodePtyHost,
+  defaultGitExec,
   defaultGitRawReader,
+  defaultGitReader,
+  deleteAgentSubtree,
+  descendantsLeafFirst,
   openMailStore,
   openRegistry,
   openReviewStore,
@@ -30,6 +34,7 @@ import {
   openSpecStore,
   openWorktreeStore,
   queryLiveObservability,
+  reapExpiredArchives,
   waitingItems,
   QUIET_WINDOW_MS,
   type BreakSignal,
@@ -107,6 +112,13 @@ export interface ConductorControlSurface {
    * events. DEGRADES EXPLICITLY (Principle 9) — every failure mode is a named state, never a throw.
    */
   readonly reviewContext: (reviewId: string) => Promise<ReviewContext>;
+  /**
+   * B3 (deleteAgent) — tear down a coordinator's entire subtree: release all warm panes, clear router
+   * suppression, then cascade-delete the durable roster/worktree/session/archive via the core primitive.
+   * Fails loud (Principle 9) on unresolvable repoCwd; lets AggregateError from the core propagate so
+   * the IPC layer surfaces partial-failure detail to the operator.
+   */
+  readonly deleteAgent: (agentId: string) => Promise<void>;
 }
 
 // ── The cadence runner ──────────────────────────────────────────────────────────────────────────────
@@ -436,11 +448,20 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   let isolatedHomeDirFor: ((agent: string) => string) | undefined;
   // The project data dir backs both the per-pane isolated homes (P2) and the operator-IPC socket
   // (Stage 11 P1) — derive it once when either is needed.
+  // repoCwd is the project's registered repo working directory; resolved once here for the reaper
+  // tick (Principle 9: deleteAgent resolves it per-call so it can fail loud on unregistered projects).
   let dataDir: string | undefined;
-  if (opts.coMcpPaths != null || opts.operatorIpc != null) {
+  let repoCwdForReaper: string | undefined;
+  {
     const registry = openRegistry();
-    dataDir = registry.dataDirFor(projectId);
-    registry.close();
+    try {
+      if (opts.coMcpPaths != null || opts.operatorIpc != null) {
+        dataDir = registry.dataDirFor(projectId);
+      }
+      repoCwdForReaper = registry.pathFor(projectId) ?? undefined;
+    } finally {
+      registry.close();
+    }
   }
   if (opts.coMcpPaths != null && dataDir != null) {
     const resolvedDataDir = dataDir;
@@ -524,6 +545,52 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         },
         reviewId,
       ),
+    // B3 (deleteAgent) — compose hook: release warm panes, clear router suppression, then cascade-delete
+    // the durable subtree. Each call opens the registry to resolve repoCwd (Principle 9: fail loud if the
+    // project is not registered). AggregateError from deleteAgentSubtree propagates; never swallowed.
+    deleteAgent: async (agentId: string): Promise<void> => {
+      // Resolve repoCwd per call: open + close the registry (mirrors the reviewContext store pattern).
+      const registry = openRegistry();
+      let repoCwd: string;
+      try {
+        const p = registry.pathFor(projectId);
+        if (p == null) {
+          throw new Error(
+            `co-mcp serve: deleteAgent: project '${projectId}' is not registered — cannot resolve repoCwd.`,
+          );
+        }
+        repoCwd = p;
+      } finally {
+        registry.close();
+      }
+
+      // Compute the leaf-first id list (descendants + root) from the roster.
+      const roster = openRosterStore(projectId);
+      let ids: string[];
+      try {
+        ids = [
+          ...descendantsLeafFirst(roster.listAgents(), agentId).map((a) => a.agentId),
+          agentId,
+        ];
+      } finally {
+        roster.close();
+      }
+
+      // Release every warm pane and clear router suppression for each id.
+      for (const id of ids) {
+        await engine.release(projectId, id, {});
+        router.unstop(id);
+      }
+
+      // Durable cascade teardown via the core primitive (roster/worktree/session/archive, leaf-first).
+      // AggregateError on partial failure — Principle 9: let it propagate to the IPC layer.
+      deleteAgentSubtree(projectId, agentId, {
+        repoCwd,
+        nowMs: Date.now(),
+        gitExec: defaultGitExec,
+        gitReader: defaultGitReader,
+      });
+    },
   };
 
   // Stage 11 P1 (OP-IPC) — the cross-process operator-IPC server, started alongside the cadence
@@ -610,10 +677,19 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   });
 
   const wtStoreForStop = ownedWtStore;
+  // B3 (reaper) — throttled archive reaper: runs at most once every 60 ticks. Uses repoCwdForReaper
+  // resolved at serve-setup time. A missing repoCwd (unregistered project) is benign — skip silently.
+  // Errors are caught + logged: a reaper failure must never crash the tick (Principle 9 inverse — the
+  // tick loop itself is load-bearing; diagnostic issues must not take it down).
+  let reaperTickCount = 0;
+  const REAPER_EVERY_N_TICKS = 60;
+
   // Forward each tick as the operator-IPC `tick` push (D6 — the whole fresh snapshot) while still
-  // honoring any caller `onTick`. Built only when either is present, so existing callers are unchanged.
+  // honoring any caller `onTick`. Also runs the throttled archive reaper when repoCwdForReaper is
+  // known. Built when any of these are present; existing callers without IPC/onTick/repoCwd are
+  // unchanged (undefined → the runner skips the hook entirely).
   const onTick =
-    ipcServer != null || opts.onTick != null
+    ipcServer != null || opts.onTick != null || repoCwdForReaper != null
       ? (outcome: DaemonTickOutcome): void => {
           try {
             opts.onTick?.(outcome);
@@ -624,6 +700,21 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
             );
           }
           if (ipcServer != null) ipcServer.pushTick(control.observe());
+          // B3 (reaper) — opportunistic archive purge, throttled to once per N ticks.
+          reaperTickCount++;
+          if (reaperTickCount % REAPER_EVERY_N_TICKS === 0 && repoCwdForReaper != null) {
+            try {
+              reapExpiredArchives(projectId, Date.now(), {
+                repoCwd: repoCwdForReaper,
+                gitExec: defaultGitExec,
+              });
+            } catch (reaperError) {
+              reportServeControlDiagnostic(
+                opts.onError,
+                new Error(`co-mcp serve: archive reaper error: ${errorMessage(reaperError)}`),
+              );
+            }
+          }
         }
       : undefined;
   const runner = new ConductorHostRunner({

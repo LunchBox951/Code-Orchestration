@@ -302,6 +302,7 @@ function makeControl(
         if (pid === projectId) listener(agent, chunk, offset);
       }),
     reviewContext,
+    deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
   };
   return { router, control };
 }
@@ -861,6 +862,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -908,6 +910,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
     } satisfies ConductorControlSurface;
     const server = new OperatorIpcServer({
       control: fakeControl,
@@ -2259,6 +2262,7 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId) => Promise.resolve({ kind: 'not-found', reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
     };
     await startServer(control, projectId, socketPath);
 

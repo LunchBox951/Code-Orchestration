@@ -544,6 +544,7 @@ async function operatorPassViaIpc(
         },
         rid,
       ),
+    deleteAgent: () => Promise.reject(new Error('orch-bench: deleteAgent is not used here')),
   };
   const server = new OperatorIpcServer({ control, projectId, socketPath });
   ipcServers.push(server);
