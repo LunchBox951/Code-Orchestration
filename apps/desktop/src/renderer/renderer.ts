@@ -1762,7 +1762,14 @@ function renderSettingControl(row: SettingsRow): string {
           return `<label class="set-model"><span>${esc(t.label)}</span><input type="text" list="${listId}" data-tier="${esc(t.key)}" value="${esc(value)}" placeholder="${esc(placeholder)}" ${dis}/></label>`;
         })
         .join('');
-      return `<span class="set-models" data-setting-key="${key}" data-control="model-tier">${datalist}${inputs}</span>`;
+      // A per-project override REPLACES the whole table for this provider (config keys don't deep-merge
+      // across layers). When the current values are inherited from the global layer, say so — otherwise
+      // the placeholders read like a promise that a partial override would silently break.
+      const hint =
+        row.source === 'inherited'
+          ? `<div class="set-note">Setting any tier creates a per-project override that replaces the inherited table; tiers you leave blank then use the built-in default.</div>`
+          : '';
+      return `<span class="set-models" data-setting-key="${key}" data-control="model-tier">${datalist}${inputs}${hint}</span>`;
     }
     default: {
       // Exhaustiveness guard: a new SettingControl kind without a case here is a compile error,
