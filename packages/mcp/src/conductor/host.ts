@@ -18,9 +18,15 @@
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  */
 import { performance } from 'node:perf_hooks';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
+  GH_AUTH_TOKEN_COMMANDS,
+  GH_AUTH_TOKEN_TIMEOUT_MS,
   NodePtyHost,
+  ghCommandPathEnv,
+  githubHttpsCredentialEnv,
+  resolveGhTokenFromEnv,
   defaultGitExec,
   defaultGitRawReader,
   defaultGitReader,
@@ -64,6 +70,8 @@ import { createSocketBridgeTransportPair } from './real-transport.js';
 import { defaultCoMcpPaths, type HostLaunchPathOptions } from './host-launch-paths.js';
 import { resolveReviewContext } from './review-context.js';
 import { OperatorIpcServer, operatorIpcSocketPath } from '../operator-ipc/server.js';
+
+export { GH_AUTH_TOKEN_COMMANDS, GH_AUTH_TOKEN_TIMEOUT_MS } from '@co/core';
 
 // ── The cadence scheduler seam (injected so the loop is FakePty-unit-testable) ──────────────────────
 
@@ -932,6 +940,132 @@ export function defaultServeCoMcpPaths(
   return defaultCoMcpPaths({ ...opts, includeProviderAuth: true });
 }
 
+// ── GitHub auth provisioning for the daemon (RC-2/3/4) ──────────────────────────────────────────────
+//
+// The gated publish (`co_push`/`co_pr_merge`) and remote detection run DAEMON-side, inheriting the
+// daemon's `process.env`. A GUI-launched desktop app inherits no shell exports and there is no
+// Connect-GitHub UI, so the token must be SOURCED (from the operator's existing `gh auth login`) and
+// the env PROVISIONED so both `gh` and `git push https` authenticate. See {@link githubHttpsCredentialEnv}.
+
+/** Resolved `gh auth token` output plus the command that produced it. */
+export interface GhAuthTokenResolution {
+  readonly token: string;
+  readonly command: string;
+}
+
+/** Runs `gh auth token`, returning the operator's token or undefined (gh absent / logged out). */
+export type GhAuthTokenRunner = (env: NodeJS.ProcessEnv) => GhAuthTokenResolution | undefined;
+
+/** Resolves a usable `gh` command for later daemon seams that intentionally invoke bare `gh`. */
+export type GhCommandResolver = (env: NodeJS.ProcessEnv) => string | undefined;
+
+/** Sync spawn seam for the gh runner — injectable so the real runner is testable without a real gh. */
+export type GhSpawnSync = (
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+) => { readonly status: number | null; readonly stdout?: string };
+
+const realGhSpawn: GhSpawnSync = (command, args, env) => {
+  const res = spawnSync(command, [...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env,
+    timeout: GH_AUTH_TOKEN_TIMEOUT_MS,
+  });
+  return { status: res.status, stdout: typeof res.stdout === 'string' ? res.stdout : undefined };
+};
+
+/**
+ * Build a {@link GhCommandResolver} over a spawn seam: try `gh --version` on PATH, then common
+ * absolute locations. This is separate from token resolution so an explicit env token can still make
+ * the selected `gh` binary available to later repo/publish seams.
+ */
+export function makeGhCommandResolver(spawn: GhSpawnSync = realGhSpawn): GhCommandResolver {
+  return (env) => {
+    for (const cmd of GH_AUTH_TOKEN_COMMANDS) {
+      try {
+        const res = spawn(cmd, ['--version'], env);
+        if (res.status === 0) return cmd;
+      } catch {
+        // ENOENT / spawn failure → try the next candidate; a missing gh is "not resolved".
+      }
+    }
+    return undefined;
+  };
+}
+
+/** The real {@link GhCommandResolver} (timeout-bounded real spawnSync). */
+export const defaultGhCommandResolver: GhCommandResolver = makeGhCommandResolver();
+
+/**
+ * Build a {@link GhAuthTokenRunner} over a spawn seam: try `gh` on PATH, then common absolute paths
+ * (a GUI launch often has a minimal PATH). Never throws — any spawn failure / non-zero / timeout is
+ * treated as "no token" and falls through to the next candidate, ultimately `undefined`.
+ */
+export function makeGhAuthTokenRunner(spawn: GhSpawnSync = realGhSpawn): GhAuthTokenRunner {
+  return (env) => {
+    for (const cmd of GH_AUTH_TOKEN_COMMANDS) {
+      try {
+        const res = spawn(cmd, ['auth', 'token'], env);
+        if (res.status === 0) {
+          const token = res.stdout?.trim();
+          if (token != null && token.length > 0) return { token, command: cmd };
+        }
+      } catch {
+        // ENOENT / spawn failure → try the next candidate; a missing/failed gh is "no token".
+      }
+    }
+    return undefined;
+  };
+}
+
+/** The real {@link GhAuthTokenRunner} (timeout-bounded real spawnSync). */
+export const defaultGhAuthTokenRunner: GhAuthTokenRunner = makeGhAuthTokenRunner();
+
+/**
+ * Resolve a GitHub token for the daemon: explicit env (`CO_GH_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`,
+ * via the shared {@link resolveGhTokenFromEnv} policy) wins; otherwise fall back to the operator's
+ * existing login via `gh auth token`. So a self-hosting operator authenticates GitHub with the
+ * standard one-time `gh auth login` — no co-specific UI needed.
+ */
+export function resolveGhToken(
+  env: NodeJS.ProcessEnv = process.env,
+  runner: GhAuthTokenRunner = defaultGhAuthTokenRunner,
+): string | undefined {
+  const explicit = resolveGhTokenFromEnv(env);
+  if (explicit != null) return explicit;
+  return runner(env)?.token;
+}
+
+function resolveGhAuth(
+  env: NodeJS.ProcessEnv,
+  runner: GhAuthTokenRunner,
+  commandResolver: GhCommandResolver,
+): GhAuthTokenResolution | undefined {
+  const explicit = resolveGhTokenFromEnv(env);
+  if (explicit != null) return { token: explicit, command: commandResolver(env) ?? 'gh' };
+  return runner(env);
+}
+
+/**
+ * Source a GitHub token and provision `env` (the daemon's `process.env`) so BOTH `gh` and
+ * `git push https://github.com` authenticate (RC-2/3/4). Mutates `env` in place so every daemon-side
+ * git/gh seam inherits it. Returns the token, or undefined when none is available (the daemon still
+ * runs; remote publish/detection then fail LOUD per Principle 9 rather than hanging).
+ */
+export function resolveAndApplyDaemonGithubAuth(
+  env: NodeJS.ProcessEnv = process.env,
+  runner: GhAuthTokenRunner = defaultGhAuthTokenRunner,
+  commandResolver: GhCommandResolver = defaultGhCommandResolver,
+): string | undefined {
+  const auth = resolveGhAuth(env, runner, commandResolver);
+  if (auth == null) return undefined;
+  Object.assign(env, githubHttpsCredentialEnv(auth.token, env));
+  Object.assign(env, ghCommandPathEnv(auth.command, env));
+  return auth.token;
+}
+
 /**
  * The `co-mcp serve <projectId>` operator entry: launch the Conductor for a project and keep the
  * process alive on the cadence, surfacing ticks + errors to stderr (stdout is reserved). SIGINT/SIGTERM
@@ -955,6 +1089,21 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   } finally {
     registry.close();
   }
+  // The daemon has no operator at its stdin, so git must NEVER block on an interactive credential
+  // prompt — even on the no-token path (Principle 9 fail-loud: error out, do not hang). Set this
+  // unconditionally; githubHttpsCredentialEnv also sets it when a token is provisioned.
+  process.env['GIT_TERMINAL_PROMPT'] = '0';
+  // RC-2/3/4: provision GitHub auth onto the daemon env BEFORE building coMcpPaths so (a) the
+  // daemon-side git/gh publish + detection authenticate, and (b) defaultServeCoMcpPaths() picks up the
+  // now-set GH_TOKEN for the pane (defense-in-depth). Sourced from explicit env or the operator's
+  // existing `gh auth login`. Surface the result LOUDLY so a logged-out operator is never left guessing.
+  const ghToken = resolveAndApplyDaemonGithubAuth();
+  console.error(
+    ghToken != null
+      ? '[co-mcp serve] GitHub auth: configured — gh + remote HTTPS pushes will authenticate to github.com.'
+      : '[co-mcp serve] GitHub auth: NONE — run `gh auth login` (or set CO_GH_TOKEN); remote publish ' +
+          '(co_push / co_pr_merge) will fail until then. Offline/owner-local co_merge still works.',
+  );
   const runner = await serveConductor({
     projectId,
     coMcpPaths: defaultServeCoMcpPaths(),

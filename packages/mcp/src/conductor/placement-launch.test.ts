@@ -299,10 +299,13 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     );
 
     // MNR-6: only the isolated dir in env — no leakage of user-global config. CLAUDE_CODE_NO_FLICKER
-    // is a static rendering flag (#66), not a path, so it does not weaken the isolation guarantee.
+    // is a static rendering flag (#66), not a path; HOME is the ISOLATED home (RC-5, so `~` cannot
+    // resolve to the operator home); LANG is a static locale (RC-6) — none weaken the isolation guarantee.
     expect(spec.env).toEqual({
       CLAUDE_CONFIG_DIR: isolatedHomeDir,
       CLAUDE_CODE_NO_FLICKER: '1',
+      HOME: isolatedHomeDir,
+      LANG: 'C.UTF-8',
     });
     expect(spec.env).not.toHaveProperty('CODEX_HOME');
     // --strict-mcp-config suppresses user MCP servers
@@ -348,6 +351,96 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(spec.env).not.toHaveProperty('GH_TOKEN');
   });
 
+  it('RC-1: coMcpExtraEnv (ELECTRON_RUN_AS_NODE) reaches the Claude MCP server env block', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-el', 'implementer', 'claude');
+    const worktree = recordWorktree(projectId, 'impl-el', 'co/feat-el', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-el');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, coMcpExtraEnv: { ELECTRON_RUN_AS_NODE: '1' } },
+    );
+
+    const mcpConfig = spec.prelaunchFiles?.find((f) => f.path.endsWith('co-mcp.json'));
+    const parsed = JSON.parse(mcpConfig!.contents) as {
+      mcpServers?: { co?: { env?: Record<string, string> } };
+    };
+    // Without this, the provider runs `electron <bin> bridge` with no flag → a GUI Electron, never the
+    // Node bridge → the MCP surface never connects. The flag must land in the SERVER env block.
+    expect(parsed.mcpServers?.co?.env?.['ELECTRON_RUN_AS_NODE']).toBe('1');
+    // It must NOT leak into the pane (provider) process env — only the MCP server child needs it.
+    expect(spec.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+  });
+
+  it('RC-1: coMcpExtraEnv (ELECTRON_RUN_AS_NODE) reaches the Codex [mcp_servers.co.env] block', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-elx', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-elx', 'co/feat-elx', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-elx');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, coMcpExtraEnv: { ELECTRON_RUN_AS_NODE: '1' } },
+    );
+
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain('[mcp_servers.co.env]');
+    expect(configToml!.contents).toContain('ELECTRON_RUN_AS_NODE = "1"');
+  });
+
+  it('RC-1: coCliExtraEnv (ELECTRON_RUN_AS_NODE) reaches the Codex hook command only', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-hook-elx', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-hook-elx', 'co/feat-hook-elx', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-hook-elx');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      {
+        ...TEST_MCP_PATHS,
+        coCliCommand: '/electron',
+        coCliArgs: ['/repo/packages/cli/dist/index.js'],
+        coCliExtraEnv: { ELECTRON_RUN_AS_NODE: '1' },
+      },
+    );
+
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain(
+      'command = "ELECTRON_RUN_AS_NODE=\\"1\\" \\"/electron\\" \\"/repo/packages/cli/dist/index.js\\" hook codex-block-list',
+    );
+    expect(spec.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+  });
+
+  it('RC-5: the pane HOME is the ISOLATED home dir, never the operator home', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    for (const provider of ['claude', 'codex'] as const) {
+      const agent = `impl-home-${provider}`;
+      const placement = recordPlacement(projectId, agent, 'implementer', provider);
+      const worktree = recordWorktree(projectId, agent, `co/${agent}`, cwd);
+      const isolatedHomeDir = join(dataDir, 'isolated', agent);
+      const { spec } = buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        TEST_MCP_PATHS,
+      );
+      expect(spec.env['HOME']).toBe(isolatedHomeDir);
+      // Defensive: never the real operator home.
+      expect(spec.env['HOME']).not.toBe(process.env['HOME']);
+    }
+  });
+
   it('codex spec: env has ONLY CODEX_HOME set to the isolated dir; prelaunch has approval_policy=never', () => {
     const { projectId, cwd, dataDir } = makeProject();
     const placement = recordPlacement(projectId, 'impl-d', 'implementer', 'codex');
@@ -362,8 +455,12 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
       TEST_MCP_PATHS,
     );
 
-    // MNR-6: only the isolated dir in env
-    expect(spec.env).toEqual({ CODEX_HOME: isolatedHomeDir });
+    // MNR-6: only the isolated dir in env (+ isolated HOME for RC-5 and a static LANG for RC-6).
+    expect(spec.env).toEqual({
+      CODEX_HOME: isolatedHomeDir,
+      HOME: isolatedHomeDir,
+      LANG: 'C.UTF-8',
+    });
     expect(spec.env).not.toHaveProperty('CLAUDE_CONFIG_DIR');
     // prelaunch files carry the isolated config.toml (approval_policy = "never")
     expect(spec.prelaunchFiles).toBeDefined();

@@ -305,6 +305,10 @@ describe('co doctor', () => {
             status: 0,
           };
         }
+        // --live also probes GitHub auth via the shared command seam.
+        if (command === 'gh' && args.join(' ') === 'auth token') {
+          return { stdout: 'gho_token\n', stderr: '', status: 0 };
+        }
         return { stdout: '', stderr: 'unknown command', status: 1 };
       },
     });
@@ -315,7 +319,54 @@ describe('co doctor', () => {
     // The report includes the probe result (not "skipped").
     expect(result.output).toMatch(/provider-compatibility/i);
     expect(result.output).not.toMatch(/skipped/i);
+    // --live wired the github-auth probe too (the gh stub above answered it): present + not "requires --live".
+    expect(result.output).toMatch(/github-auth/i);
+    expect(result.output).not.toMatch(/requires --live/i);
     expect(result.exitCode).toBe(0);
+  });
+
+  it('passes an injected githubAuthProbe through to runDoctor and reports it authenticated (non-vacuous wiring)', async () => {
+    const { dir } = makeRegisteredProject();
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Project memory\n');
+    writeFileSync(join(dir, 'AGENTS.md'), '# Project memory\n');
+    let probed = false;
+    // Inject both probes directly (non-live path honors options.providerProbe + options.githubAuthProbe),
+    // so the assertion is deterministic and exercises no real binary. If run.ts dropped the
+    // `githubAuthProbe` passthrough, this probe would never run and the check would read
+    // "requires --live" → the assertions below go red. (Guards TQ-1.)
+    const result = await run(['doctor'], dir, {
+      providerProbe: () => ({
+        version: 'x',
+        versionSkewed: false,
+        capabilities: ['inference', 'tool-use'],
+      }),
+      githubAuthProbe: () => {
+        probed = true;
+        return { authenticated: true };
+      },
+    });
+    expect(probed).toBe(true);
+    expect(result.output).toMatch(/github-auth/i);
+    expect(result.output).toMatch(/available/i);
+    expect(result.output).not.toMatch(/requires --live/i);
+  });
+
+  it('surfaces a WARN (and unhealthy exit) when the github-auth probe reports unauthenticated', async () => {
+    const { dir } = makeRegisteredProject();
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Project memory\n');
+    writeFileSync(join(dir, 'AGENTS.md'), '# Project memory\n');
+    const result = await run(['doctor'], dir, {
+      providerProbe: () => ({
+        version: 'x',
+        versionSkewed: false,
+        capabilities: ['inference', 'tool-use'],
+      }),
+      githubAuthProbe: () => ({ authenticated: false, diagnostic: 'not logged in' }),
+    });
+    // The warn remedy is surfaced, and a warn makes the report unhealthy (exit 1). Dropping the
+    // passthrough would skip the check (ok) → no remedy text → this goes red.
+    expect(result.output).toMatch(/gh auth login/i);
+    expect(result.exitCode).toBe(1);
   });
 
   it('without --live, providerProbe is absent and provider compatibility is skipped', async () => {
@@ -364,6 +415,8 @@ describe('co doctor', () => {
             stderr: '',
             status: 0,
           };
+        if (command === 'gh' && args.join(' ') === 'auth token')
+          return { stdout: 'gho_token\n', stderr: '', status: 0 };
         return { stdout: '', stderr: '', status: 0 };
       },
     });

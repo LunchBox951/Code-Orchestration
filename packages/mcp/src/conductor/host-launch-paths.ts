@@ -2,6 +2,7 @@ import { accessSync, constants as fsConstants, existsSync, readFileSync } from '
 import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import { resolveGhTokenFromEnv } from '@co/core';
 import { sanitizeClaudeStateJson, type CoMcpPaths } from './placement-launch.js';
 
 export interface HostLaunchPathOptions {
@@ -18,12 +19,10 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
   const coMcpBin = currentCoMcpBin(argv);
   const homeDir = opts.homeDir ?? homedir();
   const coCli = resolveCoCliCommand(coMcpBin, env, opts.nodeCommand ?? process.execPath);
-  // F3: source the GitHub token for the gated publish path from the daemon's env. CO_GH_TOKEN is the
-  // co-specific channel (set by the desktop "Connect GitHub" UI, issue #71); GITHUB_TOKEN/GH_TOKEN
-  // are honored as fallbacks for a CLI/CI launch. Empty/whitespace is treated as absent.
-  const ghToken = [env['CO_GH_TOKEN'], env['GITHUB_TOKEN'], env['GH_TOKEN']]
-    .map((v) => v?.trim())
-    .find((v) => v != null && v.length > 0);
+  // F3 (defense-in-depth): source the GitHub token from the daemon env via the single shared policy
+  // ({@link resolveGhTokenFromEnv}: CO_GH_TOKEN > GH_TOKEN > GITHUB_TOKEN). The AUTHORITATIVE publish
+  // auth is provisioned daemon-side at serve boot; this propagates the token to the pane MCP config too.
+  const ghToken = resolveGhTokenFromEnv(env);
   return {
     coMcpCommand: opts.nodeCommand ?? process.execPath,
     coMcpArgs: [coMcpBin],
@@ -31,6 +30,17 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
     ...(coCli.args.length > 0 ? { coCliArgs: coCli.args } : {}),
     coMcpBridgeSocketPath: defaultBridgeSocketPath,
     ...(ghToken != null ? { ghToken } : {}),
+    // RC-1: when the daemon runs under Electron (the desktop spawns `co-mcp serve` as the Electron
+    // binary with ELECTRON_RUN_AS_NODE=1), `coMcpCommand` IS that Electron binary. The provider must
+    // therefore run the co-mcp bridge with ELECTRON_RUN_AS_NODE=1 too, or `electron <bin> bridge` boots
+    // a second GUI Electron and the MCP surface never connects. Inject the flag into the MCP server's
+    // env block. `process.versions.electron` is the reliable signal (set even under ELECTRON_RUN_AS_NODE).
+    ...(process.versions.electron != null
+      ? {
+          coMcpExtraEnv: { ELECTRON_RUN_AS_NODE: '1' },
+          coCliExtraEnv: { ELECTRON_RUN_AS_NODE: '1' },
+        }
+      : {}),
     ...(opts.includeProviderAuth
       ? {
           ...readOptionalAuthFile(

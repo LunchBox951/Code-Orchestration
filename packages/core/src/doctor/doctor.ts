@@ -12,6 +12,11 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { CLAUDE_AUTH_STATUS_ARGS, parseClaudeAuthStatus } from '../dispatch/claude-source.js';
+import {
+  GH_AUTH_TOKEN_COMMANDS,
+  GH_AUTH_TOKEN_TIMEOUT_MS,
+  resolveGhTokenFromEnv,
+} from '../worktrees/github-auth.js';
 import { CODEX_DOCTOR_ARGS, parseCodexDoctor } from '../dispatch/codex-source.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import { openGlobalStore, openProjectStore } from '../store/sqlite-store.js';
@@ -82,6 +87,22 @@ export type ProviderProbeCommand = (
   args: readonly string[],
 ) => ProviderProbeCommandResult;
 
+/** Spawn seam used by {@link makeGithubAuthProbeCommand}. */
+export type GithubAuthProbeSpawnSync = (
+  command: string,
+  args: readonly string[],
+  options: {
+    readonly encoding: 'utf8';
+    readonly timeout: number;
+    readonly stdio: readonly ['ignore', 'pipe', 'pipe'];
+  },
+) => {
+  readonly stdout?: unknown;
+  readonly stderr?: unknown;
+  readonly status: number | null;
+  readonly error?: unknown;
+};
+
 export interface DefaultProviderProbeOptions {
   readonly command?: ProviderProbeCommand;
   readonly expectedVersions?: Partial<Record<Provider, string | RegExp>>;
@@ -115,6 +136,29 @@ function realProviderProbeCommand(
     ...(result.error instanceof Error ? { error: result.error } : {}),
   };
   return out;
+}
+
+/**
+ * Build the real GitHub-auth command runner with the daemon's auth-discovery timeout budget. GitHub
+ * auth participates in desktop daemon startup, so its per-candidate timeout must stay below the
+ * daemon health window rather than inheriting the slower provider metadata probe budget.
+ */
+export function makeGithubAuthProbeCommand(
+  spawn: GithubAuthProbeSpawnSync = spawnSync as unknown as GithubAuthProbeSpawnSync,
+): ProviderProbeCommand {
+  return (command, args) => {
+    const result = spawn(command, args, {
+      encoding: 'utf8',
+      timeout: GH_AUTH_TOKEN_TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return {
+      stdout: typeof result.stdout === 'string' ? result.stdout : '',
+      stderr: typeof result.stderr === 'string' ? result.stderr : '',
+      status: result.status,
+      ...(result.error instanceof Error ? { error: result.error } : {}),
+    };
+  };
 }
 
 function trimmed(value: string): string | undefined {
@@ -251,6 +295,55 @@ export function defaultProviderProbe(options: DefaultProviderProbeOptions = {}):
   };
 }
 
+// ─── GitHub auth probe seam ([host-live]) ────────────────────────────────────
+
+/** Result of probing whether GitHub auth is available for the gated remote publish path. */
+export interface GithubAuthProbeResult {
+  readonly authenticated: boolean;
+  readonly diagnostic?: string;
+}
+
+/** Injectable seam for the GitHub-auth probe ([host-live]). Sandbox tests inject synthetic results. */
+export type GithubAuthProbeSeam = () => GithubAuthProbeResult;
+
+export interface DefaultGithubAuthProbeOptions {
+  readonly command?: ProviderProbeCommand;
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Build the real GitHub-auth probe: authenticated iff an explicit token env is set (CO_GH_TOKEN /
+ * GITHUB_TOKEN / GH_TOKEN) OR `gh auth token` returns a non-empty token. This mirrors the daemon's own
+ * resolution ({@link import('@co/mcp')} `resolveGhToken`: env first, then the operator's `gh auth login`),
+ * so `co doctor --live` reports exactly what the gated publish path will see.
+ */
+export function defaultGithubAuthProbe(
+  options: DefaultGithubAuthProbeOptions = {},
+): GithubAuthProbeSeam {
+  const command = options.command ?? makeGithubAuthProbeCommand();
+  const env = options.env ?? process.env;
+  return () => {
+    // Same env-token precedence the daemon uses (shared policy), so doctor reports what publish sees.
+    if (resolveGhTokenFromEnv(env) != null) return { authenticated: true };
+    const diagnostics: string[] = [];
+    for (const cmd of GH_AUTH_TOKEN_COMMANDS) {
+      const res = command(cmd, ['auth', 'token']);
+      const token = trimmed(res.stdout);
+      if (res.status === 0 && token !== undefined) return { authenticated: true };
+      if (res.error !== undefined) {
+        diagnostics.push(`${cmd}: ${res.error.message}`);
+      } else {
+        const detail = trimmed(res.stderr) ?? trimmed(res.stdout) ?? `exit status ${res.status}`;
+        diagnostics.push(`${cmd}: ${detail}`);
+      }
+    }
+    return {
+      authenticated: false,
+      diagnostic: `gh auth token failed: ${diagnostics.join('; ')}`,
+    };
+  };
+}
+
 // ─── Doctor deps ──────────────────────────────────────────────────────────────
 
 export interface DoctorDeps {
@@ -263,6 +356,11 @@ export interface DoctorDeps {
    * check is skipped (status: 'ok'). The real binary probe wires in at runtime.
    */
   readonly providerProbe?: ProviderProbeSeam;
+  /**
+   * Injectable GitHub-auth probe seam ([host-live]). When absent, the GitHub-auth check is skipped
+   * (status: 'ok'). The real probe wires in for `co doctor --live`.
+   */
+  readonly githubAuthProbe?: GithubAuthProbeSeam;
 }
 
 // ─── Snapshot helpers ────────────────────────────────────────────────────────
@@ -518,6 +616,38 @@ function checkProviderCompatibility(providerProbe: ProviderProbeSeam | undefined
   };
 }
 
+/**
+ * GitHub-auth availability for the gated remote publish (`co_push` / `co_pr_merge`). A WARN (not a
+ * fail): without it, remote publish fails but offline/owner-local `co_merge` still works — so it must
+ * not hard-stop an offline operator. Probe absent → skip (ok); the real probe wires in under --live.
+ */
+function checkGithubAuth(githubAuthProbe: GithubAuthProbeSeam | undefined): DoctorCheck {
+  const name = 'github-auth';
+  if (githubAuthProbe == null) {
+    return {
+      name,
+      status: 'ok',
+      reason: 'GitHub-auth check requires --live (not run in this mode).',
+    };
+  }
+  const result = githubAuthProbe();
+  if (result.authenticated) {
+    return {
+      name,
+      status: 'ok',
+      reason: 'GitHub auth available (gh + remote HTTPS pushes will authenticate).',
+    };
+  }
+  const diagnostic = result.diagnostic === undefined ? '' : ` ${result.diagnostic}`;
+  return {
+    name,
+    status: 'warn',
+    reason:
+      'No GitHub auth: remote publish (co_push / co_pr_merge) will fail. Run `gh auth login` or set ' +
+      `CO_GH_TOKEN. Offline/owner-local co_merge still works.${diagnostic}`,
+  };
+}
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /**
@@ -534,6 +664,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
     checkProjectMemoryValidity(deps.repoRoot),
     checkMcpSurfaceCompleteness(),
     checkProviderCompatibility(deps.providerProbe),
+    checkGithubAuth(deps.githubAuthProbe),
   ];
   return {
     checks,

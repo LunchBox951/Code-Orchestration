@@ -397,6 +397,13 @@ export {
   worktreePathFor,
   CO_BRANCH_PREFIX,
 } from './worktrees/sling.js';
+export {
+  GH_AUTH_TOKEN_COMMANDS,
+  GH_AUTH_TOKEN_TIMEOUT_MS,
+  ghCommandPathEnv,
+  githubHttpsCredentialEnv,
+  resolveGhTokenFromEnv,
+} from './worktrees/github-auth.js';
 // L3-B worktree environment provisioning: place the gitignored working essentials into a slung
 // sandbox by the right mechanism per item (symlink large/stable deps · copy small/mutable env ·
 // isolated-copy a dep dir an agent will mutate), from a configurable manifest (smart defaults ⊕
@@ -1452,9 +1459,17 @@ export type {
   ProviderProbeCommand,
   DefaultProviderProbeOptions,
   ProviderProbeSeam,
+  GithubAuthProbeResult,
+  GithubAuthProbeSeam,
+  DefaultGithubAuthProbeOptions,
   DoctorDeps,
 } from './doctor/doctor.js';
-export { REQUIRED_CAPABILITIES, defaultProviderProbe, runDoctor } from './doctor/doctor.js';
+export {
+  REQUIRED_CAPABILITIES,
+  defaultProviderProbe,
+  defaultGithubAuthProbe,
+  runDoctor,
+} from './doctor/doctor.js';
 export type { ReviewSummary, ObservabilitySnapshot } from './doctor/observability.js';
 export { queryObservability } from './doctor/observability.js';
 // Stage 10 P3 (CTL-OBS) — the LIVE observability overlay: the static rollup ⊕ an engine-filled

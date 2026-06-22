@@ -40,10 +40,17 @@ import { ConductorEngine, type ConductorEngineDeps } from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
 import {
   ConductorHostRunner,
+  GH_AUTH_TOKEN_COMMANDS,
+  GH_AUTH_TOKEN_TIMEOUT_MS,
   defaultServeCoMcpPaths,
   hostLiveTransportRequired,
+  makeGhCommandResolver,
+  makeGhAuthTokenRunner,
+  resolveAndApplyDaemonGithubAuth,
+  resolveGhToken,
   runServeConductor,
   serveConductor,
+  type GhSpawnSync,
   type IntervalHandle,
   type IntervalScheduler,
 } from './host.js';
@@ -878,6 +885,133 @@ describe('serveConductor — wires the full stack over injected seams (no real b
 
   it('runServeConductor fails loud on an unknown project id', async () => {
     await expect(runServeConductor(['missing-project-id'])).rejects.toThrow(/unknown project id/i);
+  });
+
+  describe('GitHub auth provisioning (RC-2/3/4)', () => {
+    it('resolveGhToken: explicit env wins and the gh fallback is NOT consulted', () => {
+      let called = false;
+      const runner = () => {
+        called = true;
+        return { token: 'gh_fallback', command: 'gh' };
+      };
+      expect(resolveGhToken({ CO_GH_TOKEN: '  gho_explicit  ' }, runner)).toBe('gho_explicit');
+      expect(resolveGhToken({ GITHUB_TOKEN: 'gho_ci' }, runner)).toBe('gho_ci');
+      expect(called).toBe(false);
+    });
+
+    it('resolveGhToken: falls back to `gh auth token` when no env token is set', () => {
+      expect(resolveGhToken({}, () => ({ token: 'gho_from_gh', command: 'gh' }))).toBe(
+        'gho_from_gh',
+      );
+      // gh absent / logged out → undefined (daemon still runs).
+      expect(resolveGhToken({}, () => undefined)).toBeUndefined();
+    });
+
+    it('resolveAndApplyDaemonGithubAuth: provisions the daemon env for gh AND git push', () => {
+      const env: NodeJS.ProcessEnv = {};
+      const token = resolveAndApplyDaemonGithubAuth(env, () => ({
+        token: 'gho_tok',
+        command: 'gh',
+      }));
+      expect(token).toBe('gho_tok');
+      // gh reads GH_TOKEN; git push uses the env-scoped credential helper for github.com.
+      expect(env.GH_TOKEN).toBe('gho_tok');
+      expect(env.GIT_CONFIG_KEY_0).toBe('credential.https://github.com.helper');
+      expect(env.GIT_TERMINAL_PROMPT).toBe('0');
+    });
+
+    it('resolveAndApplyDaemonGithubAuth: prepends the resolved absolute gh dir to PATH for later gh calls', () => {
+      const env: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin' };
+      const token = resolveAndApplyDaemonGithubAuth(env, () => ({
+        token: 'gho_tok',
+        command: '/usr/local/bin/gh',
+      }));
+      expect(token).toBe('gho_tok');
+      expect(env.PATH?.split(':')[0]).toBe('/usr/local/bin');
+    });
+
+    it('resolveAndApplyDaemonGithubAuth: explicit env token still discovers gh for later bare gh calls', () => {
+      let tokenRunnerCalled = false;
+      const env: NodeJS.ProcessEnv = { CO_GH_TOKEN: 'gho_explicit', PATH: '/usr/bin:/bin' };
+      const token = resolveAndApplyDaemonGithubAuth(
+        env,
+        () => {
+          tokenRunnerCalled = true;
+          return { token: 'gho_wrong', command: '/wrong/bin/gh' };
+        },
+        () => '/usr/local/bin/gh',
+      );
+
+      expect(token).toBe('gho_explicit');
+      expect(tokenRunnerCalled).toBe(false);
+      expect(env.PATH?.split(':')[0]).toBe('/usr/local/bin');
+    });
+
+    it('resolveAndApplyDaemonGithubAuth: no token → env untouched, returns undefined', () => {
+      const env: NodeJS.ProcessEnv = {};
+      expect(resolveAndApplyDaemonGithubAuth(env, () => undefined)).toBeUndefined();
+      expect(env).toEqual({});
+    });
+
+    describe('makeGhCommandResolver (availability probe for later bare gh seams)', () => {
+      it('falls through to an absolute candidate when `gh` is not on PATH', () => {
+        const calls: Array<{ command: string; args: readonly string[] }> = [];
+        const spawn: GhSpawnSync = (command, args) => {
+          calls.push({ command, args });
+          return command === '/usr/local/bin/gh' ? { status: 0 } : { status: 127 };
+        };
+
+        expect(makeGhCommandResolver(spawn)({})).toBe('/usr/local/bin/gh');
+        expect(calls.find((call) => call.command === '/usr/local/bin/gh')?.args).toEqual([
+          '--version',
+        ]);
+      });
+    });
+
+    describe('makeGhAuthTokenRunner (real runner over an injectable spawn seam)', () => {
+      it('worst-case gh discovery timeout stays below the desktop daemon health budget', () => {
+        expect(GH_AUTH_TOKEN_TIMEOUT_MS * GH_AUTH_TOKEN_COMMANDS.length).toBeLessThan(10_000);
+      });
+
+      it('returns the token from `gh` on PATH (first candidate)', () => {
+        const calls: string[] = [];
+        const spawn: GhSpawnSync = (cmd) => {
+          calls.push(cmd);
+          return cmd === 'gh' ? { status: 0, stdout: 'ghp_path\n' } : { status: 127 };
+        };
+        expect(makeGhAuthTokenRunner(spawn)({})).toEqual({ token: 'ghp_path', command: 'gh' });
+        expect(calls).toEqual(['gh']); // stopped at the first success
+      });
+
+      it('falls through to an absolute candidate when `gh` is not on PATH', () => {
+        const spawn: GhSpawnSync = (cmd) =>
+          cmd === '/usr/local/bin/gh' ? { status: 0, stdout: 'ghp_abs' } : { status: 127 };
+        expect(makeGhAuthTokenRunner(spawn)({})).toEqual({
+          token: 'ghp_abs',
+          command: '/usr/local/bin/gh',
+        });
+      });
+
+      it('returns undefined when every candidate fails (logged out / not found)', () => {
+        expect(makeGhAuthTokenRunner(() => ({ status: 1 }))({})).toBeUndefined();
+      });
+
+      it('returns undefined on a timeout (spawnSync status null) — does not wedge boot', () => {
+        // The real spawn returns { status: null } on timeout; the runner must degrade to "no token".
+        expect(makeGhAuthTokenRunner(() => ({ status: null }))({})).toBeUndefined();
+      });
+
+      it('returns undefined for a status-0 but whitespace-only token', () => {
+        expect(makeGhAuthTokenRunner(() => ({ status: 0, stdout: '   \n' }))({})).toBeUndefined();
+      });
+
+      it('never throws even if the spawn seam throws (treats as no token)', () => {
+        const spawn: GhSpawnSync = () => {
+          throw new Error('ENOENT');
+        };
+        expect(makeGhAuthTokenRunner(spawn)({})).toBeUndefined();
+      });
+    });
   });
 
   it('control.deleteAgent releases panes + clears router suppression + removes from roster', async () => {

@@ -35,7 +35,7 @@ describe('host launch path resolution', () => {
     );
   });
 
-  it('F3: sources the gh token from CO_GH_TOKEN (then GITHUB_TOKEN/GH_TOKEN), trimming + omitting empties', () => {
+  it('F3: sources the gh token via the shared policy (CO_GH_TOKEN > GH_TOKEN > GITHUB_TOKEN), trimming + omitting empties', () => {
     const CLI = '/tmp/repo/packages/cli/dist/index.js';
     const paths = (extra: Record<string, string>) =>
       defaultCoMcpPaths({
@@ -46,11 +46,37 @@ describe('host launch path resolution', () => {
     expect(paths({ CO_GH_TOKEN: '  gho_primary  ' }).ghToken).toBe('gho_primary');
     // CO_GH_TOKEN wins over the generic fallbacks.
     expect(paths({ CO_GH_TOKEN: 'gho_co', GITHUB_TOKEN: 'gho_gh' }).ghToken).toBe('gho_co');
+    // gh-native order: GH_TOKEN beats GITHUB_TOKEN (so the daemon picks the same token gh would).
+    expect(paths({ GH_TOKEN: 'gho_gh', GITHUB_TOKEN: 'gho_ci' }).ghToken).toBe('gho_gh');
     // Fallbacks are honored for a CLI/CI launch.
     expect(paths({ GITHUB_TOKEN: 'gho_ci' }).ghToken).toBe('gho_ci');
     // No token configured → absent (never an empty GH_TOKEN).
     expect(paths({}).ghToken).toBeUndefined();
     expect(paths({ CO_GH_TOKEN: '   ' }).ghToken).toBeUndefined();
+  });
+
+  it('RC-1: injects ELECTRON_RUN_AS_NODE into coMcpExtraEnv only when running under Electron', () => {
+    const base = {
+      argv: ['node', '/tmp/repo/packages/mcp/dist/bin.js'],
+      env: { CO_CLI_COMMAND: '/tmp/repo/packages/cli/dist/index.js' },
+      nodeCommand: '/usr/bin/node',
+    } as const;
+
+    // Default (plain Node, as the test process runs): no Electron flag is injected.
+    expect(defaultCoMcpPaths(base).coMcpExtraEnv).toBeUndefined();
+
+    // Under Electron (process.versions.electron present), the MCP server env must carry the flag so
+    // the provider runs `electron <bin> bridge` as Node instead of launching a second GUI Electron.
+    const hadElectron = Object.prototype.hasOwnProperty.call(process.versions, 'electron');
+    const prev = (process.versions as Record<string, string | undefined>)['electron'];
+    try {
+      (process.versions as Record<string, string | undefined>)['electron'] = '38.0.0';
+      expect(defaultCoMcpPaths(base).coMcpExtraEnv).toEqual({ ELECTRON_RUN_AS_NODE: '1' });
+      expect(defaultCoMcpPaths(base).coCliExtraEnv).toEqual({ ELECTRON_RUN_AS_NODE: '1' });
+    } finally {
+      if (hadElectron) (process.versions as Record<string, string | undefined>)['electron'] = prev;
+      else delete (process.versions as Record<string, string | undefined>)['electron'];
+    }
   });
 
   it('optionally reads provider auth files for isolated host launch materialization', () => {
