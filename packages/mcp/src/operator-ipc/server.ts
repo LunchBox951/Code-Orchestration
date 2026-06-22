@@ -106,6 +106,29 @@ export interface OperatorIpcServerDeps {
 const OPERATOR_IPC_METHOD_SET = new Set<string>(Object.values(OPERATOR_IPC_METHODS));
 const TRANSCRIPT_PENDING_MAX_CHARS = 64 * 1024;
 const TRANSCRIPT_PENDING_MAX_AGENTS = 256;
+const TRANSCRIPT_PENDING_MAX_CHARS_PER_AGENT = 4 * TRANSCRIPT_PENDING_MAX_CHARS;
+
+interface PendingTranscriptPush {
+  readonly agentId: string;
+  readonly generation: number;
+  offset: number;
+  chunk: string;
+}
+
+function splitTranscriptPush(
+  chunk: string,
+  offset: number,
+): Array<{ readonly offset: number; readonly chunk: string }> {
+  if (chunk.length <= TRANSCRIPT_PENDING_MAX_CHARS) return [{ offset, chunk }];
+  const pieces: Array<{ offset: number; chunk: string }> = [];
+  for (let start = 0; start < chunk.length; start += TRANSCRIPT_PENDING_MAX_CHARS) {
+    pieces.push({
+      offset: offset + start,
+      chunk: chunk.slice(start, start + TRANSCRIPT_PENDING_MAX_CHARS),
+    });
+  }
+  return pieces;
+}
 
 function isOperatorIpcMethod(method: string): method is OperatorIpcMethod {
   return OPERATOR_IPC_METHOD_SET.has(method);
@@ -251,7 +274,7 @@ export class OperatorIpcServer {
   private readonly randomHex: () => string;
   private readonly startFn: typeof startCoordinatorSession;
   private readonly transport: SocketServerTransport;
-  private readonly pendingTranscriptPushes = new Map<string, { offset: number; chunk: string }>();
+  private readonly pendingTranscriptPushes: PendingTranscriptPush[] = [];
   private transcriptPushInFlight = false;
   private started = false;
 
@@ -309,13 +332,19 @@ export class OperatorIpcServer {
    * `co-mcp serve` subscribes this to the engine's transcript stream. A no-op when no app is attached; a
    * push that races a disconnect is reported, never thrown (must not crash the daemon — Principle 9).
    */
-  pushTranscript(agentId: string, chunk: string, offset: number): void {
+  pushTranscript(agentId: string, generation: number, chunk: string, offset: number): void {
     if (!this.transport.connected) return;
+    const [first, ...rest] = splitTranscriptPush(chunk, offset);
+    if (first == null) return;
     if (this.transcriptPushInFlight) {
-      this.queueTranscriptPush(agentId, chunk, offset);
+      this.queueTranscriptPushes(generation, agentId, [
+        { offset: first.offset, chunk: first.chunk },
+        ...rest,
+      ]);
       return;
     }
-    this.sendTranscriptPush(agentId, chunk, offset);
+    this.queueTranscriptPushes(generation, agentId, rest);
+    this.sendTranscriptPush(agentId, generation, first.chunk, first.offset);
   }
 
   /** Tear the socket down (idempotent via the transport). */
@@ -790,36 +819,113 @@ export class OperatorIpcServer {
     this.transport.send(message).catch((error) => this.report(error));
   }
 
-  private queueTranscriptPush(agentId: string, chunk: string, offset: number): void {
-    const pending = this.pendingTranscriptPushes.get(agentId);
-    const canCoalesce = pending != null && offset === pending.offset + pending.chunk.length;
-    const nextOffset = canCoalesce ? pending.offset : offset;
-    const next = canCoalesce ? pending.chunk + chunk : chunk;
-    if (next.length > TRANSCRIPT_PENDING_MAX_CHARS) {
-      const dropped = next.length - TRANSCRIPT_PENDING_MAX_CHARS;
-      this.pendingTranscriptPushes.set(agentId, {
-        offset: nextOffset + dropped,
-        chunk: next.slice(dropped),
-      });
-    } else {
-      this.pendingTranscriptPushes.set(agentId, { offset: nextOffset, chunk: next });
-    }
-
-    while (this.pendingTranscriptPushes.size > TRANSCRIPT_PENDING_MAX_AGENTS) {
-      const drop =
-        [...this.pendingTranscriptPushes.keys()].find((candidate) => candidate !== agentId) ??
-        this.pendingTranscriptPushes.keys().next().value;
-      if (drop == null) break;
-      this.pendingTranscriptPushes.delete(drop);
+  private queueTranscriptPushes(
+    generation: number,
+    agentId: string,
+    pushes: readonly { readonly offset: number; readonly chunk: string }[],
+  ): void {
+    for (const push of pushes) {
+      this.queueTranscriptPiece(agentId, generation, push.chunk, push.offset);
     }
   }
 
-  private sendTranscriptPush(agentId: string, chunk: string, offset: number): void {
+  private queueTranscriptPiece(
+    agentId: string,
+    generation: number,
+    chunk: string,
+    offset: number,
+  ): void {
+    if (chunk.length === 0) return;
+    for (let i = this.pendingTranscriptPushes.length - 1; i >= 0; i--) {
+      const pending = this.pendingTranscriptPushes[i];
+      if (pending?.agentId === agentId && pending.generation !== generation) {
+        this.pendingTranscriptPushes.splice(i, 1);
+      }
+    }
+    const lastIndex = this.pendingTranscriptPushes.findLastIndex(
+      (p) => p.agentId === agentId && p.generation === generation,
+    );
+    const last = lastIndex >= 0 ? this.pendingTranscriptPushes[lastIndex] : undefined;
+    if (last != null) {
+      const expected = last.offset + last.chunk.length;
+      if (offset === expected && last.chunk.length + chunk.length <= TRANSCRIPT_PENDING_MAX_CHARS) {
+        last.chunk += chunk;
+        this.prunePendingTranscriptBytes(agentId);
+        return;
+      }
+      if (offset !== expected) {
+        for (let i = this.pendingTranscriptPushes.length - 1; i >= 0; i--) {
+          if (this.pendingTranscriptPushes[i]?.agentId === agentId) {
+            this.pendingTranscriptPushes.splice(i, 1);
+          }
+        }
+      }
+    }
+
+    for (const piece of splitTranscriptPush(chunk, offset)) {
+      this.pendingTranscriptPushes.push({
+        agentId,
+        generation,
+        offset: piece.offset,
+        chunk: piece.chunk,
+      });
+    }
+    this.prunePendingTranscriptBytes(agentId);
+
+    while (
+      new Set(this.pendingTranscriptPushes.map((p) => p.agentId)).size >
+      TRANSCRIPT_PENDING_MAX_AGENTS
+    ) {
+      const drop =
+        this.pendingTranscriptPushes.find((candidate) => candidate.agentId !== agentId)?.agentId ??
+        this.pendingTranscriptPushes[0]?.agentId;
+      if (drop == null) break;
+      for (let i = this.pendingTranscriptPushes.length - 1; i >= 0; i--) {
+        if (this.pendingTranscriptPushes[i]?.agentId === drop)
+          this.pendingTranscriptPushes.splice(i, 1);
+      }
+    }
+  }
+
+  private prunePendingTranscriptBytes(agentId: string): void {
+    let total = this.pendingTranscriptPushes
+      .filter((p) => p.agentId === agentId)
+      .reduce((n, p) => n + p.chunk.length, 0);
+
+    for (
+      let i = 0;
+      i < this.pendingTranscriptPushes.length && total > TRANSCRIPT_PENDING_MAX_CHARS_PER_AGENT;
+    ) {
+      const pending = this.pendingTranscriptPushes[i]!;
+      if (pending.agentId !== agentId) {
+        i++;
+        continue;
+      }
+      const excess = total - TRANSCRIPT_PENDING_MAX_CHARS_PER_AGENT;
+      if (excess >= pending.chunk.length) {
+        total -= pending.chunk.length;
+        this.pendingTranscriptPushes.splice(i, 1);
+        continue;
+      }
+      pending.offset += excess;
+      pending.chunk = pending.chunk.slice(excess);
+      total -= excess;
+      i++;
+    }
+  }
+
+  private sendTranscriptPush(
+    agentId: string,
+    generation: number,
+    chunk: string,
+    offset: number,
+  ): void {
     this.transcriptPushInFlight = true;
     this.transport
       .send(
         makeNotification(OPERATOR_IPC_TRANSCRIPT, {
           agentId,
+          generation,
           offset,
           chunk,
         } as unknown as WirePayload),
@@ -827,7 +933,7 @@ export class OperatorIpcServer {
       .then(
         () => this.drainTranscriptPush(),
         (error: unknown) => {
-          this.pendingTranscriptPushes.clear();
+          this.pendingTranscriptPushes.length = 0;
           this.transcriptPushInFlight = false;
           this.report(error);
         },
@@ -836,20 +942,16 @@ export class OperatorIpcServer {
 
   private drainTranscriptPush(): void {
     if (!this.transport.connected) {
-      this.pendingTranscriptPushes.clear();
+      this.pendingTranscriptPushes.length = 0;
       this.transcriptPushInFlight = false;
       return;
     }
-    const next = this.pendingTranscriptPushes.entries().next().value as
-      | [agentId: string, transcript: { offset: number; chunk: string }]
-      | undefined;
+    const next = this.pendingTranscriptPushes.shift();
     if (next == null) {
       this.transcriptPushInFlight = false;
       return;
     }
-    const [agentId, transcript] = next;
-    this.pendingTranscriptPushes.delete(agentId);
-    this.sendTranscriptPush(agentId, transcript.chunk, transcript.offset);
+    this.sendTranscriptPush(next.agentId, next.generation, next.chunk, next.offset);
   }
 
   private report(error: unknown): void {

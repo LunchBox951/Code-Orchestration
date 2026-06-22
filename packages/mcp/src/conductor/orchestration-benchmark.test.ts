@@ -533,7 +533,7 @@ async function operatorPassViaIpc(
     observe: () => {
       throw new Error('orch-bench: operator-IPC observe is not used by the review path');
     },
-    transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
+    transcriptTail: (agentId) => ({ agentId, generation: 0, offset: 0, tail: '' }),
     onTranscript: () => () => {},
     reviewContext: (rid) =>
       resolveReviewContext(

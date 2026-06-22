@@ -280,6 +280,12 @@ export interface OperatorIpcTick {
  */
 export interface OperatorIpcTranscript {
   readonly agentId: string;
+  /**
+   * Monotonic same-agent pane transcript generation; increments whenever a hosted pane is recreated.
+   * Optional on the wire: an older, independently-versioned daemon predating this field omits it, so the
+   * decode boundary may surface `undefined` (consumers coalesce to `0`).
+   */
+  readonly generation?: number;
   /** Absolute character offset where `chunk` starts in the agent's pane transcript stream. */
   readonly offset: number;
   readonly chunk: string;
@@ -287,12 +293,24 @@ export interface OperatorIpcTranscript {
 
 /**
  * The on-demand `transcript` ({@link OPERATOR_IPC_METHODS.transcript}) request result: a hosted agent's
- * bounded transcript tail — the most-recent pane bytes, up to the engine's character bound. `tail` is
- * `''` when the agent is not hosted or has produced no output yet (the read DEGRADES cleanly — never a
- * hang/throw). PINNED public shape — Console phases C-P2/C-P3 and the renderer consume it; do not rename.
+ * bounded transcript tail — recent pane bytes, up to the engine's character bound. `tail` is `''` when
+ * the agent is not hosted or has produced no output yet (the read DEGRADES cleanly — never a hang/throw).
+ * PINNED public shape — Console phases C-P2/C-P3 and the renderer consume it; do not rename.
+ *
+ * #66 sub-bug B — the engine prefers replay boundaries within bounded windows: the last reachable
+ * alternate-screen enter (`ESC[?1049h`) inside the hard cap, else a full-screen clear inside the soft cap,
+ * else a flat recent suffix. `offset` always names the retained start position, so a consumer stitching
+ * live `transcript:push` chunks onto this tail keeps a correct absolute coordinate even when the chosen
+ * boundary begins earlier than the soft bound.
  */
 export interface TranscriptTail {
   readonly agentId: string;
+  /**
+   * Monotonic same-agent pane transcript generation; increments whenever a hosted pane is recreated.
+   * Optional on the wire: an older, independently-versioned daemon predating this field omits it, so the
+   * decode boundary may surface `undefined` (consumers coalesce to `0`).
+   */
+  readonly generation?: number;
   /** Absolute character offset where `tail` starts in the agent's pane transcript stream. */
   readonly offset: number;
   readonly tail: string;

@@ -45,6 +45,9 @@ import {
   type StartupOutcome,
   type Steer,
   type TranscriptTail,
+  TranscriptTailAccumulator,
+  TRANSCRIPT_TAIL_HARD_MAX_CHARS,
+  TRANSCRIPT_TAIL_MAX_CHARS,
   type ToolSpec,
   type TurnEndConfig,
   type TurnEndResult,
@@ -77,6 +80,7 @@ import {
   WEDGE_MS,
   COMPLETION_VERBS,
   type ReviewerSpawnGate,
+  transcriptTailFrom,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -95,15 +99,24 @@ import type { ToolActivityEvent } from '../server.js';
  */
 export type TransportPair = readonly [client: Transport, server: Transport];
 
+export { TRANSCRIPT_TAIL_HARD_MAX_CHARS, TRANSCRIPT_TAIL_MAX_CHARS, transcriptTailFrom };
+export type { RetainedTail } from '@co/core';
+
 /**
- * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the character bound on a hosted agent's in-memory transcript tail.
- * The engine keeps only the MOST-RECENT `TRANSCRIPT_TAIL_MAX_CHARS` characters of each pane's output per
- * agent: when a new chunk pushes the buffer past the bound, the OLDEST characters are dropped so the
- * live tail (what the operator wants to see now) is preserved. Pane bytes are `string` end-to-end
+ * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the SOFT character bound on a hosted agent's in-memory transcript
+ * tail. The engine keeps roughly the MOST-RECENT `TRANSCRIPT_TAIL_MAX_CHARS` characters of each pane's
+ * output per agent: when a new chunk pushes the buffer past the bound, the OLDEST characters are dropped
+ * so the live tail (what the operator wants to see now) is preserved. Pane bytes are `string` end-to-end
  * (xterm.js consumes the string; JSON round-trips it exactly, ANSI/ESC included), so the bound is by
  * character. 64 KiB is generous for a scrollback tail while keeping the per-agent footprint bounded.
+ *
+ * #66 sub-bug B (transcript garble) — a flat most-recent-N slice is NOT safe to replay into a fresh
+ * xterm: an interactive TUI enters the alternate screen (`ESC[?1049h`) ONCE early, then cursor-addresses
+ * redraws within it. If the early alt-screen-enter falls outside the slice, replaying a mid-stream tail
+ * stacks/garbles frames in a terminal that never entered the alt-screen. {@link transcriptTailFrom}
+ * therefore extends the retained tail BACK to the last alt-screen-enter (up to {@link
+ * TRANSCRIPT_TAIL_HARD_MAX_CHARS}) so the alt-screen setup is never sliced away.
  */
-export const TRANSCRIPT_TAIL_MAX_CHARS = 64 * 1024;
 
 /**
  * The engine's constructor seams. Required seams have no default so the determinism / host-live
@@ -408,13 +421,14 @@ export class ConductorEngine {
   /** Per-pane onExit unsubscribers, keyed `${projectId}:${agent}` — torn down on release. */
   private readonly paneExitUnsub = new Map<string, () => void>();
   /**
-   * Per-agent bounded transcript tail (most-recent pane bytes, ≤ {@link TRANSCRIPT_TAIL_MAX_CHARS}),
-   * keyed `${projectId}:${agent}` (Stage 12 C-P1). Fed by the persistent onData subscription below;
-   * read by {@link transcriptTail} for the operator's on-demand backfill. Dropped on release.
+   * Per-agent bounded transcript tail (recent pane bytes, ≤ {@link TRANSCRIPT_TAIL_HARD_MAX_CHARS} —
+   * normally ≈ {@link TRANSCRIPT_TAIL_MAX_CHARS}, extended back to the last alt-screen-enter when one is
+   * in range; see {@link transcriptTailFrom}), keyed `${projectId}:${agent}` (Stage 12 C-P1). Fed by the
+   * persistent onData subscription below; read by {@link transcriptTail} for the operator's on-demand
+   * backfill. Dropped on release.
    */
-  private readonly transcriptTails = new Map<string, string>();
-  private readonly transcriptTailOffsets = new Map<string, number>();
-  private readonly transcriptNextOffsets = new Map<string, number>();
+  private readonly transcriptAccumulators = new Map<string, TranscriptTailAccumulator>();
+  private readonly transcriptGenerations = new Map<string, number>();
   /**
    * Per-agent PERSISTENT onData unsubscribers for the transcript stream, keyed `${projectId}:${agent}`
    * (Stage 12 C-P1) — DISTINCT from the per-turn observer in {@link observeTurnEnd}. Torn down on
@@ -446,12 +460,12 @@ export class ConductorEngine {
     { hosted: HostedPane; options: { readonly onPaneKillError?: (error: unknown) => void } }
   >();
   /**
-   * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, chunk)` on every new
-   * pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A plain
-   * subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
+   * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, generation, chunk)` on
+   * every new pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A
+   * plain subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
    */
   private readonly transcriptListeners = new Set<
-    (projectId: ProjectId, agent: string, chunk: string, offset: number) => void
+    (projectId: ProjectId, agent: string, generation: number, chunk: string, offset: number) => void
   >();
   /**
    * When each unresolved clarify was FIRST observed by a tick, keyed
@@ -524,22 +538,28 @@ export class ConductorEngine {
   }
 
   /**
-   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the current bounded transcript tail for `agent`: the most-recent
-   * pane bytes (≤ {@link TRANSCRIPT_TAIL_MAX_CHARS}), or `''` when the agent is not hosted or has
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the current bounded transcript tail for `agent`: the recent pane
+   * bytes (≤ {@link TRANSCRIPT_TAIL_HARD_MAX_CHARS}, kept from the last alt-screen-enter so the tail
+   * replays cleanly — see {@link transcriptTailFrom}), or `''` when the agent is not hosted or has
    * produced no output yet. Transport-agnostic, NO I/O, never throws — a pure in-memory read backing the
    * operator's on-demand backfill.
    */
   transcriptTail(projectId: ProjectId, agent: string): string {
-    return this.transcriptTails.get(ConductorEngine.agentKey(projectId, agent)) ?? '';
+    return (
+      this.transcriptAccumulators.get(ConductorEngine.agentKey(projectId, agent))?.snapshot()
+        .tail ?? ''
+    );
   }
 
   /** Stage 12 C-P1 — the current bounded transcript tail plus its absolute start offset. */
   transcriptTailSnapshot(projectId: ProjectId, agent: string): TranscriptTail {
     const agentKey = ConductorEngine.agentKey(projectId, agent);
+    const snapshot = this.transcriptAccumulators.get(agentKey)?.snapshot();
     return {
       agentId: agent,
-      offset: this.transcriptTailOffsets.get(agentKey) ?? 0,
-      tail: this.transcriptTails.get(agentKey) ?? '',
+      generation: this.transcriptGenerations.get(agentKey) ?? 0,
+      offset: snapshot?.offset ?? 0,
+      tail: snapshot?.tail ?? '',
     };
   }
 
@@ -598,7 +618,13 @@ export class ConductorEngine {
    * METHOD, not a tool (Principle D4 — the Conductor is never agent-callable).
    */
   onTranscript(
-    listener: (projectId: ProjectId, agent: string, chunk: string, offset: number) => void,
+    listener: (
+      projectId: ProjectId,
+      agent: string,
+      generation: number,
+      chunk: string,
+      offset: number,
+    ) => void,
   ): () => void {
     this.transcriptListeners.add(listener);
     return () => this.transcriptListeners.delete(listener);
@@ -664,9 +690,9 @@ export class ConductorEngine {
     const pane = this.deps.pty.spawn(spec ?? this.spawnSpecFor(identity));
     // Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe before startup driving so the operator tail and live
     // stream include early provider interstitials/login prompts as well as post-ready turn bytes.
-    this.transcriptTails.set(agentKey, '');
-    this.transcriptTailOffsets.set(agentKey, 0);
-    this.transcriptNextOffsets.set(agentKey, 0);
+    this.transcriptAccumulators.set(agentKey, new TranscriptTailAccumulator());
+    const transcriptGeneration = (this.transcriptGenerations.get(agentKey) ?? 0) + 1;
+    this.transcriptGenerations.set(agentKey, transcriptGeneration);
     this.transcriptUnsub.set(
       agentKey,
       pane.onData((chunk) =>
@@ -1371,11 +1397,15 @@ export class ConductorEngine {
   }
 
   /**
-   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — append `chunk` to `agentKey`'s bounded tail (keeping the
-   * most-recent {@link TRANSCRIPT_TAIL_MAX_CHARS} characters; oldest dropped when over the bound) and
-   * fan the chunk out to the global transcript listeners. Runs in the pane's onData pump, so it does no
-   * I/O and never throws of its own accord (the registered listener — the operator-IPC push — is itself
-   * guarded against a vanished client).
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — append `chunk` to `agentKey`'s bounded tail and fan the chunk out
+   * to the global transcript listeners. Runs in the pane's onData pump, so it does no I/O and never
+   * throws of its own accord (the registered listener — the operator-IPC push — is itself guarded
+   * against a vanished client).
+   *
+   * #66 sub-bug B — the retained tail is owned by the core {@link TranscriptTailAccumulator}, which keeps
+   * memory bounded WITHOUT slicing away the early alternate-screen-enter (`ESC[?1049h`) an interactive TUI
+   * needs to replay cleanly into a fresh xterm. The retained start becomes the {@link TranscriptTail}
+   * `offset` contract.
    */
   private appendTranscript(
     agentKey: string,
@@ -1384,21 +1414,13 @@ export class ConductorEngine {
     chunk: string,
   ): void {
     this.lastByteAt.set(agentKey, this.deps.now()); // P6: track last-byte time for liveness probe
-    const chunkOffset = this.transcriptNextOffsets.get(agentKey) ?? 0;
-    const tailOffset = this.transcriptTailOffsets.get(agentKey) ?? chunkOffset;
-    const next = (this.transcriptTails.get(agentKey) ?? '') + chunk;
-    this.transcriptNextOffsets.set(agentKey, chunkOffset + chunk.length);
-    if (next.length > TRANSCRIPT_TAIL_MAX_CHARS) {
-      const dropped = next.length - TRANSCRIPT_TAIL_MAX_CHARS;
-      this.transcriptTails.set(agentKey, next.slice(dropped));
-      this.transcriptTailOffsets.set(agentKey, tailOffset + dropped);
-    } else {
-      this.transcriptTails.set(agentKey, next);
-      this.transcriptTailOffsets.set(agentKey, tailOffset);
-    }
+    const accumulator = this.transcriptAccumulators.get(agentKey);
+    const chunkOffset = accumulator?.snapshot().nextOffset ?? 0;
+    const generation = this.transcriptGenerations.get(agentKey) ?? 0;
+    accumulator?.append(chunk);
     for (const listener of [...this.transcriptListeners]) {
       try {
-        listener(projectId, agent, chunk, chunkOffset);
+        listener(projectId, agent, generation, chunk, chunkOffset);
       } catch {
         /* transcript subscribers are diagnostic surfaces; pane output must keep flowing */
       }
@@ -1412,9 +1434,7 @@ export class ConductorEngine {
     this.paneExited.delete(agentKey);
     this.transcriptUnsub.get(agentKey)?.();
     this.transcriptUnsub.delete(agentKey);
-    this.transcriptTails.delete(agentKey);
-    this.transcriptTailOffsets.delete(agentKey);
-    this.transcriptNextOffsets.delete(agentKey);
+    this.transcriptAccumulators.delete(agentKey);
     this.lastByteAt.delete(agentKey); // P6
     this.turnInFlight.delete(agentKey); // P6
     this.turnStartedAt.delete(agentKey); // P6

@@ -24,6 +24,9 @@ class FakeTerminal implements FitTerminalLike, TermWriter {
   cols = 80;
   rows = 24;
   dataCb: ((data: string) => void) | null = null;
+  dataOnWrite: string | null = null;
+  pendingWriteCallback: (() => void) | null = null;
+  throwOnWrite = false;
   constructor(private readonly order: string[]) {}
   loadAddon(addon: FitAddonLike): void {
     this.loadedAddons.push(addon);
@@ -37,9 +40,12 @@ class FakeTerminal implements FitTerminalLike, TermWriter {
     this.dataCb = cb;
     this.order.push('onData');
   }
-  write(data: string): void {
+  write(data: string, callback?: () => void): void {
+    if (this.throwOnWrite) throw new Error('fake xterm: synchronous write failure');
     this.writes.push(data);
     this.order.push('write');
+    if (this.dataOnWrite != null) this.dataCb?.(this.dataOnWrite);
+    this.pendingWriteCallback = callback ?? null;
   }
   reset(): void {
     this.resets++;
@@ -218,6 +224,73 @@ describe('decideTermFeed', () => {
     expect(feed).toEqual({ kind: 'noop' });
   });
 
+  it('appends only new bytes when the retained transcript window front-trimmed', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'abcdefghij',
+      lastTranscriptOffset: 100,
+      transcript: 'efghijKL',
+      transcriptOffset: 104,
+    });
+
+    expect(feed).toEqual({ kind: 'append', data: 'KL' });
+  });
+
+  it('appends only the delta when offsets are unchanged and the retained window grew', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'frame',
+      lastTranscriptOffset: 100,
+      transcript: 'frame-next',
+      transcriptOffset: 100,
+    });
+
+    expect(feed).toEqual({ kind: 'append', data: '-next' });
+  });
+
+  it('resets when transcript generation changes even if offset and prefix look appendable', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'startup',
+      lastTranscriptGeneration: 1,
+      lastTranscriptOffset: 0,
+      transcript: 'startup fresh',
+      transcriptGeneration: 2,
+      transcriptOffset: 0,
+    });
+
+    expect(feed).toEqual({ kind: 'reset', data: 'startup fresh' });
+  });
+
+  it('resets when transcript offsets rewind even if the new text shares the old prefix', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'hello',
+      lastTranscriptOffset: 100,
+      transcript: 'hello world',
+      transcriptOffset: 0,
+    });
+
+    expect(feed).toEqual({ kind: 'reset', data: 'hello world' });
+  });
+
+  it('resets when absolute overlap bytes do not match', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'ABCDE',
+      lastTranscriptOffset: 100,
+      transcript: 'XY',
+      transcriptOffset: 102,
+    });
+
+    expect(feed).toEqual({ kind: 'reset', data: 'XY' });
+  });
+
   it('resets + rewrites on a non-prefix change (truncation / new generation)', () => {
     const feed = decideTermFeed({
       selectedAgentId: 'a1',
@@ -226,6 +299,45 @@ describe('decideTermFeed', () => {
       lastTranscript: 'line1\n',
     });
     expect(feed).toEqual({ kind: 'reset', data: 'totally different' });
+  });
+
+  it('appends the whole new tail when it begins exactly at the end of the retained window', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'frame',
+      lastTranscriptOffset: 100,
+      transcript: 'next',
+      transcriptOffset: 105,
+    });
+
+    expect(feed).toEqual({ kind: 'append', data: 'next' });
+  });
+
+  it('is a no-op when the incoming window is wholly contained in the retained one (idempotent re-delivery)', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'ABCDEFG',
+      lastTranscriptOffset: 100,
+      transcript: 'CDE',
+      transcriptOffset: 102,
+    });
+
+    expect(feed).toEqual({ kind: 'noop' });
+  });
+
+  it('resets on a forward live gap (offset beyond the retained window end)', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'abc',
+      lastTranscriptOffset: 100,
+      transcript: 'xyz',
+      transcriptOffset: 110,
+    });
+
+    expect(feed).toEqual({ kind: 'reset', data: 'xyz' });
   });
 });
 
@@ -259,6 +371,38 @@ describe('applyTermFeed — raw bytes are written VERBATIM', () => {
     applyTermFeed(term, { kind: 'reset', data: '' });
     expect(term.resets).toBe(1);
     expect(term.writes).toEqual([]);
+  });
+
+  it('suppresses xterm-generated onData while replay writes are being parsed', () => {
+    const typed: string[] = [];
+    const s = setup({ onInput: (d) => typed.push(d) });
+    s.term.dataOnWrite = ESC + '[1;1R';
+
+    applyTermFeed(s.term, { kind: 'reset', data: ESC + '[6n' }, s.result.inputGuard);
+
+    expect(typed).toEqual([]);
+    s.term.dataCb?.('k');
+    expect(typed).toEqual([]);
+
+    s.term.pendingWriteCallback?.();
+    s.term.dataCb?.('k');
+    expect(typed).toEqual(['k']);
+  });
+
+  it('releases suppression when a replay write throws synchronously (input never latches off)', () => {
+    const typed: string[] = [];
+    const s = setup({ onInput: (d) => typed.push(d) });
+    s.term.throwOnWrite = true;
+
+    expect(() =>
+      applyTermFeed(s.term, { kind: 'reset', data: ESC + '[6n' }, s.result.inputGuard),
+    ).toThrow();
+
+    // A synchronous throw must still release the guard, else live input latches off forever.
+    expect(s.result.inputGuard.isSuppressed()).toBe(false);
+    s.term.throwOnWrite = false;
+    s.term.dataCb?.('k');
+    expect(typed).toEqual(['k']);
   });
 
   it('noop feed: neither resets nor writes', () => {

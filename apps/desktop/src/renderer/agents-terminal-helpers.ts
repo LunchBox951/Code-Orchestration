@@ -83,6 +83,39 @@ export interface FitTerminalLike {
 }
 
 /**
+ * xterm can synchronously emit device/status replies through `onData` while replay bytes are being parsed
+ * (for example, `ESC[6n` can produce a cursor-position response). Replay bytes are historical output, not
+ * operator input, so those generated replies must not be forwarded back into the live PTY.
+ */
+export interface TerminalInputGuard {
+  isSuppressed(): boolean;
+  suppressUntilDone(write: (done: () => void) => void): void;
+}
+
+export function createTerminalInputGuard(): TerminalInputGuard {
+  let suppressDepth = 0;
+
+  return {
+    isSuppressed: () => suppressDepth > 0,
+    suppressUntilDone: (write) => {
+      suppressDepth += 1;
+      let released = false;
+      const done = (): void => {
+        if (released) return;
+        released = true;
+        suppressDepth = Math.max(0, suppressDepth - 1);
+      };
+      try {
+        write(done);
+      } catch (err) {
+        done(); // a synchronous throw must still release the guard, else live input latches off forever
+        throw err;
+      }
+    },
+  };
+}
+
+/**
  * Injected construction seams — the renderer wires these to `window.Terminal` / `window.FitAddon` /
  * `ResizeObserver` and the operator-IPC bridge; tests pass fakes (no DOM required).
  */
@@ -107,15 +140,18 @@ export interface AgentsTerminalDeps<T extends FitTerminalLike> {
 export function createAgentsTerminal<T extends FitTerminalLike>(
   el: HTMLElement,
   deps: AgentsTerminalDeps<T>,
-): { term: T; fit: FitAddonLike } {
+): { term: T; fit: FitAddonLike; inputGuard: TerminalInputGuard } {
   const term = deps.createTerminal({ ...AGENTS_TERMINAL_OPTIONS });
   const fit = deps.createFitAddon();
+  const inputGuard = createTerminalInputGuard();
   term.loadAddon(fit);
   term.open(el);
   fit.fit();
   if (deps.onInput) {
     const onInput = deps.onInput;
-    term.onData((data) => onInput(data));
+    term.onData((data) => {
+      if (!inputGuard.isSuppressed()) onInput(data);
+    });
   }
   const reportResize = (): void => deps.onResize?.(term.cols, term.rows);
   reportResize();
@@ -123,14 +159,14 @@ export function createAgentsTerminal<T extends FitTerminalLike>(
     fit.fit();
     reportResize();
   });
-  return { term, fit };
+  return { term, fit, inputGuard };
 }
 
 // ── Raw-stream feed decision ───────────────────────────────────────────────────
 
 /** Minimal structural view of the terminal write surface (raw bytes in, verbatim). */
 export interface TermWriter {
-  write(data: string): void;
+  write(data: string, callback?: () => void): void;
   reset(): void;
 }
 
@@ -146,11 +182,20 @@ export type TermFeed =
   | { readonly kind: 'append'; readonly data: string }
   | { readonly kind: 'noop' };
 
+/**
+ * Production ALWAYS supplies the four generation/offset fields (sourced from `AgentsConsoleState`, where
+ * they are required). They stay optional here only for the legacy/no-offset call shape used by unit tests;
+ * the `!= null` guards and the `startsWith` fallback in {@link decideTermFeed} exist solely for that shape.
+ */
 export interface TermFeedInput {
   readonly selectedAgentId: string | null;
   readonly lastAgentId: string | null;
   readonly transcript: string;
+  readonly transcriptGeneration?: number;
+  readonly transcriptOffset?: number;
   readonly lastTranscript: string;
+  readonly lastTranscriptGeneration?: number;
+  readonly lastTranscriptOffset?: number;
 }
 
 /**
@@ -165,6 +210,49 @@ export function decideTermFeed(input: TermFeedInput): TermFeed {
   if (selectedAgentId !== lastAgentId) {
     return { kind: 'reset', data: transcript };
   }
+  if (
+    input.transcriptGeneration != null &&
+    input.lastTranscriptGeneration != null &&
+    input.transcriptGeneration !== input.lastTranscriptGeneration
+  ) {
+    return { kind: 'reset', data: transcript };
+  }
+  if (input.transcriptOffset != null && input.lastTranscriptOffset != null) {
+    const transcriptOffset = input.transcriptOffset;
+    const lastTranscriptOffset = input.lastTranscriptOffset;
+    const transcriptEnd = transcriptOffset + transcript.length;
+    const lastTranscriptEnd = lastTranscriptOffset + lastTranscript.length;
+    if (transcriptOffset < lastTranscriptOffset) return { kind: 'reset', data: transcript };
+    if (transcriptOffset > lastTranscriptEnd) return { kind: 'reset', data: transcript };
+    if (transcriptOffset === lastTranscriptOffset) {
+      if (transcript.length < lastTranscript.length) return { kind: 'reset', data: transcript };
+      if (!transcript.startsWith(lastTranscript)) return { kind: 'reset', data: transcript };
+      const delta = transcript.slice(lastTranscript.length);
+      return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
+    }
+    if (transcriptOffset === lastTranscriptEnd) {
+      return transcript.length > 0 ? { kind: 'append', data: transcript } : { kind: 'noop' };
+    }
+
+    const overlapLength = Math.min(transcriptEnd, lastTranscriptEnd) - transcriptOffset;
+    if (overlapLength > 0) {
+      const existing = lastTranscript.slice(
+        transcriptOffset - lastTranscriptOffset,
+        transcriptOffset - lastTranscriptOffset + overlapLength,
+      );
+      const incoming = transcript.slice(0, overlapLength);
+      if (existing !== incoming) return { kind: 'reset', data: transcript };
+    }
+
+    if (transcriptEnd <= lastTranscriptEnd) {
+      return transcriptOffset === lastTranscriptOffset && transcript.length < lastTranscript.length
+        ? { kind: 'reset', data: transcript }
+        : { kind: 'noop' };
+    }
+
+    const delta = transcript.slice(lastTranscriptEnd - transcriptOffset);
+    return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
+  }
   if (transcript.startsWith(lastTranscript)) {
     const delta = transcript.slice(lastTranscript.length);
     return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
@@ -173,14 +261,26 @@ export function decideTermFeed(input: TermFeedInput): TermFeed {
 }
 
 /** Apply a feed decision to a terminal, writing raw bytes VERBATIM (no conversion, no sanitization). */
-export function applyTermFeed(term: TermWriter, feed: TermFeed): void {
+export function applyTermFeed(
+  term: TermWriter,
+  feed: TermFeed,
+  inputGuard?: TerminalInputGuard,
+): void {
+  const writeReplay = (data: string): void => {
+    if (inputGuard == null) {
+      term.write(data);
+      return;
+    }
+    inputGuard.suppressUntilDone((done) => term.write(data, done));
+  };
+
   if (feed.kind === 'reset') {
     term.reset();
-    if (feed.data.length > 0) term.write(feed.data);
+    if (feed.data.length > 0) writeReplay(feed.data);
     return;
   }
   if (feed.kind === 'append') {
-    if (feed.data.length > 0) term.write(feed.data);
+    if (feed.data.length > 0) writeReplay(feed.data);
   }
   // kind === 'noop' → nothing to write.
 }
