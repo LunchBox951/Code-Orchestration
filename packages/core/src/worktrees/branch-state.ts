@@ -66,7 +66,10 @@ export function probeWorktreeDirty(
   try {
     return isWorktreeDirty(sandboxPath, gitReader);
   } catch (cause) {
-    if (isAbsentDirError(cause)) return false;
+    // A sandbox that raced away after the pre-check makes git fail; the production reader collapses
+    // that to a plain "unable to read git status" Error (no ENOENT code), so re-check existence
+    // rather than matching cause.code. A still-present tree means a genuine status failure → re-throw.
+    if (!pathExists(sandboxPath) || isAbsentDirError(cause)) return false;
     throw cause;
   }
 }

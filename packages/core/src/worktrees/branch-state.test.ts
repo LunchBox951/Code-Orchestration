@@ -84,11 +84,15 @@ describe('branch-state git helpers', () => {
     });
 
     it('treats a raced-away sandbox ENOENT as clean', () => {
-      const fakeGitReader: GitReader = () => {
-        throw Object.assign(new Error('cwd vanished'), { code: 'ENOENT' });
-      };
+      // Model the PRODUCTION path: defaultGitRawReader swallows the missing-cwd ENOENT into `null`,
+      // so isWorktreeDirty throws a plain "unable to read git status" Error (no code). The probe must
+      // self-heal by re-checking existence — here pathExists is true on the pre-check, false on the
+      // post-check, mirroring the tree disappearing mid-probe.
+      const fakeGitReader: GitReader = () => null;
+      let calls = 0;
+      const pathExists = (): boolean => calls++ === 0;
 
-      expect(probeWorktreeDirty('/sbx', fakeGitReader, () => true)).toBe(false);
+      expect(probeWorktreeDirty('/sbx', fakeGitReader, pathExists)).toBe(false);
     });
 
     it('propagates present-sandbox status failures', () => {

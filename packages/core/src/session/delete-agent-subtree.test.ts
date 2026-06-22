@@ -552,6 +552,10 @@ describe('deleteAgentSubtree', () => {
       nowMs: 10_000,
       gitExec,
       gitReader,
+      // Treat the sandbox as PRESENT so the dirty decision flows through the injected gitReader's empty
+      // `status --porcelain` result — exercising the clean-from-git-status branch rather than the
+      // absent-path short-circuit already covered by the MAINT-A1 test.
+      sandboxPathExists: (path) => path === sandboxPath,
     });
 
     expect(result.deletedBranches).toContain('co/coord-x');
@@ -1434,10 +1438,19 @@ describe('deleteAgentSubtree', () => {
         if (branchDeleteAttempts === 1) throw new Error('transient branch delete failure');
       }
     };
+    // Make the dirty probe NON-VACUOUS on the RETRY only: report co/impl's sandbox dirty + present after
+    // the first pass, so the ONLY thing keeping the retry on the clean `branch -d` path is the
+    // `!wt.removed` short-circuit. Deleting that guard would route the retry into the dirty archive arm
+    // (force-remove + appendRecord) and break the assertions below — so the guard is load-bearing here.
+    // Pass 1 must stay clean (the probe sees an empty dirty set + absent path) so its clean remove +
+    // transient `branch -d` failure is what the retry recovers from.
+    const sandboxPath = '/data/worktrees/co/impl';
+    const dirtyPaths = new Set<string>();
+    let sandboxPresent = false;
     const gitReader = makeGitReader({
       existingBranches: new Set(['co/impl']),
       mergedBranches: new Set(['co/impl']),
-      dirtyPaths: new Set(),
+      dirtyPaths,
     });
     const opts = {
       openRoster: () => roster,
@@ -1448,6 +1461,7 @@ describe('deleteAgentSubtree', () => {
       nowMs: 10_000,
       gitExec,
       gitReader,
+      sandboxPathExists: (path: string) => sandboxPresent && path === sandboxPath,
     };
 
     let firstError: unknown;
@@ -1463,6 +1477,11 @@ describe('deleteAgentSubtree', () => {
     expect(archive.records).toEqual([]);
     expect(roster.getAgent('impl')).toBeDefined();
 
+    // Now make the probe non-vacuous: the retry's worktree IS dirty + present. Only the `!wt.removed`
+    // short-circuit (the worktree was removed on pass 1) keeps the retry on the clean `branch -d` path.
+    dirtyPaths.add(sandboxPath);
+    sandboxPresent = true;
+
     const result = deleteAgentSubtree('proj', 'coord-x', opts);
 
     expect(result.removed).toEqual(['impl', 'coord-x']);
@@ -1470,6 +1489,8 @@ describe('deleteAgentSubtree', () => {
     expect(result.archivedBranches).toEqual([]);
     expect(branchDeleteAttempts).toBe(2);
     expect(archive.records).toEqual([]);
+    // The dirty archive arm did NOT fire on the retry — the `!wt.removed` guard kept it on `branch -d`.
+    expect(worktreeStore.removeForce).toEqual([]);
     expect(worktreeStore.removedBranches).toEqual(['co/impl']);
     expect(sessions.getSession('impl')).toBeUndefined();
     expect(roster.getAgent('impl')).toBeUndefined();

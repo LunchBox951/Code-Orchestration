@@ -224,8 +224,10 @@ function snapshotMergeTeardownResidue(
       `co_merge: dirty teardown snapshot for '${branch}' did not return a commit sha.`,
     );
   }
+  // Reset the REVIEWED branch back to its PASSed head before returning (the snapshot must not move the
+  // source branch). The archive ref is created by the caller AFTER it appends the archive record, so a
+  // failure between snapshot and record never leaves a record-less ref that the reaper cannot purge.
   const archiveBranch = archiveBranchForMergeTeardown(branch, snapshotSha);
-  gitExec(repoCwd, ['update-ref', `refs/heads/${archiveBranch}`, snapshotSha]);
   gitExec(repoCwd, ['update-ref', `refs/heads/${branch}`, reviewedHead]);
   return { snapshotSha, archiveBranch };
 }
@@ -385,12 +387,13 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
       ...(operatorOverride ? {} : { parentResolver: roleParentResolver(ctx.roster) }),
       // Merge-time teardown trigger (AC-L5-7): the merge gate tears the merged branch's sandbox down
       // AFTER the merge is recorded + the slot released — never before (the review-finalize cure).
-      // #76: the just-merged sandbox can still hold uncommitted/untracked working files (handoff docs,
-      // build artifacts). A plain `git worktree remove` (no --force) is REFUSED by git on a dirty tree.
-      // Preserve that residue without moving the REVIEWED source branch: snapshot in the sandbox, create
-      // a separate archive branch pointing at the snapshot, reset the reviewed branch back to its PASSed
-      // head, record the archive branch, then force-remove the dirty sandbox. Owner `co_push` still
-      // validates the original branch against the merge commit, while the residue remains restoreable.
+      // #76: the just-merged sandbox can still hold uncommitted/untracked working files (handoff docs).
+      // A plain `git worktree remove` (no --force) is REFUSED by git on a dirty tree.
+      // Preserve that residue without moving the REVIEWED source branch: snapshot in the sandbox, reset
+      // the reviewed branch back to its PASSed head, record the archive (record FIRST so a failure never
+      // leaks a record-less ref), create a separate archive branch pointing at the snapshot, then
+      // force-remove the dirty sandbox. Owner `co_push` still validates the original branch against the
+      // merge commit, while the residue remains restoreable.
       // The dirty PROBE is defensive: if the sandbox dir is already gone, fall through to the plain
       // remove, which tolerates an absent dir idempotently.
       teardown: {
@@ -402,12 +405,15 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
                 'co_merge: the mount did not inject an archive store (ctx.archive absent).',
               );
             }
-            const { archiveBranch } = snapshotMergeTeardownResidue(
+            const { snapshotSha, archiveBranch } = snapshotMergeTeardownResidue(
               repoCwd,
               wt.path,
               branch,
               branchHead,
             );
+            // Append the archive RECORD before creating the archive ref: the reaper purges by record
+            // (it tolerates a missing branch), so a record-without-ref self-heals while a ref-without-
+            // record would leak forever — pin the ordering record-first (Principle 9 — no invisible refs).
             const nowMs = ctx.nowMs ?? Date.now();
             ctx.archive.appendRecord({
               id: archiveBranch,
@@ -417,6 +423,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
               deletedAt: nowMs,
               expiresAt: nowMs + ARCHIVE_TTL_MS,
             });
+            defaultGitExec(repoCwd, ['update-ref', `refs/heads/${archiveBranch}`, snapshotSha]);
             worktrees.removeWorktree(branch, { repoCwd, force: true });
             return;
           }

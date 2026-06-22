@@ -49,6 +49,8 @@ import { defaultGitExec, type GitExec } from '../worktrees/sling.js';
 import { isMissingBranchDeleteError } from '../worktrees/branch-delete.js';
 import { defaultGitReader, type GitReader } from '../worktrees/detect-base.js';
 
+// Re-exported for backward-compat; defined in archive/events.ts (preserves the existing
+// `from './session/delete-agent-subtree.js'` public import path).
 export { ARCHIVE_TTL_MS };
 
 export interface DeleteAgentSubtreeDeps {
