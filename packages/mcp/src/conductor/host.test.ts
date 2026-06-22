@@ -1032,15 +1032,19 @@ describe('serveConductor — wires the full stack over injected seams (no real b
 
     const worktrees = openWorktreeStore(projectId);
     worktreeStores.push(worktrees);
+    const sandboxPath = worktreePathFor(projectId, 'co/coord-x');
     worktrees.recordWorktree({
       branch: 'co/coord-x',
       baseRef: 'main',
       baseSha: 'abc123',
-      path: worktreePathFor(projectId, 'co/coord-x'),
+      path: sandboxPath,
       parent: OPERATOR,
       agent: 'coord-x',
       role: 'coordinator',
     });
+    // The sandbox dir exists on disk so the worktree-remove git op actually runs (not the
+    // already-absent tolerated path), letting the injected gitExec below force a real failure.
+    mkdirSync(sandboxPath, { recursive: true });
 
     const clock = makeClock();
     const qw = makeQuietWindow();
@@ -1052,6 +1056,13 @@ describe('serveConductor — wires the full stack over injected seams (no real b
       quietWindow: qw.quietWindow,
       scheduler: new FakeScheduler(),
       autoStart: true,
+      // Force a GENUINE durable teardown failure: `git worktree remove` throws. (Previously this
+      // test relied on a missing branch ref to fail, but #65 makes that case succeed by design.)
+      gitExec: (_cwd, args) => {
+        if (args[0] === 'worktree' && args[1] === 'remove') {
+          throw new Error('simulated durable teardown failure');
+        }
+      },
     });
 
     expect(runner.control!.router.shouldSkip(projectId, 'coord-x')).toBe(false);
