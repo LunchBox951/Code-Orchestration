@@ -1099,7 +1099,7 @@ async function operatorPassViaIpc(
     observe: () => {
       throw new Error('sh1-dry-run: operator-IPC observe is not used by the review path');
     },
-    transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
+    transcriptTail: (agentId) => ({ agentId, generation: 0, offset: 0, tail: '' }),
     onTranscript: () => () => {},
     // These store factories need no afterEach tracking: resolveReviewContext OWNS each store's lifecycle —
     // it opens one per read and closes it in a `finally` before the next read (open→read→close, see

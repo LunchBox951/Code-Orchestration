@@ -492,6 +492,9 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     const w = out['waiting'] as Record<string, unknown>;
     expect(typeof w['message']).toBe('string');
     expect((w['message'] as string).length).toBeGreaterThan(0);
+    // Provider-maxed WAITING also carries a one-line next-step (re-issue co_sling once capacity recovers).
+    expect(typeof w['next_step']).toBe('string');
+    expect(w['next_step'] as string).toMatch(/re-issue this co_sling/i);
     expect(w['maxed_accounts']).toBeUndefined();
 
     // No sandbox created (branch/worktree_path absent)
@@ -723,6 +726,7 @@ describe('co_sling — output schema shape', () => {
         status: 'waiting',
         waiting: {
           message: 'delayed',
+          next_step: 'retry later',
           reason: 'usage source unavailable',
           maxed_providers: ['gemini'],
           unavailable_providers: [],
@@ -734,6 +738,7 @@ describe('co_sling — output schema shape', () => {
         status: 'waiting',
         waiting: {
           message: 'delayed',
+          next_step: 'retry later',
           reason: 'usage source unavailable',
           maxed_providers: ['claude'],
           unavailable_providers: [],
@@ -765,6 +770,7 @@ describe('co_sling — output schema shape', () => {
         status: 'waiting',
         waiting: {
           message: 'delayed',
+          next_step: 'retry later',
           reason: 'usage source unavailable',
           maxed_providers: ['claude'],
           maxed_accounts: [accountForProvider('claude')],
@@ -777,6 +783,7 @@ describe('co_sling — output schema shape', () => {
         status: 'waiting',
         waiting: {
           message: 'delayed',
+          next_step: 'retry later',
           reason: 'usage source unavailable',
           maxed_providers: ['claude'],
           unavailable_providers: [],
@@ -811,10 +818,12 @@ describe('co_sling — L6b E4 child-cap (queue-as-WAITING for excess dispatches)
       parent: 'lead-7',
       agent: 'impl-c',
       branch: 'co/over-cap',
-    })) as { status: string; waiting?: { reason: string; message: string } };
+    })) as { status: string; waiting?: { reason: string; message: string; next_step: string } };
 
     expect(out.status).toBe('waiting');
     expect(out.waiting?.reason).toMatch(/max active children reached \(2\/2\)/);
+    // A WAITING payload carries a one-line next-step telling the agent how to make progress.
+    expect(out.waiting?.next_step).toMatch(/free a slot.*re-issue this co_sling/i);
     // No sandbox is created for the queued dispatch.
     expect(ctx.worktrees?.getWorktree('co/over-cap')).toBeUndefined();
     expect(() => git(repo, 'rev-parse', '--verify', 'co/over-cap')).toThrow();

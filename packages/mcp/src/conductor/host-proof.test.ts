@@ -26,6 +26,7 @@ import {
   openMailStore,
   openRegistry,
   openRosterStore,
+  roleBasePrompt,
   type DeliveredMail,
   type MailStore,
   type NodePtyModule,
@@ -1148,6 +1149,10 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
       // MCP-tool approval prompt (PLACEHOLDER — pending live verification).
       '--ask-for-approval',
       'never',
+      // Role base-prompt config override (PR D item 1): the host-proof pane is threaded its role
+      // too, so the coordinator base prompt rides along as a `-c` override.
+      '-c',
+      `developer_instructions=${JSON.stringify(roleBasePrompt('coordinator'))}`,
       '--add-dir',
       `${dataDir}/sockets`,
     ]);
@@ -1169,6 +1174,40 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
       path: `${dataDir}/isolated/host-proof-codex/auth.json`,
       contents: '{"codex":true}\n',
     });
+  });
+
+  it('preserves sub-role identity in Codex prompt args and scoped co-mcp env', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const identity: HostedIdentity = {
+      agent: 'host-proof-codex-test',
+      role: 'implementer',
+      subRole: 'test',
+      parent: 'coord-1',
+      pane: 'host-proof-pane-codex-test',
+      projectId,
+      cwd,
+      provider: 'codex',
+      resume: { provider: 'codex', codexHome: join(dataDir, 'isolated', 'host-proof-codex-test') },
+    };
+
+    const spec = buildHostProofSpawnSpec(identity, {
+      isolatedHomeDir: join(dataDir, 'isolated', identity.agent),
+      coMcpCommand: '/usr/bin/node',
+      coMcpArgs: ['/repo/packages/mcp/dist/bin.js'],
+      coMcpBridgeSocketPath: () => `${dataDir}/sockets/co.sock`,
+      coCliCommand: '/repo/packages/cli/dist/index.js',
+      codexAuthJson: '{"codex":true}\n',
+    });
+
+    const flagIdx = spec.args.indexOf('-c');
+    expect(flagIdx).toBeGreaterThanOrEqual(0);
+    const override = spec.args[flagIdx + 1] ?? '';
+    expect(override).toContain('developer_instructions=');
+    expect(override).toContain('Sub-role focus (implementer:test)');
+    expect(override).toContain('test-first');
+    const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
+    expect(configToml).toBeDefined();
+    expect(configToml!.contents).toContain('CO_ROLE = "implementer:test"');
   });
 });
 

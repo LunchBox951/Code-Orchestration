@@ -610,32 +610,40 @@ export type {
   UsageObservedUnavailable,
   CostRecorded,
   CostNearBudget,
+  ToolInvoked,
   UsageBucket,
   UsageAccountStatus,
   CostRollup,
   CostRollupKind,
   NearBudgetRecord,
+  AgentToolUsage,
 } from './dispatch/events.js';
 export {
   DISPATCH_EVENT_V,
   EVENT_USAGE_OBSERVED,
   EVENT_COST_RECORDED,
   EVENT_COST_NEAR_BUDGET,
+  EVENT_TOOL_INVOKED,
   USAGE_SCOPE_PREFIX,
   COST_SCOPE_PREFIX,
+  TOOL_SCOPE_PREFIX,
   usageScope,
   costScope,
+  toolScope,
   providerSchema,
   usageObservedAvailableSchema,
   usageObservedUnavailableSchema,
   usageObservedSchema,
   costRecordedSchema,
+  hasMeasuredCostField,
   costNearBudgetSchema,
+  toolInvokedSchema,
   dispatchSchemas,
   dispatchUpcasters,
   makeUsageObservedEvent,
   makeCostRecordedEvent,
   makeCostNearBudgetEvent,
+  makeToolInvokedEvent,
 } from './dispatch/events.js';
 export {
   UsageProjector,
@@ -657,6 +665,22 @@ export {
   selectNearBudgetBySeq,
   selectNearBudgetEvents,
 } from './dispatch/cost-projector.js';
+// L4 tool-usage collection: the durable, replay-safe per-agent tool-call projection (#67-adjacent),
+// the counterpart to the engine's in-memory ToolActivityEvent watchdog seam.
+export {
+  ToolUsageProjector,
+  ensureToolUsageTables,
+  isProductiveCoTool,
+  rowToAgentToolUsage,
+  selectAgentToolUsage,
+  selectAllAgentToolUsage,
+} from './dispatch/tool-usage-projector.js';
+// L4 live per-turn COST collection parsers (spec §4.2): the fail-soft Claude transcript JSONL reader +
+// the Codex logs_2.sqlite token_count reader the host wires into the engine's captureTurnCost seam.
+export type { ClaudeTurnCost } from './dispatch/claude-source.js';
+export { parseClaudeTranscriptTurnCost } from './dispatch/claude-source.js';
+export type { CodexTurnCost } from './dispatch/codex-source.js';
+export { parseCodexTokenCount, readLatestCodexTokenCount } from './dispatch/codex-source.js';
 // L4-1 PURE policy (AC10, Principle 16): headroom as a discriminated value (never a magic number),
 // near-budget edge trigger, and a clock-free staleness predicate (injected `now` — replay-deterministic).
 export type { Headroom, StaleInput, BudgetInput } from './dispatch/policy.js';
@@ -675,6 +699,7 @@ export type {
   DispatchStore,
   BudgetCap,
   CostRecordResult,
+  AgentCostRollup,
   UsageObservedResult,
   SnapshotIngestResult,
 } from './dispatch/dispatch-store.js';
@@ -850,6 +875,7 @@ export {
 export type {
   CodexAccountInfo,
   CodexRateLimitsReading,
+  CodexTokenCountReadout,
   CodexUsageSourceDeps,
   CodexUsageSourceOptions,
   CodexCli,
@@ -869,6 +895,7 @@ export {
   parseCodexRateLimits,
   readLatestCodexRateLimits,
   readLatestRolloutRateLimits,
+  readLatestCodexTokenCountReadout,
 } from './dispatch/codex-source.js';
 export type { UsageSourceAttempt } from './dispatch/usage-adapter-common.js';
 export { buildSnapshot, layeredRead } from './dispatch/usage-adapter-common.js';
@@ -918,16 +945,40 @@ export {
   calcLibScenario,
   getOrchestrationScenario,
 } from './bench/orchestration-scenarios.js';
+// AgentCostRollup / AgentToolUsage are exported from the dispatch read-model (PR #81) above — the
+// canonical source. bench-econ-types keeps structurally-identical local copies for bench-internal use.
 export type {
   ProviderMode,
   RunFidelity,
   StopReason,
   AgentRunMetric,
+  NormalizedAgentRunMetric,
+  ArtifactCheckWithCases,
+  AgentTokenEconomy,
+  AgentToolEfficiency,
   MergeOutcome,
   OrchestrationRunInput,
   OrchestrationScorecard,
+  NormalizedOrchestrationScorecard,
+  RunScores,
+  RoleScoreAggregate,
 } from './bench/orchestration-metrics.js';
-export { summarizeRun, toJsonl, renderScorecard } from './bench/orchestration-metrics.js';
+export {
+  summarizeRun,
+  toJsonl,
+  renderScorecard,
+  correctnessScore,
+  tokenEconomyScore,
+  cacheEfficiency,
+  contextEfficiencyScore,
+  buildTokenEconomy,
+  buildToolEfficiency,
+  budgetTokensForScenario,
+  clamp01,
+  BUDGET_TOKENS_BY_SCENARIO,
+  DEFAULT_BUDGET_TOKENS,
+  CONTEXT_EFFICIENCY_WEIGHTS,
+} from './bench/orchestration-metrics.js';
 
 // L6a Phase A — authoritative role profiles + durable agent→role→parent projection + spawn rules
 // (AC-L6a-1, AC-L6a-3, AC-L6a-8, AC-L6a-9, AC-L6a-10). Five base roles promoted from a seed
@@ -936,7 +987,12 @@ export { summarizeRun, toJsonl, renderScorecard } from './bench/orchestration-me
 // event-sourced agent→role→parent projection (`roster` table) is replay-equal over L0. Structural
 // spawn rules are a pure static check (no spawn runtime — that is L7).
 export type { RoleProfile, WriteScope, Capability, RoleProfileViolation } from './roles/profile.js';
-export { ROLE_PROFILES, profileFor, checkRoleProfileCompleteness } from './roles/profile.js';
+export {
+  ROLE_PROFILES,
+  profileFor,
+  roleBasePrompt,
+  checkRoleProfileCompleteness,
+} from './roles/profile.js';
 // L6a roles events: `agent.registered` — the durable, validated record of which role an agent was
 // dispatched under and who spawned it. Event-sourced over L0 (program-data only, Principle 12).
 export type { AgentRegistered, AgentRemoved, AgentRecord } from './roles/events.js';
@@ -1341,6 +1397,22 @@ export { isMissingBranchDeleteError } from './worktrees/branch-delete.js';
 export type { PrelaunchFile, SpawnSpec, PtyExit, Pane, PtyHost } from './pty/pty-host.js';
 export type { FakePtyPane } from './pty/fake-pty.js';
 export { FakePty } from './pty/fake-pty.js';
+export type {
+  RetainedTail,
+  TranscriptReplayBoundary,
+  TranscriptReplayBoundaryKind,
+  TranscriptTailAccumulatorSnapshot,
+  TranscriptTailRetentionOptions,
+} from './pty/transcript-tail.js';
+export {
+  TRANSCRIPT_REPLAY_BOUNDARY_SCAN_OVERLAP,
+  TRANSCRIPT_TAIL_MAX_CHARS,
+  TRANSCRIPT_TAIL_HARD_MAX_CHARS,
+  retainTranscriptTail,
+  scanTranscriptReplayBoundaries,
+  transcriptTailFrom,
+  TranscriptTailAccumulator,
+} from './pty/transcript-tail.js';
 
 // L7 B1 — startup interstitial state machine (PURE, provider-aware): classify a freshly-spawned
 // claude/codex TUI's startup dialogs from the whitespace-normalized output, and drive a Pane through

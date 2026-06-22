@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { z } from 'zod';
 import { assertRepoPristine } from '../config/pristine.js';
 import {
   MAIL_CHAT,
@@ -26,6 +27,19 @@ const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
 let repoDirs: string[] = [];
 const CWD = '/work/p-tools'; // a fixed logical worktree path; the mail/status tools never touch disk
+
+function distinctiveToolFieldIdentifiers(): string[] {
+  const out = new Set<string>();
+  for (const spec of buildCoreRegistry().list()) {
+    const schema = spec.inputSchema;
+    if (schema instanceof z.ZodObject) {
+      for (const field of Object.keys(schema.shape)) {
+        if (field.includes('_')) out.add(field);
+      }
+    }
+  }
+  return [...out];
+}
 
 function useDataDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'co-tools-'));
@@ -96,6 +110,7 @@ type StatusOut = {
   cwd: string;
   outstanding: number;
   inbox_unread: number;
+  next_action?: { type: string; subject: string; sender: string };
 };
 type OrientOut = { guidance: string };
 
@@ -152,6 +167,41 @@ describe('buildCoreRegistry — the canonical single source of truth', () => {
   it('co_pr_merge public contract names the required pr_merge PASS', () => {
     const prMerge = buildCoreRegistry().get('co_pr_merge');
     expect(prMerge?.description).toMatch(/pr_merge PASS/);
+  });
+
+  // PR D — item 4: the costliest tool descriptions were trimmed ≥30% (rationale moved to JSDoc;
+  // .describe() stays syntax-focused). These are regression GUARDS keyed to the post-trim lengths,
+  // so a future re-bloat past the trimmed budget fails loudly. Baselines (pre-trim → post-trim):
+  //   co_research_finalize 362→164, co_plan_ingest 495→232, co_review_finalize 282→182,
+  //   co_pr_merge 363→231, co_sling 451→282.
+  it('the five costliest tool descriptions stay within their trimmed budgets (≥30% cut held)', () => {
+    const reg = buildCoreRegistry();
+    const budgets: Record<string, { preTrim: number; max: number }> = {
+      co_research_finalize: { preTrim: 362, max: 200 },
+      co_plan_ingest: { preTrim: 495, max: 280 },
+      co_review_finalize: { preTrim: 282, max: 197 },
+      co_pr_merge: { preTrim: 363, max: 254 },
+      co_sling: { preTrim: 451, max: 290 },
+    };
+    const requiredTerms: Record<string, RegExp[]> = {
+      co_research_finalize: [/locator map/i, /cited answer/i, /Researcher-only/i],
+      co_plan_ingest: [/locked spec/i, /wired verify/i, /DAG/i, /Coordinator-only/i],
+      co_review_finalize: [/PASS or ISSUES/i, /blocker/i, /merges nothing/i],
+      co_pr_merge: [/pull request/i, /pr_merge PASS/i, /audited override/i],
+      co_sling: [/baseline/i, /dispatch policy/i, /WAITING/i, /no sandbox/i],
+    };
+    for (const [name, { preTrim, max }] of Object.entries(budgets)) {
+      const desc = reg.get(name)?.description ?? '';
+      expect(desc.length, `${name} description should be non-empty`).toBeGreaterThan(0);
+      expect(desc.length, `${name} description within trimmed budget`).toBeLessThanOrEqual(max);
+      // The budget itself is ≥30% below the pre-trim baseline — the cut is real, not cosmetic.
+      expect(max, `${name} budget is ≥30% below baseline`).toBeLessThanOrEqual(
+        Math.floor(preTrim * 0.7),
+      );
+      for (const term of requiredTerms[name] ?? []) {
+        expect(desc, `${name} retained semantic term ${term}`).toMatch(term);
+      }
+    }
   });
 });
 
@@ -610,9 +660,64 @@ describe('co_status — the honest L2 agent record; counts track the bus', () =>
       close();
     }
   });
+
+  it('surfaces next_action: the oldest outstanding ACTIONABLE item (type+subject+sender)', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      // No outstanding mail → no next_action (a quiet inbox tells the agent there is nothing to do).
+      const quiet = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(quiet.next_action).toBeUndefined();
+
+      // Two actionable items arrive in order; FIFO means the FIRST is the one to act on next.
+      await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'first question',
+        body: 'a?',
+      });
+      await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'second question',
+        body: 'b?',
+      });
+
+      const status = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(status.outstanding).toBe(2);
+      expect(status.next_action).toEqual({
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'first question',
+        sender: 'worker',
+      });
+    } finally {
+      close();
+    }
+  });
+
+  it('next_action ignores non-actionable mail (informational notices are not "to do")', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      // A chat message is informational, not actionable — it lifts inbox_unread but must NOT
+      // become a next_action (outstanding tracks only items that demand a response).
+      await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CHAT,
+        subject: 'fyi',
+        body: 'heads up',
+      });
+      const status = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(status.inbox_unread).toBe(1);
+      expect(status.outstanding).toBe(0);
+      expect(status.next_action).toBeUndefined();
+    } finally {
+      close();
+    }
+  });
 });
 
 describe('co_orient — workflow-only guidance (Principle 5: schemas are the syntax source)', () => {
+  const distinctiveFieldTokens = distinctiveToolFieldIdentifiers();
+
   it('returns non-empty workflow guidance and restates NO tool field-name list', async () => {
     const { reg, ctx, close } = setup();
     try {
@@ -621,17 +726,8 @@ describe('co_orient — workflow-only guidance (Principle 5: schemas are the syn
       expect(out.guidance.toLowerCase()).toContain('mail'); // it teaches the coordination workflow
 
       // The schemas are the single syntax source — orient must not restate any tool's fields.
-      const FORBIDDEN_FIELD_TOKENS = [
-        'in_reply_to',
-        'idempotency_key',
-        'unread_only',
-        'thread_id',
-        'head_sha',
-        'inbox_unread',
-        'correlation_id',
-        'causation_id',
-      ];
-      for (const token of FORBIDDEN_FIELD_TOKENS) {
+      expect(distinctiveFieldTokens.length).toBeGreaterThan(0);
+      for (const token of distinctiveFieldTokens) {
         expect(out.guidance).not.toContain(token);
       }
     } finally {
@@ -647,7 +743,9 @@ describe('co_orient — workflow-only guidance (Principle 5: schemas are the syn
         topic: 'finish',
       })) as OrientOut;
       expect(out.guidance).toContain('implementer');
-      expect(out.guidance).not.toContain('in_reply_to');
+      for (const token of distinctiveFieldTokens) {
+        expect(out.guidance).not.toContain(token);
+      }
     } finally {
       close();
     }

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AgentsConsoleVM, CONSOLE_TRANSCRIPT_MAX_CHARS } from './agents-console-vm.js';
+import { TRANSCRIPT_TAIL_HARD_MAX_CHARS } from '@co/core';
 import type {
   OperatorObservation,
   ObservabilitySnapshot,
@@ -54,8 +55,18 @@ const staticObs = (agents: readonly AgentRecord[]): OperatorObservation => ({
   reason: 'conductor-not-running',
 });
 
-const tail = (agentId: string, text: string, offset = 0) => ({ agentId, offset, tail: text });
-const push = (agentId: string, chunk: string, offset = 0) => ({ agentId, offset, chunk });
+const tail = (agentId: string, text: string, offset = 0, generation = 0) => ({
+  agentId,
+  generation,
+  offset,
+  tail: text,
+});
+const push = (agentId: string, chunk: string, offset = 0, generation = 0) => ({
+  agentId,
+  generation,
+  offset,
+  chunk,
+});
 
 // ── AgentsConsoleVM ───────────────────────────────────────────────────────────
 
@@ -479,6 +490,194 @@ describe('AgentsConsoleVM — appendChunk', () => {
     vm.setTranscriptTail(tail('a1', oversize));
     expect(vm.state.transcript).toHaveLength(CONSOLE_TRANSCRIPT_MAX_CHARS);
     expect(vm.state.transcript.endsWith('X')).toBe(true);
+  });
+});
+
+// #66 sub-bug B — the renderer-side alt-screen-aware bound is exercised through the real VM API below
+// (the `renderer cap has STRICT headroom` and `alt-screen-aware bound over the reconstructed transcript`
+// blocks); the underlying core boundary policy is covered by packages/core/src/pty/transcript-tail.test.ts.
+// ESC authored as a `\u` escape so the SOURCE holds no raw control byte (the C2 pristine-repo rule).
+const ESC = '\u001B';
+const ALT_ENTER = ESC + '[?1049h'; // DEC private mode 1049 set — switch to the alternate screen
+
+// The engine's HARD ceiling on the retained tail (`TRANSCRIPT_TAIL_HARD_MAX_CHARS` in `@co/mcp` — 4 × 64
+// KiB). Imported from the shared core contract so the test fails if the engine ceiling changes without
+// preserving renderer headroom.
+const ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS = TRANSCRIPT_TAIL_HARD_MAX_CHARS;
+
+describe('AgentsConsoleVM — renderer cap has STRICT headroom over the engine ceiling (#66 round-2)', () => {
+  it('a ceiling-sized engine tail leading with ESC[?1049h + a live append STILL leads with ESC[?1049h', () => {
+    // Round-2 regression: the engine hands the renderer a tail up to its HARD ceiling that LEADS with the
+    // alt-screen-enter. The renderer then appends live chunks on top before re-bounding. If the renderer cap
+    // EQUALLED the engine ceiling (the round-1 bug), `ceiling-sized tail + append` would exceed the cap and
+    // the alt-screen-aware front-drop would re-slice the leading enter away at that boundary — re-introducing
+    // the garble. With the renderer cap sitting strictly ABOVE the engine ceiling, the join fits and the
+    // leading enter survives. This assertion FAILS when the cap == the engine ceiling, PASSES with headroom.
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    // A ceiling-sized engine tail: exactly TRANSCRIPT_TAIL_HARD_MAX_CHARS chars that LEAD with the enter,
+    // just as `transcriptTailFrom` produces when it anchors back to the alt-screen-enter at the ceiling.
+    const engineTail =
+      ALT_ENTER + 'E'.repeat(ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS - ALT_ENTER.length);
+    expect(engineTail.length).toBe(ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS);
+    vm.setTranscriptTail(tail('a1', engineTail));
+    // Sanity: the ceiling-sized backfill alone still leads with the enter (it is < the renderer cap).
+    expect(vm.state.transcript.startsWith(ALT_ENTER)).toBe(true);
+
+    // A live append on top of the ceiling-sized tail — this is what re-slices the front under the old cap.
+    const liveAppend = 'L'.repeat(4_096);
+    vm.appendChunk(push('a1', liveAppend, engineTail.length));
+
+    // The load-bearing invariant: the reconstructed transcript STILL leads with the alt-screen-enter, so a
+    // real TUI redraw replays cleanly. The renderer's headroom over the engine ceiling is what guarantees it.
+    expect(vm.state.transcript.startsWith(ALT_ENTER)).toBe(true);
+    expect(vm.state.transcript.includes(ALT_ENTER)).toBe(true);
+    expect(vm.state.transcript.endsWith(liveAppend)).toBe(true);
+    // The renderer cap must be strictly above the engine ceiling for the headroom invariant to hold at all.
+    expect(CONSOLE_TRANSCRIPT_MAX_CHARS).toBeGreaterThan(ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS);
+  });
+});
+
+describe('AgentsConsoleVM — alt-screen-aware bound over the reconstructed transcript (#66 sub-bug B)', () => {
+  it('keeps the early ESC[?1049h after a >cap stream (FAILS under the old flat segment-store drop)', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    // Older scrollback, then the alt-screen setup, then redraw frames — streamed as successive chunks so
+    // the segment store has to bound itself. The whole reconstruction exceeds the cap but the enter stays
+    // inside the most-recent-cap window; the old alt-screen-UNAWARE segment-store drop sliced it off.
+    const head = 'H'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS);
+    const setup = ALT_ENTER + ESC + '[2J' + ESC + '[H';
+    const frames = 'F'.repeat(Math.floor(CONSOLE_TRANSCRIPT_MAX_CHARS / 2));
+    vm.setTranscriptTail(tail('a1', head));
+    vm.appendChunk(push('a1', setup, head.length));
+    vm.appendChunk(push('a1', frames, head.length + setup.length));
+
+    // The reconstructed transcript STILL leads with the alt-screen-enter — the garble is prevented.
+    expect(vm.state.transcript.includes(ALT_ENTER)).toBe(true);
+    expect(vm.state.transcript.startsWith(ALT_ENTER)).toBe(true);
+    expect(vm.state.transcript.length).toBeLessThanOrEqual(CONSOLE_TRANSCRIPT_MAX_CHARS);
+  });
+});
+
+describe('AgentsConsoleVM — nonzero transcript offsets and live gaps', () => {
+  it('tracks the retained transcript offset in state', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    vm.setTranscriptTail(tail('a1', 'retained', 100));
+
+    expect(vm.state.transcript).toBe('retained');
+    expect(vm.state.transcriptOffset).toBe(100);
+  });
+
+  it('ignores stale live chunks wholly before a nonzero retained tail', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'retained-tail', 100));
+
+    const result = vm.appendChunk(push('a1', 'old-', 50));
+
+    expect(result).toBe('ignored');
+    expect(vm.state.transcript).toBe('retained-tail');
+    expect(vm.state.transcriptOffset).toBe(100);
+  });
+
+  it('does not let an older conflicting overlap replace a nonzero retained tail', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'CDE', 100));
+
+    const result = vm.appendChunk(push('a1', 'ABXY', 98));
+
+    expect(result).toBe('ignored');
+    expect(vm.state.transcript).toBe('CDE');
+    expect(vm.state.transcriptOffset).toBe(100);
+  });
+
+  it('treats offset-zero live chunks as a new generation before stale clipping', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'CDE', 100));
+
+    const result = vm.appendChunk(push('a1', 'AB', 0));
+
+    expect(result).toBe('applied');
+    expect(vm.state.transcript).toBe('AB');
+    expect(vm.state.transcriptOffset).toBe(0);
+  });
+
+  it('keeps the full offset-zero live chunk when resetting from a nonzero retained tail', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'retained', 100));
+
+    const next = 'A'.repeat(110);
+    const result = vm.appendChunk(push('a1', next, 0));
+
+    expect(result).toBe('applied');
+    expect(vm.state.transcript).toBe(next);
+    expect(vm.state.transcriptOffset).toBe(0);
+  });
+
+  it('resets on newer transcript generation even when offset zero shares the old prefix', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'startup old tail', 0, 1));
+
+    const result = vm.appendChunk(push('a1', 'startup new', 0, 2));
+
+    expect(result).toBe('applied');
+    expect(vm.state.transcript).toBe('startup new');
+    expect(vm.state.transcriptGeneration).toBe(2);
+    expect(vm.state.transcriptOffset).toBe(0);
+  });
+
+  it('ignores stale transcript generations after a newer generation is visible', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'new', 0, 2));
+
+    expect(vm.appendChunk(push('a1', 'old', 0, 1))).toBe('ignored');
+    vm.setTranscriptTail(tail('a1', 'old tail', 0, 1));
+
+    expect(vm.state.transcript).toBe('new');
+    expect(vm.state.transcriptGeneration).toBe(2);
+  });
+
+  it('reports a forward live gap instead of silently concatenating missing bytes', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'base', 100));
+
+    const result = vm.appendChunk(push('a1', 'later', 120));
+
+    expect(result).toBe('gap');
+    expect(vm.state.transcript).toBe('base');
+    expect(vm.state.transcriptOffset).toBe(100);
+  });
+
+  it('keeps the newest contiguous suffix when backfill and live chunks are disjoint', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    vm.appendChunk(push('a1', 'later', 120));
+    vm.setTranscriptTail(tail('a1', 'base', 100));
+
+    expect(vm.state.transcript).toBe('later');
+    expect(vm.state.transcriptOffset).toBe(120);
   });
 });
 

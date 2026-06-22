@@ -299,8 +299,8 @@ function makeControl(
     // engine's global stream to this project. The cross-process proofs run against these real accessors.
     transcriptTail: (agentId) => engine.transcriptTailSnapshot(projectId, agentId),
     onTranscript: (listener) =>
-      engine.onTranscript((pid, agent, chunk, offset) => {
-        if (pid === projectId) listener(agent, chunk, offset);
+      engine.onTranscript((pid, agent, generation, chunk, offset) => {
+        if (pid === projectId) listener(agent, generation, chunk, offset);
       }),
     reviewContext,
     deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
@@ -345,8 +345,8 @@ function wireTranscriptPush(
   control: ConductorControlSurface,
   server: OperatorIpcServer,
 ): () => void {
-  return control.onTranscript((agentId, chunk, offset) =>
-    server.pushTranscript(agentId, chunk, offset),
+  return control.onTranscript((agentId, generation, chunk, offset) =>
+    server.pushTranscript(agentId, generation, chunk, offset),
   );
 }
 
@@ -863,7 +863,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     const fakeControl = {
       router: {} as DaemonBackedAgentRouter,
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
-      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
@@ -881,9 +881,9 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     });
     Object.defineProperty(server, 'transport', { value: fakeTransport });
 
-    server.pushTranscript('impl-x', 'one', 0);
-    server.pushTranscript('impl-x', 'two', 3);
-    server.pushTranscript('impl-x', 'three', 6);
+    server.pushTranscript('impl-x', 0, 'one', 0);
+    server.pushTranscript('impl-x', 0, 'two', 3);
+    server.pushTranscript('impl-x', 0, 'three', 6);
 
     expect(fakeTransport.send).toHaveBeenCalledTimes(1);
     releaseFirst();
@@ -916,7 +916,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     const fakeControl = {
       router: {} as DaemonBackedAgentRouter,
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
-      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
@@ -934,9 +934,9 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     });
     Object.defineProperty(server, 'transport', { value: fakeTransport });
 
-    server.pushTranscript('impl-x', 'old-in-flight', 0);
-    server.pushTranscript('impl-x', 'old-pending', 'old-in-flight'.length);
-    server.pushTranscript('impl-x', 'new-generation', 0);
+    server.pushTranscript('impl-x', 0, 'old-in-flight', 0);
+    server.pushTranscript('impl-x', 0, 'old-pending', 'old-in-flight'.length);
+    server.pushTranscript('impl-x', 0, 'new-generation', 0);
 
     expect(fakeTransport.send).toHaveBeenCalledTimes(1);
     releaseFirst();
@@ -946,6 +946,169 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     expect(sent[1]).toMatchObject({
       method: 'transcript:push',
       params: { agentId: 'impl-x', offset: 0, chunk: 'new-generation' },
+    });
+  });
+
+  it('evicts a pending same-agent push when a newer generation arrives (no stale-generation leakage)', async () => {
+    const { projectId } = makeProject();
+    let releaseFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const sent: Array<{ method?: string; params?: unknown }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message);
+        return sent.length === 1 ? firstSend : Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    server.pushTranscript('impl-x', 1, 'inflight', 0); // occupies the in-flight slot (send #1)
+    server.pushTranscript('impl-x', 1, 'genA', 'inflight'.length); // queued at generation 1
+    server.pushTranscript('impl-x', 2, 'genB', 0); // queued at generation 2 → evicts the gen-1 'genA'
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await flush();
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(2);
+    expect(sent[1]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', generation: 2, offset: 0, chunk: 'genB' },
+    });
+  });
+
+  it('bounds same-agent pending transcript backlog while a write is in flight', async () => {
+    const { projectId } = makeProject();
+    let releaseFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const sent: Array<{
+      method?: string;
+      params?: { agentId?: string; offset?: number; chunk?: string };
+    }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message as (typeof sent)[number]);
+        return sent.length === 1 ? firstSend : Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    const cap = 64 * 1024;
+    server.pushTranscript('impl-x', 0, 'first', 0);
+    for (let i = 0; i < 10; i++) {
+      server.pushTranscript('impl-x', 0, String(i).repeat(cap), 'first'.length + i * cap);
+    }
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await flush(12);
+
+    const pendingSends = sent.slice(1).filter((s) => s.params?.agentId === 'impl-x');
+    const totalPendingBytes = pendingSends.reduce((n, s) => n + (s.params?.chunk?.length ?? 0), 0);
+    expect(totalPendingBytes).toBeLessThanOrEqual(4 * cap);
+    expect(pendingSends.at(0)?.params?.offset).toBe('first'.length + 6 * cap);
+  });
+
+  it('splits an over-cap direct transcript push without dropping replay-boundary bytes', async () => {
+    const { projectId } = makeProject();
+    const sent: Array<{
+      method?: string;
+      params?: { agentId?: string; offset?: number; chunk?: string };
+    }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message as (typeof sent)[number]);
+        return Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    const cap = 64 * 1024;
+    const raw = ESC + '[?1049h' + 'A'.repeat(cap + 10);
+    server.pushTranscript('impl-x', 0, raw, 5);
+    await flush();
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', offset: 5, chunk: raw.slice(0, cap) },
+    });
+    expect(sent[1]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', offset: 5 + cap, chunk: raw.slice(cap) },
     });
   });
 
@@ -976,6 +1139,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
 
     expect(got).toHaveLength(1);
     expect(got[0]!.agentId).toBe('impl-x');
+    // A single hostPane bumps the engine generation to 1 — prove the new field round-trips end-to-end.
+    expect(got[0]!.generation).toBe(1);
     expect(got[0]!.offset).toBe(CLAUDE_READY.length);
     // EXACT same string cross-process — a serialization / default-derivation bug MUST fail here.
     expect(got[0]!.chunk).toBe(chunk);
@@ -1091,7 +1256,12 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     client.onTranscript((t) => got.push(t));
 
     // Down: transcript() degrades to an EMPTY tail; never hangs, never throws (Principle 9 / MNR #3).
-    expect(await client.transcript('impl-x')).toEqual({ agentId: 'impl-x', offset: 0, tail: '' });
+    expect(await client.transcript('impl-x')).toEqual({
+      agentId: 'impl-x',
+      generation: 0,
+      offset: 0,
+      tail: '',
+    });
     expect(client.connected).toBe(false);
 
     // Up: start the daemon on the same socket, wire the push, reconnect.
@@ -2137,6 +2307,7 @@ describe('serveConductor wiring — the IPC server rides the cadence runner (pus
     // (an unknown agent has no warm pane → an empty tail; never a throw).
     expect(runner.control?.transcriptTail('impl-x')).toEqual({
       agentId: 'impl-x',
+      generation: 0,
       offset: 0,
       tail: '',
     });
@@ -2296,7 +2467,7 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       observe: () => {
         throw new Error('observe boom in test');
       },
-      transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
+      transcriptTail: (agentId) => ({ agentId, generation: 0, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId) => Promise.resolve({ kind: 'not-found', reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),

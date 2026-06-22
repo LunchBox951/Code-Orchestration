@@ -145,9 +145,8 @@ export const reviewFinalizeTool: ToolSpec<ReviewFinalizeInput, ReviewFinalizeOut
   name: 'co_review_finalize',
   title: 'Record a review verdict',
   description:
-    'Record your structured review verdict (PASS or ISSUES) for a reviewed branch on a target. An ' +
-    'ISSUES verdict must name at least one blocker; a PASS must carry none. The verdict is recorded ' +
-    'as an event read by gated merge, push, and PR tools — it does not merge or tear anything down.',
+    'Record your structured review verdict (PASS or ISSUES) for a reviewed branch on a target. ' +
+    'ISSUES needs at least one blocker; PASS needs none. Records a verdict event; merges nothing.',
   inputSchema: reviewFinalizeInput,
   outputSchema: reviewFinalizeOutput,
   handler: (ctx, input): ReviewFinalizeOutput => {

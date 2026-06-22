@@ -99,11 +99,19 @@ Each case prints a scorecard (via `renderScorecard`) to stderr, e.g.:
 ```
 orchestration-benchmark calc-lib — PASS (host-live, claude-only)
   run:        calc-lib-ob-claude-…  stop=task-complete
-  completed:  true   artifact: true — calc.mjs correct: add/sub/mul over 9 cases + tokenize over 4 cases
+  completed:  true   artifact: true (13/13 cases) — calc.mjs correct: add/sub/mul over 9 cases + tokenize over 4 cases
   merged-up:  2/2 implementer branches
+  scores:     correctness=1.00 token-economy=0.87 context-efficiency=0.96
   totals:     turns=… wall=…ms reviews=3 kickbacks=0 escalations=0
   agents:     coordinator×1 lead×1 implementer×2
+    - coordinator coord-… [claude]: turns=… wall=…ms esc=0
+        tokens=… (in=… out=… cacheR=… cacheC=…) cost=$… econ=0.87 cacheEff=0.74
+        tools=… err=0 redundantReads=0 permAsks=0 ctxEff=0.96 [diag: firstCoCall=… tools/task=…]
 ```
+
+(In a **sandbox** run the `token-economy` column and every raw token field render as `N/A`, not `0`;
+`context-efficiency` also renders `N/A` until PR B's per-agent tool-usage rollup lands — see the
+N/A-in-sandbox rule below.)
 
 ### Provider-pinning modes
 
@@ -154,16 +162,61 @@ pass  =  completed                                  (task.completed recorded in 
 Per-agent and per-merge metrics (the per-provider fine-tuning corpus):
 
 - **`agents[]`** (`AgentRunMetric`) — `agentId`, `role`, `provider`, `turnsUsed`, `wallClockMs`,
-  `escalations`. Role/provider come from the roster + dispatch stores; escalations from the mail log.
+  `escalations`, plus the per-agent **`tokenEconomy`** + **`toolEfficiency`** score blocks (below).
+  Role/provider come from the roster + dispatch stores; escalations from the mail log.
 - **`merges[]`** (`MergeOutcome`) — `branch`, `target`, `reviewRounds`, `kickbacks`, `firstTryPass`,
   `mergeCommitSha`. Rounds are reconstructed from the durable, append-only `review_request` mail log (the
   review store UPSERTs the latest verdict + resets strikes on a PASS, so the mail log is the honest round
   history).
 - Totals: `totalTurns`, `totalWallClockMs`, `totalReviewRounds`, `totalKickbacks`, `totalEscalations`,
   `agentsByRole`.
+- The merged artifact's oracle tally rides on `artifact.casesPassed` / `artifact.casesTotal` (alongside
+  the back-compat binary `artifact.correct`, which is exactly `casesPassed === casesTotal`).
 
 `toJsonl(scorecard)` serialises one record per agent + one run record — an append-only per-provider
 corpus. `CO_BENCH_CORPUS_DIR` persists it across runs (else a throwaway dir is used and discarded).
+
+### The three scores (`scorecard.scores` — reported per-run, per-agent, per-role)
+
+Each score is `∈ [0,1]` **or `null` = N/A** (a deliberate "not applicable", **never a silent zero**).
+They are independent on purpose: a high token-economy can **never** mask a correctness miss.
+
+| Score | Arms | Definition | Notes |
+| --- | --- | --- | --- |
+| **CORRECTNESS** | both | `(casesPassed/casesTotal) × (completed?1:0) × clamp01(mergedUp/required) × (everyMergeReviewed?1:0)` | objective; refines the binary oracle into a case fraction, gated by structural completeness |
+| **TOKEN-ECONOMY** | **live only** | `clamp01(budgetTokens / max(actualTokens, 1))` | **`null` in the sandbox arm** (`fidelity === 'sandbox-fake'` — no real tokens are spent). Sub-signal `cacheEfficiency = cacheReadTokens / max(cacheReadTokens + cacheCreationTokens, 1)` |
+| **CONTEXT/TOOL-EFFICIENCY** | both | `0.4·(1−toolFailRate) + 0.4·(1−redundantReadRate) + 0.2·(1−permissionAskRate)` | `xRate = x / max(toolCalls, 1)`; the weights are **tunable** (`CONTEXT_EFFICIENCY_WEIGHTS`); `null` until the per-agent tool-usage rollup lands |
+
+Raw per-agent fields backing the scores: `tokenEconomy.{inputTokens, outputTokens, cacheReadTokens,
+cacheCreationTokens, totalTokens, costUsd, tokenEconomy, cacheEfficiency}` (live-only; every field `null`
+in the sandbox arm; `costUsd` is `number | null` — `null` where the provider reports no dollar cost) and
+`toolEfficiency.{toolCalls, toolErrors, redundantReads, permissionAsks, contextEfficiency}` plus two
+**un-scored diagnostics** reported raw: `turnsToFirstProductiveCoCall` (read from the tool-usage rollup) and
+`toolCallsPerCompletedTask` (**DERIVED by the driver**, not a store field — `toolCalls / completed-task-count`,
+`null` when the run completed no task). `scores` also carries the run-level means + the per-role folds
+(`tokenEconomyByRole`, `contextEfficiencyByRole`) for the fine-tuning corpus.
+
+> **N/A-in-sandbox rule (no silent zero), enforced in code:** a sandbox run spends no real tokens, so its
+> TOKEN-ECONOMY (and every raw token field) is reported as `null`, NOT `0` — a `0` would falsely read as
+> "infinitely wasteful". This is **not** an accident of the cost read-model being absent: the driver
+> (`aggregateAgentMetrics` → `readAgentEcon`) takes the run `fidelity` and, when it is `sandbox-fake`,
+> **skips the cost read entirely (forces `cost = null`)**, so token-economy is *guaranteed* `null` in the
+> sandbox arm even once the live cost surface lands. This is the same silent-zero trap the live `turnsUsed`
+> already falls into; the three scores avoid it by design. CONTEXT/TOOL-EFFICIENCY is available in BOTH arms
+> (tool calls are observable in the sandbox).
+
+> **Uncalibrated budgets (honest):** the per-scenario token budgets (`BUDGET_TOKENS_BY_SCENARIO`, e.g.
+> `calc-lib = 2,000,000`) and the context-efficiency weights were **not** measured against a real binary
+> driving the full chain — the first live runs are the calibration. Treat TOKEN-ECONOMY as a relative
+> yardstick, not an absolute target, and tune the budgets/weights as the corpus grows. The token/tool raw
+> data is read from the conductor's per-agent cost/tool read-model (the `AgentCostRollup` / `AgentToolUsage`
+> shapes — owned canonically by the cost/tool-usage PR; the benchmark keeps an *identical bench-local copy*
+> and reads the store via **optional chaining**, so it needs no import of those types and `pnpm typecheck`
+> stays green whether or not that surface has landed). Until those read-model surfaces land, their
+> respective score blocks are `null` (an absent rollup is an honest N/A). Only TOKEN-ECONOMY is live-only;
+> CONTEXT/TOOL-EFFICIENCY applies to both arms once the tool-usage rollup exists. A persistent econ-read
+> failure is **logged**, never swallowed (Principle 9), so a wedged read surfaces instead of degrading
+> invisibly to an all-N/A scorecard.
 
 > **Reconstruction limit (honest):** once a merge lands (a final PASS), the review store keeps only the
 > latest verdict and resets the strike counter, so exact historical kickback counts are reconstructed
@@ -196,6 +249,9 @@ runs are the calibration. All have safe defaults and are overridable without a c
 A passing run is **evidence** an operator reviews on the SH-1 / RL-1 / RL-3 / RL-4 ladder — not an
 automatic checkbox flip. It exercises the same host-live surface the SH-1 self-host bundle needs (a real
 binary reaching ready and routing real mail through a real pty), and unlike a single-agent host-proof it
-confirms the **whole chain** can decompose, dispatch, review, and merge up. See
+confirms the **whole chain** can decompose, dispatch, review, and merge up. The per-provider score corpus
+supports `PV-1` by comparing the same scenario across Claude/Codex, and its explicit N/A / fail-loud score
+semantics provide post-hoc `ST-3` evidence; neither discharges the remaining host-live live-stream
+monitoring proof by itself. See
 [`sh1-runbook.md`](sh1-runbook.md) for the full self-host evidence bundle and
 [`worker-benchmark.md`](worker-benchmark.md) for the single-agent sibling.

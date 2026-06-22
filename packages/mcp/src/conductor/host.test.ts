@@ -486,6 +486,105 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
 
     expect(onStop).toHaveBeenCalledTimes(1);
   });
+
+  it('stop({ waitForInFlight: false }) skips the in-flight drain and runs teardown immediately', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const pane = await hostPane(engine, pty, makeIdentity('impl-x', projectId, cwd));
+    seedActionableMail(projectId, 'impl-x');
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+    });
+    const scheduler = new FakeScheduler();
+    const onStop = vi.fn();
+    const runner = new ConductorHostRunner({
+      daemon,
+      intervalMs: 1000,
+      scheduler,
+      onStop,
+    });
+    runner.start();
+
+    scheduler.fire();
+    await tick(); // beat #1's daemon tick is now in flight, parked at the unsettled turn
+
+    // stop with waitForInFlight:false resolves WITHOUT awaiting the still-pending tick — the false branch
+    // skips the `await this.inFlight`/`watchdogInFlight` drain that the default-true case deliberately does.
+    await runner.stop({ waitForInFlight: false });
+    expect(onStop).toHaveBeenCalledTimes(1);
+
+    // Drain the pending tick cleanly so the test does not leak an unhandled promise.
+    await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
+    await flush();
+  });
+
+  it('step() is awaitable and resolves only after the daemon tick completes', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const pane = await hostPane(engine, pty, makeIdentity('impl-x', projectId, cwd));
+    seedActionableMail(projectId, 'impl-x');
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+    });
+    const ticks: DaemonTickOutcome[] = [];
+    const runner = new ConductorHostRunner({
+      daemon,
+      intervalMs: 1000,
+      scheduler: new FakeScheduler(),
+      onTick: (o) => ticks.push(o),
+    });
+
+    runner.start();
+    const stepP = runner.step();
+    await tick();
+    expect(ticks).toHaveLength(0);
+
+    await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
+    await stepP;
+
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]!.selected).toBe('impl-x');
+    await runner.stop();
+  });
+
+  it('step() rejects daemon tick errors for manual drivers while scheduled beats keep logging', async () => {
+    const scheduler = new FakeScheduler();
+    const errors: string[] = [];
+    const runner = new ConductorHostRunner({
+      daemon: {
+        recover: () => [],
+        tick: async () => {
+          throw new Error('tick failed in manual step');
+        },
+      } as unknown as ConductorDaemon,
+      intervalMs: 1000,
+      scheduler,
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
+    runner.start();
+    await expect(runner.step()).rejects.toThrow(/tick failed in manual step/);
+    expect(errors).toEqual(['tick failed in manual step']);
+
+    scheduler.fire();
+    await flush();
+    expect(errors).toEqual(['tick failed in manual step', 'tick failed in manual step']);
+    await runner.stop();
+  });
 });
 
 describe('hostLiveCaptureUsageSourceFactory', () => {

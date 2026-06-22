@@ -91,7 +91,7 @@ export interface HostSessionOptions {
   readonly tools?: readonly ToolSpec[];
   /** Optional per-session tool-call activity hook used by the conductor liveness observer. */
   readonly onToolActivity?: (event: ToolActivityEvent) => void;
-  /** Optional per-session usage-source factory override used by host-live capture. */
+  /** Optional per-session passive provider usage reader factory (used by host-live capture). */
   readonly usageSourceFactory?: UsageSourceFactory;
 }
 

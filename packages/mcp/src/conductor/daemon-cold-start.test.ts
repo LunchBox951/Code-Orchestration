@@ -23,17 +23,23 @@ import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  CODEX_READY,
   OPERATOR,
   WEDGE_MS,
   ReconcileLoop,
+  DISPATCH_ENABLED_PROVIDERS_KEY,
+  accountForProvider,
   defaultMailRenderer,
   type DetectorEvent,
+  openConfigStore,
+  openDispatchStore,
   openMailStore,
   openProjectStore,
   openRegistry,
   openRosterStore,
   openSessionStore,
   openWorktreeStore,
+  resolveTier,
   startCoordinatorSession,
   type DeliveredMail,
   type ProjectId,
@@ -218,6 +224,7 @@ interface ColdStartRun {
   readonly sessionExists: boolean;
   readonly rosterRole: string | undefined;
   readonly rosterParent: string | undefined;
+  readonly sessionProvider: string | undefined;
 }
 
 /** Start a root, compose the daemon over FakePty, and drive ONE tick that cold-starts + drives it. */
@@ -262,6 +269,7 @@ async function driveColdStart(projectId: ProjectId, repo: string): Promise<ColdS
       sessionExists: session?.agentId === coordinator,
       rosterRole: agent?.role,
       rosterParent: agent?.parent,
+      sessionProvider: session?.provider,
     };
   } finally {
     sessions.close();
@@ -305,6 +313,144 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
     expect(run.sessionExists).toBe(true);
     expect(run.rosterRole).toBe('coordinator');
     expect(run.rosterParent).toBe(OPERATOR);
+  });
+
+  it('honors a recorded root placement instead of hard-coding Claude on cold-start', async () => {
+    const { projectId, repo } = makeProject();
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+    const tier = resolveTier('technical', 'deep', 'codex');
+    const dispatch = openDispatchStore(projectId);
+    try {
+      dispatch.recordPlacement(coordinator, {
+        kind: 'placed',
+        role: 'coordinator',
+        work_size: 'technical',
+        reasoning_budget: 'deep',
+        provider: 'codex',
+        account: accountForProvider('codex'),
+        model: tier.model,
+        effort: tier.effort,
+        context: tier.context,
+      });
+    } finally {
+      dispatch.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const engine = makeEngine(pty, clock, qw);
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+      codexHomeFor: (agent) => join(repo, `.codex-home-${agent}`),
+    });
+    const kickoff = kickoffFor(projectId, coordinator);
+
+    const tickP = daemon.tick();
+    await tick();
+    const rootPane = pty.panes[pty.panes.length - 1]!;
+    rootPane.emit(CODEX_READY);
+    await driveTurnToIdle(rootPane, kickoff, clock, qw);
+    await tickP;
+
+    const sessions = openSessionStore(projectId);
+    try {
+      expect(sessions.getSession(coordinator)?.provider).toBe('codex');
+    } finally {
+      sessions.close();
+    }
+  });
+
+  it('rejects a cold-started Codex root when no isolated CODEX_HOME seam is provided', async () => {
+    const { projectId, repo } = makeProject();
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+    const tier = resolveTier('technical', 'deep', 'codex');
+    const dispatch = openDispatchStore(projectId);
+    try {
+      dispatch.recordPlacement(coordinator, {
+        kind: 'placed',
+        role: 'coordinator',
+        work_size: 'technical',
+        reasoning_budget: 'deep',
+        provider: 'codex',
+        account: accountForProvider('codex'),
+        model: tier.model,
+        effort: tier.effort,
+        context: tier.context,
+      });
+    } finally {
+      dispatch.close();
+    }
+
+    const clock = makeClock();
+    const daemon = new ConductorDaemon({
+      engine: makeEngine(new FakePty(), clock, makeQuietWindow()),
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+      // intentionally NO codexHomeFor — the cold-start must fail loud rather than launch without isolation.
+    });
+    // The throw propagates out of the tick (toColdAgentIdentity runs during discovery, before the agent
+    // is driven), so the pane/CODEX_READY/driveTurnToIdle dance is unnecessary here.
+    await expect(daemon.tick()).rejects.toThrow(/no isolated CODEX_HOME seam/);
+  });
+
+  it('cold-starts an operator-started Codex-only root from the start primitive placement', async () => {
+    const { projectId, repo } = makeProject();
+    const config = openConfigStore();
+    try {
+      config.setProjectOverride(projectId, DISPATCH_ENABLED_PROVIDERS_KEY, ['codex']);
+    } finally {
+      config.close();
+    }
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const engine = makeEngine(pty, clock, qw);
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+      codexHomeFor: (agent) => join(repo, `.codex-home-${agent}`),
+    });
+    const kickoff = kickoffFor(projectId, coordinator);
+
+    const tickP = daemon.tick();
+    await tick();
+    const rootPane = pty.panes[pty.panes.length - 1]!;
+    rootPane.emit(CODEX_READY);
+    await driveTurnToIdle(rootPane, kickoff, clock, qw);
+    await tickP;
+
+    const sessions = openSessionStore(projectId);
+    try {
+      const session = sessions.getSession(coordinator);
+      expect(session?.provider).toBe('codex');
+      expect(session?.resume).toEqual({
+        provider: 'codex',
+        codexHome: join(repo, `.codex-home-${coordinator}`),
+      });
+    } finally {
+      sessions.close();
+    }
   });
 
   it('does not re-select the consumed root kickoff when later operator work arrives', async () => {

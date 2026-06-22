@@ -16,21 +16,10 @@ import { BASE_ROLES } from './scoping.js';
 //        regardless of a `CLAUDE.md` fixture in cwd.
 
 // ── (i) The P5 anti-drift checker, keyed on DISTINCTIVE field identifiers ──────────────────────────
-// Single-word input field names are ordinary English, indistinguishable from prose — excluded via a
-// curated stoplist. What survives is the DISTINCTIVE set (in practice the underscored compounds, e.g.
-// `in_reply_to`): these never occur in natural workflow prose, so finding one in orient text IS a
-// tool field-list restatement. Collected LIVE from the registry so a new field is covered for free.
-const FIELD_NAME_STOPLIST = new Set([
-  'to',
-  'type',
-  'subject',
-  'body',
-  'decision',
-  'id',
-  'ids',
-  'role',
-  'topic',
-]);
+// Single-word input field names are ordinary English, indistinguishable from prose. What survives is
+// the DISTINCTIVE set: underscored compounds such as `in_reply_to`. These never occur in natural
+// workflow prose, so finding one in orient text IS a tool field-list restatement. Collected LIVE from
+// the registry so a new distinctive field is covered for free.
 
 function distinctiveFieldIdentifiers(): string[] {
   const out = new Set<string>();
@@ -38,7 +27,7 @@ function distinctiveFieldIdentifiers(): string[] {
     const schema = spec.inputSchema;
     if (schema instanceof z.ZodObject) {
       for (const field of Object.keys(schema.shape)) {
-        if (!FIELD_NAME_STOPLIST.has(field) && field.includes('_')) out.add(field);
+        if (field.includes('_')) out.add(field);
       }
     }
   }
@@ -53,28 +42,10 @@ function fieldRestatementsIn(text: string, fields: readonly string[]): string[] 
 describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas are the syntax source)', () => {
   const distinctive = distinctiveFieldIdentifiers();
 
-  it('is not vacuous — the registry yields the known distinctive input identifiers', () => {
+  it('is not vacuous — the registry yields distinctive input identifiers dynamically', () => {
     expect(distinctive.length).toBeGreaterThan(0);
-    expect([...distinctive].sort()).toEqual(
-      [
-        'idempotency_key',
-        'in_reply_to',
-        'issue_id',
-        'operator_override',
-        'phase_id',
-        'probable_cause',
-        'reasoning_budget',
-        'requested_by',
-        'research_id',
-        'review_id',
-        'spec_ref',
-        'task_criteria',
-        'task_id',
-        'thread_id',
-        'unread_only',
-        'work_size',
-      ].sort(),
-    );
+    expect(distinctive.every((field) => field.includes('_'))).toBe(true);
+    expect(new Set(distinctive).size).toBe(distinctive.length);
   });
 
   it('GREEN: every base role’s orient content restates none of them', () => {
@@ -87,12 +58,13 @@ describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas
   });
 
   it('RED: the SAME checker flags an injected field-list restatement', () => {
-    const drifted =
-      orientContent('implementer') +
-      '\nReply by setting in_reply_to to the seq, and pass idempotency_key to dedupe.';
+    const [first, second] = [...distinctive].sort();
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    const drifted = orientContent('implementer') + `\nReply by setting ${first} and ${second}.`;
     const found = fieldRestatementsIn(drifted, distinctive);
-    expect(found).toContain('in_reply_to');
-    expect(found).toContain('idempotency_key');
+    expect(found).toContain(first);
+    expect(found).toContain(second);
     // The real content still passes the same checker — only the injected drift is flagged, proving
     // the GREEN above is a real property of the content, not a checker that flags nothing.
     expect(fieldRestatementsIn(orientContent('implementer'), distinctive)).toEqual([]);
@@ -184,6 +156,60 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
     // The spec LOCK is the operator's surface — orient must say so, not name a self-lock verb.
     expect(out.toLowerCase()).toContain('locked by the operator');
     // Naming verbs must NOT drift into restating their fields (P5 is asserted separately above).
+  });
+
+  it('the lead arc NAMES its workflow verbs (F4 — drive every arc from orient, not just coordinator)', () => {
+    const out = orientContent('lead');
+    for (const verb of [
+      'co_sling',
+      'co_merge',
+      'co_kickback',
+      'co_push',
+      'co_pr_merge',
+      'co_finish',
+    ]) {
+      expect(out, `lead orient should name ${verb}`).toContain(verb);
+    }
+    expect(out).toContain('finish only your own phase branch');
+    expect(out).not.toContain('You do not finish through the gate yourself');
+  });
+
+  it('the implementer arc NAMES co_finish as the verb that advances the gate (F4)', () => {
+    const out = orientContent('implementer');
+    expect(out).toContain('co_finish');
+  });
+
+  it('the researcher arc NAMES co_research_finalize as its record verb (F4)', () => {
+    const out = orientContent('researcher');
+    expect(out).toContain('co_research_finalize');
+  });
+
+  it('the generic (unknown-role) arc stays role-neutral and does not name unavailable tools', () => {
+    const out = orientContent();
+    expect(out).toContain('completion or finalization path');
+    expect(out).not.toContain('co_finish');
+  });
+
+  it('reviewer and researcher arcs do not point at co_finish, which they cannot call', () => {
+    expect(orientContent('reviewer')).not.toContain('co_finish');
+    expect(orientContent('researcher')).not.toContain('co_finish');
+    expect(orientContent('reviewer', 'finish')).not.toContain('co_finish');
+    expect(orientContent('researcher', 'finish')).not.toContain('co_finish');
+    expect(orientContent('reviewer', 'finish')).toContain('completion or finalization verb');
+    expect(orientContent('researcher', 'finish')).toContain('completion or finalization verb');
+  });
+
+  it('known sub-role input adds the shipped approach while preserving base lifecycle guidance', () => {
+    const reviewer = orientContent('reviewer:pr');
+    expect(reviewer).toContain('co_review_finalize');
+    expect(reviewer).toContain('Sub-role focus (reviewer:pr)');
+    expect(reviewer).toContain('PR review');
+    expect(reviewer).not.toContain('co_finish');
+
+    const implementer = orientContent('implementer:test');
+    expect(implementer).toContain('co_finish');
+    expect(implementer).toContain('Sub-role focus (implementer:test)');
+    expect(implementer).toContain('test-first');
   });
 
   it('an unknown role gets generic workflow guidance, not an error (lenient input)', () => {

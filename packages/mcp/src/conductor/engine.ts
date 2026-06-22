@@ -45,9 +45,13 @@ import {
   type StartupOutcome,
   type Steer,
   type TranscriptTail,
+  TranscriptTailAccumulator,
+  TRANSCRIPT_TAIL_HARD_MAX_CHARS,
+  TRANSCRIPT_TAIL_MAX_CHARS,
   type ToolSpec,
   type TurnEndConfig,
   type TurnEndResult,
+  type UsageSourceFactory,
   CLARIFY_TIMEOUT_SECONDS_DEFAULT,
   CLARIFY_TIMEOUT_SECONDS_KEY,
   LiveDelivery,
@@ -77,7 +81,7 @@ import {
   WEDGE_MS,
   COMPLETION_VERBS,
   type ReviewerSpawnGate,
-  type UsageSourceFactory,
+  transcriptTailFrom,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -96,15 +100,24 @@ import type { ToolActivityEvent } from '../server.js';
  */
 export type TransportPair = readonly [client: Transport, server: Transport];
 
+export { TRANSCRIPT_TAIL_HARD_MAX_CHARS, TRANSCRIPT_TAIL_MAX_CHARS, transcriptTailFrom };
+export type { RetainedTail } from '@co/core';
+
 /**
- * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the character bound on a hosted agent's in-memory transcript tail.
- * The engine keeps only the MOST-RECENT `TRANSCRIPT_TAIL_MAX_CHARS` characters of each pane's output per
- * agent: when a new chunk pushes the buffer past the bound, the OLDEST characters are dropped so the
- * live tail (what the operator wants to see now) is preserved. Pane bytes are `string` end-to-end
+ * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the SOFT character bound on a hosted agent's in-memory transcript
+ * tail. The engine keeps roughly the MOST-RECENT `TRANSCRIPT_TAIL_MAX_CHARS` characters of each pane's
+ * output per agent: when a new chunk pushes the buffer past the bound, the OLDEST characters are dropped
+ * so the live tail (what the operator wants to see now) is preserved. Pane bytes are `string` end-to-end
  * (xterm.js consumes the string; JSON round-trips it exactly, ANSI/ESC included), so the bound is by
  * character. 64 KiB is generous for a scrollback tail while keeping the per-agent footprint bounded.
+ *
+ * #66 sub-bug B (transcript garble) — a flat most-recent-N slice is NOT safe to replay into a fresh
+ * xterm: an interactive TUI enters the alternate screen (`ESC[?1049h`) ONCE early, then cursor-addresses
+ * redraws within it. If the early alt-screen-enter falls outside the slice, replaying a mid-stream tail
+ * stacks/garbles frames in a terminal that never entered the alt-screen. {@link transcriptTailFrom}
+ * therefore extends the retained tail BACK to the last alt-screen-enter (up to {@link
+ * TRANSCRIPT_TAIL_HARD_MAX_CHARS}) so the alt-screen setup is never sliced away.
  */
-export const TRANSCRIPT_TAIL_MAX_CHARS = 64 * 1024;
 
 /**
  * The engine's constructor seams. Required seams have no default so the determinism / host-live
@@ -195,6 +208,55 @@ export interface ConductorEngineDeps {
    * passes an explicit `undefined` (exactOptionalPropertyTypes safe).
    */
   readonly reviewerSpawnGate?: () => ReviewerSpawnGate | undefined;
+  /**
+   * Optional per-hosted-session passive usage-source factory. Host-live uses this to scope provider
+   * reads to the pane's isolated home instead of daemon-wide environment variables.
+   */
+  readonly usageSourceFactoryFor?: (identity: HostedIdentity) => UsageSourceFactory | undefined;
+  /**
+   * PR-B COLLECTION (cost) — per-turn cost-capture seam, called in the turn-END region of
+   * {@link ConductorEngine.runOneTurn} (after the detector yields, before the warm yield). The host
+   * binds a closure that reads the provider's per-turn usage (Claude: the isolated transcript JSONL
+   * assistant-message `usage`; Codex: `logs_2.sqlite` `token_count`) and records it via
+   * `DispatchStore.recordCost`. Called for EVERY non-errored turn with the agent identity + the engine's
+   * per-agent turn ordinal. MUST be fail-soft: a throw here is swallowed by the engine (a missing/garbled
+   * usage read must never fail the turn). Absent ⇒ no cost capture (headless / sandbox path).
+   */
+  readonly captureTurnCost?: (capture: TurnCostCapture) => void | Promise<void>;
+  /**
+   * PR-B COLLECTION (tool-usage) — the engine forwards EVERY hosted session's
+   * {@link ToolActivityEvent} to this seam (in addition to the in-memory watchdog liveness trace). The
+   * host binds a closure that records each completed `end` activity into the durable per-agent tool-usage
+   * projection (`DispatchStore.recordToolInvoked`). MUST be fail-soft. Absent ⇒ no durable tool-usage
+   * collection (headless / sandbox path).
+   */
+  readonly onToolActivity?: (capture: ToolActivityCapture) => void;
+  /** Collection failure diagnostic hook. Absent means report to stderr; failures remain fail-soft. */
+  readonly onCollectionError?: (diagnostic: CollectionDiagnostic) => void;
+}
+
+/** A fail-soft collection failure that still needs surfacing (Principle 9 — no silent failures). */
+export interface CollectionDiagnostic {
+  readonly kind: 'cost' | 'tool';
+  readonly identity: HostedIdentity;
+  readonly turn: number;
+  readonly error: unknown;
+  readonly activity?: ToolActivityEvent;
+}
+
+/** The per-turn cost-capture invocation: the acting agent's identity + the engine's per-agent turn ordinal. */
+export interface TurnCostCapture {
+  readonly identity: HostedIdentity;
+  /** The engine's 0-based per-agent turn ordinal — the stable `turn` for the cost observation identity. */
+  readonly turn: number;
+}
+
+/** A durable tool-activity forward: the acting agent identity, the engine turn ordinal, and the raw event. */
+export interface ToolActivityCapture {
+  readonly identity: HostedIdentity;
+  /** The engine's 0-based per-agent turn ordinal at the time of the call. */
+  readonly turn: number;
+  readonly activity: ToolActivityEvent;
 }
 
 /** A routed live-delivery side-effect that failed post-persist (the {@link LiveDelivery} ledger re-tries). */
@@ -362,13 +424,14 @@ export class ConductorEngine {
   /** Per-pane onExit unsubscribers, keyed `${projectId}:${agent}` — torn down on release. */
   private readonly paneExitUnsub = new Map<string, () => void>();
   /**
-   * Per-agent bounded transcript tail (most-recent pane bytes, ≤ {@link TRANSCRIPT_TAIL_MAX_CHARS}),
-   * keyed `${projectId}:${agent}` (Stage 12 C-P1). Fed by the persistent onData subscription below;
-   * read by {@link transcriptTail} for the operator's on-demand backfill. Dropped on release.
+   * Per-agent bounded transcript tail (recent pane bytes, ≤ {@link TRANSCRIPT_TAIL_HARD_MAX_CHARS} —
+   * normally ≈ {@link TRANSCRIPT_TAIL_MAX_CHARS}, extended back to the last alt-screen-enter when one is
+   * in range; see {@link transcriptTailFrom}), keyed `${projectId}:${agent}` (Stage 12 C-P1). Fed by the
+   * persistent onData subscription below; read by {@link transcriptTail} for the operator's on-demand
+   * backfill. Dropped on release.
    */
-  private readonly transcriptTails = new Map<string, string>();
-  private readonly transcriptTailOffsets = new Map<string, number>();
-  private readonly transcriptNextOffsets = new Map<string, number>();
+  private readonly transcriptAccumulators = new Map<string, TranscriptTailAccumulator>();
+  private readonly transcriptGenerations = new Map<string, number>();
   /**
    * Per-agent PERSISTENT onData unsubscribers for the transcript stream, keyed `${projectId}:${agent}`
    * (Stage 12 C-P1) — DISTINCT from the per-turn observer in {@link observeTurnEnd}. Torn down on
@@ -400,14 +463,16 @@ export class ConductorEngine {
     { hosted: HostedPane; options: { readonly onPaneKillError?: (error: unknown) => void } }
   >();
   /**
-   * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, chunk, offset, provider)` on every new
-   * pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A plain
-   * subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
+   * GLOBAL transcript listeners (Stage 12 C-P1), fired with
+   * `(projectId, agent, generation, chunk, offset, provider)` on every new pane chunk from any hosted
+   * agent — the fan-out the operator-IPC live push subscribes to. A plain subscriber set; never an
+   * agent surface (Principle D4 — the Conductor registers zero MCP tools).
    */
   private readonly transcriptListeners = new Set<
     (
       projectId: ProjectId,
       agent: string,
+      generation: number,
       chunk: string,
       offset: number,
       provider: HostedIdentity['provider'],
@@ -462,6 +527,13 @@ export class ConductorEngine {
    * and dropped on release.
    */
   private readonly kickoffInjectAttempts = new Map<string, number>();
+  /**
+   * PR-B COLLECTION — the engine's 0-based per-agent turn ORDINAL, keyed `${projectId}:${agent}`.
+   * Incremented at the start of each {@link runOneTurn}; the CURRENT value is the `turn` carried on the
+   * per-turn cost observation and forwarded tool-activity (the stable identity that dedupes a re-recorded
+   * turn). Survives across warm turns; dropped on release (so a re-hosted agent restarts at 0).
+   */
+  private readonly turnOrdinal = new Map<string, number>();
 
   constructor(deps: ConductorEngineDeps) {
     this.deps = deps;
@@ -501,22 +573,28 @@ export class ConductorEngine {
   }
 
   /**
-   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the current bounded transcript tail for `agent`: the most-recent
-   * pane bytes (≤ {@link TRANSCRIPT_TAIL_MAX_CHARS}), or `''` when the agent is not hosted or has
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the current bounded transcript tail for `agent`: the recent pane
+   * bytes (≤ {@link TRANSCRIPT_TAIL_HARD_MAX_CHARS}, kept from the last alt-screen-enter so the tail
+   * replays cleanly — see {@link transcriptTailFrom}), or `''` when the agent is not hosted or has
    * produced no output yet. Transport-agnostic, NO I/O, never throws — a pure in-memory read backing the
    * operator's on-demand backfill.
    */
   transcriptTail(projectId: ProjectId, agent: string): string {
-    return this.transcriptTails.get(ConductorEngine.agentKey(projectId, agent)) ?? '';
+    return (
+      this.transcriptAccumulators.get(ConductorEngine.agentKey(projectId, agent))?.snapshot()
+        .tail ?? ''
+    );
   }
 
   /** Stage 12 C-P1 — the current bounded transcript tail plus its absolute start offset. */
   transcriptTailSnapshot(projectId: ProjectId, agent: string): TranscriptTail {
     const agentKey = ConductorEngine.agentKey(projectId, agent);
+    const snapshot = this.transcriptAccumulators.get(agentKey)?.snapshot();
     return {
       agentId: agent,
-      offset: this.transcriptTailOffsets.get(agentKey) ?? 0,
-      tail: this.transcriptTails.get(agentKey) ?? '',
+      generation: this.transcriptGenerations.get(agentKey) ?? 0,
+      offset: snapshot?.offset ?? 0,
+      tail: snapshot?.tail ?? '',
     };
   }
 
@@ -578,6 +656,7 @@ export class ConductorEngine {
     listener: (
       projectId: ProjectId,
       agent: string,
+      generation: number,
       chunk: string,
       offset: number,
       provider: HostedIdentity['provider'],
@@ -647,9 +726,9 @@ export class ConductorEngine {
     const pane = this.deps.pty.spawn(spec ?? this.spawnSpecFor(identity));
     // Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe before startup driving so the operator tail and live
     // stream include early provider interstitials/login prompts as well as post-ready turn bytes.
-    this.transcriptTails.set(agentKey, '');
-    this.transcriptTailOffsets.set(agentKey, 0);
-    this.transcriptNextOffsets.set(agentKey, 0);
+    this.transcriptAccumulators.set(agentKey, new TranscriptTailAccumulator());
+    const transcriptGeneration = (this.transcriptGenerations.get(agentKey) ?? 0) + 1;
+    this.transcriptGenerations.set(agentKey, transcriptGeneration);
     this.transcriptUnsub.set(
       agentKey,
       pane.onData((chunk) =>
@@ -681,14 +760,17 @@ export class ConductorEngine {
       clientTransport = transportClient;
       const spawnGate = this.deps.reviewerSpawnGate?.();
       const sessionTools = this.deps.sessionTools?.(identity);
+      // Compose both usage-source wirings (#81 per-identity isolated readers + #84 host-live capture):
+      // prefer the per-identity factory, falling back to the engine-wide static factory. The two PRs
+      // feed the SAME single hostSession sink, so picking only one would silently drop the other.
+      const usageSourceFactory =
+        this.deps.usageSourceFactoryFor?.(identity) ?? this.deps.usageSourceFactory;
       session = await this.host.hostSession(identity, serverTransport, {
         deliveryFactory: this.routingDeliveryFactory(),
         ...(spawnGate != null ? { reviewerSpawnGate: spawnGate } : {}),
         ...(sessionTools != null ? { tools: sessionTools } : {}),
-        ...(this.deps.usageSourceFactory != null
-          ? { usageSourceFactory: this.deps.usageSourceFactory }
-          : {}),
-        onToolActivity: (activity) => this.emitToolActivity(agentKey, activity),
+        ...(usageSourceFactory != null ? { usageSourceFactory } : {}),
+        onToolActivity: (activity) => this.emitToolActivity(agentKey, activity, identity),
       });
 
       // Drive it through its startup interstitials to ready (or surface a terminal login menu).
@@ -758,6 +840,11 @@ export class ConductorEngine {
     const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
     this.turnStartedAt.set(agentKey, this.deps.now());
     this.turnInFlight.set(agentKey, true); // P6: mark turn in flight so the reconcile watchdog sees turnActive
+    // PR-B COLLECTION — the CURRENT turn ordinal (first turn is 0). The stored value reflects THIS turn
+    // for its whole duration, so the cost observation AND any tool-activity forwarded mid-turn share the
+    // same stable `turn`. It is bumped to the NEXT ordinal in the finally (once this turn yields).
+    const turnOrdinal = this.turnOrdinal.get(agentKey) ?? 0;
+    this.turnOrdinal.set(agentKey, turnOrdinal);
     try {
       const text = this.renderMail(mail);
       await injectMail(hosted.pane, text, {
@@ -803,6 +890,23 @@ export class ConductorEngine {
       // a healthy agent's later turns.
       this.clearKickoffInjectAttempts(agentKey);
       this.lastTurnErrored.delete(agentKey);
+      // PR-B COLLECTION (cost) — capture this turn's provider cost in the turn-END region, FAIL-SOFT:
+      // the host's closure reads the per-turn usage and records it; a missing/garbled usage read (or any
+      // throw) is swallowed so cost collection can never fail a healthy turn (Principle 9 inverse — the
+      // turn is load-bearing, the metric is not). Skipped on a transient-overload no-progress turn (no
+      // real usage was produced).
+      if (this.deps.captureTurnCost != null && !(sawOverload && !sawMcpActivity)) {
+        try {
+          await this.deps.captureTurnCost({ identity: hosted.identity, turn: turnOrdinal });
+        } catch (error) {
+          this.reportCollectionError({
+            kind: 'cost',
+            identity: hosted.identity,
+            turn: turnOrdinal,
+            error,
+          });
+        }
+      }
       return { turnEnd, errored: false, liveness };
     } catch (error) {
       // MNR-2 seam: yield on an errored turn WITHOUT consuming the mail. We deliberately do nothing
@@ -858,6 +962,9 @@ export class ConductorEngine {
       return { errored: true, error };
     } finally {
       this.turnInFlight.set(agentKey, false); // P6: turn yielded (success or error) — reset flag
+      // PR-B: advance the per-agent turn ordinal so the NEXT runOneTurn records under turn+1. Done in
+      // the finally so an errored turn still advances (its ordinal was already consumed).
+      this.turnOrdinal.set(agentKey, turnOrdinal + 1);
       // #73: a release() that arrived mid-turn was deferred — finalize it now that the pane is idle,
       // so the kill + session close never tore the pane out from under this turn. Best-effort: a
       // finalize failure must not mask the turn's own outcome.
@@ -1025,13 +1132,41 @@ export class ConductorEngine {
     };
   }
 
-  private emitToolActivity(agentKey: string, activity: ToolActivityEvent): void {
+  // `agentKey` is kept FIRST (the landed signature the watchdog-liveness consumer drives directly).
+  // `identity` is an OPTIONAL second arg carrying the full identity for the PR-B durable tool-usage
+  // forward — present on the live hosting path, absent when a test drives the in-memory liveness trace.
+  private emitToolActivity(
+    agentKey: string,
+    activity: ToolActivityEvent,
+    identity?: HostedIdentity,
+  ): void {
     if (
       activity.phase === 'end' &&
       activity.ok === true &&
       COMPLETION_VERBS.includes(activity.tool)
     ) {
       this.turnStartedAt.delete(agentKey);
+    }
+    // PR-B COLLECTION (tool-usage) — forward EVERY activity to the durable consumer (in addition to the
+    // in-memory watchdog trace below). Done BEFORE the no-watchdog-listeners early return so durable
+    // collection happens even when no turn is currently observing. FAIL-SOFT: a throwing consumer must
+    // never break the live MCP call path. The current per-agent turn ordinal scopes the recorded call.
+    if (this.deps.onToolActivity != null && identity != null) {
+      try {
+        this.deps.onToolActivity({
+          identity,
+          turn: this.turnOrdinal.get(agentKey) ?? 0,
+          activity,
+        });
+      } catch (error) {
+        this.reportCollectionError({
+          kind: 'tool',
+          identity,
+          turn: this.turnOrdinal.get(agentKey) ?? 0,
+          activity,
+          error,
+        });
+      }
     }
     const listeners = this.toolActivityListeners.get(agentKey);
     if (listeners == null || listeners.size === 0) return;
@@ -1042,6 +1177,28 @@ export class ConductorEngine {
       ...(activity.phase === 'end' ? { ok: activity.ok } : {}),
     };
     for (const listener of [...listeners]) listener(ev);
+  }
+
+  private reportCollectionError(diagnostic: CollectionDiagnostic): void {
+    if (this.deps.onCollectionError != null) {
+      try {
+        this.deps.onCollectionError(diagnostic);
+        return;
+      } catch (hookError) {
+        console.error(
+          '[co-mcp collection] diagnostic hook failed:',
+          hookError,
+          'while reporting:',
+          diagnostic.error,
+        );
+        return;
+      }
+    }
+    console.error(
+      `[co-mcp collection] ${diagnostic.kind} collection failed for ` +
+        `${diagnostic.identity.projectId}/${diagnostic.identity.agent}/turn-${diagnostic.turn}:`,
+      diagnostic.error,
+    );
   }
 
   private consumeOneShotKickoff(projectId: ProjectId, mail: DeliveredMail): void {
@@ -1337,11 +1494,15 @@ export class ConductorEngine {
   }
 
   /**
-   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — append `chunk` to `agentKey`'s bounded tail (keeping the
-   * most-recent {@link TRANSCRIPT_TAIL_MAX_CHARS} characters; oldest dropped when over the bound) and
-   * fan the chunk out to the global transcript listeners. Runs in the pane's onData pump, so it does no
-   * I/O and never throws of its own accord (the registered listener — the operator-IPC push — is itself
-   * guarded against a vanished client).
+   * Stage 12 C-P1 (TRANSCRIPT-SEAM) — append `chunk` to `agentKey`'s bounded tail and fan the chunk out
+   * to the global transcript listeners. Runs in the pane's onData pump, so it does no I/O and never
+   * throws of its own accord (the registered listener — the operator-IPC push — is itself guarded
+   * against a vanished client).
+   *
+   * #66 sub-bug B — the retained tail is owned by the core {@link TranscriptTailAccumulator}, which keeps
+   * memory bounded WITHOUT slicing away the early alternate-screen-enter (`ESC[?1049h`) an interactive TUI
+   * needs to replay cleanly into a fresh xterm. The retained start becomes the {@link TranscriptTail}
+   * `offset` contract.
    */
   private appendTranscript(
     agentKey: string,
@@ -1351,21 +1512,13 @@ export class ConductorEngine {
     chunk: string,
   ): void {
     this.lastByteAt.set(agentKey, this.deps.now()); // P6: track last-byte time for liveness probe
-    const chunkOffset = this.transcriptNextOffsets.get(agentKey) ?? 0;
-    const tailOffset = this.transcriptTailOffsets.get(agentKey) ?? chunkOffset;
-    const next = (this.transcriptTails.get(agentKey) ?? '') + chunk;
-    this.transcriptNextOffsets.set(agentKey, chunkOffset + chunk.length);
-    if (next.length > TRANSCRIPT_TAIL_MAX_CHARS) {
-      const dropped = next.length - TRANSCRIPT_TAIL_MAX_CHARS;
-      this.transcriptTails.set(agentKey, next.slice(dropped));
-      this.transcriptTailOffsets.set(agentKey, tailOffset + dropped);
-    } else {
-      this.transcriptTails.set(agentKey, next);
-      this.transcriptTailOffsets.set(agentKey, tailOffset);
-    }
+    const accumulator = this.transcriptAccumulators.get(agentKey);
+    const chunkOffset = accumulator?.snapshot().nextOffset ?? 0;
+    const generation = this.transcriptGenerations.get(agentKey) ?? 0;
+    accumulator?.append(chunk);
     for (const listener of [...this.transcriptListeners]) {
       try {
-        listener(projectId, agent, chunk, chunkOffset, provider);
+        listener(projectId, agent, generation, chunk, chunkOffset, provider);
       } catch {
         /* transcript subscribers are diagnostic surfaces; pane output must keep flowing */
       }
@@ -1408,14 +1561,13 @@ export class ConductorEngine {
     this.paneExited.delete(agentKey);
     this.transcriptUnsub.get(agentKey)?.();
     this.transcriptUnsub.delete(agentKey);
-    this.transcriptTails.delete(agentKey);
-    this.transcriptTailOffsets.delete(agentKey);
-    this.transcriptNextOffsets.delete(agentKey);
+    this.transcriptAccumulators.delete(agentKey);
     this.lastByteAt.delete(agentKey); // P6
     this.turnInFlight.delete(agentKey); // P6
     this.turnStartedAt.delete(agentKey); // P6
     this.lastTurnErrored.delete(agentKey);
     this.toolActivityListeners.delete(agentKey);
+    this.turnOrdinal.delete(agentKey); // PR-B: a re-hosted agent restarts its turn ordinal at 0
     this.overloadBackoff.delete(agentKey); // #68
     this.clearKickoffInjectAttempts(agentKey); // #77
   }

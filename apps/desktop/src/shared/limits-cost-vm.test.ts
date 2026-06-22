@@ -40,6 +40,8 @@ function makeRollup(kind: 'agent' | 'task', id: string, totalCostUsd: number): C
     outputTokens: 50,
     totalTokens: 150,
     tokenObservations: 1,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
     usedPct: 0,
     usedPctObservations: 0,
     observations: 1,

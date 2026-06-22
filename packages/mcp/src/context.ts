@@ -8,6 +8,7 @@ import {
   openIssueStore,
   openMailStore,
   openPlanStore,
+  openArchiveStore,
   openRegistry,
   openResearchStore,
   openReviewStore,
@@ -134,7 +135,11 @@ export interface OpenContextStoresOptions {
    * Absent ⇒ headless behaviour (unchanged).
    */
   readonly reviewerSpawnGate?: ReviewerSpawnGate;
-  /** Optional L4 usage-source factory override, used by host-live capture wrappers. */
+  /**
+   * Passive usage-source factory for this mounted context. Hosted panes can inject identity-scoped
+   * provider readers (for example the pane's isolated Claude statusLine file) instead of using daemon
+   * process globals — also used by host-live capture wrappers.
+   */
   readonly usageSourceFactory?: UsageSourceFactory;
 }
 
@@ -193,6 +198,8 @@ export function openContextStores(
     closeOnFailure.push(() => issues.close());
     const research = openResearchStore(projectId);
     closeOnFailure.push(() => research.close());
+    const archive = openArchiveStore(projectId);
+    closeOnFailure.push(() => archive.close());
 
     const ctx: ToolContext = {
       agent,
@@ -208,6 +215,7 @@ export function openContextStores(
       plans,
       issues,
       research,
+      archive,
       usageSourceFactory: opts?.usageSourceFactory ?? defaultUsageSourceFactory,
       ...(opts?.reviewerSpawnGate != null ? { reviewerSpawnGate: opts.reviewerSpawnGate } : {}),
     };

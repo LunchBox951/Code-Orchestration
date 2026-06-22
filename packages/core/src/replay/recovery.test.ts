@@ -17,6 +17,7 @@ import { openPlanStore } from '../plans/plans-store.js';
 import { openMailStore } from '../mail/mail-store.js';
 import { openSessionStore } from '../session/session-store.js';
 import { openSpecStore } from '../specs/specs-store.js';
+import { openDispatchStore } from '../dispatch/dispatch-store.js';
 import {
   buildProjectProjectors,
   buildGlobalProjectors,
@@ -234,6 +235,54 @@ describe('recoverProjectStore — AC-S9-3 holistic byte-equal recovery', () => {
     expect(afterSecond).toBe(preCrash);
   });
 
+  it('rebuilds tool-usage projections from tool.invoked events instead of preserving stale rows', () => {
+    const initStore = openProjectStore(PROJECT_ID);
+    initStore.transaction((tx) => {
+      for (const p of buildProjectProjectors()) p.reset(tx);
+    });
+    initStore.close();
+
+    const dispatch = openDispatchStore(PROJECT_ID);
+    try {
+      dispatch.recordToolInvoked({
+        agent: 'impl-tool',
+        task: 'task-tool',
+        tool: 'co_status',
+        turn: 2,
+        ok: true,
+        duration_ms: 12,
+      });
+    } finally {
+      dispatch.close();
+    }
+    const clean = snapshotProjections(PROJECT_ID);
+
+    const corrupt = openProjectStore(PROJECT_ID);
+    try {
+      corrupt.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        db.prepare(
+          `UPDATE tool_usage_rollup
+              SET tool_calls = 99,
+                  tool_errors = 99,
+                  first_productive_turn = 99
+            WHERE agent = ?`,
+        ).run('impl-tool');
+        db.prepare('DELETE FROM tool_invocations WHERE agent = ?').run('impl-tool');
+      });
+    } finally {
+      corrupt.close();
+    }
+
+    expect(snapshotProjections(PROJECT_ID)).not.toBe(clean);
+    recoverProjectStore(PROJECT_ID);
+    expect(snapshotProjections(PROJECT_ID)).toBe(clean);
+
+    const parsed = JSON.parse(clean) as Record<string, unknown[]>;
+    expect((parsed['tool_invocations'] ?? []).length).toBe(1);
+    expect((parsed['tool_usage_rollup'] ?? []).length).toBe(1);
+  });
+
   it('no repo dependency — recovery succeeds with only CO_DATA_DIR (no git/worktree)', () => {
     // This test runs entirely in a plain temp directory: no .git, no git worktrees,
     // no .co/ files. Recovery must read ONLY the SQLite store under CO_DATA_DIR.
@@ -272,9 +321,9 @@ describe('recoverProjectStore — AC-S9-3 holistic byte-equal recovery', () => {
 });
 
 describe('buildProjectProjectors — canonical set', () => {
-  it('contains exactly one instance of each project-level projector (14 total)', () => {
+  it('contains exactly one instance of each project-level projector (15 total)', () => {
     const projectors = buildProjectProjectors();
-    expect(projectors).toHaveLength(14);
+    expect(projectors).toHaveLength(15);
 
     // Each projector name is unique — deduplicated
     const names = projectors.map((p) => p.name);
@@ -284,6 +333,7 @@ describe('buildProjectProjectors — canonical set', () => {
     expect(names).toContain('session');
     expect(names).toContain('roster');
     expect(names).toContain('placement');
+    expect(names).toContain('tool-usage');
     expect(names).toContain('inbox');
     expect(names).toContain('reviews');
     expect(names).toContain('specs');

@@ -17,13 +17,16 @@ import {
 } from './drift.js';
 import {
   buildPaneLaunchConfig,
+  buildClaudeStatusLineCommand,
   paneMayUseWebTools,
+  CO_CLAUDE_STATUSLINE_PATH_ENV,
+  CODEX_BASE_PROMPT_CONFIG_KEY,
   CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY,
   CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE,
   CODEX_NON_INTERACTIVE_APPROVAL_ARGS,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
-import { ROLE_PROFILES, type Capability } from '../roles/profile.js';
+import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
 import type { SpawnSpec } from '../pty/pty-host.js';
 
 const ISOLATED_HOME = '/tmp/co-pane-isolated-test';
@@ -355,6 +358,45 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
       path: `${ISOLATED_HOME}/settings.json`,
       contents: config.claudeSettingsJson,
     });
+  });
+
+  it('claude (#67): settings.json carries a statusLine command teeing to the isolated payload file', () => {
+    const config = buildPaneLaunchConfig('claude', BASE_IDENTITY);
+    const settings = JSON.parse(config.claudeSettingsJson ?? '{}') as Record<string, unknown>;
+    const statusLine = settings['statusLine'] as Record<string, unknown> | undefined;
+    expect(statusLine).toBeDefined();
+    expect(statusLine?.['type']).toBe('command');
+    const statusLinePath = `${ISOLATED_HOME}/co-statusline.json`;
+    // The command must TEE the statusLine payload to the per-account file under the isolated home, and
+    // discard the echoed status (the collection is invisible — no status text, no spent turn / AC11).
+    expect(statusLine?.['command']).toBe(buildClaudeStatusLineCommand(statusLinePath));
+    expect(statusLine?.['command']).toContain(`tee '${statusLinePath}'`);
+    expect(statusLine?.['command']).toContain('>/dev/null');
+    // The path is under the ISOLATED home, never the user's ~/.claude.
+    expect(statusLinePath).toContain(ISOLATED_HOME);
+    expect(statusLinePath).not.toContain('/.claude');
+  });
+
+  it('claude (#67): CO_CLAUDE_STATUSLINE_PATH env points at the isolated statusLine payload file', () => {
+    const config = buildPaneLaunchConfig('claude', BASE_IDENTITY);
+    expect(config.env[CO_CLAUDE_STATUSLINE_PATH_ENV]).toBe(`${ISOLATED_HOME}/co-statusline.json`);
+    expect(CO_CLAUDE_STATUSLINE_PATH_ENV).toBe('CO_CLAUDE_STATUSLINE_PATH');
+    // The companion path env never leaks the user home.
+    expect(config.env[CO_CLAUDE_STATUSLINE_PATH_ENV]).toContain(ISOLATED_HOME);
+    expect(config.env[CO_CLAUDE_STATUSLINE_PATH_ENV]).not.toContain('/.claude');
+  });
+
+  it('codex: the statusLine collection is Claude-only (no CO_CLAUDE_STATUSLINE_PATH on codex)', () => {
+    const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    expect(config.env[CO_CLAUDE_STATUSLINE_PATH_ENV]).toBeUndefined();
+    expect(config.claudeSettingsJson).toBeUndefined();
+  });
+
+  it('claude (#67): statusLine command single-quotes a path with shell metacharacters', () => {
+    // A path with a space / quote must be safely single-quoted (the isolated home is host-controlled,
+    // but the builder must never produce an unquoted shell injection).
+    const cmd = buildClaudeStatusLineCommand("/tmp/iso home/it's/co-statusline.json");
+    expect(cmd).toBe(`tee '/tmp/iso home/it'\\''s/co-statusline.json' >/dev/null`);
   });
 
   it('claude: args allow the CO MCP bus without allowing shell tools', () => {
@@ -806,5 +848,100 @@ describe('claude built-in web tools are explicitly decided at launch (#7 §5 #3)
   it('paneMayUseWebTools is grant-all and capability-driven (one-line flip to least-privilege)', () => {
     expect(paneMayUseWebTools(new Set<Capability>())).toBe(true);
     expect(paneMayUseWebTools(ROLE_PROFILES.researcher.capabilities)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Role base-prompt injection (PR D — item 1)
+// ---------------------------------------------------------------------------
+
+describe('role base-prompt injection into builder args', () => {
+  it('claude: appends --append-system-prompt <roleBasePrompt> ONLY when role is set', () => {
+    const withRole = buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, role: 'implementer' });
+    const idx = withRole.args.indexOf('--append-system-prompt');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(withRole.args[idx + 1]).toBe(roleBasePrompt('implementer'));
+
+    // No role → deliberate no-op (the no-op that the prior round shipped to production).
+    const noRole = buildPaneLaunchConfig('claude', BASE_IDENTITY);
+    expect(noRole.args).not.toContain('--append-system-prompt');
+  });
+
+  it('codex: appends -c <key>=<json(roleBasePrompt)> ONLY when role is set', () => {
+    const withRole = buildPaneLaunchConfig('codex', { ...BASE_IDENTITY, role: 'researcher' });
+    const idx = withRole.args.indexOf('-c');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(withRole.args[idx + 1]).toBe(
+      `${CODEX_BASE_PROMPT_CONFIG_KEY}=${JSON.stringify(roleBasePrompt('researcher'))}`,
+    );
+
+    const noRole = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    expect(noRole.args).not.toContain('-c');
+  });
+
+  it('codex: preserves the shipped sub-role approach in developer_instructions', () => {
+    const config = buildPaneLaunchConfig('codex', {
+      ...BASE_IDENTITY,
+      role: 'reviewer',
+      subRole: 'pr',
+    });
+    const idx = config.args.indexOf('-c');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const override = config.args[idx + 1] ?? '';
+    expect(override).toContain(`${CODEX_BASE_PROMPT_CONFIG_KEY}=`);
+    expect(override).toContain('Sub-role focus (reviewer:pr)');
+    expect(override).toContain('PR review');
+  });
+
+  it('the base prompt is repo-agnostic: no project-memory / CLAUDE.md leakage, and stays short', () => {
+    for (const role of ['coordinator', 'lead', 'implementer', 'reviewer', 'researcher'] as const) {
+      const prompt = roleBasePrompt(role);
+      expect(prompt).toContain(role);
+      expect(prompt).toMatch(/typed, threaded mail/);
+      expect(prompt).toMatch(/act solely as yourself/);
+      expect(prompt).toMatch(/reading your inbox and acknowledging/);
+      expect(prompt).toContain('co_orient');
+      expect(prompt).toMatch(/tool schemas.*only syntax/s);
+      expect(prompt).toMatch(/blocked.*ambiguous.*ask.*wait/s);
+      expect(prompt).toMatch(/do not drop a blocker silently/);
+      expect(prompt).toMatch(/end your turn/);
+      // Prompting split (Principle 11): never names a project-memory file or repo conventions.
+      expect(prompt).not.toMatch(/CLAUDE\.md|AGENTS\.md/);
+      // ~5-8 lines — short enough not to crowd out co orient + the schemas.
+      expect(prompt.split('\n').length).toBeLessThanOrEqual(8);
+    }
+  });
+
+  it('appends the shipped sub-role approach when a valid sub-role is threaded', () => {
+    const config = buildPaneLaunchConfig('claude', {
+      ...BASE_IDENTITY,
+      role: 'reviewer',
+      subRole: 'pr',
+    });
+    const idx = config.args.indexOf('--append-system-prompt');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const prompt = config.args[idx + 1] ?? '';
+    expect(prompt).toContain('Sub-role focus (reviewer:pr)');
+    expect(prompt).toContain('PR review');
+  });
+
+  it('fails loud rather than silently dropping an unknown sub-role prompt focus', () => {
+    expect(() =>
+      buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, role: 'reviewer', subRole: 'random' }),
+    ).toThrow(/unknown sub-role 'reviewer:random'/i);
+  });
+
+  it('throws when a sub-role is threaded without a role', () => {
+    expect(() => buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, subRole: 'pr' })).toThrow(
+      /subRole requires role/i,
+    );
+  });
+
+  it('the injected base prompt does NOT disturb the block-list drift roundtrip', () => {
+    const config = buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, role: 'implementer' });
+    const enforced = readEnforcedConfig(config);
+    expect(checkBlockListDrift(BLOCK_LIST, enforced)).toEqual([]);
+    const codex = buildPaneLaunchConfig('codex', { ...BASE_IDENTITY, role: 'implementer' });
+    expect(checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(codex))).toEqual([]);
   });
 });

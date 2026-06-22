@@ -1,4 +1,5 @@
 import { assertNever } from '../assert-never.js';
+import { findSubRole, parseSubRoleId } from '../roles/sub-roles.js';
 import type { Role } from './scoping.js';
 
 /**
@@ -38,8 +39,9 @@ const CLOSING =
 const GENERIC_GUIDANCE = [
   'Do the work in your worktree, raising a question to your parent the moment intent is genuinely',
   'ambiguous rather than guessing, and escalating a true blocker rather than dropping it silently.',
-  'When the work is done and verified, finish through the gate; integrating or publishing a reviewed',
-  'result is the job of the owner above you, not yours.',
+  'When the work is done and verified, use the completion or finalization path exposed by your',
+  'mounted role (the tool schemas remain the only source of syntax); integrating or publishing a',
+  'reviewed result is the job of the owner above you, not yours.',
 ].join('\n');
 
 const COORDINATOR_GUIDANCE = [
@@ -76,30 +78,39 @@ const COORDINATOR_GUIDANCE = [
 const LEAD_GUIDANCE = [
   'As a lead you own one phase: decompose it into worker-sized tasks, dispatch your workers one at a',
   'time, integrate each reviewed branch, verify the integrated whole, then report the phase ready to',
-  'your coordinator.',
+  'your coordinator. Each step names the verb that advances it (the tool schemas remain the only',
+  'source of syntax):',
   '',
-  'Dispatch sequentially: sling a fresh worktree sandbox for each worker and hand out one task at a',
-  'time — only once a worker’s branch has been reviewed and merged do you hand out the next — so',
-  'integration stays clean. A worker signals it is done with an informational worker_done; you then',
-  'integrate that reviewed branch. You do not finish through the gate yourself; you stitch together',
-  'the reviewed branches your workers produce.',
+  '  • DISPATCH — co_sling a fresh worktree sandbox for each worker and hand out one task at a time;',
+  '    only once a worker’s branch has been reviewed and merged do you hand out the next, so',
+  '    integration stays clean. A WAITING result means NO sandbox was placed — do not proceed as if',
+  '    it had been.',
+  '  • GATE + INTEGRATE — a worker signals it is done with an informational worker_done; land its',
+  '    reviewed branch with co_merge once a reviewer records a PASS, or co_kickback the branch with',
+  '    what must change. In contributor mode, publish through co_push then co_pr_merge.',
+  '  • FINISH — after worker branches are integrated and the phase branch is verified, co_finish',
+  '    your own phase branch; it records your finish and notifies the coordinator, then stops before',
+  '    review, merge, or publish.',
   '',
-  'Resolve within the phase: how to implement, integration questions, approach, re-scoping a worker,',
-  'or spawning a remediation worker. Forward upward anything that changes what the phase delivers or',
-  'touches the spec’s intent. By mail: hand tasks to your workers, answer their clarify_request',
-  'messages, and report the phase ready to your coordinator.',
+  'Do not finish on behalf of workers; you stitch together the reviewed branches they produce and',
+  'finish only your own phase branch. Resolve within the phase: how to implement, integration',
+  'questions, approach, re-scoping a worker, or spawning a remediation worker. Forward upward',
+  'anything that changes what the phase delivers or touches the spec’s intent. By mail: hand tasks to',
+  'your workers, answer their clarify_request messages, and report the phase ready to your',
+  'coordinator.',
 ].join('\n');
 
 const IMPLEMENTER_GUIDANCE = [
   'As an implementer you change code in your own isolated worktree — the sandbox your parent slung',
   'for you — then finish through the gate. Read your inbox, make the focused change as small',
   'reviewable commits, and verify it with the project’s own test and check commands before you hand',
-  'it back.',
+  'it back. The verb that advances it is named below (the tool schemas remain the only source of',
+  'syntax):',
   '',
-  'Finish through the gate: when the work is verified, finish — that records your finish for review',
-  'and sends a worker_done to your parent. The worker_done is an informational notice, not a request,',
-  'so do not wait on a reply to it; integrating and publishing the branch is your parent’s job, never',
-  'yours.',
+  '  • FINISH — when the work is verified, co_finish: that records your finish for review and sends a',
+  '    worker_done to your parent. The worker_done is an informational notice, not a request, so do',
+  '    not wait on a reply to it; integrating and publishing the branch is your parent’s job, never',
+  '    yours.',
   '',
   'Ask, never guess: on genuine intent ambiguity raise a clarify_request to your parent and wait for',
   'the answer, and note any assumption you had to make. If you are caught in an unwinnable',
@@ -120,8 +131,10 @@ const REVIEWER_GUIDANCE = [
 
 const RESEARCHER_GUIDANCE = [
   'As a researcher you answer one scoped question with cited evidence, and you change nothing — you',
-  'are read-only. Read the question, investigate within your scope, then reply with a findings report',
-  'whose claims cite the evidence behind them, and stay warm for follow-ups in the same thread.',
+  'are read-only. Read the question, investigate within your scope, then record your finished result',
+  'with co_research_finalize so the requester and later agents can read it instead of re-searching',
+  '(the tool schemas remain the only source of syntax), and stay warm for follow-ups in the same',
+  'thread.',
   '',
   'You are a leaf: you do not spawn other agents. Surface evidence rather than making the call or',
   'doing the work yourself — the agent who asked decides what to do with what you find.',
@@ -145,10 +158,14 @@ function roleGuidance(role: Role): string {
   }
 }
 
-/** Leniently map a self-declared role string to a base {@link Role}, or undefined (→ generic). */
-function asRole(input: string | undefined): Role | undefined {
-  if (input == null) return undefined;
-  switch (input.trim().toLowerCase()) {
+interface ResolvedRole {
+  readonly role?: Role;
+  readonly subRole?: string;
+  readonly subRoleApproach?: string;
+}
+
+function asBaseRole(input: string): Role | undefined {
+  switch (input) {
     case 'coordinator':
       return 'coordinator';
     case 'lead':
@@ -164,11 +181,26 @@ function asRole(input: string | undefined): Role | undefined {
   }
 }
 
+/** Leniently map a self-declared role string to a base role plus known sub-role focus. */
+function resolveRole(input: string | undefined): ResolvedRole {
+  if (input == null) return {};
+  const parsed = parseSubRoleId(input.trim().toLowerCase());
+  const role = asBaseRole(parsed.baseRole);
+  if (role == null) return {};
+  if (parsed.name == null) return { role };
+  const subRole = findSubRole(role, parsed.name);
+  if (subRole == null) return { role };
+  return { role, subRole: subRole.name, subRoleApproach: subRole.approach };
+}
+
 /** An optional one-line focus for a known lifecycle topic; unknown topics add nothing (lenient). */
-function topicFocus(topic: string): string {
+function topicFocus(topic: string, role: Role | undefined): string {
   switch (topic.trim().toLowerCase()) {
     case 'finish':
-      return 'Focus — finishing: commit your work through co_finish; it records the finish, notifies your parent, and stops before review or publish.';
+      if (role === 'lead' || role === 'implementer') {
+        return 'Focus — finishing: commit your work through co_finish; it records the finish, notifies your parent, and stops before review or publish.';
+      }
+      return 'Focus — finishing: use the completion or finalization verb exposed by your mounted role; record the result and stop before review or publish.';
     case 'mail':
       return 'Focus — mail: every message is typed and threaded; reply within the thread you are answering so the conversation stays linked, and never invent a new mail type.';
     case 'review':
@@ -179,6 +211,13 @@ function topicFocus(topic: string): string {
     default:
       return '';
   }
+}
+
+function subRoleFocus(resolved: ResolvedRole): string {
+  if (resolved.role == null || resolved.subRole == null || resolved.subRoleApproach == null) {
+    return '';
+  }
+  return `Sub-role focus (${resolved.role}:${resolved.subRole}): ${resolved.subRoleApproach}.`;
 }
 
 /** The header naming the requested role / topic, or '' when neither was given. */
@@ -197,10 +236,12 @@ function header(role: string | undefined, topic: string | undefined): string {
  * gets its lifecycle arc; an unknown / absent role gets generic workflow guidance.
  */
 export function orientContent(role?: string, topic?: string): string {
-  const body = asRole(role);
-  const arc = body === undefined ? GENERIC_GUIDANCE : roleGuidance(body);
-  const focus = topic != null ? topicFocus(topic) : '';
+  const resolved = resolveRole(role);
+  const arc = resolved.role === undefined ? GENERIC_GUIDANCE : roleGuidance(resolved.role);
+  const subRole = subRoleFocus(resolved);
+  const focus = topic != null ? topicFocus(topic, resolved.role) : '';
   const sections = [SHARED_PREAMBLE, arc];
+  if (subRole.length > 0) sections.push(subRole);
   if (focus.length > 0) sections.push(focus);
   sections.push(CLOSING);
   return header(role, topic) + sections.join('\n\n');
