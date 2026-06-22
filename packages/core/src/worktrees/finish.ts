@@ -3,6 +3,7 @@ import { MAIL_WORKER_DONE } from '../mail/events.js';
 import { resolve } from 'node:path';
 import { finishRecordedSchema, type TestOutcome } from './events.js';
 import { renderCommitMessage, type CommitIntent } from './messages.js';
+import { scrubOutwardText } from '../issues/scrub.js';
 import type { GitReader } from './detect-base.js';
 import { DEFAULT_PROVISION_MANIFEST, type ProvisioningManifest } from './provision.js';
 import { defaultGitExec, type GitExec } from './sling.js';
@@ -186,8 +187,13 @@ export function finishWorktree(
     agent,
   });
 
-  // 2) Render the house-style commit message (provider-deterministic — no voice parameter).
-  const commitMessage = renderCommitMessage(intent);
+  // 2) Render the house-style commit message (provider-deterministic — no voice parameter), then
+  //    scrub it: a worker's commit body is agent-authored free text (intent.summary/body) that
+  //    rides outward — owner-mode pushes it via the --no-ff merge, contributor-mode pushes the
+  //    feature branch directly — so a leaked path/email/token must not land in published history.
+  //    (Only the message co generates here is covered; a worker that ran `git commit` itself, the
+  //    clean-tree branch below, is its own author and out of scope.)
+  const commitMessage = scrubOutwardText(renderCommitMessage(intent));
 
   // 3) Stage + commit the worktree's own content with the rendered message + DCO sign-off, then read
   //    back the commit sha. Committing the worktree's content is the worker's sandbox, not an
