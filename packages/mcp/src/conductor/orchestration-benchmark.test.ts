@@ -1114,6 +1114,59 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
     expect(agents.find((a) => a.agentId === 'impl-a')?.turnsUsed).toBe(0);
   });
 
+  it('aggregateAgentMetrics FORCES tokenEconomy=null in sandbox even when the store has a non-null cost rollup (fidelity short-circuit; non-vacuous)', () => {
+    const { projectId } = makeProject();
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-a', role: 'coordinator', parent: OPERATOR });
+
+    // An injected econ store whose getAgentCostRollup returns NON-null token data (it does NOT depend on
+    // PR B being absent — the store is present and answers). If the sandbox-fake cost-skip in readAgentEcon
+    // is removed, the sandbox arm below would READ this rollup and compute a non-null tokenEconomy, failing
+    // the `toBeNull()` assertions — that is what makes this test non-vacuous.
+    const ECON_ROLLUP = {
+      agentId: 'coord-a',
+      inputTokens: 1000,
+      outputTokens: 2000,
+      cacheReadTokens: 500,
+      cacheCreationTokens: 100,
+      totalTokens: 3100,
+      costUsd: 0.42,
+    };
+    const openEconWithCost = (): {
+      getAgentCostRollup: () => typeof ECON_ROLLUP;
+      getAgentToolUsage: () => null;
+      close: () => void;
+    } => ({
+      getAgentCostRollup: () => ECON_ROLLUP,
+      getAgentToolUsage: () => null,
+      close: () => {},
+    });
+
+    // SANDBOX arm: the cost read is SKIPPED entirely (fidelity-enforced) — tokenEconomy is GUARANTEED null
+    // even though the store would have returned a non-null rollup.
+    const sandbox = aggregateAgentMetrics(
+      projectId,
+      {},
+      'calc-lib',
+      'sandbox-fake',
+      1,
+      openEconWithCost,
+    );
+    const sandboxCoord = sandbox.find((a) => a.agentId === 'coord-a');
+    expect(sandboxCoord?.tokenEconomy.tokenEconomy).toBeNull();
+    expect(sandboxCoord?.tokenEconomy.totalTokens).toBeNull();
+    expect(sandboxCoord?.tokenEconomy.costUsd).toBeNull();
+
+    // HOST-LIVE arm: the SAME injected rollup IS read — tokenEconomy is computed (non-null), proving the
+    // short-circuit is the only thing nulling the sandbox arm (not a missing store).
+    const live = aggregateAgentMetrics(projectId, {}, 'calc-lib', 'host-live', 1, openEconWithCost);
+    const liveCoord = live.find((a) => a.agentId === 'coord-a');
+    expect(liveCoord?.tokenEconomy.totalTokens).toBe(3100);
+    expect(liveCoord?.tokenEconomy.costUsd).toBe(0.42);
+    expect(liveCoord?.tokenEconomy.tokenEconomy).not.toBeNull();
+  });
+
   it('aggregateMergeOutcomes + countImplementerBranchesMergedUp read review rounds/kickbacks/merge-up from the stores', () => {
     const { projectId, repo } = makeProject();
     const wt = worktrees(projectId);

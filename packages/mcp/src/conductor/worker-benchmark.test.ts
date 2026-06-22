@@ -9,7 +9,7 @@
  *
  * The host-live run that drives a real agent is the gated `worker-benchmark.live.test.ts`.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +32,7 @@ import { assertHostLiveProof, type ProofFidelity, type ProofResult } from './hos
 import {
   doneMailObserved,
   parentInboxMaxSeq,
+  readWorkerEcon,
   workerBenchRenderer,
   workerCorrectness,
 } from './worker-benchmark.js';
@@ -237,5 +238,59 @@ describe('assertHostLiveProof refuses a sandbox-fake scorecard (hermetic)', () =
   it('throws on sandbox-fake, passes on host-live', () => {
     expect(() => assertHostLiveProof(shim('sandbox-fake'))).toThrow(/host-live/);
     expect(() => assertHostLiveProof(shim('host-live'))).not.toThrow();
+  });
+});
+
+describe('readWorkerEcon — sandbox cost-skip parity + log-don’t-swallow (hermetic)', () => {
+  const ECON_ROLLUP = {
+    agentId: 'wb-1',
+    inputTokens: 1000,
+    outputTokens: 2000,
+    cacheReadTokens: 500,
+    cacheCreationTokens: 100,
+    totalTokens: 3100,
+    costUsd: 0.42,
+  };
+  // An injected econ store that DOES return a non-null cost rollup (present, not PR-B-absent), so the
+  // sandbox-fake null below is the fidelity short-circuit at work, not a missing store.
+  const openEconWithCost = (): {
+    getAgentCostRollup: () => typeof ECON_ROLLUP;
+    getAgentToolUsage: () => null;
+    close: () => void;
+  } => ({
+    getAgentCostRollup: () => ECON_ROLLUP,
+    getAgentToolUsage: () => null,
+    close: () => {},
+  });
+
+  it('FORCES cost=null in sandbox-fake even when the store has a non-null rollup, and READS it host-live (non-vacuous)', () => {
+    const projectId = makeProject();
+
+    // SANDBOX arm: the cost read is SKIPPED entirely — cost is GUARANTEED null even though the injected
+    // store would have returned a rollup. If the sandbox-fake skip is removed, this cost is non-null ⇒ fail.
+    const sandbox = readWorkerEcon(projectId, 'wb-1', 'sandbox-fake', openEconWithCost);
+    expect(sandbox.cost).toBeNull();
+
+    // HOST-LIVE arm: the SAME injected rollup IS read — proving the short-circuit is the only thing nulling
+    // the sandbox arm (parity with the orchestration driver's readAgentEcon).
+    const live = readWorkerEcon(projectId, 'wb-1', 'host-live', openEconWithCost);
+    expect(live.cost).toEqual(ECON_ROLLUP);
+  });
+
+  it('LOGS (does not silently swallow) when the econ store open throws, still degrading to null', () => {
+    const projectId = makeProject();
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const throwingOpen = (): never => {
+        throw new Error('boom: dispatch store unavailable');
+      };
+      const result = readWorkerEcon(projectId, 'wb-1', 'host-live', throwingOpen);
+      // Degrades to null (the run is still graded) AND the failure is surfaced on stderr (Principle 9).
+      expect(result).toEqual({ cost: null, tool: null });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]?.[0]).toMatch(/econ read failed/u);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

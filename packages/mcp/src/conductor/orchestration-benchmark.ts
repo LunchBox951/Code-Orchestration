@@ -328,6 +328,18 @@ interface BenchEconStore {
 }
 
 /**
+ * How the driver opens the econ read-model — defaults to the real dispatch store cast to
+ * {@link BenchEconStore}. A SEAM (not a runtime knob): the `sandbox-fake` cost-skip is enforced in
+ * {@link readAgentEcon} regardless of what this returns, so a test can inject a store whose
+ * `getAgentCostRollup` returns NON-null token data and still assert the sandbox arm forces `cost=null`.
+ */
+export type OpenBenchEcon = (projectId: ProjectId) => BenchEconStore & { close: () => void };
+
+/** The production econ opener: the real dispatch store, structurally typed as a {@link BenchEconStore}. */
+const openDispatchEcon: OpenBenchEcon = (projectId) =>
+  openDispatchStore(projectId) as ReturnType<typeof openDispatchStore> & BenchEconStore;
+
+/**
  * Aggregate the per-agent {@link AgentRunMetric}s from the roster (role) + the dispatch store (provider) +
  * the mail log (escalations) + PR B's per-agent cost/tool rollups, folding in the automation-measured
  * turn/wall samples. The roster is the authoritative agent set; provider/escalation come from the
@@ -352,6 +364,7 @@ export function aggregateAgentMetrics(
   scenarioId: string,
   fidelity: RunFidelity,
   completedTaskCount: number,
+  openEcon: OpenBenchEcon = openDispatchEcon,
 ): readonly AgentRunMetric[] {
   const roster = openRosterStore(projectId);
   const mail = openMailStore(projectId);
@@ -363,7 +376,7 @@ export function aggregateAgentMetrics(
       .filter((a) => a.agentId !== OPERATOR)
       .map((a): AgentRunMetric => {
         const sample = agentTurns[a.agentId];
-        const { cost, tool } = readAgentEcon(projectId, a.agentId, fidelity);
+        const { cost, tool } = readAgentEcon(projectId, a.agentId, fidelity, openEcon);
         // The throughput diagnostic is DERIVED (not a store field): tool calls per completed task, or null
         // when there is no tool rollup / the run completed no task (never a divide-by-zero Infinity).
         const toolCallsPerCompletedTask =
@@ -403,10 +416,11 @@ function readAgentEcon(
   projectId: ProjectId,
   agentId: string,
   fidelity: RunFidelity,
+  openEcon: OpenBenchEcon = openDispatchEcon,
 ): { cost: AgentCostRollup | null; tool: AgentToolUsage | null } {
-  let store: (ReturnType<typeof openDispatchStore> & BenchEconStore) | undefined;
+  let store: (BenchEconStore & { close: () => void }) | undefined;
   try {
-    store = openDispatchStore(projectId) as ReturnType<typeof openDispatchStore> & BenchEconStore;
+    store = openEcon(projectId);
     // Sandbox runs spend no real tokens ⇒ skip the cost read entirely (forced null). The tool rollup is
     // observable in both arms, so it is always read.
     const cost = fidelity === 'sandbox-fake' ? null : (store.getAgentCostRollup?.(agentId) ?? null);

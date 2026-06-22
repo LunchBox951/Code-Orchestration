@@ -252,7 +252,7 @@ export async function runWorkerBenchmark(
     // The three comparable scores for the single-agent case. Token/tool rollups are read via OPTIONAL
     // CHAINING against PR B's store surface (declared locally; see {@link WorkerEconStore}) so this
     // compiles on `dev` WITHOUT B — a `null` rollup ⇒ a `null` score (N/A), never a silent zero.
-    const { cost, tool } = readWorkerEcon(projectId, identity.agent);
+    const { cost, tool } = readWorkerEcon(projectId, identity.agent, seams.fidelity);
     // The throughput diagnostic is DERIVED (not a store field): tool calls per completed task, or null when
     // there is no rollup / the single task did not complete (never a divide-by-zero).
     const toolCallsPerCompletedTask = tool == null || !completed ? null : tool.toolCalls;
@@ -423,21 +423,50 @@ interface WorkerEconStore {
 }
 
 /**
+ * How the driver opens the econ read-model — defaults to the real dispatch store cast to
+ * {@link WorkerEconStore}. A SEAM (not a runtime knob): the `sandbox-fake` cost-skip in
+ * {@link readWorkerEcon} is enforced regardless of what this returns, so a test can inject a store whose
+ * `getAgentCostRollup` returns NON-null token data and still assert the sandbox arm forces `cost=null`.
+ */
+export type OpenWorkerEcon = (projectId: ProjectId) => WorkerEconStore & { close: () => void };
+
+/** The production econ opener: the real dispatch store, structurally typed as a {@link WorkerEconStore}. */
+const openDispatchEcon: OpenWorkerEcon = (projectId) =>
+  openDispatchStore(projectId) as ReturnType<typeof openDispatchStore> & WorkerEconStore;
+
+/**
  * Read PR B's per-agent cost + tool-usage rollups via OPTIONAL CHAINING against the dispatch store cast to
  * {@link WorkerEconStore}. On `dev` WITHOUT B the methods are absent ⇒ both reads return `null`. Never
  * throws: a store-open failure or a missing method degrades to `null`.
+ *
+ * `fidelity` ENFORCES the N/A-in-sandbox rule IN CODE — parity with the orchestration driver's
+ * {@link readAgentEcon}: a `sandbox-fake` run spends no real tokens, so the cost read is SKIPPED entirely
+ * and `cost` is forced to `null` (token-economy GUARANTEED `null`, not a byproduct of B's store being
+ * absent). The tool rollup IS read in both arms (tool calls are observable in the sandbox too).
+ *
+ * A store-open / read FAILURE is LOGGED, not silently swallowed (Principle 9 — no silent green): a
+ * persistent econ-read failure degrades the whole corpus to N/A invisibly otherwise. We still degrade to
+ * `null` so the run is graded, but the error is surfaced on stderr.
  */
-function readWorkerEcon(
+export function readWorkerEcon(
   projectId: ProjectId,
   agentId: string,
+  fidelity: ProofFidelity,
+  openEcon: OpenWorkerEcon = openDispatchEcon,
 ): { cost: AgentCostRollup | null; tool: AgentToolUsage | null } {
-  let store: (ReturnType<typeof openDispatchStore> & WorkerEconStore) | undefined;
+  let store: (WorkerEconStore & { close: () => void }) | undefined;
   try {
-    store = openDispatchStore(projectId) as ReturnType<typeof openDispatchStore> & WorkerEconStore;
-    const cost = store.getAgentCostRollup?.(agentId) ?? null;
+    store = openEcon(projectId);
+    // Sandbox runs spend no real tokens ⇒ skip the cost read entirely (forced null). The tool rollup is
+    // observable in both arms, so it is always read.
+    const cost = fidelity === 'sandbox-fake' ? null : (store.getAgentCostRollup?.(agentId) ?? null);
     const tool = store.getAgentToolUsage?.(agentId) ?? null;
     return { cost, tool };
-  } catch {
+  } catch (error) {
+    // Surface, don't swallow: a persistent econ-read failure degrades the whole corpus to N/A invisibly.
+    console.error(
+      `[co worker-bench] econ read failed for agent '${agentId}' in project '${projectId}': ${errorMessage(error)}`,
+    );
     return { cost: null, tool: null };
   } finally {
     store?.close();

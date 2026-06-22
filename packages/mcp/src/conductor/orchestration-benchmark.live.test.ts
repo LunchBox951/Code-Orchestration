@@ -28,7 +28,7 @@
  * mock-pass: a fake host can never be `host-live`, and the chain must actually complete + the oracle must
  * execute the merged artifact for `pass` to be true.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -65,6 +65,8 @@ import {
   type OrchestrationScenario,
   type ProjectId,
   type ProviderMode,
+  type ReviewContext,
+  type ReviewContextResolved,
 } from '@co/core';
 import { openContextStores } from '../context.js';
 import { defaultServeCoMcpPaths, serveConductor, type IntervalScheduler } from './host.js';
@@ -344,6 +346,153 @@ describe('maybePassReviews — drives a pending review to PASS over the real ope
     } finally {
       await ipc.close().catch(() => undefined);
       await server.close().catch(() => undefined);
+    }
+  });
+});
+
+// ── Always-on hermetic test for the maybePassReviews failStreak / wedge-logging (no node-pty, no IPC) ───
+//
+// Proves the per-reviewId CONSECUTIVE-failure accounting + the wedge log (Principle 9 — log, don't swallow):
+// a PASS attempt that keeps failing tick after tick is a WEDGED gate, and after {@link REVIEW_PASS_FAIL_LOG_AFTER}
+// failures running it MUST be logged so the operator sees the stall instead of an invisibly-hung chain. A
+// later successful PASS CLEARS the streak. Uses a STUB ipc (the real wire is exercised by the PASS-path test
+// above) so the failure branch is reachable hermetically: `reviewContext` throws in fail-mode, resolves in
+// pass-mode. WITHOUT the streak accounting (a bare swallow) NO console.error fires and the streak never
+// clears — the assertions below fail, so the test is non-vacuous.
+describe('maybePassReviews — per-reviewId failStreak + wedge-logging (hermetic, always runs)', () => {
+  // A controllable stub typed as an OperatorIpcClient: fail-mode throws from reviewContext (so the PASS
+  // attempt fails + the streak climbs); pass-mode resolves a context + a no-op reply (so the streak clears).
+  function makeStubIpc(): {
+    ipc: OperatorIpcClient;
+    setMode: (mode: 'fail' | 'pass') => void;
+    replyCount: () => number;
+  } {
+    let mode: 'fail' | 'pass' = 'fail';
+    let replies = 0;
+    const resolved = (reviewId: string): ReviewContextResolved => ({
+      kind: 'resolved',
+      reviewId,
+      evidenceFingerprint: `sha256:${reviewId}`,
+      branch: 'feat',
+      target: 'main',
+      scope: 'worker_merge',
+      diff: { kind: 'patch', patch: 'diff --git a/x b/x\n' },
+      criteria: { kind: 'no-locked-spec' },
+    });
+    const ipc = {
+      reviewContext: (reviewId: string): Promise<ReviewContext> => {
+        if (mode === 'fail') {
+          return Promise.reject(new Error(`stub: reviewContext '${reviewId}' is wedged`));
+        }
+        return Promise.resolve(resolved(reviewId));
+      },
+      reply: (): Promise<DeliveredMail> => {
+        replies += 1;
+        return Promise.resolve({} as DeliveredMail);
+      },
+    } as unknown as OperatorIpcClient;
+    return { ipc, setMode: (m) => (mode = m), replyCount: () => replies };
+  }
+
+  // Seed ONE pending review_request to @operator (the gate maybePassReviews tries to PASS each tick) without
+  // any git/diff/spec scaffolding — the stub ipc never reaches the resolver, so only the mail need exist.
+  function seedPendingReview(projectId: ProjectId, reviewId: string): void {
+    const mailStore = openMailStore(projectId);
+    try {
+      mailStore.requestHumanReview(
+        reviewRequestEnvelope({
+          from: 'lead-wedge',
+          subject: `review requested: 'feat' into 'main'`,
+          body: `review ${reviewId}`,
+          idempotencyKey: `review-request:${reviewId}`,
+        }),
+        {
+          reviewId,
+          target: 'main',
+          branch: 'feat',
+          scope: 'worker_merge',
+          reviewerKind: 'human',
+          requestedBy: 'lead-wedge',
+          specRefKind: 'criteria',
+          specRefRef: `spec:wedge#locked`,
+        },
+      );
+    } finally {
+      mailStore.close();
+    }
+  }
+
+  it('increments the per-reviewId streak across ticks, LOGS once the streak hits the threshold, and a PASS clears it', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'co-ob-wedge-data-'));
+    dataDirs.push(dataDir);
+    process.env.CO_DATA_DIR = dataDir;
+
+    const registry = openRegistry();
+    let projectId: ProjectId;
+    try {
+      projectId = registry.register(join(dataDir, 'repo'));
+    } finally {
+      registry.close();
+    }
+
+    const reviewId = 'rev-wedge-1';
+    seedPendingReview(projectId, reviewId);
+
+    const { ipc, setMode, replyCount } = makeStubIpc();
+    const failStreak = new Map<string, number>();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // FAIL-MODE: the gate keeps failing its PASS attempt. The streak climbs one per tick, and the wedge
+      // log stays SILENT until the streak reaches REVIEW_PASS_FAIL_LOG_AFTER (5) — never before.
+      for (let tick = 1; tick <= REVIEW_PASS_FAIL_LOG_AFTER; tick++) {
+        await maybePassReviews(ipc, projectId, failStreak);
+        expect(failStreak.get(reviewId)).toBe(tick);
+        // Below the threshold: no wedge log yet (a transient miss must not spam the operator).
+        if (tick < REVIEW_PASS_FAIL_LOG_AFTER) expect(errorSpy).not.toHaveBeenCalled();
+      }
+      // At the threshold: the wedge is logged EXACTLY once, naming the wedged reviewId.
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0]?.[0]).toMatch(reviewId);
+      expect(errorSpy.mock.calls[0]?.[0]).toMatch(/wedged/u);
+      // No PASS reply was ever submitted while the gate was wedged.
+      expect(replyCount()).toBe(0);
+
+      // PASS-MODE: the gate now resolves + the reply lands. The streak is CLEARED (deleted), and the reply
+      // was submitted — the chain un-wedges.
+      setMode('pass');
+      await maybePassReviews(ipc, projectId, failStreak);
+      expect(failStreak.has(reviewId)).toBe(false);
+      expect(replyCount()).toBe(1);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('does NOT log a transient single failure (streak below threshold) — only a PERSISTENT wedge', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'co-ob-wedge2-data-'));
+    dataDirs.push(dataDir);
+    process.env.CO_DATA_DIR = dataDir;
+
+    const registry = openRegistry();
+    let projectId: ProjectId;
+    try {
+      projectId = registry.register(join(dataDir, 'repo'));
+    } finally {
+      registry.close();
+    }
+    const reviewId = 'rev-transient-1';
+    seedPendingReview(projectId, reviewId);
+
+    const { ipc } = makeStubIpc(); // stays in fail-mode
+    const failStreak = new Map<string, number>();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // A single failed tick is a transient miss (it retries next tick) — it must NOT log.
+      await maybePassReviews(ipc, projectId, failStreak);
+      expect(failStreak.get(reviewId)).toBe(1);
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
     }
   });
 });
