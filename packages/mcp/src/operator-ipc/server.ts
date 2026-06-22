@@ -332,19 +332,8 @@ export class OperatorIpcServer {
    * `co-mcp serve` subscribes this to the engine's transcript stream. A no-op when no app is attached; a
    * push that races a disconnect is reported, never thrown (must not crash the daemon — Principle 9).
    */
-  pushTranscript(agentId: string, chunk: string, offset: number): void;
-  pushTranscript(agentId: string, generation: number, chunk: string, offset: number): void;
-  pushTranscript(
-    agentId: string,
-    generationOrChunk: number | string,
-    chunkOrOffset: string | number,
-    maybeOffset?: number,
-  ): void {
+  pushTranscript(agentId: string, generation: number, chunk: string, offset: number): void {
     if (!this.transport.connected) return;
-    const generation = typeof generationOrChunk === 'number' ? generationOrChunk : 0;
-    const chunk = typeof generationOrChunk === 'number' ? String(chunkOrOffset) : generationOrChunk;
-    const offset =
-      typeof generationOrChunk === 'number' ? (maybeOffset ?? 0) : Number(chunkOrOffset);
     const [first, ...rest] = splitTranscriptPush(chunk, offset);
     if (first == null) return;
     if (this.transcriptPushInFlight) {

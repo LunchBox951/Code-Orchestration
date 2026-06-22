@@ -26,6 +26,7 @@ class FakeTerminal implements FitTerminalLike, TermWriter {
   dataCb: ((data: string) => void) | null = null;
   dataOnWrite: string | null = null;
   pendingWriteCallback: (() => void) | null = null;
+  throwOnWrite = false;
   constructor(private readonly order: string[]) {}
   loadAddon(addon: FitAddonLike): void {
     this.loadedAddons.push(addon);
@@ -40,6 +41,7 @@ class FakeTerminal implements FitTerminalLike, TermWriter {
     this.order.push('onData');
   }
   write(data: string, callback?: () => void): void {
+    if (this.throwOnWrite) throw new Error('fake xterm: synchronous write failure');
     this.writes.push(data);
     this.order.push('write');
     if (this.dataOnWrite != null) this.dataCb?.(this.dataOnWrite);
@@ -298,6 +300,45 @@ describe('decideTermFeed', () => {
     });
     expect(feed).toEqual({ kind: 'reset', data: 'totally different' });
   });
+
+  it('appends the whole new tail when it begins exactly at the end of the retained window', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'frame',
+      lastTranscriptOffset: 100,
+      transcript: 'next',
+      transcriptOffset: 105,
+    });
+
+    expect(feed).toEqual({ kind: 'append', data: 'next' });
+  });
+
+  it('is a no-op when the incoming window is wholly contained in the retained one (idempotent re-delivery)', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'ABCDEFG',
+      lastTranscriptOffset: 100,
+      transcript: 'CDE',
+      transcriptOffset: 102,
+    });
+
+    expect(feed).toEqual({ kind: 'noop' });
+  });
+
+  it('resets on a forward live gap (offset beyond the retained window end)', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'abc',
+      lastTranscriptOffset: 100,
+      transcript: 'xyz',
+      transcriptOffset: 110,
+    });
+
+    expect(feed).toEqual({ kind: 'reset', data: 'xyz' });
+  });
 });
 
 describe('applyTermFeed — raw bytes are written VERBATIM', () => {
@@ -344,6 +385,22 @@ describe('applyTermFeed — raw bytes are written VERBATIM', () => {
     expect(typed).toEqual([]);
 
     s.term.pendingWriteCallback?.();
+    s.term.dataCb?.('k');
+    expect(typed).toEqual(['k']);
+  });
+
+  it('releases suppression when a replay write throws synchronously (input never latches off)', () => {
+    const typed: string[] = [];
+    const s = setup({ onInput: (d) => typed.push(d) });
+    s.term.throwOnWrite = true;
+
+    expect(() =>
+      applyTermFeed(s.term, { kind: 'reset', data: ESC + '[6n' }, s.result.inputGuard),
+    ).toThrow();
+
+    // A synchronous throw must still release the guard, else live input latches off forever.
+    expect(s.result.inputGuard.isSuppressed()).toBe(false);
+    s.term.throwOnWrite = false;
     s.term.dataCb?.('k');
     expect(typed).toEqual(['k']);
   });

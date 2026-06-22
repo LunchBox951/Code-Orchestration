@@ -105,7 +105,12 @@ export function createTerminalInputGuard(): TerminalInputGuard {
         released = true;
         suppressDepth = Math.max(0, suppressDepth - 1);
       };
-      write(done);
+      try {
+        write(done);
+      } catch (err) {
+        done(); // a synchronous throw must still release the guard, else live input latches off forever
+        throw err;
+      }
     },
   };
 }
@@ -177,6 +182,11 @@ export type TermFeed =
   | { readonly kind: 'append'; readonly data: string }
   | { readonly kind: 'noop' };
 
+/**
+ * Production ALWAYS supplies the four generation/offset fields (sourced from `AgentsConsoleState`, where
+ * they are required). They stay optional here only for the legacy/no-offset call shape used by unit tests;
+ * the `!= null` guards and the `startsWith` fallback in {@link decideTermFeed} exist solely for that shape.
+ */
 export interface TermFeedInput {
   readonly selectedAgentId: string | null;
   readonly lastAgentId: string | null;

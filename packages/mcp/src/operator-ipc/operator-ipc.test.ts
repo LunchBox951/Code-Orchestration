@@ -881,9 +881,9 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     });
     Object.defineProperty(server, 'transport', { value: fakeTransport });
 
-    server.pushTranscript('impl-x', 'one', 0);
-    server.pushTranscript('impl-x', 'two', 3);
-    server.pushTranscript('impl-x', 'three', 6);
+    server.pushTranscript('impl-x', 0, 'one', 0);
+    server.pushTranscript('impl-x', 0, 'two', 3);
+    server.pushTranscript('impl-x', 0, 'three', 6);
 
     expect(fakeTransport.send).toHaveBeenCalledTimes(1);
     releaseFirst();
@@ -934,9 +934,9 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     });
     Object.defineProperty(server, 'transport', { value: fakeTransport });
 
-    server.pushTranscript('impl-x', 'old-in-flight', 0);
-    server.pushTranscript('impl-x', 'old-pending', 'old-in-flight'.length);
-    server.pushTranscript('impl-x', 'new-generation', 0);
+    server.pushTranscript('impl-x', 0, 'old-in-flight', 0);
+    server.pushTranscript('impl-x', 0, 'old-pending', 'old-in-flight'.length);
+    server.pushTranscript('impl-x', 0, 'new-generation', 0);
 
     expect(fakeTransport.send).toHaveBeenCalledTimes(1);
     releaseFirst();
@@ -946,6 +946,59 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     expect(sent[1]).toMatchObject({
       method: 'transcript:push',
       params: { agentId: 'impl-x', offset: 0, chunk: 'new-generation' },
+    });
+  });
+
+  it('evicts a pending same-agent push when a newer generation arrives (no stale-generation leakage)', async () => {
+    const { projectId } = makeProject();
+    let releaseFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const sent: Array<{ method?: string; params?: unknown }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message);
+        return sent.length === 1 ? firstSend : Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    server.pushTranscript('impl-x', 1, 'inflight', 0); // occupies the in-flight slot (send #1)
+    server.pushTranscript('impl-x', 1, 'genA', 'inflight'.length); // queued at generation 1
+    server.pushTranscript('impl-x', 2, 'genB', 0); // queued at generation 2 → evicts the gen-1 'genA'
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await flush();
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(2);
+    expect(sent[1]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', generation: 2, offset: 0, chunk: 'genB' },
     });
   });
 
@@ -991,9 +1044,9 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     Object.defineProperty(server, 'transport', { value: fakeTransport });
 
     const cap = 64 * 1024;
-    server.pushTranscript('impl-x', 'first', 0);
+    server.pushTranscript('impl-x', 0, 'first', 0);
     for (let i = 0; i < 10; i++) {
-      server.pushTranscript('impl-x', String(i).repeat(cap), 'first'.length + i * cap);
+      server.pushTranscript('impl-x', 0, String(i).repeat(cap), 'first'.length + i * cap);
     }
 
     expect(fakeTransport.send).toHaveBeenCalledTimes(1);
@@ -1045,7 +1098,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
 
     const cap = 64 * 1024;
     const raw = ESC + '[?1049h' + 'A'.repeat(cap + 10);
-    server.pushTranscript('impl-x', raw, 5);
+    server.pushTranscript('impl-x', 0, raw, 5);
     await flush();
 
     expect(sent).toHaveLength(2);
@@ -1086,6 +1139,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
 
     expect(got).toHaveLength(1);
     expect(got[0]!.agentId).toBe('impl-x');
+    // A single hostPane bumps the engine generation to 1 — prove the new field round-trips end-to-end.
+    expect(got[0]!.generation).toBe(1);
     expect(got[0]!.offset).toBe(CLAUDE_READY.length);
     // EXACT same string cross-process — a serialization / default-derivation bug MUST fail here.
     expect(got[0]!.chunk).toBe(chunk);

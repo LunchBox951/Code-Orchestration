@@ -1,9 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import {
-  AgentsConsoleVM,
-  CONSOLE_TRANSCRIPT_MAX_CHARS,
-  boundConsoleTranscript,
-} from './agents-console-vm.js';
+import { AgentsConsoleVM, CONSOLE_TRANSCRIPT_MAX_CHARS } from './agents-console-vm.js';
 import { TRANSCRIPT_TAIL_HARD_MAX_CHARS } from '@co/core';
 import type {
   OperatorObservation,
@@ -497,96 +493,12 @@ describe('AgentsConsoleVM — appendChunk', () => {
   });
 });
 
-// ── #66 sub-bug B — the renderer-side alt-screen-aware bound (boundConsoleTranscript) ─────────────
-// The OLD flat front-drop sliced off the early `ESC[?1049h` an interactive TUI emits ONCE to enter the
-// alternate screen, so a long session's reconstructed transcript lost its alt-screen setup and the garble
-// returned. The bound must NEVER cut past the last alt-screen-enter within the kept window — mirroring the
-// engine's `transcriptTailFrom` policy. These assert the PURE exported function directly (no electron); the
-// alt-screen cases would FAIL under the old flat slice.
+// #66 sub-bug B — the renderer-side alt-screen-aware bound is exercised through the real VM API below
+// (the `renderer cap has STRICT headroom` and `alt-screen-aware bound over the reconstructed transcript`
+// blocks); the underlying core boundary policy is covered by packages/core/src/pty/transcript-tail.test.ts.
 // ESC authored as a `\u` escape so the SOURCE holds no raw control byte (the C2 pristine-repo rule).
 const ESC = '\u001B';
-const CSI = '\u009B';
 const ALT_ENTER = ESC + '[?1049h'; // DEC private mode 1049 set — switch to the alternate screen
-const C1_ALT_ENTER = CSI + '?1049h';
-describe('boundConsoleTranscript (#66 sub-bug B) — never slices away the alternate-screen setup', () => {
-  it('keeps the FULL text verbatim when at/under the cap (common case, unchanged)', () => {
-    const under = ALT_ENTER + 'a small frame';
-    expect(boundConsoleTranscript(under)).toBe(under);
-    const exact = 'z'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS);
-    expect(boundConsoleTranscript(exact)).toBe(exact);
-  });
-
-  it('retains back to the early alt-screen-enter on a >cap stream (the fix; FAILS under flat front-drop)', () => {
-    // A long session: scrollback that will be dropped, then the alt-screen setup, then redraw frames.
-    // The whole stream exceeds the cap, but the enter still sits WITHIN the most-recent-cap window — so it
-    // is reachable and MUST be retained (an alt-screen-UNAWARE flat drop would slice it away mid-window).
-    const head = 'H'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS); // older scrollback — pushes total past the cap
-    const setup = ALT_ENTER + ESC + '[2J' + ESC + '[H'; // enter alt screen, clear, home
-    const frames = 'F'.repeat(Math.floor(CONSOLE_TRANSCRIPT_MAX_CHARS / 2)); // redraws, < cap after the enter
-    const buf = head + setup + frames;
-    expect(buf.length).toBeGreaterThan(CONSOLE_TRANSCRIPT_MAX_CHARS); // the stream is genuinely over the cap
-
-    const bounded = boundConsoleTranscript(buf);
-
-    // The load-bearing invariant: the alt-screen-enter is STILL present in the bound result…
-    expect(bounded.includes(ALT_ENTER)).toBe(true);
-    // …and it leads the kept transcript (we anchored on exactly that boundary).
-    expect(bounded.startsWith(ALT_ENTER)).toBe(true);
-    // Anchoring keeps the same-or-less than the flat window, so the footprint stays bounded.
-    expect(bounded.length).toBeLessThanOrEqual(CONSOLE_TRANSCRIPT_MAX_CHARS);
-    // The OLD flat front-drop would have kept only the last `cap` chars — which START mid-`H`-scrollback
-    // and so SLICE the alt-screen-enter even though it is inside the window: exactly the garble we prevent.
-    expect(buf.slice(buf.length - CONSOLE_TRANSCRIPT_MAX_CHARS).startsWith(ALT_ENTER)).toBe(false);
-  });
-
-  it('anchors on the LAST alt-screen-enter when several are present (re-entered the alt screen)', () => {
-    const firstEnter = ALT_ENTER + 'one'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS); // pushed well past the cap
-    const lastEnter = ALT_ENTER + 'two'; // the re-enter we must anchor on
-    const buf = firstEnter + lastEnter;
-
-    const bounded = boundConsoleTranscript(buf);
-
-    expect(bounded.startsWith(ALT_ENTER)).toBe(true);
-    expect(bounded).toBe(lastEnter); // anchored on the LAST enter, not the first
-    expect(bounded.split(ALT_ENTER).length - 1).toBe(1); // exactly one enter survives
-  });
-
-  it('honours the cap: an unreachably-old alt-screen-enter is NOT dragged in', () => {
-    // Alt-screen-enter, then MORE than the cap of bytes after it → it falls outside the kept window.
-    const buf = ALT_ENTER + 'G'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS + 5_000);
-
-    const bounded = boundConsoleTranscript(buf);
-
-    expect(bounded.length).toBeLessThanOrEqual(CONSOLE_TRANSCRIPT_MAX_CHARS); // memory stays bounded
-    expect(bounded.includes(ALT_ENTER)).toBe(false); // the stale enter is beyond reach — not retained
-  });
-
-  it('with NO alt-screen, is exactly the flat most-recent-N drop (legacy behavior preserved)', () => {
-    const buf = 'A'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS) + 'B'.repeat(1_000);
-
-    const bounded = boundConsoleTranscript(buf);
-
-    expect(bounded.length).toBe(CONSOLE_TRANSCRIPT_MAX_CHARS);
-    expect(bounded).toBe(buf.slice(buf.length - CONSOLE_TRANSCRIPT_MAX_CHARS));
-    expect(bounded.endsWith('B'.repeat(1_000))).toBe(true);
-  });
-
-  it('recognizes C1 CSI alt-screen enter as the same replay boundary', () => {
-    const head = 'H'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS);
-    const frames = 'F'.repeat(Math.floor(CONSOLE_TRANSCRIPT_MAX_CHARS / 2));
-    const bounded = boundConsoleTranscript(head + C1_ALT_ENTER + frames);
-
-    expect(bounded.startsWith(C1_ALT_ENTER)).toBe(true);
-  });
-
-  it('snaps to a full-screen clear when no alt-screen enter is reachable', () => {
-    const head = 'H'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS);
-    const clearFrame = ESC + '[2J' + ESC + '[Hfresh frame';
-    const bounded = boundConsoleTranscript(head + clearFrame);
-
-    expect(bounded).toBe(clearFrame);
-  });
-});
 
 // The engine's HARD ceiling on the retained tail (`TRANSCRIPT_TAIL_HARD_MAX_CHARS` in `@co/mcp` — 4 × 64
 // KiB). Imported from the shared core contract so the test fails if the engine ceiling changes without

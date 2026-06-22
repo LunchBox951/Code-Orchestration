@@ -1,9 +1,4 @@
-import {
-  assertNever,
-  retainTranscriptTail,
-  TranscriptTailAccumulator,
-  TRANSCRIPT_TAIL_HARD_MAX_CHARS,
-} from '@co/core';
+import { assertNever, TranscriptTailAccumulator, TRANSCRIPT_TAIL_HARD_MAX_CHARS } from '@co/core';
 import type {
   OperatorObservation,
   AgentLiveView,
@@ -31,27 +26,6 @@ import type { AgentStatus } from './dashboard-vm.js';
  * still needs live verification against an interactive TUI; the unit tests do not exercise the terminal.
  */
 export const CONSOLE_TRANSCRIPT_MAX_CHARS = 2 * TRANSCRIPT_TAIL_HARD_MAX_CHARS;
-
-/**
- * #66 sub-bug B — bound the renderer-side reconstructed transcript WITHOUT slicing away the early
- * alternate-screen-enter (`ESC[?1049h`) that an interactive TUI emits ONCE to switch xterm into its own
- * buffer. PURE (no I/O, no mutation, deterministic) and exported so it is unit-testable WITHOUT loading
- * electron. Uses the same core boundary policy as the engine, bounded to the single
- * {@link CONSOLE_TRANSCRIPT_MAX_CHARS} ceiling the renderer keeps:
- *
- *  - Under the cap: the whole `text` is kept verbatim (the common case — byte-for-byte unchanged).
- *  - Over the cap: anchor at the last reachable alt-screen enter, else at the last reachable full-screen
- *    clear, else fall back to the flat most-recent-N drop.
- *
- * Without this, the old alt-screen-UNAWARE flat front-drop slices off the leading `ESC[?1049h` on any long
- * session; `decideTermFeed` then `reset()`s and rewrites the alt-stripped transcript → the #66 garble.
- */
-export function boundConsoleTranscript(text: string): string {
-  return retainTranscriptTail(text, {
-    softMaxChars: CONSOLE_TRANSCRIPT_MAX_CHARS,
-    hardMaxChars: CONSOLE_TRANSCRIPT_MAX_CHARS,
-  }).tail;
-}
 
 export interface AgentConsoleRow {
   readonly agentId: string;
