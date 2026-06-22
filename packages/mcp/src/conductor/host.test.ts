@@ -42,10 +42,12 @@ import {
   ConductorHostRunner,
   defaultServeCoMcpPaths,
   hostLiveTransportRequired,
+  makeGhAuthTokenRunner,
   resolveAndApplyDaemonGithubAuth,
   resolveGhToken,
   runServeConductor,
   serveConductor,
+  type GhSpawnSync,
   type IntervalHandle,
   type IntervalScheduler,
 } from './host.js';
@@ -914,6 +916,44 @@ describe('serveConductor — wires the full stack over injected seams (no real b
       const env: NodeJS.ProcessEnv = {};
       expect(resolveAndApplyDaemonGithubAuth(env, () => undefined)).toBeUndefined();
       expect(env).toEqual({});
+    });
+
+    describe('makeGhAuthTokenRunner (real runner over an injectable spawn seam)', () => {
+      it('returns the token from `gh` on PATH (first candidate)', () => {
+        const calls: string[] = [];
+        const spawn: GhSpawnSync = (cmd) => {
+          calls.push(cmd);
+          return cmd === 'gh' ? { status: 0, stdout: 'ghp_path\n' } : { status: 127 };
+        };
+        expect(makeGhAuthTokenRunner(spawn)({})).toBe('ghp_path');
+        expect(calls).toEqual(['gh']); // stopped at the first success
+      });
+
+      it('falls through to an absolute candidate when `gh` is not on PATH', () => {
+        const spawn: GhSpawnSync = (cmd) =>
+          cmd === '/usr/local/bin/gh' ? { status: 0, stdout: 'ghp_abs' } : { status: 127 };
+        expect(makeGhAuthTokenRunner(spawn)({})).toBe('ghp_abs');
+      });
+
+      it('returns undefined when every candidate fails (logged out / not found)', () => {
+        expect(makeGhAuthTokenRunner(() => ({ status: 1 }))({})).toBeUndefined();
+      });
+
+      it('returns undefined on a timeout (spawnSync status null) — does not wedge boot', () => {
+        // The real spawn returns { status: null } on timeout; the runner must degrade to "no token".
+        expect(makeGhAuthTokenRunner(() => ({ status: null }))({})).toBeUndefined();
+      });
+
+      it('returns undefined for a status-0 but whitespace-only token', () => {
+        expect(makeGhAuthTokenRunner(() => ({ status: 0, stdout: '   \n' }))({})).toBeUndefined();
+      });
+
+      it('never throws even if the spawn seam throws (treats as no token)', () => {
+        const spawn: GhSpawnSync = () => {
+          throw new Error('ENOENT');
+        };
+        expect(makeGhAuthTokenRunner(spawn)({})).toBeUndefined();
+      });
     });
   });
 

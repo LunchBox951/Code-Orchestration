@@ -397,7 +397,7 @@ export {
   worktreePathFor,
   CO_BRANCH_PREFIX,
 } from './worktrees/sling.js';
-export { githubHttpsCredentialEnv } from './worktrees/github-auth.js';
+export { githubHttpsCredentialEnv, resolveGhTokenFromEnv } from './worktrees/github-auth.js';
 // L3-B worktree environment provisioning: place the gitignored working essentials into a slung
 // sandbox by the right mechanism per item (symlink large/stable deps · copy small/mutable env ·
 // isolated-copy a dep dir an agent will mutate), from a configurable manifest (smart defaults ⊕

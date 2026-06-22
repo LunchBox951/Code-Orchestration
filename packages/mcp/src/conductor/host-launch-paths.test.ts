@@ -35,7 +35,7 @@ describe('host launch path resolution', () => {
     );
   });
 
-  it('F3: sources the gh token from CO_GH_TOKEN (then GITHUB_TOKEN/GH_TOKEN), trimming + omitting empties', () => {
+  it('F3: sources the gh token via the shared policy (CO_GH_TOKEN > GH_TOKEN > GITHUB_TOKEN), trimming + omitting empties', () => {
     const CLI = '/tmp/repo/packages/cli/dist/index.js';
     const paths = (extra: Record<string, string>) =>
       defaultCoMcpPaths({
@@ -46,6 +46,8 @@ describe('host launch path resolution', () => {
     expect(paths({ CO_GH_TOKEN: '  gho_primary  ' }).ghToken).toBe('gho_primary');
     // CO_GH_TOKEN wins over the generic fallbacks.
     expect(paths({ CO_GH_TOKEN: 'gho_co', GITHUB_TOKEN: 'gho_gh' }).ghToken).toBe('gho_co');
+    // gh-native order: GH_TOKEN beats GITHUB_TOKEN (so the daemon picks the same token gh would).
+    expect(paths({ GH_TOKEN: 'gho_gh', GITHUB_TOKEN: 'gho_ci' }).ghToken).toBe('gho_gh');
     // Fallbacks are honored for a CLI/CI launch.
     expect(paths({ GITHUB_TOKEN: 'gho_ci' }).ghToken).toBe('gho_ci');
     // No token configured → absent (never an empty GH_TOKEN).

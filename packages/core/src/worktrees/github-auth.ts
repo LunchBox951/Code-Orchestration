@@ -26,6 +26,20 @@ const GITHUB_CREDENTIAL_HELPER =
   '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f';
 
 /**
+ * Resolve a GitHub token from an env's EXPLICIT token variables — the single source of truth for the
+ * precedence policy (the env-only part; the daemon adds a `gh auth token` fallback on top). Order:
+ * `CO_GH_TOKEN` (co-specific override) wins, then `GH_TOKEN` then `GITHUB_TOKEN` — matching `gh`'s own
+ * native precedence (`GH_TOKEN` > `GITHUB_TOKEN`) so the daemon picks the same token `gh` would.
+ * Whitespace is trimmed; blank/whitespace-only values are treated as absent. Returns `undefined` when
+ * no token is set. Pure (reads only `env`).
+ */
+export function resolveGhTokenFromEnv(env: NodeJS.ProcessEnv): string | undefined {
+  return [env['CO_GH_TOKEN'], env['GH_TOKEN'], env['GITHUB_TOKEN']]
+    .map((v) => v?.trim())
+    .find((v) => v != null && v.length > 0);
+}
+
+/**
  * Build the env additions that authenticate the daemon's `gh` and `git push https://github.com`.
  * Returns `{}` for a blank token. `baseEnv` is read (never mutated) to compose `GIT_CONFIG_COUNT`.
  */

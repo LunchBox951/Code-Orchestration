@@ -12,6 +12,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { CLAUDE_AUTH_STATUS_ARGS, parseClaudeAuthStatus } from '../dispatch/claude-source.js';
+import { resolveGhTokenFromEnv } from '../worktrees/github-auth.js';
 import { CODEX_DOCTOR_ARGS, parseCodexDoctor } from '../dispatch/codex-source.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import { openGlobalStore, openProjectStore } from '../store/sqlite-store.js';
@@ -279,10 +280,8 @@ export function defaultGithubAuthProbe(
   const command = options.command ?? realProviderProbeCommand;
   const env = options.env ?? process.env;
   return () => {
-    const envToken = [env['CO_GH_TOKEN'], env['GITHUB_TOKEN'], env['GH_TOKEN']]
-      .map((v) => v?.trim())
-      .find((v) => v != null && v.length > 0);
-    if (envToken != null) return { authenticated: true };
+    // Same env-token precedence the daemon uses (shared policy), so doctor reports what publish sees.
+    if (resolveGhTokenFromEnv(env) != null) return { authenticated: true };
     const res = command('gh', ['auth', 'status']);
     if (res.error !== undefined) {
       return { authenticated: false, diagnostic: `gh not runnable: ${res.error.message}` };

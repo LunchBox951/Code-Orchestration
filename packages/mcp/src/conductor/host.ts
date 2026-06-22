@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import {
   NodePtyHost,
   githubHttpsCredentialEnv,
+  resolveGhTokenFromEnv,
   defaultGitExec,
   defaultGitRawReader,
   defaultGitReader,
@@ -947,40 +948,63 @@ export type GhAuthTokenRunner = (env: NodeJS.ProcessEnv) => string | undefined;
 /** Common absolute `gh` locations to try when a GUI launch has a minimal PATH. */
 const GH_ABSOLUTE_FALLBACKS = ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh'] as const;
 
-/** The real {@link GhAuthTokenRunner}: try `gh` on PATH, then common absolute paths; never throws. */
-export const defaultGhAuthTokenRunner: GhAuthTokenRunner = (env) => {
-  for (const cmd of ['gh', ...GH_ABSOLUTE_FALLBACKS]) {
-    try {
-      const res = spawnSync(cmd, ['auth', 'token'], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env,
-      });
-      if (res.status === 0) {
-        const token = res.stdout?.trim();
-        if (token != null && token.length > 0) return token;
-      }
-    } catch {
-      // Try the next candidate (ENOENT etc.) — a missing/failed gh is "no token", not a crash.
-    }
-  }
-  return undefined;
+/** Hard cap on `gh auth token` so a hung gh (credential prompt, stuck helper) cannot wedge the
+ *  daemon-boot hot path; on timeout spawnSync returns status null and we degrade to "no token". */
+const GH_AUTH_TOKEN_TIMEOUT_MS = 15_000;
+
+/** Sync spawn seam for the gh runner — injectable so the real runner is testable without a real gh. */
+export type GhSpawnSync = (
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+) => { readonly status: number | null; readonly stdout?: string };
+
+const realGhSpawn: GhSpawnSync = (command, args, env) => {
+  const res = spawnSync(command, [...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env,
+    timeout: GH_AUTH_TOKEN_TIMEOUT_MS,
+  });
+  return { status: res.status, stdout: typeof res.stdout === 'string' ? res.stdout : undefined };
 };
 
 /**
- * Resolve a GitHub token for the daemon: explicit env (`CO_GH_TOKEN`, then `GITHUB_TOKEN`/`GH_TOKEN`)
- * wins; otherwise fall back to the operator's existing login via `gh auth token`. So a self-hosting
- * operator authenticates GitHub with the standard one-time `gh auth login` — no co-specific UI needed.
+ * Build a {@link GhAuthTokenRunner} over a spawn seam: try `gh` on PATH, then common absolute paths
+ * (a GUI launch often has a minimal PATH). Never throws — any spawn failure / non-zero / timeout is
+ * treated as "no token" and falls through to the next candidate, ultimately `undefined`.
+ */
+export function makeGhAuthTokenRunner(spawn: GhSpawnSync = realGhSpawn): GhAuthTokenRunner {
+  return (env) => {
+    for (const cmd of ['gh', ...GH_ABSOLUTE_FALLBACKS]) {
+      try {
+        const res = spawn(cmd, ['auth', 'token'], env);
+        if (res.status === 0) {
+          const token = res.stdout?.trim();
+          if (token != null && token.length > 0) return token;
+        }
+      } catch {
+        // ENOENT / spawn failure → try the next candidate; a missing/failed gh is "no token".
+      }
+    }
+    return undefined;
+  };
+}
+
+/** The real {@link GhAuthTokenRunner} (timeout-bounded real spawnSync). */
+export const defaultGhAuthTokenRunner: GhAuthTokenRunner = makeGhAuthTokenRunner();
+
+/**
+ * Resolve a GitHub token for the daemon: explicit env (`CO_GH_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`,
+ * via the shared {@link resolveGhTokenFromEnv} policy) wins; otherwise fall back to the operator's
+ * existing login via `gh auth token`. So a self-hosting operator authenticates GitHub with the
+ * standard one-time `gh auth login` — no co-specific UI needed.
  */
 export function resolveGhToken(
   env: NodeJS.ProcessEnv = process.env,
   runner: GhAuthTokenRunner = defaultGhAuthTokenRunner,
 ): string | undefined {
-  const explicit = [env['CO_GH_TOKEN'], env['GITHUB_TOKEN'], env['GH_TOKEN']]
-    .map((v) => v?.trim())
-    .find((v) => v != null && v.length > 0);
-  if (explicit != null) return explicit;
-  return runner(env);
+  return resolveGhTokenFromEnv(env) ?? runner(env);
 }
 
 /**
@@ -1022,6 +1046,10 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   } finally {
     registry.close();
   }
+  // The daemon has no operator at its stdin, so git must NEVER block on an interactive credential
+  // prompt — even on the no-token path (Principle 9 fail-loud: error out, do not hang). Set this
+  // unconditionally; githubHttpsCredentialEnv also sets it when a token is provisioned.
+  process.env['GIT_TERMINAL_PROMPT'] = '0';
   // RC-2/3/4: provision GitHub auth onto the daemon env BEFORE building coMcpPaths so (a) the
   // daemon-side git/gh publish + detection authenticate, and (b) defaultServeCoMcpPaths() picks up the
   // now-set GH_TOKEN for the pane (defense-in-depth). Sourced from explicit env or the operator's

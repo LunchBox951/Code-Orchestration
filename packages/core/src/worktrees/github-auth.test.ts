@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { githubHttpsCredentialEnv } from './github-auth.js';
+import { githubHttpsCredentialEnv, resolveGhTokenFromEnv } from './github-auth.js';
+
+describe('resolveGhTokenFromEnv — shared token-precedence policy', () => {
+  it('CO_GH_TOKEN wins, then GH_TOKEN, then GITHUB_TOKEN (gh-native order); trims + omits blanks', () => {
+    expect(
+      resolveGhTokenFromEnv({ CO_GH_TOKEN: '  co  ', GH_TOKEN: 'gh', GITHUB_TOKEN: 'ci' }),
+    ).toBe('co');
+    // gh-native: GH_TOKEN beats GITHUB_TOKEN (matches what `gh` itself would pick).
+    expect(resolveGhTokenFromEnv({ GH_TOKEN: 'gh', GITHUB_TOKEN: 'ci' })).toBe('gh');
+    expect(resolveGhTokenFromEnv({ GITHUB_TOKEN: 'ci' })).toBe('ci');
+    expect(resolveGhTokenFromEnv({})).toBeUndefined();
+    expect(resolveGhTokenFromEnv({ CO_GH_TOKEN: '   ' })).toBeUndefined();
+  });
+});
 
 describe('githubHttpsCredentialEnv — daemon-side GitHub HTTPS auth (RC-3/RC-4)', () => {
   it('authenticates both gh (GH_TOKEN) and git push (credential helper) for github.com', () => {
@@ -42,5 +55,13 @@ describe('githubHttpsCredentialEnv — daemon-side GitHub HTTPS auth (RC-3/RC-4)
     expect(env['GIT_CONFIG_KEY_1']).toBe('credential.https://github.com.helper');
     expect(env['GIT_CONFIG_KEY_2']).toBe('credential.https://github.com.useHttpPath');
     expect(env).not.toHaveProperty('GIT_CONFIG_KEY_0');
+  });
+
+  it('treats a malformed/zero inbound GIT_CONFIG_COUNT as 0 (appends at index 0)', () => {
+    for (const bad of ['abc', '0', '-1', '']) {
+      const env = githubHttpsCredentialEnv('ghp_abc', { GIT_CONFIG_COUNT: bad });
+      expect(env['GIT_CONFIG_COUNT']).toBe('2');
+      expect(env['GIT_CONFIG_KEY_0']).toBe('credential.https://github.com.helper');
+    }
   });
 });
