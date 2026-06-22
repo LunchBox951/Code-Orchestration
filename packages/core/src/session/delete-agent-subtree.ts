@@ -259,12 +259,18 @@ export function deleteAgentSubtree(
           const branchExists = localBranchExists(repoCwd, wt.branch, gitReader);
           const alreadyDeletedMergedBranch = wt.removed && !branchExists;
           if (!branchExists && !wt.removed) {
-            recordAgentError(
-              new Error(
-                `deleteAgentSubtree: live worktree branch '${wt.branch}' is missing; ` +
-                  `refusing to archive or remove worktree '${wt.path}'`,
-              ),
-            );
+            // #65: the live worktree's branch ref is already gone (out-of-band `git branch -D`,
+            // a force-push, or a history rewrite). There is no recoverable work left to preserve
+            // and no branch to delete, so force-remove the orphaned worktree and continue the
+            // cascade instead of wedging the whole subtree delete. We deliberately do NOT archive:
+            // the archive stores only metadata, so a "Restore" would have no branch ref to restore
+            // to. The safety property still holds — we never delete a branch holding unmerged work
+            // (there is no branch here), we only clean up the stranded worktree.
+            try {
+              worktrees.removeWorktree(wt.branch, { repoCwd, gitExec, force: true });
+            } catch (e) {
+              recordAgentError(e);
+            }
           } else if (alreadyDeletedMergedBranch) {
             try {
               gitExec(repoCwd, ['branch', '-d', wt.branch]);

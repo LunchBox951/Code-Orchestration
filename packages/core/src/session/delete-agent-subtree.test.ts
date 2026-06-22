@@ -1347,7 +1347,7 @@ describe('deleteAgentSubtree', () => {
     expect(roster.getAgent('coord-x')).toBeDefined();
   });
 
-  it('fails loud without removing or archiving when a live worktree branch ref is missing', () => {
+  it('removes the orphaned worktree and completes teardown when a live worktree branch ref is missing (#65)', () => {
     const roster = makeFakeRoster([
       { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
       { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
@@ -1356,13 +1356,14 @@ describe('deleteAgentSubtree', () => {
     const sessions = makeFakeSessions([session('impl', 'pane-impl')]);
     const archive = makeFakeArchive();
     const { spy: gitExec, calls } = makeGitExecSpy();
+    // co/impl's branch ref is GONE (out-of-band branch -D / force-push) while its worktree is live.
     const gitReader = makeGitReader({
       existingBranches: new Set(['co/coord-x']),
       mergedBranches: new Set(['co/coord-x']),
     });
 
-    let caught: unknown;
-    try {
+    // The whole subtree delete used to wedge here (#65). It must now succeed.
+    expect(() =>
       deleteAgentSubtree('proj', 'coord-x', {
         openRoster: () => roster,
         openWorktrees: () => worktreeStore,
@@ -1372,19 +1373,20 @@ describe('deleteAgentSubtree', () => {
         nowMs: 10_000,
         gitExec,
         gitReader,
-      });
-    } catch (err) {
-      caught = err;
-    }
+      }),
+    ).not.toThrow();
 
-    expect(caught).toBeInstanceOf(AggregateError);
-    expect((caught as AggregateError).errors.some((e) => String(e).includes('co/impl'))).toBe(true);
-    expect(worktreeStore.removedBranches).not.toContain('co/impl');
+    // The orphaned worktree is force-removed (its branch ref is already gone)...
+    expect(worktreeStore.removedBranches).toContain('co/impl');
+    // ...but NOT archived — the archive holds only metadata, so a Restore would have no branch ref.
     expect(archive.records).toEqual([]);
+    // ...and no branch delete is attempted (there is no branch to delete).
     expect(calls.some((call) => call.join(' ').includes('branch -d co/impl'))).toBe(false);
-    expect(sessions.getSession('impl')).toBeDefined();
-    expect(roster.getAgent('impl')).toBeDefined();
-    expect(roster.getAgent('coord-x')).toBeDefined();
+    expect(calls.some((call) => call.join(' ').includes('branch -D co/impl'))).toBe(false);
+    // The cascade completes: sessions ended + roster entries removed for the whole subtree.
+    expect(sessions.getSession('impl')).toBeUndefined();
+    expect(roster.getAgent('impl')).toBeUndefined();
+    expect(roster.getAgent('coord-x')).toBeUndefined();
   });
 
   it('skips session end if session already ended (no active session for that agent)', () => {
