@@ -5,9 +5,9 @@
 > from a single task to the whole product. Every spec's own acceptance criteria must **ladder up**
 > to one or more criteria here.
 
-**Every Coordinator reads this.** It is referenced from `CLAUDE.md`/`AGENTS.md`, which every CO
-agent loads at the start of its turn — so all sequential Coordinators share one definition of "v1
-done" no matter how many tasks or sessions span the build.
+**Every Coordinator reads this.** It is referenced from `CLAUDE.md`/`AGENTS.md` (the repo's
+project-memory files) — so all sequential Coordinators share one definition of "v1 done" no matter
+how many tasks or sessions span the build.
 
 ## The v1 bar
 
