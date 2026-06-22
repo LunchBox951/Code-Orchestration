@@ -235,6 +235,19 @@ describe('decideTermFeed', () => {
     expect(feed).toEqual({ kind: 'append', data: 'KL' });
   });
 
+  it('appends only the delta when offsets are unchanged and the retained window grew', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'frame',
+      lastTranscriptOffset: 100,
+      transcript: 'frame-next',
+      transcriptOffset: 100,
+    });
+
+    expect(feed).toEqual({ kind: 'append', data: '-next' });
+  });
+
   it('resets when transcript offsets rewind even if the new text shares the old prefix', () => {
     const feed = decideTermFeed({
       selectedAgentId: 'a1',

@@ -205,6 +205,12 @@ export function decideTermFeed(input: TermFeedInput): TermFeed {
     const lastTranscriptEnd = lastTranscriptOffset + lastTranscript.length;
     if (transcriptOffset < lastTranscriptOffset) return { kind: 'reset', data: transcript };
     if (transcriptOffset > lastTranscriptEnd) return { kind: 'reset', data: transcript };
+    if (transcriptOffset === lastTranscriptOffset) {
+      if (transcript.length < lastTranscript.length) return { kind: 'reset', data: transcript };
+      if (!transcript.startsWith(lastTranscript)) return { kind: 'reset', data: transcript };
+      const delta = transcript.slice(lastTranscript.length);
+      return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
+    }
     if (transcriptOffset === lastTranscriptEnd) {
       return transcript.length > 0 ? { kind: 'append', data: transcript } : { kind: 'noop' };
     }

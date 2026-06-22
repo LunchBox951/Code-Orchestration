@@ -949,7 +949,64 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     });
   });
 
-  it('bounds an over-cap direct transcript push before sending it over IPC', () => {
+  it('bounds same-agent pending transcript backlog while a write is in flight', async () => {
+    const { projectId } = makeProject();
+    let releaseFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const sent: Array<{
+      method?: string;
+      params?: { agentId?: string; offset?: number; chunk?: string };
+    }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message as (typeof sent)[number]);
+        return sent.length === 1 ? firstSend : Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    const cap = 64 * 1024;
+    server.pushTranscript('impl-x', 'first', 0);
+    for (let i = 0; i < 10; i++) {
+      server.pushTranscript('impl-x', String(i).repeat(cap), 'first'.length + i * cap);
+    }
+
+    expect(fakeTransport.send).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await flush(12);
+
+    const pendingSends = sent.slice(1).filter((s) => s.params?.agentId === 'impl-x');
+    const totalPendingBytes = pendingSends.reduce((n, s) => n + (s.params?.chunk?.length ?? 0), 0);
+    expect(totalPendingBytes).toBeLessThanOrEqual(4 * cap);
+    expect(pendingSends.at(0)?.params?.offset).toBe('first'.length + 6 * cap);
+  });
+
+  it('splits an over-cap direct transcript push without dropping replay-boundary bytes', async () => {
     const { projectId } = makeProject();
     const sent: Array<{
       method?: string;
@@ -987,11 +1044,18 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     Object.defineProperty(server, 'transport', { value: fakeTransport });
 
     const cap = 64 * 1024;
-    server.pushTranscript('impl-x', 'A'.repeat(cap + 10), 5);
+    const raw = ESC + '[?1049h' + 'A'.repeat(cap + 10);
+    server.pushTranscript('impl-x', raw, 5);
+    await flush();
 
+    expect(sent).toHaveLength(2);
     expect(sent[0]).toMatchObject({
       method: 'transcript:push',
-      params: { agentId: 'impl-x', offset: 15, chunk: 'A'.repeat(cap) },
+      params: { agentId: 'impl-x', offset: 5, chunk: raw.slice(0, cap) },
+    });
+    expect(sent[1]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', offset: 5 + cap, chunk: raw.slice(cap) },
     });
   });
 
