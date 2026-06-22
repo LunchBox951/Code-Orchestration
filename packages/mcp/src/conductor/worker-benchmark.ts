@@ -27,8 +27,10 @@ import {
   openDispatchStore,
   openMailStore,
   toolsForRole,
+  type AgentCostRollup,
   type AgentToolEfficiency,
   type AgentTokenEconomy,
+  type AgentToolUsage,
   type ArtifactCheck,
   type BenchmarkScenario,
   type DeliveredMail,
@@ -396,27 +398,10 @@ export function workerCorrectness(artifact: ArtifactCheck, completed: boolean): 
 }
 
 /**
- * Optional per-agent read-model surface, declared structurally so this driver can read whichever store
- * implementation is present via optional chaining. Both methods OPTIONAL: an absent method / `null` return
- * ⇒ a `null` score (N/A), never a silent zero.
+ * Optional per-agent read-model surface. The rollup shapes are owned by @co/core; this local seam only
+ * models that a concrete dispatch store may not expose the read methods yet. Both methods OPTIONAL: an
+ * absent method / `null` return ⇒ a `null` score (N/A), never a silent zero.
  */
-interface AgentCostRollup {
-  readonly agentId: string;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheReadTokens: number;
-  readonly cacheCreationTokens: number;
-  readonly totalTokens: number;
-  readonly costUsd: number | null;
-}
-interface AgentToolUsage {
-  readonly agentId: string;
-  readonly toolCalls: number;
-  readonly toolErrors: number;
-  readonly redundantReads: number;
-  readonly permissionAsks: number;
-  readonly turnsToFirstProductiveCoCall: number | null;
-}
 interface WorkerEconStore {
   readonly getAgentCostRollup?: (agentId: string) => AgentCostRollup | null;
   readonly getAgentToolUsage?: (agentId: string) => AgentToolUsage | null;

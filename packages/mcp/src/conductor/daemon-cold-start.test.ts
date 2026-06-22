@@ -27,9 +27,11 @@ import {
   OPERATOR,
   WEDGE_MS,
   ReconcileLoop,
+  DISPATCH_ENABLED_PROVIDERS_KEY,
   accountForProvider,
   defaultMailRenderer,
   type DetectorEvent,
+  openConfigStore,
   openDispatchStore,
   openMailStore,
   openProjectStore,
@@ -361,6 +363,53 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
     const sessions = openSessionStore(projectId);
     try {
       expect(sessions.getSession(coordinator)?.provider).toBe('codex');
+    } finally {
+      sessions.close();
+    }
+  });
+
+  it('cold-starts an operator-started Codex-only root from the start primitive placement', async () => {
+    const { projectId, repo } = makeProject();
+    const config = openConfigStore();
+    try {
+      config.setProjectOverride(projectId, DISPATCH_ENABLED_PROVIDERS_KEY, ['codex']);
+    } finally {
+      config.close();
+    }
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const engine = makeEngine(pty, clock, qw);
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+      codexHomeFor: (agent) => join(repo, `.codex-home-${agent}`),
+    });
+    const kickoff = kickoffFor(projectId, coordinator);
+
+    const tickP = daemon.tick();
+    await tick();
+    const rootPane = pty.panes[pty.panes.length - 1]!;
+    rootPane.emit(CODEX_READY);
+    await driveTurnToIdle(rootPane, kickoff, clock, qw);
+    await tickP;
+
+    const sessions = openSessionStore(projectId);
+    try {
+      const session = sessions.getSession(coordinator);
+      expect(session?.provider).toBe('codex');
+      expect(session?.resume).toEqual({
+        provider: 'codex',
+        codexHome: join(repo, `.codex-home-${coordinator}`),
+      });
     } finally {
       sessions.close();
     }

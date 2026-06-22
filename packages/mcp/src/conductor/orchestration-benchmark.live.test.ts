@@ -43,7 +43,6 @@ import {
   MAIL_REVIEW_RESPONSE,
   NodePtyHost,
   OPERATOR,
-  accountForProvider,
   buildCoreRegistry,
   calcLibScenario,
   defaultGitExec,
@@ -51,7 +50,6 @@ import {
   invokeTool,
   isLiveE2EEnabled,
   openConfigStore,
-  openDispatchStore,
   openMailStore,
   openPlanStore,
   openRegistry,
@@ -61,7 +59,6 @@ import {
   openWorktreeStore,
   renderScorecard,
   resolvePinTable,
-  resolveTier,
   reviewRequestEnvelope,
   reviewReviewerKey,
   startCoordinatorSession,
@@ -610,7 +607,7 @@ describe('maybeLockSpec — failStreak + selected-turn metrics (hermetic, always
 });
 
 describe('live provider pinning + bounded operator gates (hermetic, always runs)', () => {
-  it('pins provider-only benchmark runs into dispatch config and the root placement', () => {
+  it('pins provider-only benchmark runs into dispatch config before root start', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'co-ob-pin-data-'));
     dataDirs.push(dataDir);
     process.env.CO_DATA_DIR = dataDir;
@@ -622,9 +619,7 @@ describe('live provider pinning + bounded operator gates (hermetic, always runs)
     } finally {
       registry.close();
     }
-    const coordinator = 'coord-pin-root';
-
-    pinBenchmarkProvider(projectId, coordinator, 'codex');
+    pinBenchmarkProvider(projectId, 'codex');
 
     const config = openConfigStore();
     try {
@@ -636,13 +631,6 @@ describe('live provider pinning + bounded operator gates (hermetic, always runs)
       expect(pins.reviewer?.provider).toBe('codex');
     } finally {
       config.close();
-    }
-
-    const dispatch = openDispatchStore(projectId);
-    try {
-      expect(dispatch.readPlacements(coordinator).at(-1)?.provider).toBe('codex');
-    } finally {
-      dispatch.close();
     }
   });
 
@@ -812,14 +800,16 @@ async function makeLiveAutomation(
         cfg.close();
       }
 
+      pinBenchmarkProvider(input.projectId, provider);
       // Provision + register the root coordinator + seed its kickoff (the daemon cold-starts it tick-0).
-      const { coordinator } = startCoordinatorSession({
+      // Root placement is recorded by the shared start primitive after the provider pins above are in
+      // place, so the benchmark does not write a second placement event.
+      startCoordinatorSession({
         projectId: input.projectId,
         repoCwd: input.repoCwd,
         prompt: scenario.rootBody({ nonce: input.nonce, operator: OPERATOR }),
         base: input.integrationBranch,
       });
-      pinBenchmarkProvider(input.projectId, coordinator, provider);
 
       const ipc = new OperatorIpcClient({ projectId: input.projectId, socketPath });
 
@@ -908,7 +898,7 @@ async function makeLiveAutomation(
 
 type SpecLockAttempt = () => Promise<void>;
 
-function pinBenchmarkProvider(projectId: ProjectId, rootAgent: string, provider: Provider): void {
+function pinBenchmarkProvider(projectId: ProjectId, provider: Provider): void {
   const pin = { provider };
   const config = openConfigStore();
   try {
@@ -921,24 +911,6 @@ function pinBenchmarkProvider(projectId: ProjectId, rootAgent: string, provider:
     });
   } finally {
     config.close();
-  }
-
-  const tier = resolveTier('technical', 'deep', provider);
-  const dispatch = openDispatchStore(projectId);
-  try {
-    dispatch.recordPlacement(rootAgent, {
-      kind: 'placed',
-      role: 'coordinator',
-      work_size: 'technical',
-      reasoning_budget: 'deep',
-      provider,
-      account: accountForProvider(provider),
-      model: tier.model,
-      effort: tier.effort,
-      context: tier.context,
-    });
-  } finally {
-    dispatch.close();
   }
 }
 

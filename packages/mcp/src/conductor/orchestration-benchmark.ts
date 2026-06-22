@@ -40,7 +40,9 @@ import {
   openRosterStore,
   openWorktreeStore,
   summarizeRun,
+  type AgentCostRollup,
   type AgentRunMetric,
+  type AgentToolUsage,
   type MergeOutcome,
   type OrchestrationScenario,
   type OrchestrationScorecard,
@@ -294,29 +296,12 @@ export function detectChainCompletion(projectId: ProjectId, taskId: string): boo
 }
 
 /**
- * The optional per-agent read-model surface this driver reads. It is structural so the benchmark can read
- * whichever store implementation is present via optional chaining. Both methods are OPTIONAL: when the
- * store handle does not provide them, the optional call short-circuits to `undefined` and the corresponding
- * three-score component becomes `null` (N/A) — never a silent zero; a `null` return is an explicit
- * "no rollup".
+ * The optional per-agent read-model surface this driver reads. The rollup shapes are owned by @co/core;
+ * this local seam only models that a concrete dispatch store may not expose the read methods yet. Both
+ * methods are OPTIONAL: when the store handle does not provide them, the optional call short-circuits to
+ * `undefined` and the corresponding three-score component becomes `null` (N/A) — never a silent zero; a
+ * `null` return is an explicit "no rollup".
  */
-interface AgentCostRollup {
-  readonly agentId: string;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheReadTokens: number;
-  readonly cacheCreationTokens: number;
-  readonly totalTokens: number;
-  readonly costUsd: number | null;
-}
-interface AgentToolUsage {
-  readonly agentId: string;
-  readonly toolCalls: number;
-  readonly toolErrors: number;
-  readonly redundantReads: number;
-  readonly permissionAsks: number;
-  readonly turnsToFirstProductiveCoCall: number | null;
-}
 interface BenchEconStore {
   /** LIVE-ONLY per-agent token cost rollup, or `null` (sandbox / not yet recorded). */
   readonly getAgentCostRollup?: (agentId: string) => AgentCostRollup | null;
