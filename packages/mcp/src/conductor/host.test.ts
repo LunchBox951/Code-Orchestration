@@ -512,6 +512,31 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     expect(ticks[0]!.selected).toBe('impl-x');
     await runner.stop();
   });
+
+  it('step() rejects daemon tick errors for manual drivers while scheduled beats keep logging', async () => {
+    const scheduler = new FakeScheduler();
+    const errors: string[] = [];
+    const runner = new ConductorHostRunner({
+      daemon: {
+        recover: () => [],
+        tick: async () => {
+          throw new Error('tick failed in manual step');
+        },
+      } as unknown as ConductorDaemon,
+      intervalMs: 1000,
+      scheduler,
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
+    runner.start();
+    await expect(runner.step()).rejects.toThrow(/tick failed in manual step/);
+    expect(errors).toEqual(['tick failed in manual step']);
+
+    scheduler.fire();
+    await flush();
+    expect(errors).toEqual(['tick failed in manual step', 'tick failed in manual step']);
+    await runner.stop();
+  });
 });
 
 // ── serveConductor wiring + the [host-live] handoff seams ─────────────────────

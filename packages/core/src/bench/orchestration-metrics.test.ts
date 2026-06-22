@@ -254,6 +254,15 @@ describe('summarizeRun — the hard structural PASS verdict + totals', () => {
     expect(s.pass).toBe(false);
     expect(s.failures.join(' ')).toMatch(/review gate never ran/);
   });
+
+  it.each(['wedged', 'error'] as const)(
+    'fails closed when stopReason is %s even if durable stores otherwise look successful',
+    (stopReason) => {
+      const s = summarizeRun(baseInput({ stopReason }));
+      expect(s.pass).toBe(false);
+      expect(s.failures.join(' ')).toMatch(new RegExp(stopReason));
+    },
+  );
 });
 
 describe('the three scores — correctness math (objective; both arms)', () => {

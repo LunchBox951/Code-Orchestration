@@ -48,7 +48,6 @@ import {
   invokeTool,
   isLiveE2EEnabled,
   openConfigStore,
-  openDispatchStore,
   openMailStore,
   openPlanStore,
   openRegistry,
@@ -537,6 +536,72 @@ describe('maybePassReviews — per-reviewId failStreak + wedge-logging (hermetic
   });
 });
 
+describe('maybeLockSpec — failStreak + selected-turn metrics (hermetic, always runs)', () => {
+  it('logs a persistent unexpected spec-lock failure once and keeps retrying', async () => {
+    const failStreak = new Map<string, number>();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (let tick = 1; tick <= REVIEW_PASS_FAIL_LOG_AFTER; tick++) {
+        await maybeLockSpec(
+          buildCoreRegistry(),
+          'project-spec-lock',
+          tmpdir(),
+          failStreak,
+          async () => {
+            throw new Error('criteria are fuzzy');
+          },
+        );
+        expect(failStreak.get(ORCH_BENCH_TASK_ID)).toBe(tick);
+      }
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0]?.[0]).toMatch(/spec lock/u);
+      expect(errorSpy.mock.calls[0]?.[0]).toMatch(/criteria are fuzzy/u);
+
+      await maybeLockSpec(
+        buildCoreRegistry(),
+        'project-spec-lock',
+        tmpdir(),
+        failStreak,
+        async () => {
+          throw new Error('criteria are fuzzy');
+        },
+      );
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('treats a missing draft as an expected retry state, not a persistent spec-lock failure', async () => {
+    const failStreak = new Map<string, number>();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await maybeLockSpec(
+        buildCoreRegistry(),
+        'project-spec-lock',
+        tmpdir(),
+        failStreak,
+        async () => {
+          throw new Error(`no spec record for task '${ORCH_BENCH_TASK_ID}'`);
+        },
+      );
+      expect(failStreak.size).toBe(0);
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('measures turns from selected daemon ticks rather than missing cost rollups', () => {
+    const firstSeen = new Map<string, number>([['agent-a', 100]]);
+    const selectedTurns = new Map<string, number>([['agent-a', 2]]);
+
+    expect(measureAgentTurns(firstSeen, 250, selectedTurns)).toEqual({
+      'agent-a': { turnsUsed: 2, wallClockMs: 150 },
+    });
+  });
+});
+
 interface LiveRun {
   readonly projectId: ProjectId;
   readonly repo: string;
@@ -611,6 +676,7 @@ async function makeLiveAutomation(
   const sockDir = mkdtempSync(join(tmpdir(), 'co-ob-sock-'));
   dataDirs.push(sockDir);
   const socketPath = join(sockDir, 'control.sock');
+  const selectedTurns = new Map<string, number>();
 
   const runner = await serveConductor({
     projectId: run.projectId,
@@ -620,6 +686,11 @@ async function makeLiveAutomation(
     quietWindow: seams.quietWindow,
     scheduler: manual,
     operatorIpc: { socketPath },
+    onTick: (outcome) => {
+      if (outcome.selected != null) {
+        selectedTurns.set(outcome.selected, (selectedTurns.get(outcome.selected) ?? 0) + 1);
+      }
+    },
     // Large interval (we step manually); autoStart arms the cadence + runs recover().
     intervalMs: 3_600_000,
   });
@@ -653,15 +724,16 @@ async function makeLiveAutomation(
 
       const deadline = seams.now() + input.wallClockBudgetMs;
       // Per-agent wall-clock: the real time between when an agent first appears in the roster (it has been
-      // provisioned + is taking turns) and the end of the drive. The daemon owns the turns themselves, so
-      // turn COUNTS are read from the durable cost read-model below (one cost.recorded per turn) rather
-      // than guessed — both are real measurements, not the `agentTurns:{}` silent zero this replaces.
+      // provisioned + is taking turns) and the end of the drive. Turn counts come from the daemon's selected
+      // agent on each awaited step; cost recording is not a runtime guarantee yet, so it cannot be the turn
+      // source of truth for the live benchmark.
       const firstSeenMs = new Map<string, number>();
       // Per-reviewId consecutive PASS-attempt failure counter, owned by the drive loop and threaded into
       // maybePassReviews each tick. A transient miss is fine (it retries next tick); a PERSISTENT failure
       // (the same gate failing tick after tick) is LOGGED so the operator sees a wedged review instead of a
       // silently-stalled chain (Principle 9 — no silent green).
       const reviewFailStreak = new Map<string, number>();
+      const specLockFailStreak = new Map<string, number>();
       let completed = false;
       let stopReason: AutomationDriveResult['stopReason'] | undefined;
       let stepError: string | undefined;
@@ -693,7 +765,7 @@ async function makeLiveAutomation(
           // Between ticks, play the human operator gates: lock the spec once drafted, and PASS any
           // pending review_request. These are the ONLY hand-driven inputs — all coding/merging is the
           // live agents' own work through the co tools.
-          await maybeLockSpec(reg, input.projectId, input.repoCwd);
+          await maybeLockSpec(reg, input.projectId, input.repoCwd, specLockFailStreak);
           await maybePassReviews(ipc, input.projectId, reviewFailStreak);
 
           completed = planCompleted(input.projectId);
@@ -709,29 +781,44 @@ async function makeLiveAutomation(
           stopReason ??
           (completed ? 'task-complete' : driveEndMs >= deadline ? 'wall-budget' : 'turn-budget'),
         ...(stepError != null ? { error: stepError } : {}),
-        // REAL per-agent samples: turns from the durable cost rollup (one observation per turn), wall from
-        // the observed active window. Replaces the `agentTurns:{}` silent zero — an agent that took turns
-        // now reports a non-zero turn count and a measured wall-clock.
-        agentTurns: measureAgentTurns(input.projectId, firstSeenMs, driveEndMs),
+        // REAL per-agent samples: turns from selected daemon ticks, wall from the observed active window.
+        // Replaces the `agentTurns:{}` silent zero without depending on optional cost rollups.
+        agentTurns: measureAgentTurns(firstSeenMs, driveEndMs, selectedTurns),
         integrationBranch: input.integrationBranch,
       };
     },
   };
 }
 
+type SpecLockAttempt = () => Promise<void>;
+
 /** Lock the spec once the coordinator has drafted it (the operator's spec-lock gate). Idempotent. */
 async function maybeLockSpec(
   reg: ReturnType<typeof buildCoreRegistry>,
   projectId: ProjectId,
   repoCwd: string,
+  failStreak?: Map<string, number>,
+  attempt?: SpecLockAttempt,
 ): Promise<void> {
-  const ctx = openContextStores({ agent: OPERATOR, projectId, cwd: repoCwd });
   try {
-    await invokeTool(reg, ctx.ctx, 'co_spec_lock', { task_id: ORCH_BENCH_TASK_ID });
-  } catch {
-    // Not yet draftable / already locked — both are expected on most ticks. Fail-soft (the gate retries).
-  } finally {
-    ctx.close();
+    if (attempt != null) {
+      await attempt();
+    } else {
+      const ctx = openContextStores({ agent: OPERATOR, projectId, cwd: repoCwd });
+      try {
+        await invokeTool(reg, ctx.ctx, 'co_spec_lock', { task_id: ORCH_BENCH_TASK_ID });
+      } finally {
+        ctx.close();
+      }
+    }
+    failStreak?.delete(ORCH_BENCH_TASK_ID);
+  } catch (error) {
+    const detail = errorMessage(error);
+    if (isExpectedSpecLockRetry(detail)) {
+      failStreak?.delete(ORCH_BENCH_TASK_ID);
+      return;
+    }
+    recordSpecLockFailure(failStreak, detail);
   }
 }
 
@@ -804,6 +891,30 @@ function recordReviewPassFailure(
   }
 }
 
+function recordSpecLockFailure(failStreak: Map<string, number> | undefined, detail: string): void {
+  if (failStreak == null) return;
+  const streak = (failStreak.get(ORCH_BENCH_TASK_ID) ?? 0) + 1;
+  failStreak.set(ORCH_BENCH_TASK_ID, streak);
+  if (streak === REVIEW_PASS_FAIL_LOG_AFTER) {
+    console.error(
+      `[co orch-bench] spec lock for '${ORCH_BENCH_TASK_ID}' has failed ${streak} ticks running — ` +
+        `the gate may be wedged: ${detail}`,
+    );
+  }
+}
+
+function isExpectedSpecLockRetry(detail: string): boolean {
+  return isMissingDraftSpec(detail) || isSpecAlreadyLocked(detail);
+}
+
+function isMissingDraftSpec(detail: string): boolean {
+  return /no spec record for task/i.test(detail);
+}
+
+function isSpecAlreadyLocked(detail: string): boolean {
+  return /is in state 'locked', not 'draft'|already locked/i.test(detail);
+}
+
 /** Normalize an unknown thrown value to a string message for logging. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -874,31 +985,25 @@ function rosterAgentIds(projectId: ProjectId): readonly string[] {
 
 /**
  * Measure REAL per-agent turn/wall samples for the live arm (replacing the `agentTurns:{}` silent zero):
- *   - turns: the agent's count of durable `cost.recorded` observations (the daemon files one per turn), so
- *     an agent that actually took turns reports a non-zero count straight from the objective cost log.
+ *   - turns: the agent's count of selected daemon ticks, so an agent that actually took turns reports a
+ *     non-zero count even before the optional cost read-model is wired into runtime.
  *   - wall: the active window `driveEndMs − firstSeenMs[agent]` (when the agent first appeared in the
  *     roster until the drive ended) — a real measurement, not a guess.
- * An agent with no recorded cost yet still appears with `turnsUsed: 0` + its measured wall (it was seen).
+ * An agent with no selected tick yet still appears with `turnsUsed: 0` + its measured wall (it was seen).
  */
 function measureAgentTurns(
-  projectId: ProjectId,
   firstSeenMs: ReadonlyMap<string, number>,
   driveEndMs: number,
+  selectedTurns: ReadonlyMap<string, number>,
 ): Record<string, AgentTurnSample> {
-  const dispatch = openDispatchStore(projectId);
-  try {
-    const samples: Record<string, AgentTurnSample> = {};
-    for (const [agentId, seenMs] of firstSeenMs) {
-      const rollup = dispatch.getRollup('agent', agentId);
-      samples[agentId] = {
-        turnsUsed: rollup?.observations ?? 0,
-        wallClockMs: Math.max(0, driveEndMs - seenMs),
-      };
-    }
-    return samples;
-  } finally {
-    dispatch.close();
+  const samples: Record<string, AgentTurnSample> = {};
+  for (const [agentId, seenMs] of firstSeenMs) {
+    samples[agentId] = {
+      turnsUsed: selectedTurns.get(agentId) ?? 0,
+      wallClockMs: Math.max(0, driveEndMs - seenMs),
+    };
   }
+  return samples;
 }
 
 // Read the SAME budgets the driver uses (shared defaults, so an operator override of CO_BENCH_* keeps the

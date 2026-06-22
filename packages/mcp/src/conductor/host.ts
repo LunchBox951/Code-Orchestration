@@ -254,19 +254,19 @@ export class ConductorHostRunner {
     if (this.stopped) {
       throw new Error('ConductorHostRunner.step: runner has already been stopped.');
     }
-    await this.beat();
+    await this.beat({ rethrowTickErrors: true });
   }
 
   /**
    * One cadence beat: run a daemon tick unless a prior one is still in flight. If a turn is still
    * active, run only the reconcile watchdog so wedged sessions are still detected on cadence.
    */
-  private async beat(): Promise<void> {
+  private async beat(options: { readonly rethrowTickErrors?: boolean } = {}): Promise<void> {
     if (this.inFlight != null) {
       this.runOverlapWatchdogBeat();
       return;
     }
-    const run = this.runBeat();
+    const run = this.runBeat(options.rethrowTickErrors === true);
     this.inFlight = run;
     try {
       await run;
@@ -290,13 +290,14 @@ export class ConductorHostRunner {
     });
   }
 
-  private async runBeat(): Promise<void> {
+  private async runBeat(rethrowTickErrors = false): Promise<void> {
     try {
       const outcome = await this.daemon.tick();
       this.onTick?.(outcome);
     } catch (error) {
       if (this.onError != null) this.onError(error);
       else console.error('[co-mcp serve] tick error:', error);
+      if (rethrowTickErrors) throw error;
     }
   }
 }

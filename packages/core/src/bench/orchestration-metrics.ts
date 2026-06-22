@@ -328,6 +328,9 @@ export interface OrchestrationScorecard extends OrchestrationRunInput {
  */
 export function summarizeRun(input: OrchestrationRunInput): OrchestrationScorecard {
   const failures: string[] = [];
+  if (input.stopReason !== 'task-complete') {
+    failures.push(`run stopped before task completion: ${input.stopReason}`);
+  }
   if (!input.completed) failures.push('chain did not complete (no task.completed)');
   if (!input.artifact.correct) failures.push(`artifact oracle failed: ${input.artifact.detail}`);
   if (input.implementerBranchesMergedUp < input.requiredImplementerMerges) {

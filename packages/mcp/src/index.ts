@@ -55,6 +55,7 @@ export {
   realQuietWindow,
   hostLiveTransportRequired,
   type ConductorHostRunnerDeps,
+  type ConductorHostRunnerStopOptions,
   type ConductorControlSurface,
   type ServeConductorOptions,
   type OperatorIpcServeConfig,
@@ -100,6 +101,7 @@ export {
   type WorkerBenchmarkOptions,
   type WorkerBenchmarkResult,
   type WorkerBenchmarkStopReason,
+  type WorkerScores,
 } from './conductor/worker-benchmark.js';
 // MULTI-LEVEL ORCHESTRATION BENCHMARK (the v1 centerpiece) — drives the full coordinator → lead → 2
 // implementers → merge-up chain for an OrchestrationScenario, automates the operator gates, and grades the
