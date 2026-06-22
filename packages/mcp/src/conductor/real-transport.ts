@@ -101,6 +101,21 @@ export interface SocketBridgeStreams {
   readonly diagnosticLogPath?: string;
 }
 
+/** Default bridge→socket connect budget. Generous (vs. the prior 10s) so a cold-starting provider's
+ *  `co-mcp bridge` keeps retrying long enough to meet a slightly-late server bind (the engine binds
+ *  the socket immediately after spawning the pane). Override with `CO_MCP_BRIDGE_CONNECT_TIMEOUT_MS`.
+ *  Both sides log to `${isolatedHomeDir}/mcp/bridge.log`, so a bring-up failure (F1) is now visible
+ *  (server_start / server_listening / connect_ok / connect_error) rather than a silent hang. */
+export const CO_MCP_BRIDGE_CONNECT_TIMEOUT_MS_ENV = 'CO_MCP_BRIDGE_CONNECT_TIMEOUT_MS';
+const DEFAULT_BRIDGE_CONNECT_TIMEOUT_MS = 30_000;
+
+function bridgeConnectTimeoutMs(): number {
+  const raw = process.env[CO_MCP_BRIDGE_CONNECT_TIMEOUT_MS_ENV];
+  if (raw == null) return DEFAULT_BRIDGE_CONNECT_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_BRIDGE_CONNECT_TIMEOUT_MS;
+}
+
 export async function runSocketBridge(
   socketPath: string,
   streams: SocketBridgeStreams = { stdin: process.stdin, stdout: process.stdout },
@@ -108,10 +123,15 @@ export async function runSocketBridge(
   const diagnostics = new SocketBridgeDiagnostics(
     streams.diagnosticLogPath ?? process.env['CO_MCP_BRIDGE_LOG'],
   );
-  diagnostics.write('start', { socketPath, pid: String(process.pid) });
+  const timeoutMs = bridgeConnectTimeoutMs();
+  diagnostics.write('start', {
+    socketPath,
+    pid: String(process.pid),
+    connectTimeoutMs: String(timeoutMs),
+  });
   let socket: Socket;
   try {
-    socket = await connectSocketWithRetry(socketPath);
+    socket = await connectSocketWithRetry(socketPath, { timeoutMs });
   } catch (error) {
     diagnostics.write('connect_error', errorDiagnosticFields(error));
     throw error;

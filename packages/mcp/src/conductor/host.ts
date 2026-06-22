@@ -502,7 +502,12 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
             'the real provider MCP bridge transport.',
         );
       }
-      return createSocketBridgeTransportPair(socketPath);
+      // Give the SERVER side the same diagnostics log the provider's bridge writes
+      // (`${isolatedHomeDir}/mcp/bridge.log`, matching buildHostedLaunchSpec's CO_MCP_BRIDGE_LOG).
+      // Without it the prod transport logged no server_start/server_listening/server_recv, so an
+      // MCP-surface failure (F1) was invisible — only the bridge's one-sided `start` line existed.
+      const bridgeLogPath = `${isolatedHomeDir.replace(/\/+$/u, '')}/mcp/bridge.log`;
+      return createSocketBridgeTransportPair(socketPath, bridgeLogPath);
     });
   const spawnSpecFor =
     opts.coMcpPaths != null && isolatedHomeDirFor != null

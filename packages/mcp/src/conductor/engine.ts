@@ -583,6 +583,10 @@ export class ConductorEngine {
       // client's). The engine hands the server side to the host; the client side is the provider's seam.
       // P1b: thread the ROUTING delivery factory so this pane's emitted mail wakes + injects its
       // recipients' live panes (the `LiveDelivery` seams bind back to THIS engine's hosted-pane lookup).
+      // NOTE (F1): the socket bind happens here, right after spawn. The provider's `co-mcp bridge`
+      // retries the connect (CO_MCP_BRIDGE_CONNECT_TIMEOUT_MS, default 30s) and both sides now log to
+      // `${isolatedHomeDir}/mcp/bridge.log`, so a bring-up failure is visible (server_start /
+      // server_listening / connect_ok) rather than a silent "still connecting".
       const [transportClient, serverTransport] = this.deps.makeTransport(identity);
       clientTransport = transportClient;
       const spawnGate = this.deps.reviewerSpawnGate?.();

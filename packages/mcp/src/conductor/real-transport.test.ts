@@ -243,6 +243,27 @@ describe('createSocketBridgeTransportPair — live provider bridge transport', (
     }
   });
 
+  it('honors CO_MCP_BRIDGE_CONNECT_TIMEOUT_MS for the bridge connect budget (F1)', async () => {
+    // Default is 30s; an explicit env override changes the retry budget. Point the bridge at a
+    // socket that never binds and assert it gives up after the configured (small) timeout — and
+    // that the budget is recorded in the diagnostics `start` line.
+    const dataDir = mkdtempSync(join(tmpdir(), 'co-rt-timeout-'));
+    dataDirs.push(dataDir);
+    const socketPath = join(dataDir, 'mcp', 'never.sock');
+    const logPath = join(dataDir, 'mcp', 'bridge.log');
+    process.env.CO_MCP_BRIDGE_CONNECT_TIMEOUT_MS = '80';
+
+    const bridgeP = runSocketBridge(socketPath, {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      diagnosticLogPath: logPath,
+    });
+    await expect(bridgeP).rejects.toThrow(/after 80ms/u);
+    const log = readFileSync(logPath, 'utf8');
+    expect(log).toContain('connectTimeoutMs="80"');
+    expect(log).toContain('connect_error');
+  });
+
   it('bridges stdio JSON-RPC through the Unix socket to the engine-hosted MCP server', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
