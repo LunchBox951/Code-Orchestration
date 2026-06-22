@@ -1,7 +1,8 @@
 # Project notes for CO agents
 
-This file is read by every CO agent at the start of its turn. CLAUDE.md and AGENTS.md
-are kept in sync; if both exist, CLAUDE.md wins.
+Project-specific memory for this repo. How to _be_ an orchestrated co agent (mail, review,
+dispatch, recovery) ships in co's role prompts and `co orient`, never here
+(`docs/architecture/prompts-and-memory.md`).
 
 ## Test command
 
@@ -31,18 +32,17 @@ Run all five (`test` included) before considering a diff done.
 - Strict TypeScript. Use `assertNever` from `@co/core` for exhaustive discriminated-union
   switches rather than a silent default branch.
 - **Conventional Commits**, and **sign off every commit** (`git commit -s`, DCO).
-- Design rationale lives in `docs/` (start at `docs/README.md`); the 16 invariants are in
-  `docs/principles.md` and are cited inline as `Principle N — handle`.
 
-## Global v1 acceptance criteria
+## The docs
 
-The project-wide definition of "v1 done" is [`docs/v1-acceptance-criteria.md`](docs/v1-acceptance-criteria.md)
-— **read it before locking any spec.** v1 = `co` self-hosts and the prototype is retired. Every
-spec's acceptance criteria must ladder up to a criterion there (cite its ID, e.g. `SH-2`). It is a
-living document; advance and mark criteria as work lands.
+Design rationale lives in `docs/` — start at [`docs/README.md`](docs/README.md) for the reading order.
 
-## Things agents should not do
-
-- Do not put orchestration state in the repo (Principle 12 — pristine-repo). The only
-  sanctioned repo files are these memory files.
-- Do not duplicate core logic into `cli`/`mcp`.
+- [`docs/concepts.md`](docs/concepts.md) — shared vocabulary (Operator, Conductor, Agent, Mail,
+  Task, Phase, Spec, Review, Worktree, Provider).
+- [`docs/principles.md`](docs/principles.md) — the 16 invariants, cited inline as
+  `Principle N — handle` (grep a handle to land there).
+- [`docs/v1-acceptance-criteria.md`](docs/v1-acceptance-criteria.md) — the project-wide definition
+  of v1 (`co` self-hosts; the prototype retires).
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, the five required checks, and the branch-from-`dev`
+  / PR-against-`dev` / DCO flow.
+- [`docs/architecture/review-gates.md`](docs/architecture/review-gates.md) — the merge/push/PR gate model.
