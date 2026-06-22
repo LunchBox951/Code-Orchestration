@@ -20,17 +20,29 @@ import { isAbsolute, relative, resolve } from 'node:path';
 /** What the harness gate hooks actually enforce. Produced by L7; injected here for tests. */
 export interface EnforcedConfig {
   readonly blockedIds: readonly string[];
+  /**
+   * #78 (round-2): codex only — `true` iff the block list IS fully enforced (sandbox/approval policy,
+   * isolated hook, rule sidecar) but the `[mcp_servers.co]` MCP-tool pre-grant is ABSENT. This is a
+   * DISTINCT regression from block-list drift: the block list is intact, but a hosted codex pane would
+   * deadlock on the interactive "allow this MCP tool?" prompt. Surfacing it separately stops a missing
+   * pre-grant from masquerading as EVERY block rule being unenforced (a misleading operator signal).
+   */
+  readonly codexMcpPreGrantMissing?: boolean;
 }
 
 /** A single drift mismatch between the declared registry and the enforced config. */
 export interface DriftViolation {
-  /** The block-list id involved. */
+  /** The block-list id involved, or `@mcp-pre-grant` for the codex pre-grant regression. */
   readonly id: string;
   /** `declared-not-enforced`: in registry but missing from `EnforcedConfig.blockedIds`. */
   /** `enforced-not-declared`: in `EnforcedConfig.blockedIds` but absent from the registry. */
-  readonly kind: 'declared-not-enforced' | 'enforced-not-declared';
+  /** `codex-mcp-pre-grant-missing`: codex block list IS enforced but the MCP-tool pre-grant regressed. */
+  readonly kind: 'declared-not-enforced' | 'enforced-not-declared' | 'codex-mcp-pre-grant-missing';
   readonly reason: string;
 }
+
+/** Synthetic id for the codex MCP-pre-grant violation (it has no block-list rule of its own). */
+export const CODEX_MCP_PRE_GRANT_VIOLATION_ID = '@mcp-pre-grant';
 
 /**
  * Pure drift check. Returns `[]` iff `enforced.blockedIds` exactly equals the set of ids in
@@ -67,6 +79,20 @@ export function checkBlockListDrift(
     }
   }
 
+  // #78 (round-2): a missing codex MCP-tool pre-grant is its OWN regression — the block list is intact,
+  // but a hosted codex pane would deadlock on the interactive MCP-tool approval prompt. Report it with a
+  // DISTINCT kind so the operator is not misled into blaming the (fully-enforced) block list.
+  if (enforced.codexMcpPreGrantMissing === true) {
+    violations.push({
+      id: CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+      kind: 'codex-mcp-pre-grant-missing',
+      reason:
+        'Codex block list is enforced, but the [mcp_servers.co] MCP-tool pre-grant is absent — a ' +
+        'hosted codex pane would deadlock on the interactive "allow this MCP tool?" prompt (#78). ' +
+        'Restore an auto-approve assignment under [mcp_servers.co]; this is NOT block-list drift.',
+    });
+  }
+
   return violations;
 }
 
@@ -81,7 +107,7 @@ export function readEnforcedConfig(config: PaneLaunchConfig): EnforcedConfig {
     case 'claude':
       return { blockedIds: readClaudeBlockedIds(config) };
     case 'codex':
-      return { blockedIds: readCodexBlockedIds(config) };
+      return readCodexEnforcedConfig(config);
     default:
       return assertNever(config.provider);
   }
@@ -111,9 +137,9 @@ function readClaudeBlockedIds(config: PaneLaunchConfig): string[] {
   return ids;
 }
 
-function readCodexBlockedIds(config: PaneLaunchConfig): string[] {
+function readCodexEnforcedConfig(config: PaneLaunchConfig): EnforcedConfig {
   const codexHome = config.env['CODEX_HOME'];
-  if (codexHome == null) return [];
+  if (codexHome == null) return { blockedIds: [] };
   const toml = config.codexConfigToml ?? '';
   const configPath = config.codexConfigTomlPath;
   const rulesPath = config.codexBlockListRulesPath;
@@ -121,18 +147,32 @@ function readCodexBlockedIds(config: PaneLaunchConfig): string[] {
     tomlActiveScalar(toml, '', 'sandbox_mode') === 'workspace-write' &&
     tomlActiveScalar(toml, '', 'approval_policy') === 'never' &&
     codexConfigTomlHasExpectedMcp(toml, config.codexMcpCommand, config.codexMcpArgs ?? []);
-  if (!hasIsolatedPolicy) return [];
-  if (configPath == null || resolve(configPath) !== resolve(codexHome, 'config.toml')) return [];
-  if (rulesPath == null || !isPathInsideDir(codexHome, rulesPath)) return [];
-  if (!hasPrelaunchFile(config, configPath, toml)) return [];
-  if (!hasPrelaunchFile(config, rulesPath, config.codexBlockListRulesJson ?? '')) return [];
-  if (!codexConfigTomlReferencesRuleFile(toml, rulesPath, config.codexHookCommand)) return [];
+  if (!hasIsolatedPolicy) return { blockedIds: [] };
+  if (configPath == null || resolve(configPath) !== resolve(codexHome, 'config.toml')) {
+    return { blockedIds: [] };
+  }
+  if (rulesPath == null || !isPathInsideDir(codexHome, rulesPath)) return { blockedIds: [] };
+  if (!hasPrelaunchFile(config, configPath, toml)) return { blockedIds: [] };
+  if (!hasPrelaunchFile(config, rulesPath, config.codexBlockListRulesJson ?? '')) {
+    return { blockedIds: [] };
+  }
+  if (!codexConfigTomlReferencesRuleFile(toml, rulesPath, config.codexHookCommand)) {
+    return { blockedIds: [] };
+  }
+  // The block list is FULLY enforced (isolated policy + hook + rule sidecar): read the enforced ids.
+  const blockedIds = readCodexHookRuleIds(config.codexBlockListRulesJson);
   // #78: REQUIRE the MCP-tool pre-grant (else a hosted codex pane deadlocks on the approval prompt),
   // but be TOLERANT of WHICH candidate key carries it — swapping a wrong guess for the real key (once
-  // the capture harness identifies it) must not read as permanent drift. Absent ⇒ [] ⇒ the drift
-  // check reports declared-not-enforced for every rule (a LOUD signal the pre-grant regressed).
-  if (!codexConfigTomlHasMcpAutoApprove(toml)) return [];
-  return readCodexHookRuleIds(config.codexBlockListRulesJson);
+  // the capture harness identifies it) must not read as permanent drift. A MISSING pre-grant is its OWN
+  // regression, DISTINCT from block-list drift: the block list above is intact, so we keep the enforced
+  // ids (no false declared-not-enforced for every rule) and instead flag the pre-grant separately so the
+  // drift check can raise a `codex-mcp-pre-grant-missing` violation. Blaming the block list when the
+  // pre-grant is what regressed would be a misleading operator signal (Principle 9 — no-silent-failures
+  // is about accurate signal, not just loud signal).
+  return {
+    blockedIds,
+    ...(codexConfigTomlHasMcpAutoApprove(toml) ? {} : { codexMcpPreGrantMissing: true }),
+  };
 }
 
 /**

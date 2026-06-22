@@ -266,12 +266,20 @@ function requireTrustedMcpExecutableArgs(
 // NOT read as permanent drift. These keys are SCHEMA-SPECULATIVE (see the inline note in the TOML
 // builder) and harmless if codex ignores them.
 
-/** [PLACEHOLDER · #78] Candidate `[mcp_servers.co]` keys that may auto-approve the co MCP tools. */
-export const CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS = [
-  'auto_approve',
-  'trust_level',
-  'approval_policy',
-] as const;
+/**
+ * [PLACEHOLDER · #78] Candidate `[mcp_servers.co]` keys that may auto-approve the co MCP tools.
+ *
+ * SCOPED to keys that ONLY make sense as a per-MCP-server tool-approval setting under
+ * `[mcp_servers.co]`. We deliberately EXCLUDE generic keys (`trust_level`, `approval_policy`) that
+ * legitimately recur ELSEWHERE in the same `config.toml` — `approval_policy = "never"` is the
+ * top-level syscall-approval axis and `[projects."<cwd>"].trust_level = "trusted"` pre-seeds project
+ * trust. Although the drift reader matches keys section-scoped to `[mcp_servers.co]`, keeping the
+ * candidate set free of those names avoids any chance of a generic key reading as the MCP pre-grant
+ * (a drift false-positive) and keeps the operator signal unambiguous about WHICH knob the pre-grant
+ * rides on. `auto_approve` is the emitted best candidate; `mcp_tool_trust` is the MCP-scoped trust
+ * alternative the real key can land on without reading as permanent drift.
+ */
+export const CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS = ['auto_approve', 'mcp_tool_trust'] as const;
 
 /**
  * [PLACEHOLDER · #78] The `[mcp_servers.co]` TOML lines that pre-grant the co MCP tools. We emit the

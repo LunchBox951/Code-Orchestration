@@ -765,4 +765,55 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     await driveCodexInjectFailure(engine, hosted, freshKickoff, retry); // reset-budget attempt 2 (< cap)
     expect(kickoffOutstanding(projectId, freshKickoff.seq)).toBe(true);
   });
+
+  it('keys the budget by the SPECIFIC kickoff mail — two distinct failing kickoffs do NOT share a budget', async () => {
+    // The attempt counter must be keyed by (agent + kickoff mail identity), NOT the agent alone. Drive
+    // kickoff A to CAP-1 failed injects (it survives). Then seed a DISTINCT kickoff B for the SAME agent
+    // (no success in between, so no reset) and drive B to CAP-1 failed injects. With a SHARED per-agent
+    // budget, A's CAP-1 attempts would pre-consume B so its very FIRST failed inject would hit the cap
+    // and retract B prematurely. With per-mail keying, B gets its OWN full budget and survives — proving
+    // a later legitimate kickoff is never pre-consumed by an earlier one's failures.
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff: kickoffA, worktreePath } = seedCodexKickoff(projectId, repo);
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    const CAP = 3; // ConductorEngine.KICKOFF_INJECT_ATTEMPT_CAP
+
+    // Kickoff A: CAP-1 failed injects — A survives (strictly under the cap), budget for A = CAP-1.
+    for (let i = 0; i < CAP - 1; i++) {
+      await driveCodexInjectFailure(engine, hosted, kickoffA, retry);
+    }
+    expect(kickoffOutstanding(projectId, kickoffA.seq)).toBe(true);
+
+    // Seed a DISTINCT kickoff B for the SAME agent (different seq) — NO success has reset any budget.
+    const bus = openMailStore(projectId);
+    mailStores.push(bus);
+    const kickoffB = bus.send({
+      type: 'clarify_request',
+      from: 'lead-1',
+      to: 'impl-cx',
+      subject: 'kickoff',
+      body: 'A SECOND distinct kickoff for the same agent (e.g. a re-kick from the parent).',
+      correlationId: turnKickoffCorrelationId('impl-cx'),
+    });
+    expect(isTurnKickoffMail(kickoffB)).toBe(true);
+    expect(kickoffB.seq).not.toBe(kickoffA.seq); // genuinely distinct mail
+
+    // Kickoff B: CAP-1 failed injects. Under per-mail keying these are B's OWN attempts 1..CAP-1, so B
+    // stays outstanding. Under the OLD shared per-agent budget the FIRST of these would be attempt CAP
+    // and retract B immediately — so this assertion fails if the fix is reverted (non-vacuous).
+    for (let i = 0; i < CAP - 1; i++) {
+      await driveCodexInjectFailure(engine, hosted, kickoffB, retry);
+    }
+    expect(kickoffOutstanding(projectId, kickoffB.seq)).toBe(true);
+
+    // And B's own budget is honored end-to-end: ITS cap-th failed inject (not A's) retracts B.
+    await driveCodexInjectFailure(engine, hosted, kickoffB, retry);
+    expect(kickoffOutstanding(projectId, kickoffB.seq)).toBe(false);
+  });
 });

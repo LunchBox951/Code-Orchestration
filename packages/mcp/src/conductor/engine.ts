@@ -438,14 +438,18 @@ export class ConductorEngine {
   /** Agents whose most recent driven turn errored before consuming their selected mail. */
   private readonly lastTurnErrored = new Map<string, boolean>();
   /**
-   * Per-agent failed one-shot-kickoff inject-attempt counter (#77), keyed `${projectId}:${agent}`.
-   * A daemon kickoff mail is ALWAYS multiline, so `injectMail` bracketed-pastes + echo-verifies it;
-   * a provider whose composer collapses the paste (codex — its preview bytes are not yet known) never
-   * satisfies the echo predicate, so the multiline branch THROWS, the turn errors, and (MNR-2) the
-   * kickoff is left outstanding — which the daemon then re-injects every ~1s tick FOREVER. This
-   * counter BOUNDS that: after {@link KICKOFF_INJECT_ATTEMPT_CAP} failed inject attempts the kickoff
-   * is RETRACTED (the same path {@link consumeOneShotKickoff} uses) so the warm pane is freed instead
-   * of stranded. Cleared on any successful turn (the budget resets after a success). Dropped on release.
+   * Per-kickoff failed inject-attempt counter (#77), keyed `${projectId}:${agent}::${sender}#${seq}`
+   * — the PARTICULAR kickoff mail, NOT just the agent. A daemon kickoff mail is ALWAYS multiline, so
+   * `injectMail` bracketed-pastes + echo-verifies it; a provider whose composer collapses the paste
+   * (codex — its preview bytes are not yet known) never satisfies the echo predicate, so the multiline
+   * branch THROWS, the turn errors, and (MNR-2) the kickoff is left outstanding — which the daemon then
+   * re-injects every ~1s tick FOREVER. This counter BOUNDS that: after {@link KICKOFF_INJECT_ATTEMPT_CAP}
+   * failed inject attempts the SAME kickoff is RETRACTED (the same path {@link consumeOneShotKickoff}
+   * uses) so the warm pane is freed instead of stranded. Keying by the mail identity (not `agentKey`
+   * alone) keeps each kickoff's budget SEPARATE — two distinct failing kickoffs for one agent never
+   * share a budget, and a later legitimate kickoff is never pre-consumed by an earlier one's failures.
+   * All of an agent's entries are cleared on any successful turn (the budget resets after a success)
+   * and dropped on release.
    */
   private readonly kickoffInjectAttempts = new Map<string, number>();
 
@@ -465,6 +469,15 @@ export class ConductorEngine {
   }
   private static paneKey(projectId: ProjectId, pane: string): string {
     return `${projectId}:${pane}`;
+  }
+  /**
+   * #77 — the per-kickoff inject-attempt key: the agent key plus the SPECIFIC kickoff mail identity
+   * (`${sender}#${seq}`). Keying by the mail (not `agentKey` alone) keeps two distinct failing
+   * kickoffs for the same agent on SEPARATE budgets, so a later legitimate kickoff is never
+   * pre-consumed by an earlier one's failed attempts.
+   */
+  private static kickoffAttemptKey(agentKey: string, mail: DeliveredMail): string {
+    return `${agentKey}::${mail.sender}#${mail.seq}`;
   }
 
   /** Whether this engine currently hosts `agent` in `projectId`. */
@@ -761,8 +774,9 @@ export class ConductorEngine {
         }
       }
       // #77: the turn injected and ran to idle — the kickoff (if this was one) landed, so reset the
-      // failed-inject budget. The budget bounds a RE-PASTE loop, not a healthy agent's later turns.
-      this.kickoffInjectAttempts.delete(agentKey);
+      // failed-inject budget for ALL of this agent's kickoffs. The budget bounds a RE-PASTE loop, not
+      // a healthy agent's later turns.
+      this.clearKickoffInjectAttempts(agentKey);
       this.lastTurnErrored.delete(agentKey);
       return { turnEnd, errored: false, liveness };
     } catch (error) {
@@ -776,12 +790,23 @@ export class ConductorEngine {
       // so the warm pane is freed rather than stranded. Ordinary actionable / wake mail is untouched
       // (consumeOneShotKickoff is a no-op unless `mail` IS the kickoff) — it stays outstanding per
       // MNR-2 for clean re-injection. LOUD diagnostic on retraction (Principle 9 — no silent drop).
+      //
+      // SEMANTICS (#77 round-2): this counts ANY errored kickoff turn, not strictly an inject/echo
+      // failure. `injectMail` and the rest of the turn both throw plain `Error`s with no distinguishing
+      // class, so cleanly isolating the echo-verify failure from (say) an observeTurnEnd error is not
+      // possible here without a brittle message match. The broader bound is SAFE: the only realistic
+      // repeated-error mode for a one-shot kickoff is the collapsed-paste echo-verify throw (the kickoff
+      // text is fixed, so a turn that errors on it errors the same way each tick), and even if some other
+      // turn error contributed, retracting after CAP attempts only DROPS A SCHEDULING NUDGE — the parent
+      // can re-kick a healthy agent, whereas a stranded warm pane blocks the slot indefinitely. So the
+      // conservative choice is to bound any repeated kickoff-turn error, not just the echo failure.
       if (isTurnKickoffMail(mail)) {
-        const attempts = (this.kickoffInjectAttempts.get(agentKey) ?? 0) + 1;
-        this.kickoffInjectAttempts.set(agentKey, attempts);
+        const kickoffKey = ConductorEngine.kickoffAttemptKey(agentKey, mail);
+        const attempts = (this.kickoffInjectAttempts.get(kickoffKey) ?? 0) + 1;
+        this.kickoffInjectAttempts.set(kickoffKey, attempts);
         if (attempts >= ConductorEngine.KICKOFF_INJECT_ATTEMPT_CAP) {
           this.consumeOneShotKickoff(hosted.identity.projectId, mail);
-          this.kickoffInjectAttempts.delete(agentKey);
+          this.kickoffInjectAttempts.delete(kickoffKey);
           console.error(
             `[ConductorEngine] RETRACTING one-shot kickoff for agent '${hosted.identity.agent}' in ` +
               `project '${hosted.identity.projectId}' after ${attempts} failed inject attempt(s) ` +
@@ -1323,7 +1348,20 @@ export class ConductorEngine {
     this.lastTurnErrored.delete(agentKey);
     this.toolActivityListeners.delete(agentKey);
     this.overloadBackoff.delete(agentKey); // #68
-    this.kickoffInjectAttempts.delete(agentKey); // #77
+    this.clearKickoffInjectAttempts(agentKey); // #77
+  }
+
+  /**
+   * #77 — clear EVERY per-kickoff inject-attempt counter for `agentKey`. The counter is keyed by the
+   * specific kickoff mail (`${agentKey}::${sender}#${seq}`), so a single `delete(agentKey)` would miss
+   * the per-mail entries; iterate the agent's prefix instead. Called on any successful turn (budget
+   * reset) and on release/teardown.
+   */
+  private clearKickoffInjectAttempts(agentKey: string): void {
+    const prefix = `${agentKey}::`;
+    for (const key of this.kickoffInjectAttempts.keys()) {
+      if (key.startsWith(prefix)) this.kickoffInjectAttempts.delete(key);
+    }
   }
 
   // #68 — transient-overload backoff. Base/cap chosen so a 529 storm backs off exponentially

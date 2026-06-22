@@ -10,7 +10,11 @@
 
 import { describe, expect, it } from 'vitest';
 import { BLOCK_LIST } from './block-list.js';
-import { checkBlockListDrift, readEnforcedConfig } from './drift.js';
+import {
+  checkBlockListDrift,
+  readEnforcedConfig,
+  CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+} from './drift.js';
 import {
   buildPaneLaunchConfig,
   paneMayUseWebTools,
@@ -499,7 +503,7 @@ describe('#78 codex MCP-tool pre-approval', () => {
     expect(config.args).toContain('--dangerously-bypass-hook-trust');
   });
 
-  it('drift REQUIRES the pre-grant: removing it entirely → declared-not-enforced violations', () => {
+  it('drift REQUIRES the pre-grant: removing it → a DISTINCT codex-mcp-pre-grant-missing violation (NOT block-list drift)', () => {
     const good = buildPaneLaunchConfig('codex', BASE_IDENTITY);
     // Strip EVERY candidate auto-approve assignment from the [mcp_servers.co] block.
     let toml = good.codexConfigToml ?? '';
@@ -514,8 +518,15 @@ describe('#78 codex MCP-tool pre-approval', () => {
       ),
     };
     const violations = checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config));
-    expect(violations.length).toBeGreaterThan(0);
-    expect(violations.every((v) => v.kind === 'declared-not-enforced')).toBe(true);
+    // EXACTLY ONE violation, and it is the DISTINCT pre-grant kind — the block list itself is intact, so
+    // the missing pre-grant must NOT masquerade as declared-not-enforced for every rule (#78 round-2).
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toMatchObject({
+      id: CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+      kind: 'codex-mcp-pre-grant-missing',
+    });
+    // And specifically: NO block-list-drift kinds are raised (the regression the round-2 fix kills).
+    expect(violations.some((v) => v.kind === 'declared-not-enforced')).toBe(false);
   });
 
   it('drift is TOLERANT of the key: swapping the emitted key for ANOTHER candidate stays drift-clean', () => {
