@@ -2,7 +2,7 @@
 
 Project-specific memory for this repo. How to _be_ an orchestrated co agent (mail, review,
 dispatch, recovery) ships in co's role prompts and `co orient`, never here
-(`docs/architecture/prompts-and-memory.md`).
+([`docs/architecture/prompts-and-memory.md`](docs/architecture/prompts-and-memory.md)).
 
 ## Test command
 
