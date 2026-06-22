@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { defaultGitExec, type GitExec } from './sling.js';
 import { defaultGitReader, type GitReader } from './detect-base.js';
 
@@ -40,6 +41,37 @@ export function isWorktreeDirty(
     throw new Error(`unable to read git status for worktree '${sandboxPath}'`);
   }
   return out.trim().length > 0;
+}
+
+function isAbsentDirError(cause: unknown): boolean {
+  return (
+    cause != null &&
+    typeof cause === 'object' &&
+    'code' in cause &&
+    (cause as { code?: unknown }).code === 'ENOENT'
+  );
+}
+
+/**
+ * Dirty probe for teardown paths. It treats an absent sandbox as clean so idempotent teardown can
+ * continue through {@link import('./worktree-store.js').WorktreeStore.removeWorktree}; present-tree
+ * status failures still propagate so unknown state is not silently downgraded.
+ */
+export function probeWorktreeDirty(
+  sandboxPath: string,
+  gitReader: GitReader = defaultGitReader,
+  pathExists: (path: string) => boolean = existsSync,
+): boolean {
+  if (!pathExists(sandboxPath)) return false;
+  try {
+    return isWorktreeDirty(sandboxPath, gitReader);
+  } catch (cause) {
+    // A sandbox that raced away after the pre-check makes git fail; the production reader collapses
+    // that to a plain "unable to read git status" Error (no ENOENT code), so re-check existence
+    // rather than matching cause.code. A still-present tree means a genuine status failure → re-throw.
+    if (!pathExists(sandboxPath) || isAbsentDirError(cause)) return false;
+    throw cause;
+  }
 }
 
 /**

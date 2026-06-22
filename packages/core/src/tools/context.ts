@@ -15,6 +15,7 @@ import type { IssueStore } from '../issues/issues-store.js';
 import type { ResearchStore } from '../research/research-store.js';
 import type { UsageSourceFactory } from '../dispatch/cli-render.js';
 import type { GhExec } from '../worktrees/repo-mode.js';
+import type { ArchiveStore } from '../archive/archive-store.js';
 
 /**
  * What every tool handler receives. Assembled by whoever MOUNTS the surface — the
@@ -91,6 +92,13 @@ export interface ToolContext {
    * verbs (`co_research_finalize`, `co_research_get`) loud-fail when absent (Principle 9).
    */
   readonly research?: ResearchStore;
+  /**
+   * OPTIONAL archive handle for branch-residue preservation. Tools that need to record recoverable
+   * teardown residue loud-fail when it is absent rather than creating invisible refs.
+   */
+  readonly archive?: ArchiveStore;
+  /** Optional deterministic clock seam for tool-created records that need payload timestamps. */
+  readonly nowMs?: number;
   /**
    * OPTIONAL L4 passive/live usage-source factory. When the mount supplies it, dispatching tools refresh
    * stale/missing usage buckets through {@link import('../dispatch/provider-source.js').readProviderUsageCached}
