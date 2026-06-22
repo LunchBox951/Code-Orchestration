@@ -320,6 +320,32 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
       CO_PARENT: 'lead-1',
       CO_PROJECT_ID: projectId,
     });
+    // F3: with no token configured, GH_TOKEN is absent (no accidental empty/leaked credential).
+    expect(parsed.mcpServers?.co?.env).not.toHaveProperty('GH_TOKEN');
+  });
+
+  it('F3: a configured ghToken is provisioned into the pane MCP env as GH_TOKEN (and only then)', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-gh', 'implementer', 'claude');
+    const worktree = recordWorktree(projectId, 'impl-gh', 'co/feat-gh', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-gh');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: 'gho_test_token' },
+    );
+
+    const mcpConfig = spec.prelaunchFiles?.find((f) => f.path.endsWith('co-mcp.json'));
+    const parsed = JSON.parse(mcpConfig!.contents) as {
+      mcpServers?: { co?: { env?: Record<string, string> } };
+    };
+    // The token reaches the co MCP server (which runs the gated `gh` publish) — the only channel
+    // that survives the pane's sanitized env. It must NOT leak into the pane process env itself.
+    expect(parsed.mcpServers?.co?.env?.['GH_TOKEN']).toBe('gho_test_token');
+    expect(spec.env).not.toHaveProperty('GH_TOKEN');
   });
 
   it('codex spec: env has ONLY CODEX_HOME set to the isolated dir; prelaunch has approval_policy=never', () => {

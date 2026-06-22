@@ -53,6 +53,16 @@ export interface CoMcpPaths {
   readonly claudeStateJson?: string;
   /** Optional host-copied Codex auth file contents for the isolated CODEX_HOME. */
   readonly codexAuthJson?: string;
+  /**
+   * Optional GitHub token (F3) to provision into each hosted pane's co MCP server env as
+   * `GH_TOKEN`, so the gated publish path (`co_push`/`co_pr_merge` → `gh`) authenticates under
+   * self-hosting. The pane CLI runs under a sanitized env that does NOT carry the daemon's
+   * process.env, so the MCP server's explicit env block is the ONLY channel that reaches `gh`.
+   * Sourced from `CO_GH_TOKEN` (then `GITHUB_TOKEN`/`GH_TOKEN`) by {@link defaultCoMcpPaths}; the
+   * desktop "Connect GitHub" UI (issue #71) is a convenience that sets `CO_GH_TOKEN` on the daemon.
+   * Never written to the repo; lives only in the isolated home's 0o600 MCP config.
+   */
+  readonly ghToken?: string;
 }
 
 export interface ProviderAuthPrelaunchPaths {
@@ -188,6 +198,11 @@ export function buildHostedLaunchSpec(
       [CO_PARENT_ENV]: identity.parent,
       [CO_PROJECT_ID_ENV]: identity.projectId,
       ...bridgeDiagnosticEnv(isolatedHomeDir, bridgeSocketPath),
+      // F3: provision the GitHub token into the co MCP server env so its gated `gh` publish path
+      // authenticates. Only emitted when a token is configured (CO_GH_TOKEN); absent otherwise.
+      ...(coMcpPaths.ghToken != null && coMcpPaths.ghToken.length > 0
+        ? { GH_TOKEN: coMcpPaths.ghToken }
+        : {}),
     },
     coCliCommand: coMcpPaths.coCliCommand,
     ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),

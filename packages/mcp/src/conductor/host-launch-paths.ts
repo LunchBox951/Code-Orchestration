@@ -18,12 +18,19 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
   const coMcpBin = currentCoMcpBin(argv);
   const homeDir = opts.homeDir ?? homedir();
   const coCli = resolveCoCliCommand(coMcpBin, env, opts.nodeCommand ?? process.execPath);
+  // F3: source the GitHub token for the gated publish path from the daemon's env. CO_GH_TOKEN is the
+  // co-specific channel (set by the desktop "Connect GitHub" UI, issue #71); GITHUB_TOKEN/GH_TOKEN
+  // are honored as fallbacks for a CLI/CI launch. Empty/whitespace is treated as absent.
+  const ghToken = [env['CO_GH_TOKEN'], env['GITHUB_TOKEN'], env['GH_TOKEN']]
+    .map((v) => v?.trim())
+    .find((v) => v != null && v.length > 0);
   return {
     coMcpCommand: opts.nodeCommand ?? process.execPath,
     coMcpArgs: [coMcpBin],
     coCliCommand: coCli.command,
     ...(coCli.args.length > 0 ? { coCliArgs: coCli.args } : {}),
     coMcpBridgeSocketPath: defaultBridgeSocketPath,
+    ...(ghToken != null ? { ghToken } : {}),
     ...(opts.includeProviderAuth
       ? {
           ...readOptionalAuthFile(

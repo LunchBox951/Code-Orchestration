@@ -35,6 +35,24 @@ describe('host launch path resolution', () => {
     );
   });
 
+  it('F3: sources the gh token from CO_GH_TOKEN (then GITHUB_TOKEN/GH_TOKEN), trimming + omitting empties', () => {
+    const CLI = '/tmp/repo/packages/cli/dist/index.js';
+    const paths = (extra: Record<string, string>) =>
+      defaultCoMcpPaths({
+        argv: ['node', '/tmp/repo/packages/mcp/dist/bin.js'],
+        nodeCommand: '/usr/bin/node',
+        env: { CO_CLI_COMMAND: CLI, ...extra },
+      });
+    expect(paths({ CO_GH_TOKEN: '  gho_primary  ' }).ghToken).toBe('gho_primary');
+    // CO_GH_TOKEN wins over the generic fallbacks.
+    expect(paths({ CO_GH_TOKEN: 'gho_co', GITHUB_TOKEN: 'gho_gh' }).ghToken).toBe('gho_co');
+    // Fallbacks are honored for a CLI/CI launch.
+    expect(paths({ GITHUB_TOKEN: 'gho_ci' }).ghToken).toBe('gho_ci');
+    // No token configured → absent (never an empty GH_TOKEN).
+    expect(paths({}).ghToken).toBeUndefined();
+    expect(paths({ CO_GH_TOKEN: '   ' }).ghToken).toBeUndefined();
+  });
+
   it('optionally reads provider auth files for isolated host launch materialization', () => {
     const home = mkdtempSync(join(tmpdir(), 'co-home-'));
     dirs.push(home);
