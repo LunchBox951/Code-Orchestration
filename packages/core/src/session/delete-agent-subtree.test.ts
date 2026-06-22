@@ -295,9 +295,28 @@ function makeGitReader(opts: {
   existingBranches?: Set<string>;
   mergedBranches?: Set<string>;
   dirtyPaths?: Set<string>;
+  /** Per-worktree-path HEAD sha for the `rev-parse --verify --quiet HEAD` probe (#65 recovery).
+   *  A path mapped to null models an unresolvable HEAD (nothing to recover). Default sha: 'a'*40. */
+  worktreeHeads?: Map<string, string | null>;
 }): GitReader {
-  const { existingBranches, mergedBranches = new Set(), dirtyPaths = new Set() } = opts;
+  const {
+    existingBranches,
+    mergedBranches = new Set(),
+    dirtyPaths = new Set(),
+    worktreeHeads,
+  } = opts;
   return (cwd: string, args: readonly string[]): string | null => {
+    // #65: orphaned-worktree HEAD probe — resolve the live worktree's tip (or null if unresolvable).
+    if (
+      args[0] === 'rev-parse' &&
+      args[1] === '--verify' &&
+      args[2] === '--quiet' &&
+      args[3] === 'HEAD'
+    ) {
+      if (worktreeHeads == null) return 'a'.repeat(40) + '\n';
+      const head = worktreeHeads.has(cwd) ? worktreeHeads.get(cwd)! : 'a'.repeat(40);
+      return head == null ? null : head + '\n';
+    }
     if (
       args[0] === 'rev-parse' &&
       args[1] === '--verify' &&
@@ -1347,7 +1366,7 @@ describe('deleteAgentSubtree', () => {
     expect(roster.getAgent('coord-x')).toBeDefined();
   });
 
-  it('removes the orphaned worktree and completes teardown when a live worktree branch ref is missing (#65)', () => {
+  it('removes the orphaned worktree and completes teardown when a live worktree branch ref is missing with nothing to recover (#65)', () => {
     const roster = makeFakeRoster([
       { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
       { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
@@ -1357,9 +1376,11 @@ describe('deleteAgentSubtree', () => {
     const archive = makeFakeArchive();
     const { spy: gitExec, calls } = makeGitExecSpy();
     // co/impl's branch ref is GONE (out-of-band branch -D / force-push) while its worktree is live.
+    // Its HEAD resolves to the baseline sha (no work beyond base) → nothing recoverable.
     const gitReader = makeGitReader({
       existingBranches: new Set(['co/coord-x']),
-      mergedBranches: new Set(['co/coord-x']),
+      mergedBranches: new Set(['co/coord-x', 'a'.repeat(40)]),
+      worktreeHeads: new Map([['/data/worktrees/co/impl', 'a'.repeat(40)]]),
     });
 
     // The whole subtree delete used to wedge here (#65). It must now succeed.
@@ -1378,8 +1399,10 @@ describe('deleteAgentSubtree', () => {
 
     // The orphaned worktree is force-removed (its branch ref is already gone)...
     expect(worktreeStore.removedBranches).toContain('co/impl');
-    // ...but NOT archived — the archive holds only metadata, so a Restore would have no branch ref.
+    expect(worktreeStore.removeForce).toContain('co/impl');
+    // ...nothing was recoverable (HEAD already in base), so no recovery ref / archive was written.
     expect(archive.records).toEqual([]);
+    expect(calls.some((call) => call[1] === 'update-ref')).toBe(false);
     // ...and no branch delete is attempted (there is no branch to delete).
     expect(calls.some((call) => call.join(' ').includes('branch -d co/impl'))).toBe(false);
     expect(calls.some((call) => call.join(' ').includes('branch -D co/impl'))).toBe(false);
@@ -1387,6 +1410,125 @@ describe('deleteAgentSubtree', () => {
     expect(sessions.getSession('impl')).toBeUndefined();
     expect(roster.getAgent('impl')).toBeUndefined();
     expect(roster.getAgent('coord-x')).toBeUndefined();
+  });
+
+  it('re-anchors committed unmerged work under a recovery ref when an orphaned worktree HEAD is ahead of base (#65 safety)', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2, name: 'impl' },
+    ]);
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl')]);
+    const sessions = makeFakeSessions([session('impl', 'pane-impl')]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec, calls } = makeGitExecSpy();
+    // Branch ref gone, but the worktree HEAD ('b'*40) carries commits NOT contained in base — the
+    // exact force-push/history-rewrite case the old fix silently dropped to GC.
+    const gitReader = makeGitReader({
+      existingBranches: new Set(['co/coord-x']),
+      mergedBranches: new Set(['co/coord-x']),
+      worktreeHeads: new Map([['/data/worktrees/co/impl', 'b'.repeat(40)]]),
+    });
+
+    deleteAgentSubtree('proj', 'coord-x', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    // The tip is re-anchored under refs/co-recovered/<branch> so it survives GC...
+    expect(
+      calls.some(
+        (c) =>
+          c[1] === 'update-ref' && c[2] === 'refs/co-recovered/co/impl' && c[3] === 'b'.repeat(40),
+      ),
+    ).toBe(true);
+    // ...and archived (metadata points at the recovery ref) so it is discoverable/restorable.
+    expect(archive.records).toHaveLength(1);
+    expect(archive.records[0]?.branch).toBe('refs/co-recovered/co/impl');
+    // ...then the orphaned worktree is force-removed, and teardown completes.
+    expect(worktreeStore.removeForce).toContain('co/impl');
+    expect(roster.getAgent('impl')).toBeUndefined();
+    expect(roster.getAgent('coord-x')).toBeUndefined();
+  });
+
+  it('snapshots dirty work before removing an orphaned worktree with a missing branch ref (#65 safety)', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2, name: 'impl' },
+    ]);
+    const sandboxPath = '/data/worktrees/co/impl';
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl', 'main', sandboxPath)]);
+    const sessions = makeFakeSessions([session('impl', 'pane-impl')]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec, calls } = makeGitExecSpy();
+    // Branch ref gone AND the worktree has uncommitted changes — both must be preserved, not erased.
+    const gitReader = makeGitReader({
+      existingBranches: new Set(['co/coord-x']),
+      mergedBranches: new Set(['co/coord-x']),
+      dirtyPaths: new Set([sandboxPath]),
+      worktreeHeads: new Map([[sandboxPath, 'b'.repeat(40)]]),
+    });
+
+    deleteAgentSubtree('proj', 'coord-x', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    // Dirty work is snapshotted (add -A then commit -s) BEFORE the force-remove...
+    expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'add' && c[2] === '-A')).toBe(true);
+    expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'commit')).toBe(true);
+    // ...and the resulting snapshot tip ('f'*40 from the post-commit rev-parse) is re-anchored.
+    expect(calls.some((c) => c[1] === 'update-ref' && c[2] === 'refs/co-recovered/co/impl')).toBe(
+      true,
+    );
+    expect(archive.records).toHaveLength(1);
+    expect(worktreeStore.removeForce).toContain('co/impl');
+  });
+
+  it('force-removes a truly unrecoverable orphaned worktree (unresolvable HEAD) without archiving (#65)', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl')]);
+    const sessions = makeFakeSessions([session('impl', 'pane-impl')]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec, calls } = makeGitExecSpy();
+    // Branch ref gone AND the worktree HEAD does not resolve (broken/dangling) → nothing to recover.
+    const gitReader = makeGitReader({
+      existingBranches: new Set(['co/coord-x']),
+      mergedBranches: new Set(['co/coord-x']),
+      worktreeHeads: new Map([['/data/worktrees/co/impl', null]]),
+    });
+
+    expect(() =>
+      deleteAgentSubtree('proj', 'coord-x', {
+        openRoster: () => roster,
+        openWorktrees: () => worktreeStore,
+        openSessions: () => sessions,
+        openArchive: () => archive,
+        repoCwd: '/repo',
+        nowMs: 10_000,
+        gitExec,
+        gitReader,
+      }),
+    ).not.toThrow();
+
+    expect(worktreeStore.removeForce).toContain('co/impl');
+    expect(archive.records).toEqual([]);
+    expect(calls.some((call) => call[1] === 'update-ref')).toBe(false);
+    expect(roster.getAgent('impl')).toBeUndefined();
   });
 
   it('skips session end if session already ended (no active session for that agent)', () => {

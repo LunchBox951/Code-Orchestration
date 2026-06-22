@@ -259,18 +259,45 @@ export function deleteAgentSubtree(
           const branchExists = localBranchExists(repoCwd, wt.branch, gitReader);
           const alreadyDeletedMergedBranch = wt.removed && !branchExists;
           if (!branchExists && !wt.removed) {
-            // #65: the live worktree's branch ref is already gone (out-of-band `git branch -D`,
-            // a force-push, or a history rewrite). There is no recoverable work left to preserve
-            // and no branch to delete, so force-remove the orphaned worktree and continue the
-            // cascade instead of wedging the whole subtree delete. We deliberately do NOT archive:
-            // the archive stores only metadata, so a "Restore" would have no branch ref to restore
-            // to. The safety property still holds — we never delete a branch holding unmerged work
-            // (there is no branch here), we only clean up the stranded worktree.
-            try {
-              worktrees.removeWorktree(wt.branch, { repoCwd, gitExec, force: true });
-            } catch (e) {
-              recordAgentError(e);
+            // #65: the named branch ref is gone (out-of-band `git branch -D`, a force-push, or a
+            // history rewrite). The orphaned worktree may STILL hold uncommitted changes and/or a
+            // committed tip reachable only via its own HEAD reflog; a blind force-remove (`git
+            // worktree remove --force` + rmSync) destroys both. Preserve recoverable work FIRST,
+            // then remove — so teardown no longer wedges (the #65 bug) without silently dropping
+            // work:
+            //   1. snapshot uncommitted changes onto the worktree HEAD;
+            //   2. if the resulting tip is not already contained in base, re-anchor it under a
+            //      recovery ref (`refs/co-recovered/<branch>`) + archive metadata, so the commit
+            //      survives GC and stays restorable. The `refs/co-recovered/` namespace avoids the
+            //      "branch already checked out" conflict that recreating `refs/heads/<branch>` hits.
+            // A genuinely unrecoverable worktree (HEAD does not resolve) has nothing to preserve and
+            // force-removes cleanly — the common orphaned-coordinator case #65 reported. A failure to
+            // snapshot/re-anchor propagates to the outer catch and wedges THIS agent rather than
+            // risk data loss, exactly as the sibling dirty-unmerged path does (Principle 9).
+            let tip = (
+              gitReader(wt.path, ['rev-parse', '--verify', '--quiet', 'HEAD']) ?? ''
+            ).trim();
+            if (tip.length > 0 && isWorktreeDirty(wt.path, gitReader)) {
+              tip = snapshotDirtyWorktree(
+                wt.path,
+                'co: recovery snapshot before orphaned-worktree delete',
+                gitExec,
+                gitReader,
+              );
             }
+            if (tip.length > 0 && !isBranchMerged(repoCwd, tip, wt.baseRef, gitReader)) {
+              gitExec(repoCwd, ['update-ref', `refs/co-recovered/${wt.branch}`, tip]);
+              archive.appendRecord({
+                id: wt.branch,
+                name: agent.name ?? agentId,
+                branch: `refs/co-recovered/${wt.branch}`,
+                baseRef: wt.baseRef,
+                deletedAt: nowMs,
+                expiresAt: nowMs + archiveTtlMs,
+              });
+              archivedBranches.push(wt.branch);
+            }
+            worktrees.removeWorktree(wt.branch, { repoCwd, gitExec, force: true });
           } else if (alreadyDeletedMergedBranch) {
             try {
               gitExec(repoCwd, ['branch', '-d', wt.branch]);
