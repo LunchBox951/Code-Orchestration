@@ -19,11 +19,14 @@ import {
   openRosterStore,
   openSessionStore,
   toolsForRole,
+  type ToolContext,
+  type UsageSourceFactory,
   type MailStore,
   type ProjectRegistry,
   type Role,
   type RosterStore,
   type SessionStore,
+  type ToolSpec,
 } from '@co/core';
 import {
   LiveSessionHostImpl,
@@ -301,6 +304,49 @@ describe('LiveSessionHostImpl — authoritative identity injection (AC-L7-2)', (
       role: 'implementer',
       parent: 'lead-1',
     });
+  });
+
+  it('threads an injected usageSourceFactory into the hosted ToolContext', async () => {
+    const { projectId, cwd } = makeProject();
+    const identity = makeHostedIdentity({
+      agent: 'impl-usage-factory',
+      role: 'implementer',
+      parent: 'lead-1',
+      projectId,
+      cwd,
+    });
+    seedParentChain(projectId, identity.parent);
+
+    const usageSourceFactory: UsageSourceFactory = () => {
+      throw new Error('probe factory should not be called');
+    };
+    let observedInjectedFactory = false;
+    const statusSpec = buildCoreRegistry().get('co_status')!;
+    const probeTool: ToolSpec = {
+      name: 'co_probe_usage_factory',
+      title: 'Probe usage factory',
+      description: 'Probe whether a hosted session received the injected usage source factory.',
+      inputSchema: statusSpec.inputSchema,
+      outputSchema: statusSpec.outputSchema,
+      handler: (ctx: ToolContext) => {
+        observedInjectedFactory = ctx.usageSourceFactory === usageSourceFactory;
+        return {
+          agent: ctx.agent,
+          project_id: ctx.projectId,
+          cwd: ctx.cwd,
+          outstanding: ctx.mail.outstandingCount(ctx.agent),
+          inbox_unread: ctx.mail.inbox(ctx.agent).filter((m) => !m.read && !m.resolved).length,
+        };
+      },
+    };
+
+    const { client } = await hostAndConnect(identity, {
+      tools: [probeTool],
+      usageSourceFactory,
+    });
+    const res = await client.callTool({ name: 'co_probe_usage_factory', arguments: {} });
+    expect(res.isError).toBeFalsy();
+    expect(observedInjectedFactory).toBe(true);
   });
 
   it('preserves a hosted sub-role in the roster record', async () => {
