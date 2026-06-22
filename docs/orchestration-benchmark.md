@@ -188,22 +188,33 @@ They are independent on purpose: a high token-economy can **never** mask a corre
 
 Raw per-agent fields backing the scores: `tokenEconomy.{inputTokens, outputTokens, cacheReadTokens,
 cacheCreationTokens, totalTokens, costUsd, tokenEconomy, cacheEfficiency}` (live-only; every field `null`
-in the sandbox arm) and `toolEfficiency.{toolCalls, toolErrors, redundantReads, permissionAsks,
-contextEfficiency}` plus two **un-scored diagnostics** reported raw: `turnsToFirstProductiveCoCall` and
-`toolCallsPerCompletedTask`. `scores` also carries the run-level means + the per-role folds
+in the sandbox arm; `costUsd` is `number | null` — `null` where the provider reports no dollar cost) and
+`toolEfficiency.{toolCalls, toolErrors, redundantReads, permissionAsks, contextEfficiency}` plus two
+**un-scored diagnostics** reported raw: `turnsToFirstProductiveCoCall` (read from the tool-usage rollup) and
+`toolCallsPerCompletedTask` (**DERIVED by the driver**, not a store field — `toolCalls / completed-task-count`,
+`null` when the run completed no task). `scores` also carries the run-level means + the per-role folds
 (`tokenEconomyByRole`, `contextEfficiencyByRole`) for the fine-tuning corpus.
 
-> **N/A-in-sandbox rule (no silent zero):** a sandbox run spends no real tokens, so its TOKEN-ECONOMY (and
-> every raw token field) is reported as `null`, NOT `0` — a `0` would falsely read as "infinitely
-> wasteful". This is the same trap the live `turnsUsed` already falls into; the three scores avoid it by
-> design. CONTEXT/TOOL-EFFICIENCY is available in BOTH arms (tool calls are observable in the sandbox).
+> **N/A-in-sandbox rule (no silent zero), enforced in code:** a sandbox run spends no real tokens, so its
+> TOKEN-ECONOMY (and every raw token field) is reported as `null`, NOT `0` — a `0` would falsely read as
+> "infinitely wasteful". This is **not** an accident of the cost read-model being absent: the driver
+> (`aggregateAgentMetrics` → `readAgentEcon`) takes the run `fidelity` and, when it is `sandbox-fake`,
+> **skips the cost read entirely (forces `cost = null`)**, so token-economy is *guaranteed* `null` in the
+> sandbox arm even once the live cost surface lands. This is the same silent-zero trap the live `turnsUsed`
+> already falls into; the three scores avoid it by design. CONTEXT/TOOL-EFFICIENCY is available in BOTH arms
+> (tool calls are observable in the sandbox).
 
 > **Uncalibrated budgets (honest):** the per-scenario token budgets (`BUDGET_TOKENS_BY_SCENARIO`, e.g.
 > `calc-lib = 2,000,000`) and the context-efficiency weights were **not** measured against a real binary
 > driving the full chain — the first live runs are the calibration. Treat TOKEN-ECONOMY as a relative
 > yardstick, not an absolute target, and tune the budgets/weights as the corpus grows. The token/tool raw
-> data is read from the conductor's per-agent cost/tool read-model; until that surface lands, the two
-> live-dependent scores are `null` (read via optional chaining — an absent rollup is an honest N/A).
+> data is read from the conductor's per-agent cost/tool read-model (the `AgentCostRollup` / `AgentToolUsage`
+> shapes — owned canonically by the cost/tool-usage PR; the benchmark keeps an *identical bench-local copy*
+> and reads the store via **optional chaining**, so it needs no import of those types and `pnpm typecheck`
+> stays green whether or not that surface has landed). In a **live** run, until that surface lands the two
+> live-dependent scores are `null` (an absent rollup is an honest N/A). A persistent econ-read failure is
+> **logged**, never swallowed (Principle 9), so a wedged read surfaces instead of degrading invisibly to an
+> all-N/A scorecard.
 
 > **Reconstruction limit (honest):** once a merge lands (a final PASS), the review store keeps only the
 > latest verdict and resets the strike counter, so exact historical kickback counts are reconstructed

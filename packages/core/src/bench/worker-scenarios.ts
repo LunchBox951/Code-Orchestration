@@ -104,14 +104,29 @@ async function evaluateAddModule(
     try {
       got = addFn(a, b);
     } catch (error) {
-      return { correct: false, detail: `add(${a}, ${b}) threw: ${errorMessage(error)}`, casesPassed, casesTotal };
+      return {
+        correct: false,
+        detail: `add(${a}, ${b}) threw: ${errorMessage(error)}`,
+        casesPassed,
+        casesTotal,
+      };
     }
     if (got !== want) {
-      return { correct: false, detail: `add(${a}, ${b}) = ${String(got)}, want ${want}`, casesPassed, casesTotal };
+      return {
+        correct: false,
+        detail: `add(${a}, ${b}) = ${String(got)}, want ${want}`,
+        casesPassed,
+        casesTotal,
+      };
     }
     casesPassed += 1;
   }
-  return { correct: true, detail: `add() correct over ${casesTotal} cases`, casesPassed, casesTotal };
+  return {
+    correct: true,
+    detail: `add() correct over ${casesTotal} cases`,
+    casesPassed,
+    casesTotal,
+  };
 }
 
 /**

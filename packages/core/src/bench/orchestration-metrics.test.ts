@@ -14,10 +14,11 @@ import {
   CONTEXT_EFFICIENCY_WEIGHTS,
   type OrchestrationRunInput,
   type AgentRunMetric,
-  type AgentCostRollup,
-  type AgentToolUsage,
   type MergeOutcome,
 } from './orchestration-metrics.js';
+// AgentCostRollup / AgentToolUsage are bench-local (NOT re-exported from orchestration-metrics nor the
+// @co/core barrel — PR B owns the canonical export); import them from their declaring module.
+import type { AgentCostRollup, AgentToolUsage } from './bench-econ-types.js';
 import type { ArtifactCheck } from './orchestration-scenarios.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────────────────────────────
@@ -65,31 +66,112 @@ const PASS_ARTIFACT: ArtifactCheck = {
 
 const agents: AgentRunMetric[] = [
   liveAgent(
-    { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheCreationTokens: 0, totalTokens: 150, costUsd: 0.1 },
-    { toolCalls: 10, toolErrors: 0, redundantReads: 0, permissionAsks: 0, turnsToFirstProductiveCoCall: 1, toolCallsPerCompletedTask: 10 },
+    {
+      agentId: 'coord-1',
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 150,
+      costUsd: 0.1,
+    },
+    {
+      agentId: 'coord-1',
+      toolCalls: 10,
+      toolErrors: 0,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: 1,
+    },
     { agentId: 'coord-1', role: 'coordinator', turnsUsed: 4, wallClockMs: 8000, escalations: 0 },
   ),
   liveAgent(
-    { inputTokens: 80, outputTokens: 40, cacheReadTokens: 0, cacheCreationTokens: 0, totalTokens: 120, costUsd: 0.08 },
-    { toolCalls: 10, toolErrors: 1, redundantReads: 0, permissionAsks: 0, turnsToFirstProductiveCoCall: 1, toolCallsPerCompletedTask: 10 },
+    {
+      agentId: 'lead-1',
+      inputTokens: 80,
+      outputTokens: 40,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 120,
+      costUsd: 0.08,
+    },
+    {
+      agentId: 'lead-1',
+      toolCalls: 10,
+      toolErrors: 1,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: 1,
+    },
     { agentId: 'lead-1', role: 'lead', turnsUsed: 3, wallClockMs: 6000, escalations: 1 },
   ),
   liveAgent(
-    { inputTokens: 60, outputTokens: 30, cacheReadTokens: 0, cacheCreationTokens: 0, totalTokens: 90, costUsd: 0.06 },
-    { toolCalls: 10, toolErrors: 0, redundantReads: 0, permissionAsks: 0, turnsToFirstProductiveCoCall: 1, toolCallsPerCompletedTask: 10 },
+    {
+      agentId: 'impl-ops',
+      inputTokens: 60,
+      outputTokens: 30,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 90,
+      costUsd: 0.06,
+    },
+    {
+      agentId: 'impl-ops',
+      toolCalls: 10,
+      toolErrors: 0,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: 1,
+    },
     { agentId: 'impl-ops', role: 'implementer', turnsUsed: 2, wallClockMs: 4000, escalations: 0 },
   ),
   liveAgent(
-    { inputTokens: 65, outputTokens: 35, cacheReadTokens: 0, cacheCreationTokens: 0, totalTokens: 100, costUsd: 0.07 },
-    { toolCalls: 10, toolErrors: 0, redundantReads: 0, permissionAsks: 0, turnsToFirstProductiveCoCall: 1, toolCallsPerCompletedTask: 10 },
+    {
+      agentId: 'impl-tok',
+      inputTokens: 65,
+      outputTokens: 35,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 100,
+      costUsd: 0.07,
+    },
+    {
+      agentId: 'impl-tok',
+      toolCalls: 10,
+      toolErrors: 0,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: 1,
+    },
     { agentId: 'impl-tok', role: 'implementer', turnsUsed: 2, wallClockMs: 4500, escalations: 0 },
   ),
 ];
 
 const merges: MergeOutcome[] = [
-  { branch: 'impl-ops', target: 'lead-1', reviewRounds: 1, kickbacks: 0, firstTryPass: true, mergeCommitSha: 'a1' },
-  { branch: 'impl-tok', target: 'lead-1', reviewRounds: 2, kickbacks: 1, firstTryPass: false, mergeCommitSha: 'b2' },
-  { branch: 'lead-1', target: 'integration', reviewRounds: 1, kickbacks: 0, firstTryPass: true, mergeCommitSha: 'c3' },
+  {
+    branch: 'impl-ops',
+    target: 'lead-1',
+    reviewRounds: 1,
+    kickbacks: 0,
+    firstTryPass: true,
+    mergeCommitSha: 'a1',
+  },
+  {
+    branch: 'impl-tok',
+    target: 'lead-1',
+    reviewRounds: 2,
+    kickbacks: 1,
+    firstTryPass: false,
+    mergeCommitSha: 'b2',
+  },
+  {
+    branch: 'lead-1',
+    target: 'integration',
+    reviewRounds: 1,
+    kickbacks: 0,
+    firstTryPass: true,
+    mergeCommitSha: 'c3',
+  },
 ];
 
 function baseInput(overrides: Partial<OrchestrationRunInput> = {}): OrchestrationRunInput {
@@ -132,7 +214,12 @@ describe('summarizeRun — the hard structural PASS verdict + totals', () => {
   it('fails when the executed oracle was incorrect (surfacing the concrete reason)', () => {
     const s = summarizeRun(
       baseInput({
-        artifact: { correct: false, detail: 'add(2, 3) = -1, want 5', casesPassed: 0, casesTotal: 13 },
+        artifact: {
+          correct: false,
+          detail: 'add(2, 3) = -1, want 5',
+          casesPassed: 0,
+          casesTotal: 13,
+        },
       }),
     );
     expect(s.pass).toBe(false);
@@ -147,7 +234,14 @@ describe('summarizeRun — the hard structural PASS verdict + totals', () => {
 
   it('fails when a merge landed without a review round (the gate was skipped)', () => {
     const ungated: MergeOutcome[] = [
-      { branch: 'impl-ops', target: 'lead-1', reviewRounds: 0, kickbacks: 0, firstTryPass: true, mergeCommitSha: 'x' },
+      {
+        branch: 'impl-ops',
+        target: 'lead-1',
+        reviewRounds: 0,
+        kickbacks: 0,
+        firstTryPass: true,
+        mergeCommitSha: 'x',
+      },
       ...merges.slice(1),
     ];
     const s = summarizeRun(baseInput({ merges: ungated }));
@@ -183,13 +277,22 @@ describe('the three scores — correctness math (objective; both arms)', () => {
   });
 
   it('a half-merged-up chain halves correctness (the merge-up factor)', () => {
-    const s = summarizeRun(baseInput({ implementerBranchesMergedUp: 1, requiredImplementerMerges: 2 }));
+    const s = summarizeRun(
+      baseInput({ implementerBranchesMergedUp: 1, requiredImplementerMerges: 2 }),
+    );
     expect(s.scores.correctness).toBeCloseTo(0.5, 10);
   });
 
   it('an ungated merge (a skipped review) zeroes correctness (the gate factor)', () => {
     const ungated: MergeOutcome[] = [
-      { branch: 'impl-ops', target: 'lead-1', reviewRounds: 0, kickbacks: 0, firstTryPass: true, mergeCommitSha: 'x' },
+      {
+        branch: 'impl-ops',
+        target: 'lead-1',
+        reviewRounds: 0,
+        kickbacks: 0,
+        firstTryPass: true,
+        mergeCommitSha: 'x',
+      },
       ...merges.slice(1),
     ];
     const s = summarizeRun(baseInput({ merges: ungated }));
@@ -215,6 +318,7 @@ describe('the three scores — LAZY-AGENT: economy cannot mask a correctness mis
   // miss — that is the whole point of three separate scores (this fails if correctness folded economy in).
   it('high token-economy + a wrong artifact ⇒ correctness ≈ 0 while token-economy = 1', () => {
     const lazyCost: AgentCostRollup = {
+      agentId: 'lazy-1',
       inputTokens: 5,
       outputTokens: 1,
       cacheReadTokens: 0,
@@ -223,17 +327,22 @@ describe('the three scores — LAZY-AGENT: economy cannot mask a correctness mis
       costUsd: 0.0001,
     };
     const lazyTool: AgentToolUsage = {
+      agentId: 'lazy-1',
       toolCalls: 1,
       toolErrors: 0,
       redundantReads: 0,
       permissionAsks: 0,
       turnsToFirstProductiveCoCall: 0,
-      toolCallsPerCompletedTask: 1,
     };
     const s = summarizeRun(
       baseInput({
         completed: false, // the lazy agent never finished the chain
-        artifact: { correct: false, detail: 'add(2,3) = -1, want 5', casesPassed: 0, casesTotal: 13 },
+        artifact: {
+          correct: false,
+          detail: 'add(2,3) = -1, want 5',
+          casesPassed: 0,
+          casesTotal: 13,
+        },
         agents: [liveAgent(lazyCost, lazyTool, { agentId: 'lazy-1', role: 'implementer' })],
       }),
     );
@@ -247,9 +356,7 @@ describe('the three scores — LAZY-AGENT: economy cannot mask a correctness mis
 
 describe('the three scores — TOKEN-ECONOMY (live-only; N/A in the sandbox arm)', () => {
   it('SANDBOX arm: tokenEconomy is null (N/A), NOT a silent zero', () => {
-    const s = summarizeRun(
-      baseInput({ fidelity: 'sandbox-fake', agents: [sandboxAgent()] }),
-    );
+    const s = summarizeRun(baseInput({ fidelity: 'sandbox-fake', agents: [sandboxAgent()] }));
     // The run-level and per-agent token economy are both null in the sandbox arm — never 0.
     expect(s.scores.tokenEconomy).toBeNull();
     expect(s.agents[0]!.tokenEconomy.tokenEconomy).toBeNull();
@@ -258,15 +365,39 @@ describe('the three scores — TOKEN-ECONOMY (live-only; N/A in the sandbox arm)
   });
 
   it('tokenEconomyScore: at-or-under budget ⇒ 1; over budget ⇒ degrades below 1; null cost ⇒ null', () => {
-    const under: AgentCostRollup = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, totalTokens: 1000, costUsd: 0 };
-    const over: AgentCostRollup = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, totalTokens: 4000, costUsd: 0 };
+    const under: AgentCostRollup = {
+      agentId: 'a',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 1000,
+      costUsd: 0,
+    };
+    const over: AgentCostRollup = {
+      agentId: 'a',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 4000,
+      costUsd: 0,
+    };
     expect(tokenEconomyScore(under, 2000)).toBe(1); // 2000/1000 clamps to 1
     expect(tokenEconomyScore(over, 2000)).toBeCloseTo(0.5, 10); // 2000/4000
     expect(tokenEconomyScore(null, 2000)).toBeNull();
   });
 
   it('cacheEfficiency: read share of cacheable tokens; null cost ⇒ null', () => {
-    const cached: AgentCostRollup = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 80, cacheCreationTokens: 20, totalTokens: 100, costUsd: 0 };
+    const cached: AgentCostRollup = {
+      agentId: 'a',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 80,
+      cacheCreationTokens: 20,
+      totalTokens: 100,
+      costUsd: 0,
+    };
     expect(cacheEfficiency(cached)).toBeCloseTo(0.8, 10);
     expect(cacheEfficiency(null)).toBeNull();
   });
@@ -279,21 +410,29 @@ describe('the three scores — TOKEN-ECONOMY (live-only; N/A in the sandbox arm)
 
 describe('the three scores — CONTEXT/TOOL-EFFICIENCY (both arms; weighted blend)', () => {
   it('a clean run (no errors/redundant-reads/permission-asks) scores 1', () => {
-    const clean: AgentToolUsage = { toolCalls: 10, toolErrors: 0, redundantReads: 0, permissionAsks: 0, turnsToFirstProductiveCoCall: 1, toolCallsPerCompletedTask: 10 };
+    const clean: AgentToolUsage = {
+      agentId: 'a',
+      toolCalls: 10,
+      toolErrors: 0,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: 1,
+    };
     expect(contextEfficiencyScore(clean)).toBe(1);
   });
 
   it('matches the documented weighted formula 0.4·(1−fail)+0.4·(1−redundant)+0.2·(1−perm)', () => {
     const tool: AgentToolUsage = {
+      agentId: 'a',
       toolCalls: 10,
       toolErrors: 2, // failRate 0.2
       redundantReads: 1, // redundantReadRate 0.1
       permissionAsks: 5, // permissionAskRate 0.5
       turnsToFirstProductiveCoCall: 1,
-      toolCallsPerCompletedTask: 10,
     };
     const w = CONTEXT_EFFICIENCY_WEIGHTS;
-    const expected = w.toolFail * (1 - 0.2) + w.redundantRead * (1 - 0.1) + w.permissionAsk * (1 - 0.5);
+    const expected =
+      w.toolFail * (1 - 0.2) + w.redundantRead * (1 - 0.1) + w.permissionAsk * (1 - 0.5);
     expect(contextEfficiencyScore(tool)).toBeCloseTo(expected, 10);
   });
 
@@ -302,15 +441,35 @@ describe('the three scores — CONTEXT/TOOL-EFFICIENCY (both arms; weighted blen
   });
 
   it('a tool rollup with ZERO calls still scores (max(toolCalls,1) guard) — a real "no friction" observation', () => {
-    const idle: AgentToolUsage = { toolCalls: 0, toolErrors: 0, redundantReads: 0, permissionAsks: 0, turnsToFirstProductiveCoCall: 0, toolCallsPerCompletedTask: 0 };
+    const idle: AgentToolUsage = {
+      agentId: 'a',
+      toolCalls: 0,
+      toolErrors: 0,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: 0,
+    };
     expect(contextEfficiencyScore(idle)).toBe(1);
   });
 
-  it('reports the un-scored diagnostics raw on the metric (turnsToFirstProductiveCoCall, toolCallsPerCompletedTask)', () => {
-    const tool: AgentToolUsage = { toolCalls: 8, toolErrors: 0, redundantReads: 0, permissionAsks: 0, turnsToFirstProductiveCoCall: 3, toolCallsPerCompletedTask: 8 };
-    const ef = buildToolEfficiency(tool);
+  it('reports the un-scored diagnostics raw on the metric (turnsToFirstProductiveCoCall from the rollup, toolCallsPerCompletedTask DERIVED by the driver)', () => {
+    const tool: AgentToolUsage = {
+      agentId: 'a',
+      toolCalls: 8,
+      toolErrors: 0,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: 3,
+    };
+    // toolCallsPerCompletedTask is NOT a store field — the driver derives it and passes it as the 2nd arg.
+    const ef = buildToolEfficiency(tool, 8);
     expect(ef.turnsToFirstProductiveCoCall).toBe(3);
     expect(ef.toolCallsPerCompletedTask).toBe(8);
+  });
+
+  it('a null tool rollup forces toolCallsPerCompletedTask to null even if a derived value is offered (no rollup ⇒ no diagnostic)', () => {
+    const ef = buildToolEfficiency(null, 8);
+    expect(ef.toolCallsPerCompletedTask).toBeNull();
   });
 });
 
@@ -364,7 +523,9 @@ describe('toJsonl + renderScorecard', () => {
   });
 
   it('SANDBOX run JSONL: per-agent tokenEconomy.tokenEconomy is null (N/A), never 0', () => {
-    const jsonl = toJsonl(summarizeRun(baseInput({ fidelity: 'sandbox-fake', agents: [sandboxAgent()] })));
+    const jsonl = toJsonl(
+      summarizeRun(baseInput({ fidelity: 'sandbox-fake', agents: [sandboxAgent()] })),
+    );
     const agentRecord = jsonl
       .trim()
       .split('\n')
@@ -385,7 +546,9 @@ describe('toJsonl + renderScorecard', () => {
   });
 
   it('renders N/A (not 0) for a null score in the sandbox arm', () => {
-    const text = renderScorecard(summarizeRun(baseInput({ fidelity: 'sandbox-fake', agents: [sandboxAgent()] })));
+    const text = renderScorecard(
+      summarizeRun(baseInput({ fidelity: 'sandbox-fake', agents: [sandboxAgent()] })),
+    );
     expect(text).toMatch(/token-economy=N\/A/);
   });
 });

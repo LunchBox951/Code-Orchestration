@@ -1072,13 +1072,18 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
         'lead-a': { turnsUsed: 2, wallClockMs: 2000 },
       },
       'calc-lib',
+      'sandbox-fake',
+      1,
     );
     // @operator is excluded; every roster agent appears (impl-a with zeroed samples).
     expect(agents.map((a) => a.agentId).sort()).toEqual(['coord-a', 'impl-a', 'lead-a']);
-    // Without PR B's cost/tool rollups on the dispatch store, the live-only economy score is null (N/A) —
-    // NOT a silent zero — and the tool-efficiency score is null too (no tool-usage rollup yet).
+    // The sandbox arm SKIPS the cost read entirely (fidelity-enforced), so the live-only economy score is
+    // GUARANTEED null (N/A) — not a silent zero, not an accident of B's store being absent. Without PR B's
+    // tool-usage rollup the tool-efficiency score is null too.
     expect(agents.find((a) => a.agentId === 'coord-a')?.tokenEconomy.tokenEconomy).toBeNull();
-    expect(agents.find((a) => a.agentId === 'coord-a')?.toolEfficiency.contextEfficiency).toBeNull();
+    expect(
+      agents.find((a) => a.agentId === 'coord-a')?.toolEfficiency.contextEfficiency,
+    ).toBeNull();
     const summary = summarizeRun({
       runId: 'r',
       scenarioId: 's',

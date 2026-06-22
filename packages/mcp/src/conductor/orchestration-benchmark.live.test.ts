@@ -189,7 +189,13 @@ describe('maybePassReviews — drives a pending review to PASS over the real ope
     defaultGitExec(repo, ['config', 'commit.gpgsign', 'false']);
     writeFileSync(join(repo, 'README.md'), 'base\n');
     defaultGitExec(repo, ['add', '.']);
-    defaultGitExec(repo, ['commit', '-m', 'chore: base', '-m', 'Signed-off-by: MPR <mpr@example.com>']);
+    defaultGitExec(repo, [
+      'commit',
+      '-m',
+      'chore: base',
+      '-m',
+      'Signed-off-by: MPR <mpr@example.com>',
+    ]);
     defaultGitExec(repo, ['branch', branch]);
     const wtPath = join(repo, 'wt-feat');
     defaultGitExec(repo, ['worktree', 'add', wtPath, branch]);
@@ -464,6 +470,11 @@ async function makeLiveAutomation(
       // turn COUNTS are read from the durable cost read-model below (one cost.recorded per turn) rather
       // than guessed — both are real measurements, not the `agentTurns:{}` silent zero this replaces.
       const firstSeenMs = new Map<string, number>();
+      // Per-reviewId consecutive PASS-attempt failure counter, owned by the drive loop and threaded into
+      // maybePassReviews each tick. A transient miss is fine (it retries next tick); a PERSISTENT failure
+      // (the same gate failing tick after tick) is LOGGED so the operator sees a wedged review instead of a
+      // silently-stalled chain (Principle 9 — no silent green).
+      const reviewFailStreak = new Map<string, number>();
       let completed = false;
       let ticks = 0;
       try {
@@ -483,7 +494,7 @@ async function makeLiveAutomation(
           // pending review_request. These are the ONLY hand-driven inputs — all coding/merging is the
           // live agents' own work through the co tools.
           await maybeLockSpec(reg, input.projectId, input.repoCwd);
-          await maybePassReviews(ipc, input.projectId);
+          await maybePassReviews(ipc, input.projectId, reviewFailStreak);
 
           completed = planCompleted(input.projectId);
           if (completed) break;
@@ -540,8 +551,17 @@ async function maybeLockSpec(
  * carrying that fingerprint. Idempotent: a resolved item is skipped, so re-running this each tick PASSes
  * only newly-arrived gates. Fail-soft on a single review (a transient `reviewContext` miss / fingerprint
  * race is retried next tick) — the chain must never wedge because one PASS attempt raced the gate.
+ *
+ * `failStreak` (optional; threaded by the drive loop) counts CONSECUTIVE PASS-attempt failures per
+ * reviewId: a transient miss is fine (it retries), but a PERSISTENT failure (the same gate failing for
+ * {@link REVIEW_PASS_FAIL_LOG_AFTER} ticks running) is LOGGED so the operator sees the wedge instead of a
+ * silently-stalled chain (Principle 9 — log, don't swallow). A successful PASS clears the streak.
  */
-async function maybePassReviews(ipc: OperatorIpcClient, projectId: ProjectId): Promise<void> {
+async function maybePassReviews(
+  ipc: OperatorIpcClient,
+  projectId: ProjectId,
+  failStreak?: Map<string, number>,
+): Promise<void> {
   for (const req of pendingReviewRequests(projectId)) {
     const reviewId = reviewIdFromMail(req);
     if (reviewId == null) continue;
@@ -558,12 +578,30 @@ async function maybePassReviews(ipc: OperatorIpcClient, projectId: ProjectId): P
           body: 'Reviewed the diff + locked acceptance criteria. PASS.',
         },
       );
-    } catch {
-      // A transient reviewContext/reply race (e.g. the request landed mid-tick) — retried next tick. The
-      // chain must never wedge because a single PASS attempt raced the gate (fail-soft, Principle 9-safe:
-      // an unpassable gate simply re-surfaces, it is never silently dropped).
+      failStreak?.delete(reviewId); // a PASS landed — reset the per-gate failure streak.
+    } catch (error) {
+      // A transient reviewContext/reply race (e.g. the request landed mid-tick) is retried next tick. But
+      // count it: a gate that fails the PASS attempt for many ticks running is WEDGED — log it loudly so an
+      // operator sees a stalled review instead of an invisibly-hung chain (Principle 9 — never silently
+      // dropped). The chain still does not throw here; the gate simply re-surfaces next tick.
+      const streak = (failStreak?.get(reviewId) ?? 0) + 1;
+      failStreak?.set(reviewId, streak);
+      if (failStreak != null && streak >= REVIEW_PASS_FAIL_LOG_AFTER) {
+        console.error(
+          `[co orch-bench] review '${reviewId}' has failed its operator PASS attempt ${streak} ticks ` +
+            `running — the gate may be wedged: ${errorMessage(error)}`,
+        );
+      }
     }
   }
+}
+
+/** Log a persistent review PASS-attempt failure after this many CONSECUTIVE failed ticks (a wedge signal). */
+const REVIEW_PASS_FAIL_LOG_AFTER = 5;
+
+/** Normalize an unknown thrown value to a string message for logging. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

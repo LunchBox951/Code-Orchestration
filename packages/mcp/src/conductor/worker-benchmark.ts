@@ -27,10 +27,8 @@ import {
   openDispatchStore,
   openMailStore,
   toolsForRole,
-  type AgentCostRollup,
   type AgentToolEfficiency,
   type AgentTokenEconomy,
-  type AgentToolUsage,
   type ArtifactCheck,
   type BenchmarkScenario,
   type DeliveredMail,
@@ -255,10 +253,13 @@ export async function runWorkerBenchmark(
     // CHAINING against PR B's store surface (declared locally; see {@link WorkerEconStore}) so this
     // compiles on `dev` WITHOUT B — a `null` rollup ⇒ a `null` score (N/A), never a silent zero.
     const { cost, tool } = readWorkerEcon(projectId, identity.agent);
+    // The throughput diagnostic is DERIVED (not a store field): tool calls per completed task, or null when
+    // there is no rollup / the single task did not complete (never a divide-by-zero).
+    const toolCallsPerCompletedTask = tool == null || !completed ? null : tool.toolCalls;
     const scores: WorkerScores = {
       correctness: workerCorrectness(artifact, completed),
       tokenEconomy: buildTokenEconomy(cost, budgetTokensForScenario(scenario.id)),
-      toolEfficiency: buildToolEfficiency(tool),
+      toolEfficiency: buildToolEfficiency(tool, toolCallsPerCompletedTask),
     };
 
     return {
@@ -393,10 +394,29 @@ export function workerCorrectness(artifact: ArtifactCheck, completed: boolean): 
 }
 
 /**
- * PR B's per-agent read-model surface, declared HERE (not imported from B) so this module compiles on
- * `dev` WITHOUT B. Both methods OPTIONAL: an absent method / `null` return ⇒ a `null` score (N/A), never a
- * silent zero. The shapes are the `@co/core`-owned {@link AgentCostRollup}/{@link AgentToolUsage} contract.
+ * PR B's per-agent read-model surface, declared HERE (not imported from B, and NOT from `@co/core` — those
+ * shapes are bench-local + un-exported so B owns the canonical export) so this module compiles on `dev`
+ * WITHOUT B. The shapes are STRUCTURAL copies of the bench-local cost/tool-usage contract — read via
+ * OPTIONAL CHAINING, so structural compatibility is all that is required. Both methods OPTIONAL: an absent
+ * method / `null` return ⇒ a `null` score (N/A), never a silent zero.
  */
+interface AgentCostRollup {
+  readonly agentId: string;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheCreationTokens: number;
+  readonly totalTokens: number;
+  readonly costUsd: number | null;
+}
+interface AgentToolUsage {
+  readonly agentId: string;
+  readonly toolCalls: number;
+  readonly toolErrors: number;
+  readonly redundantReads: number;
+  readonly permissionAsks: number;
+  readonly turnsToFirstProductiveCoCall: number | null;
+}
 interface WorkerEconStore {
   readonly getAgentCostRollup?: (agentId: string) => AgentCostRollup | null;
   readonly getAgentToolUsage?: (agentId: string) => AgentToolUsage | null;

@@ -22,8 +22,15 @@
  * count of tokens the agent actually spent over the run (summed across its turns), plus the reported
  * dollar cost. In a SANDBOX run no real tokens are spent, so the driver hands `null` (not a zeroed
  * rollup) and the token-economy score is `null` (N/A), per the no-silent-zero rule.
+ *
+ * STRUCTURAL CONTRACT (kept bench-local — NOT re-exported from the `@co/core` barrel): the canonical
+ * `@co/core` export of this shape is owned by the cost read-model PR (PR B). This bench copy is the
+ * IDENTICAL shape so the `@co/mcp` driver can read PR B's store via optional chaining with no import of
+ * B's types — structural compatibility is sufficient.
  */
 export interface AgentCostRollup {
+  /** Which agent this rollup belongs to (matches the roster agent id). */
+  readonly agentId: string;
   /** Input (prompt) tokens billed to the agent across all its turns. */
   readonly inputTokens: number;
   /** Output (completion) tokens the agent produced across all its turns. */
@@ -34,18 +41,26 @@ export interface AgentCostRollup {
   readonly cacheCreationTokens: number;
   /** Total tokens billed (input + output + cache, as the provider rolls them up). */
   readonly totalTokens: number;
-  /** Reported dollar cost, summed only where the provider reports it (Claude); else 0. */
-  readonly costUsd: number;
+  /** Reported dollar cost, or `null` where the provider does not report a cost (no silent zero). */
+  readonly costUsd: number | null;
 }
 
 /**
  * The raw per-agent TOOL-USAGE rollup — the CONTEXT/TOOL-EFFICIENCY signal (available in BOTH arms, since
  * tool calls are observable in the sandbox too). `toolErrors` is the count of tool calls that returned an
  * error; `redundantReads` is the count of reads of a path the agent already read this run (a context
- * inefficiency); `permissionAsks` is the count of permission prompts the agent triggered. The two
- * un-scored diagnostics (`turnsToFirstProductiveCoCall`, `toolCallsPerCompletedTask`) are reported raw.
+ * inefficiency); `permissionAsks` is the count of permission prompts the agent triggered. The one un-scored
+ * diagnostic the STORE produces (`turnsToFirstProductiveCoCall`) is reported raw; `toolCallsPerCompletedTask`
+ * is NOT a store field — it is DERIVED by the benchmark driver from `toolCalls / completed-task-count`.
+ *
+ * STRUCTURAL CONTRACT (kept bench-local — NOT re-exported from the `@co/core` barrel): the canonical
+ * `@co/core` export of this shape is owned by the tool-usage read-model PR (PR B). This bench copy is the
+ * IDENTICAL shape so the `@co/mcp` driver can read PR B's store via optional chaining with no import of
+ * B's types — structural compatibility is sufficient.
  */
 export interface AgentToolUsage {
+  /** Which agent this rollup belongs to (matches the roster agent id). */
+  readonly agentId: string;
   /** Total tool calls the agent issued across the run. */
   readonly toolCalls: number;
   /** Of those, how many returned an error (failed tool calls). */
@@ -54,8 +69,6 @@ export interface AgentToolUsage {
   readonly redundantReads: number;
   /** Permission prompts the agent triggered (a friction signal — fewer is better). */
   readonly permissionAsks: number;
-  /** DIAGNOSTIC (un-scored): turns before the agent's first productive `co_` tool call. */
-  readonly turnsToFirstProductiveCoCall: number;
-  /** DIAGNOSTIC (un-scored): tool calls issued per completed task (throughput cost). */
-  readonly toolCallsPerCompletedTask: number;
+  /** DIAGNOSTIC (un-scored): turns before the agent's first productive `co_` tool call, or `null` if it never made one. */
+  readonly turnsToFirstProductiveCoCall: number | null;
 }

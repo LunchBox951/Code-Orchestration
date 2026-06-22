@@ -918,6 +918,10 @@ export {
   calcLibScenario,
   getOrchestrationScenario,
 } from './bench/orchestration-scenarios.js';
+// NOTE: AgentCostRollup / AgentToolUsage are intentionally NOT exported from this barrel. Their canonical
+// @co/core export is owned by the cost/tool-usage read-model PR (PR B); the benchmark keeps an identical
+// bench-local copy (packages/core/src/bench/bench-econ-types.ts) and the @co/mcp driver reads the store
+// via optional chaining, so exporting them here too would be a duplicate-export collision.
 export type {
   ProviderMode,
   RunFidelity,
@@ -930,8 +934,6 @@ export type {
   OrchestrationScorecard,
   RunScores,
   RoleScoreAggregate,
-  AgentCostRollup,
-  AgentToolUsage,
 } from './bench/orchestration-metrics.js';
 export {
   summarizeRun,

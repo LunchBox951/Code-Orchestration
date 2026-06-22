@@ -153,7 +153,8 @@ function checkNumericOp(
     } catch (error) {
       return { passed, failure: `${name}(${a}, ${b}) threw: ${errorMessage(error)}` };
     }
-    if (got !== want) return { passed, failure: `${name}(${a}, ${b}) = ${String(got)}, want ${want}` };
+    if (got !== want)
+      return { passed, failure: `${name}(${a}, ${b}) = ${String(got)}, want ${want}` };
     passed += 1;
   }
   return { passed, failure: null };

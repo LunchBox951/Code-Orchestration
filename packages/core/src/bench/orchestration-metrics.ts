@@ -22,7 +22,11 @@
 import type { ArtifactCheck } from './orchestration-scenarios.js';
 import type { AgentCostRollup, AgentToolUsage } from './bench-econ-types.js';
 
-export type { AgentCostRollup, AgentToolUsage } from './bench-econ-types.js';
+// NOTE: AgentCostRollup / AgentToolUsage are deliberately NOT re-exported here (nor from the @co/core
+// barrel). The canonical @co/core export of those read-model shapes is owned by the cost/tool-usage PR
+// (PR B); re-exporting them here too would collide. They stay bench-local (see ./bench-econ-types.ts) —
+// the @co/mcp driver reads the store via optional chaining, so structural compatibility is enough and no
+// import of B's types is required.
 
 export type ProviderMode = 'claude-only' | 'codex-only' | 'mixed';
 export type RunFidelity = 'host-live' | 'sandbox-fake';
@@ -208,10 +212,16 @@ export function buildTokenEconomy(
 
 /**
  * Build the per-agent {@link AgentToolEfficiency} (BOTH arms) from a raw tool-usage rollup. A `null` rollup
- * (no tool observations available) yields all-`null` fields + a `null` context-efficiency score. The two
- * diagnostics ride along raw (un-scored). Exported so the driver stays a thin adapter.
+ * (no tool observations available) yields all-`null` fields + a `null` context-efficiency score. The
+ * store-sourced diagnostic (`turnsToFirstProductiveCoCall`) rides along raw (un-scored). The second
+ * diagnostic, `toolCallsPerCompletedTask`, is NOT a store field — it is DERIVED by the driver (from
+ * `toolCalls / completed-task-count`) and passed in here (default `null` when there is no rollup or no
+ * completed task to divide by). Exported so the driver stays a thin adapter.
  */
-export function buildToolEfficiency(tool: AgentToolUsage | null): AgentToolEfficiency {
+export function buildToolEfficiency(
+  tool: AgentToolUsage | null,
+  toolCallsPerCompletedTask: number | null = null,
+): AgentToolEfficiency {
   return {
     toolCalls: tool?.toolCalls ?? null,
     toolErrors: tool?.toolErrors ?? null,
@@ -219,7 +229,7 @@ export function buildToolEfficiency(tool: AgentToolUsage | null): AgentToolEffic
     permissionAsks: tool?.permissionAsks ?? null,
     contextEfficiency: contextEfficiencyScore(tool),
     turnsToFirstProductiveCoCall: tool?.turnsToFirstProductiveCoCall ?? null,
-    toolCallsPerCompletedTask: tool?.toolCallsPerCompletedTask ?? null,
+    toolCallsPerCompletedTask: tool == null ? null : toolCallsPerCompletedTask,
   };
 }
 
