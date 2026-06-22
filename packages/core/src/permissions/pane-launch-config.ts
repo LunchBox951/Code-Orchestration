@@ -28,7 +28,7 @@
 import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
-import { ROLE_PROFILES } from '../roles/profile.js';
+import { ROLE_PROFILES, type Capability } from '../roles/profile.js';
 import type { BlockRule } from './block-list.js';
 import { BLOCK_LIST } from './block-list.js';
 import { basename, isAbsolute } from 'node:path';
@@ -54,6 +54,11 @@ export interface PaneIdentity {
   readonly coCliCommand: string;
   /** Optional trusted absolute arguments that precede the Codex hook subcommand. */
   readonly coCliArgs?: readonly string[];
+  /**
+   * The pane role's effective capability set (#7 §5 #3). Drives the explicit built-in web-tool
+   * decision below. Absent ⇒ empty set. Threaded from the role profile by the placement launcher.
+   */
+  readonly capabilities?: ReadonlySet<Capability>;
 }
 
 /**
@@ -136,6 +141,26 @@ const CLAUDE_ALLOWED_CO_MCP_TOOLS = Array.from(
 
 export function claudeDisallowedPatternsForRule(ruleId: string): readonly string[] | undefined {
   return CLAUDE_RULE_PATTERNS.get(ruleId);
+}
+
+/** The provider built-in web tools gated by the `web-search` capability (#7 §5 #3). */
+export const WEB_SEARCH_TOOLS = ['WebSearch', 'WebFetch'] as const;
+
+/**
+ * Whether a pane with these capabilities may use the built-in web tools (#7 §5 #3).
+ *
+ * Closes the finding that, under `--permission-mode bypassPermissions`, `WebSearch`/`WebFetch`
+ * were neither allowed NOR denied — an undefined posture. The launch config now ALWAYS states the
+ * decision explicitly (the tools appear in `--allowedTools` or `--disallowedTools`).
+ *
+ * POLICY (operator decision): GRANT to all roles. The decision is intentionally routed through the
+ * capability set so tightening to least-privilege is a one-line change — return
+ * `capabilities.has('web-search')` here and only the Researcher (the sole `web-search` holder)
+ * keeps web access.
+ */
+export function paneMayUseWebTools(capabilities: ReadonlySet<Capability>): boolean {
+  void capabilities; // grant-all today; flip to `capabilities.has('web-search')` to enforce
+  return true;
 }
 
 function claudeDisallowedPatterns(blockList: readonly BlockRule[]): string[] {
@@ -370,10 +395,14 @@ function buildClaudeLaunchConfig(
   // Deny rules apply in EVERY mode including bypassPermissions, so the `--disallowedTools` block-list
   // below still hard-denies the dangerous commands pre-exec (the gated-merge invariant is preserved).
   const args: string[] = ['--strict-mcp-config', '--permission-mode', 'bypassPermissions'];
-  if (CLAUDE_ALLOWED_CO_MCP_TOOLS.length > 0) {
-    args.push('--allowedTools', CLAUDE_ALLOWED_CO_MCP_TOOLS.join(','));
+  // Built-in web tools (#7 §5 #3): state the decision EXPLICITLY rather than leaving it undefined
+  // under bypassPermissions — allow when the role may browse, hard-deny otherwise.
+  const webAllowed = paneMayUseWebTools(identity.capabilities ?? new Set<Capability>());
+  const allowedTools = [...CLAUDE_ALLOWED_CO_MCP_TOOLS, ...(webAllowed ? WEB_SEARCH_TOOLS : [])];
+  if (allowedTools.length > 0) {
+    args.push('--allowedTools', allowedTools.join(','));
   }
-  const patterns = claudeDisallowedPatterns(blockList);
+  const patterns = [...claudeDisallowedPatterns(blockList), ...(webAllowed ? [] : WEB_SEARCH_TOOLS)];
   if (patterns.length > 0) {
     args.push('--disallowedTools', patterns.join(','));
   }

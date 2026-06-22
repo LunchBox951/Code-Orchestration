@@ -17,7 +17,7 @@ import type {
   SpawnSpec,
   WorktreeRecord,
 } from '@co/core';
-import { buildPaneLaunchConfig, parseSubRoleId } from '@co/core';
+import { buildPaneLaunchConfig, parseSubRoleId, profileFor } from '@co/core';
 import type { Role } from '@co/core';
 import { dirname } from 'node:path';
 import type { HostedIdentity } from '../live-session-host.js';
@@ -191,6 +191,9 @@ export function buildHostedLaunchSpec(
     },
     coCliCommand: coMcpPaths.coCliCommand,
     ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),
+    // Thread the role's capabilities so the built-in web-tool decision is explicit at launch
+    // (#7 §5 #3). Sub-roles may only narrow, so the base-role set is the capability ceiling.
+    capabilities: profileFor(identity.role).capabilities,
   };
   const paneLaunchConfig = buildPaneLaunchConfig(provider, paneIdentity);
 
