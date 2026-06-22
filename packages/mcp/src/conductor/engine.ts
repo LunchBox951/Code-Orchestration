@@ -1407,6 +1407,13 @@ function lastBoundaryAtOrAfter(buffer: string, pattern: RegExp, minStart: number
  *     This EXTENDS retention back past the soft most-recent-N window when the enter is older (an early
  *     one emitted ONCE), and SNAPS forward to it when a re-enter is newer — either way the alt-screen
  *     setup leads the tail. The hard ceiling keeps the footprint bounded if a session never re-enters.
+ *     NOTE — bounded step-down, not a bug: once the anchored enter ages PAST the hard ceiling (a session
+ *     that entered the alt screen ONCE, then ran for >256 KiB of redraws without re-entering), the anchor
+ *     no longer matches and the policy falls through to (2)/(3). The retained tail therefore collapses in
+ *     ONE step from up to ~256 KiB (the anchored hard window) to ~64 KiB (the soft most-recent-N window).
+ *     This is intended: it caps the per-agent footprint. The stale enter is genuinely unreachable, so the
+ *     replayed tail can no longer reconstruct the alt screen — the renderer mirror (`boundConsoleTranscript`
+ *     in `apps/desktop`) makes the same bounded trade-off so the two stay in lockstep.
  *  2. FRAME SNAP (no alt-screen in range): begin replay on a clean frame by moving the start FORWARD to
  *     the LAST full-screen-clear (`ESC[2J`/`ESC[3J`) at-or-after the most-recent-N window — this only
  *     ever keeps LESS, so it can neither break the bound nor stack a half-painted frame.

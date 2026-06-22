@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { AgentsConsoleVM, CONSOLE_TRANSCRIPT_MAX_CHARS } from './agents-console-vm.js';
+import {
+  AgentsConsoleVM,
+  CONSOLE_TRANSCRIPT_MAX_CHARS,
+  boundConsoleTranscript,
+} from './agents-console-vm.js';
 import type {
   OperatorObservation,
   ObservabilitySnapshot,
@@ -479,6 +483,102 @@ describe('AgentsConsoleVM — appendChunk', () => {
     vm.setTranscriptTail(tail('a1', oversize));
     expect(vm.state.transcript).toHaveLength(CONSOLE_TRANSCRIPT_MAX_CHARS);
     expect(vm.state.transcript.endsWith('X')).toBe(true);
+  });
+});
+
+// ── #66 sub-bug B — the renderer-side alt-screen-aware bound (boundConsoleTranscript) ─────────────
+// The OLD flat front-drop sliced off the early `ESC[?1049h` an interactive TUI emits ONCE to enter the
+// alternate screen, so a long session's reconstructed transcript lost its alt-screen setup and the garble
+// returned. The bound must NEVER cut past the last alt-screen-enter within the kept window — mirroring the
+// engine's `transcriptTailFrom` policy. These assert the PURE exported function directly (no electron); the
+// alt-screen cases would FAIL under the old flat slice.
+// ESC authored as a `\u` escape so the SOURCE holds no raw control byte (the C2 pristine-repo rule).
+const ESC = '\u001B';
+const ALT_ENTER = ESC + '[?1049h'; // DEC private mode 1049 set — switch to the alternate screen
+describe('boundConsoleTranscript (#66 sub-bug B) — never slices away the alternate-screen setup', () => {
+  it('keeps the FULL text verbatim when at/under the cap (common case, unchanged)', () => {
+    const under = ALT_ENTER + 'a small frame';
+    expect(boundConsoleTranscript(under)).toBe(under);
+    const exact = 'z'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS);
+    expect(boundConsoleTranscript(exact)).toBe(exact);
+  });
+
+  it('retains back to the early alt-screen-enter on a >cap stream (the fix; FAILS under flat front-drop)', () => {
+    // A long session: scrollback that will be dropped, then the alt-screen setup, then redraw frames.
+    // The whole stream exceeds the cap, but the enter still sits WITHIN the most-recent-cap window — so it
+    // is reachable and MUST be retained (an alt-screen-UNAWARE flat drop would slice it away mid-window).
+    const head = 'H'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS); // older scrollback — pushes total past the cap
+    const setup = ALT_ENTER + ESC + '[2J' + ESC + '[H'; // enter alt screen, clear, home
+    const frames = 'F'.repeat(Math.floor(CONSOLE_TRANSCRIPT_MAX_CHARS / 2)); // redraws, < cap after the enter
+    const buf = head + setup + frames;
+    expect(buf.length).toBeGreaterThan(CONSOLE_TRANSCRIPT_MAX_CHARS); // the stream is genuinely over the cap
+
+    const bounded = boundConsoleTranscript(buf);
+
+    // The load-bearing invariant: the alt-screen-enter is STILL present in the bound result…
+    expect(bounded.includes(ALT_ENTER)).toBe(true);
+    // …and it leads the kept transcript (we anchored on exactly that boundary).
+    expect(bounded.startsWith(ALT_ENTER)).toBe(true);
+    // Anchoring keeps the same-or-less than the flat window, so the footprint stays bounded.
+    expect(bounded.length).toBeLessThanOrEqual(CONSOLE_TRANSCRIPT_MAX_CHARS);
+    // The OLD flat front-drop would have kept only the last `cap` chars — which START mid-`H`-scrollback
+    // and so SLICE the alt-screen-enter even though it is inside the window: exactly the garble we prevent.
+    expect(buf.slice(buf.length - CONSOLE_TRANSCRIPT_MAX_CHARS).startsWith(ALT_ENTER)).toBe(false);
+  });
+
+  it('anchors on the LAST alt-screen-enter when several are present (re-entered the alt screen)', () => {
+    const firstEnter = ALT_ENTER + 'one'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS); // pushed well past the cap
+    const lastEnter = ALT_ENTER + 'two'; // the re-enter we must anchor on
+    const buf = firstEnter + lastEnter;
+
+    const bounded = boundConsoleTranscript(buf);
+
+    expect(bounded.startsWith(ALT_ENTER)).toBe(true);
+    expect(bounded).toBe(lastEnter); // anchored on the LAST enter, not the first
+    expect(bounded.split(ALT_ENTER).length - 1).toBe(1); // exactly one enter survives
+  });
+
+  it('honours the cap: an unreachably-old alt-screen-enter is NOT dragged in', () => {
+    // Alt-screen-enter, then MORE than the cap of bytes after it → it falls outside the kept window.
+    const buf = ALT_ENTER + 'G'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS + 5_000);
+
+    const bounded = boundConsoleTranscript(buf);
+
+    expect(bounded.length).toBeLessThanOrEqual(CONSOLE_TRANSCRIPT_MAX_CHARS); // memory stays bounded
+    expect(bounded.includes(ALT_ENTER)).toBe(false); // the stale enter is beyond reach — not retained
+  });
+
+  it('with NO alt-screen, is exactly the flat most-recent-N drop (legacy behavior preserved)', () => {
+    const buf = 'A'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS) + 'B'.repeat(1_000);
+
+    const bounded = boundConsoleTranscript(buf);
+
+    expect(bounded.length).toBe(CONSOLE_TRANSCRIPT_MAX_CHARS);
+    expect(bounded).toBe(buf.slice(buf.length - CONSOLE_TRANSCRIPT_MAX_CHARS));
+    expect(bounded.endsWith('B'.repeat(1_000))).toBe(true);
+  });
+});
+
+describe('AgentsConsoleVM — alt-screen-aware bound over the reconstructed transcript (#66 sub-bug B)', () => {
+  it('keeps the early ESC[?1049h after a >cap stream (FAILS under the old flat segment-store drop)', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    // Older scrollback, then the alt-screen setup, then redraw frames — streamed as successive chunks so
+    // the segment store has to bound itself. The whole reconstruction exceeds the cap but the enter stays
+    // inside the most-recent-cap window; the old alt-screen-UNAWARE segment-store drop sliced it off.
+    const head = 'H'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS);
+    const setup = ALT_ENTER + ESC + '[2J' + ESC + '[H';
+    const frames = 'F'.repeat(Math.floor(CONSOLE_TRANSCRIPT_MAX_CHARS / 2));
+    vm.setTranscriptTail(tail('a1', head));
+    vm.appendChunk(push('a1', setup, head.length));
+    vm.appendChunk(push('a1', frames, head.length + setup.length));
+
+    // The reconstructed transcript STILL leads with the alt-screen-enter — the garble is prevented.
+    expect(vm.state.transcript.includes(ALT_ENTER)).toBe(true);
+    expect(vm.state.transcript.startsWith(ALT_ENTER)).toBe(true);
+    expect(vm.state.transcript.length).toBeLessThanOrEqual(CONSOLE_TRANSCRIPT_MAX_CHARS);
   });
 });
 
