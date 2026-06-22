@@ -444,10 +444,34 @@ describe('deleteAgentSubtree', () => {
     const dirty = new Set([sandboxPath]);
     // The store refuses a non-force remove of the dirty sandbox (git's real behavior); the reader
     // reports the same path dirty so the fix's isWorktreeDirty branch fires.
-    const worktreeStore = makeFakeWorktrees([wt], dirty);
+    const events: string[] = [];
+    const baseWorktreeStore = makeFakeWorktrees([wt], dirty);
+    const worktreeStore = {
+      ...baseWorktreeStore,
+      removeWorktree(branch: string, deps: RemoveWorktreeDeps): WorktreeRecord {
+        events.push(`remove:${deps.force === true ? 'force' : 'plain'}:${branch}`);
+        return baseWorktreeStore.removeWorktree(branch, deps);
+      },
+    };
     const sessions = makeFakeSessions([]);
-    const archive = makeFakeArchive();
-    const { spy: gitExec, calls } = makeGitExecSpy();
+    const baseArchive = makeFakeArchive();
+    const archive = {
+      ...baseArchive,
+      appendRecord(rec: Parameters<ArchiveStore['appendRecord']>[0]): ArchiveRecord {
+        events.push(`archive:${rec.branch}`);
+        return baseArchive.appendRecord(rec);
+      },
+    };
+    const calls: [string, ...string[]][] = [];
+    const gitExec: GitExec = (cwd, args) => {
+      calls.push([cwd, ...args]);
+      if (cwd === sandboxPath && args[0] === 'add' && args[1] === '-A') {
+        events.push('snapshot:add');
+      }
+      if (cwd === sandboxPath && args[0] === 'commit') {
+        events.push('snapshot:commit');
+      }
+    };
     // co/coord-x is MERGED by ref-ancestry, but its sandbox is DIRTY.
     const gitReader = makeGitReader({
       mergedBranches: new Set(['co/coord-x']),
@@ -473,6 +497,12 @@ describe('deleteAgentSubtree', () => {
     // The dirty work was snapshotted (add -A then commit -s) BEFORE removal — nothing is lost.
     expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'add' && c[2] === '-A')).toBe(true);
     expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'commit')).toBe(true);
+    expect(events.indexOf('snapshot:add')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('snapshot:commit')).toBeGreaterThan(events.indexOf('snapshot:add'));
+    expect(events.indexOf('snapshot:commit')).toBeLessThan(
+      events.indexOf('remove:force:co/coord-x'),
+    );
+    expect(events.indexOf('snapshot:commit')).toBeLessThan(events.indexOf('archive:co/coord-x'));
     // The worktree was FORCE-removed (the only way git removes a dirty tree).
     expect(worktreeStore.removedBranches).toContain('co/coord-x');
     expect(worktreeStore.removeForce).toContain('co/coord-x');
@@ -1387,6 +1417,63 @@ describe('deleteAgentSubtree', () => {
     expect(result.archivedBranches).toEqual([]);
     expect(archive.records).toEqual([]);
     expect(calls.some((call) => call.join(' ').includes('branch -d co/impl'))).toBe(true);
+  });
+
+  it('retries branch deletion instead of archiving after a clean merged worktree was removed first', () => {
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'impl', role: 'implementer', parent: 'coord-x', registeredTs: 2 },
+    ]);
+    const worktreeStore = makeFakeWorktrees([worktree('co/impl', 'impl')]);
+    const sessions = makeFakeSessions([session('impl', 'pane-impl')]);
+    const archive = makeFakeArchive();
+    let branchDeleteAttempts = 0;
+    const gitExec: GitExec = (_cwd, args) => {
+      if (args[0] === 'branch' && args[1] === '-d' && args[2] === 'co/impl') {
+        branchDeleteAttempts += 1;
+        if (branchDeleteAttempts === 1) throw new Error('transient branch delete failure');
+      }
+    };
+    const gitReader = makeGitReader({
+      existingBranches: new Set(['co/impl']),
+      mergedBranches: new Set(['co/impl']),
+      dirtyPaths: new Set(),
+    });
+    const opts = {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    };
+
+    let firstError: unknown;
+    try {
+      deleteAgentSubtree('proj', 'coord-x', opts);
+    } catch (err) {
+      firstError = err;
+    }
+    expect(firstError).toBeInstanceOf(AggregateError);
+    expect(worktreeStore.removedBranches).toEqual(['co/impl']);
+    expect(worktreeStore.removeForce).toEqual([]);
+    expect(branchDeleteAttempts).toBe(1);
+    expect(archive.records).toEqual([]);
+    expect(roster.getAgent('impl')).toBeDefined();
+
+    const result = deleteAgentSubtree('proj', 'coord-x', opts);
+
+    expect(result.removed).toEqual(['impl', 'coord-x']);
+    expect(result.deletedBranches).toEqual(['co/impl']);
+    expect(result.archivedBranches).toEqual([]);
+    expect(branchDeleteAttempts).toBe(2);
+    expect(archive.records).toEqual([]);
+    expect(worktreeStore.removedBranches).toEqual(['co/impl']);
+    expect(sessions.getSession('impl')).toBeUndefined();
+    expect(roster.getAgent('impl')).toBeUndefined();
+    expect(roster.getAgent('coord-x')).toBeUndefined();
   });
 
   it('releases a serialized merge slot held by an archived branch on a retry after the first pass failed post-archive (MC-CD-1)', () => {

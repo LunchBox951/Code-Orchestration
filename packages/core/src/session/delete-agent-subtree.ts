@@ -377,39 +377,29 @@ export function deleteAgentSubtree(
               //     snapshot commit stays reachable until the reaper purges it at TTL. A snapshotted branch is
               //     no longer trivially merged and carries novel work, so it must NOT be `git branch -d`'d.
               //   - CLEAN: nothing to preserve — the historical fast path. Plain remove + safe `git branch -d`.
-              // The finder (`!w.removed || archive.getRecord == null`) only re-selects an already-removed
-              // worktree here when its archive write has NOT yet landed; reaching the merged arm with
-              // `wt.removed` set therefore means a prior pass force-removed-then-failed-to-archive — that
-              // residue belongs to the archive lifecycle (self-heal the missing record), never `branch -d`.
               // Read the dirty state ONCE and reuse it for both the archive decision and the snapshot
-              // guard below (it was previously read twice on the dirty path). `wt.removed` short-circuits
-              // the read on a retry whose sandbox a prior pass already force-removed (the dir is gone, so
-              // `isWorktreeDirty` would throw on its absent cwd) — that residue still `needsArchive` to
-              // self-heal the missing record, and the snapshot guard is skipped under `!wt.removed`.
+              // guard below (it was previously read twice on the dirty path). If a prior pass removed a
+              // CLEAN merged worktree and then `git branch -d` failed, retry reaches this arm with
+              // `wt.removed` set and the branch still merged; that must retry `branch -d`, not invent an
+              // archive record. Dirty archive retries are handled by the unmerged arm because the
+              // successful snapshot commit makes the branch no longer an ancestor of base.
               const dirty =
                 !wt.removed && probeWorktreeDirty(wt.path, gitReader, sandboxPathExists);
-              const needsArchive = wt.removed || dirty;
 
-              if (needsArchive) {
+              if (dirty) {
                 // Mirror the unmerged dirty path: snapshot → force-remove → archive (branch ref kept).
-                // Each step is gated on `!wt.removed` (skip work a prior pass already did) so a retry that
-                // only needs the missing archive record self-heals without re-snapshotting/-removing.
-                if (!wt.removed) {
-                  try {
-                    if (dirty) {
-                      snapshotDirtyWorktree(
-                        wt.path,
-                        'co: archive snapshot before delete',
-                        gitExec,
-                        gitReader,
-                      );
-                    }
-                  } catch (e) {
-                    recordAgentError(e);
-                  }
+                try {
+                  snapshotDirtyWorktree(
+                    wt.path,
+                    'co: archive snapshot before delete',
+                    gitExec,
+                    gitReader,
+                  );
+                } catch (e) {
+                  recordAgentError(e);
                 }
 
-                if (!agentTeardownFailed && !wt.removed) {
+                if (!agentTeardownFailed) {
                   try {
                     worktrees.removeWorktree(wt.branch, { repoCwd, gitExec, force: true });
                   } catch (e) {
