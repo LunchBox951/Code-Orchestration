@@ -205,6 +205,12 @@ export class AgentsConsoleVM {
 
     const range = this.transcriptRange();
     if (range != null) {
+      if (offset === 0 && range.start > 0) {
+        this.transcriptSegments = [];
+        this.transcriptAccumulator.clear();
+        this.applyTranscriptSegment(offset, text);
+        return 'applied';
+      }
       const chunkEnd = offset + text.length;
       if (offset < range.start) {
         if (chunkEnd <= range.end) return 'ignored';

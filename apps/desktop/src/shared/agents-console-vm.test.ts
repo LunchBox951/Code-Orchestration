@@ -679,6 +679,33 @@ describe('AgentsConsoleVM — nonzero transcript offsets and live gaps', () => {
     expect(vm.state.transcriptOffset).toBe(100);
   });
 
+  it('treats offset-zero live chunks as a new generation before stale clipping', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'CDE', 100));
+
+    const result = vm.appendChunk(push('a1', 'AB', 0));
+
+    expect(result).toBe('applied');
+    expect(vm.state.transcript).toBe('AB');
+    expect(vm.state.transcriptOffset).toBe(0);
+  });
+
+  it('keeps the full offset-zero live chunk when resetting from a nonzero retained tail', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'retained', 100));
+
+    const next = 'A'.repeat(110);
+    const result = vm.appendChunk(push('a1', next, 0));
+
+    expect(result).toBe('applied');
+    expect(vm.state.transcript).toBe(next);
+    expect(vm.state.transcriptOffset).toBe(0);
+  });
+
   it('reports a forward live gap instead of silently concatenating missing bytes', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
