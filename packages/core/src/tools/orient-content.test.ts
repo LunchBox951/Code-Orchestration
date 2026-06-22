@@ -195,6 +195,8 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
     expect(orientContent('researcher')).not.toContain('co_finish');
     expect(orientContent('reviewer', 'finish')).not.toContain('co_finish');
     expect(orientContent('researcher', 'finish')).not.toContain('co_finish');
+    expect(orientContent('reviewer', 'finish')).toContain('completion or finalization verb');
+    expect(orientContent('researcher', 'finish')).toContain('completion or finalization verb');
   });
 
   it('known sub-role input adds the shipped approach while preserving base lifecycle guidance', () => {

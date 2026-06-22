@@ -787,6 +787,12 @@ describe('role base-prompt injection into builder args', () => {
     ).toThrow(/unknown sub-role 'reviewer:random'/i);
   });
 
+  it('throws when a sub-role is threaded without a role', () => {
+    expect(() => buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, subRole: 'pr' })).toThrow(
+      /subRole requires role/i,
+    );
+  });
+
   it('the injected base prompt does NOT disturb the block-list drift roundtrip', () => {
     const config = buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, role: 'implementer' });
     const enforced = readEnforcedConfig(config);
