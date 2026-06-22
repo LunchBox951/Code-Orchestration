@@ -4,6 +4,14 @@ import type { ToolSpec } from '../registry.js';
 const statusInput = z.object({});
 type StatusInput = z.infer<typeof statusInput>;
 
+const nextActionSchema = z
+  .object({
+    type: z.string().describe('Mail type of the item to act on (e.g. clarify_request).'),
+    subject: z.string().describe('Subject line of the item to act on.'),
+    sender: z.string().describe('Agent id that sent it — who you reply to.'),
+  })
+  .strict();
+
 const statusOutput = z.object({
   agent: z.string().describe('Your agent identity.'),
   project_id: z.string().describe('The resolved project id for this invocation.'),
@@ -13,6 +21,11 @@ const statusOutput = z.object({
     .number()
     .int()
     .describe('Count of inbox mail you have neither read nor resolved.'),
+  next_action: nextActionSchema
+    .optional()
+    .describe(
+      'The oldest unresolved actionable item to handle next; absent when none outstanding.',
+    ),
 });
 type StatusOutput = z.infer<typeof statusOutput>;
 
@@ -28,17 +41,24 @@ export const statusTool: ToolSpec<StatusInput, StatusOutput> = {
   title: 'Agent status',
   description:
     'Report your own coordination record: who you are, the project and worktree you are in, ' +
-    'how many actionable items are still outstanding for you, and how much inbox mail is unread.',
+    'how many actionable items are still outstanding for you, how much inbox mail is unread, and ' +
+    'the single oldest outstanding item to act on next — so one call tells you what to do next.',
   inputSchema: statusInput,
   outputSchema: statusOutput,
   handler: (ctx): StatusOutput => {
     const inboxUnread = ctx.mail.inbox(ctx.agent).filter((m) => !m.read && !m.resolved).length;
+    const outstanding = ctx.mail.outstanding(ctx.agent);
+    // FIFO: `outstanding` is ordered oldest-first, so the head is the next thing to handle.
+    const [next] = outstanding;
     return {
       agent: ctx.agent,
       project_id: ctx.projectId,
       cwd: ctx.cwd,
-      outstanding: ctx.mail.outstandingCount(ctx.agent),
+      outstanding: outstanding.length,
       inbox_unread: inboxUnread,
+      ...(next != null
+        ? { next_action: { type: next.type, subject: next.subject, sender: next.sender } }
+        : {}),
     };
   },
 };

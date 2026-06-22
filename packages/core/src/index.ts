@@ -987,7 +987,12 @@ export {
 // event-sourced agent→role→parent projection (`roster` table) is replay-equal over L0. Structural
 // spawn rules are a pure static check (no spawn runtime — that is L7).
 export type { RoleProfile, WriteScope, Capability, RoleProfileViolation } from './roles/profile.js';
-export { ROLE_PROFILES, profileFor, checkRoleProfileCompleteness } from './roles/profile.js';
+export {
+  ROLE_PROFILES,
+  profileFor,
+  roleBasePrompt,
+  checkRoleProfileCompleteness,
+} from './roles/profile.js';
 // L6a roles events: `agent.registered` — the durable, validated record of which role an agent was
 // dispatched under and who spawned it. Event-sourced over L0 (program-data only, Principle 12).
 export type { AgentRegistered, AgentRemoved, AgentRecord } from './roles/events.js';
