@@ -59,8 +59,18 @@ const staticObs = (agents: readonly AgentRecord[]): OperatorObservation => ({
   reason: 'conductor-not-running',
 });
 
-const tail = (agentId: string, text: string, offset = 0) => ({ agentId, offset, tail: text });
-const push = (agentId: string, chunk: string, offset = 0) => ({ agentId, offset, chunk });
+const tail = (agentId: string, text: string, offset = 0, generation = 0) => ({
+  agentId,
+  generation,
+  offset,
+  tail: text,
+});
+const push = (agentId: string, chunk: string, offset = 0, generation = 0) => ({
+  agentId,
+  generation,
+  offset,
+  chunk,
+});
 
 // ── AgentsConsoleVM ───────────────────────────────────────────────────────────
 
@@ -704,6 +714,33 @@ describe('AgentsConsoleVM — nonzero transcript offsets and live gaps', () => {
     expect(result).toBe('applied');
     expect(vm.state.transcript).toBe(next);
     expect(vm.state.transcriptOffset).toBe(0);
+  });
+
+  it('resets on newer transcript generation even when offset zero shares the old prefix', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'startup old tail', 0, 1));
+
+    const result = vm.appendChunk(push('a1', 'startup new', 0, 2));
+
+    expect(result).toBe('applied');
+    expect(vm.state.transcript).toBe('startup new');
+    expect(vm.state.transcriptGeneration).toBe(2);
+    expect(vm.state.transcriptOffset).toBe(0);
+  });
+
+  it('ignores stale transcript generations after a newer generation is visible', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'new', 0, 2));
+
+    expect(vm.appendChunk(push('a1', 'old', 0, 1))).toBe('ignored');
+    vm.setTranscriptTail(tail('a1', 'old tail', 0, 1));
+
+    expect(vm.state.transcript).toBe('new');
+    expect(vm.state.transcriptGeneration).toBe(2);
   });
 
   it('reports a forward live gap instead of silently concatenating missing bytes', () => {

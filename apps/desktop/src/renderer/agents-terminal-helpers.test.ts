@@ -248,6 +248,21 @@ describe('decideTermFeed', () => {
     expect(feed).toEqual({ kind: 'append', data: '-next' });
   });
 
+  it('resets when transcript generation changes even if offset and prefix look appendable', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'startup',
+      lastTranscriptGeneration: 1,
+      lastTranscriptOffset: 0,
+      transcript: 'startup fresh',
+      transcriptGeneration: 2,
+      transcriptOffset: 0,
+    });
+
+    expect(feed).toEqual({ kind: 'reset', data: 'startup fresh' });
+  });
+
   it('resets when transcript offsets rewind even if the new text shares the old prefix', () => {
     const feed = decideTermFeed({
       selectedAgentId: 'a1',

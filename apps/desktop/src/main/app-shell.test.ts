@@ -56,13 +56,25 @@ const liveObs: OperatorObservation = {
 
 const flushPromises = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
-const transcriptTail = (agentId: string, tail: string, offset = 0): TranscriptTail => ({
+const transcriptTail = (
+  agentId: string,
+  tail: string,
+  offset = 0,
+  generation = 0,
+): TranscriptTail => ({
   agentId,
+  generation,
   offset,
   tail,
 });
-const transcriptPush = (agentId: string, chunk: string, offset = 0): OperatorIpcTranscript => ({
+const transcriptPush = (
+  agentId: string,
+  chunk: string,
+  offset = 0,
+  generation = 0,
+): OperatorIpcTranscript => ({
   agentId,
+  generation,
   offset,
   chunk,
 });
@@ -1058,6 +1070,47 @@ describe('createAppShell — agentsConsole VM wiring', () => {
         transcript: 'fresh tail',
         transcriptOffset: 150,
       });
+    });
+  });
+
+  it('live append: newer transcript generation resets same-offset stale selected output', async () => {
+    const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockImplementation((cb: (t: OperatorIpcTranscript) => void) => {
+        transcriptListeners.push(cb);
+        return () => {};
+      }),
+      transcript: vi.fn().mockResolvedValue(transcriptTail('impl-x', 'startup old tail', 0, 1)),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    await vi.waitFor(() => {
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        transcript: 'startup old tail',
+        transcriptGeneration: 1,
+      });
+    });
+
+    transcriptListeners[0]?.(transcriptPush('impl-x', 'startup new', 0, 2));
+
+    expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+      transcript: 'startup new',
+      transcriptGeneration: 2,
+      transcriptOffset: 0,
     });
   });
 

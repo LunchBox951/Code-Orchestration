@@ -66,6 +66,7 @@ export interface AgentsConsoleState {
   readonly selectedAgentId: string | null;
   readonly selectedStatus: AgentStatus | null;
   readonly transcript: string;
+  readonly transcriptGeneration: number;
   readonly transcriptOffset: number;
   readonly connection: 'live' | 'degraded';
 }
@@ -92,6 +93,7 @@ export class AgentsConsoleVM {
     selectedAgentId: null,
     selectedStatus: null,
     transcript: '',
+    transcriptGeneration: 0,
     transcriptOffset: 0,
     connection: 'degraded',
   };
@@ -173,6 +175,7 @@ export class AgentsConsoleVM {
       selectedAgentId: agentId,
       selectedStatus,
       transcript: '',
+      transcriptGeneration: 0,
       transcriptOffset: 0,
     };
     this.transcriptSegments = [];
@@ -194,11 +197,25 @@ export class AgentsConsoleVM {
 
   setTranscriptTail(tail: TranscriptTail): void {
     if (tail.agentId !== this._state.selectedAgentId) return;
+    const generation = tail.generation ?? 0;
+    if (generation < this._state.transcriptGeneration) return;
+    if (generation > this._state.transcriptGeneration) {
+      this.transcriptSegments = [];
+      this.transcriptAccumulator.clear();
+    }
+    this._state = { ...this._state, transcriptGeneration: generation };
     this.applyTranscriptSegment(tail.offset, tail.tail);
   }
 
   appendChunk(chunk: OperatorIpcTranscript): TranscriptApplyResult {
     if (chunk.agentId !== this._state.selectedAgentId) return 'ignored';
+    const generation = chunk.generation ?? 0;
+    if (generation < this._state.transcriptGeneration) return 'ignored';
+    if (generation > this._state.transcriptGeneration) {
+      this.transcriptSegments = [];
+      this.transcriptAccumulator.clear();
+      this._state = { ...this._state, transcriptGeneration: generation };
+    }
     let offset = chunk.offset;
     let text = chunk.chunk;
     if (text.length === 0) return 'ignored';

@@ -181,8 +181,10 @@ export interface TermFeedInput {
   readonly selectedAgentId: string | null;
   readonly lastAgentId: string | null;
   readonly transcript: string;
+  readonly transcriptGeneration?: number;
   readonly transcriptOffset?: number;
   readonly lastTranscript: string;
+  readonly lastTranscriptGeneration?: number;
   readonly lastTranscriptOffset?: number;
 }
 
@@ -196,6 +198,13 @@ export interface TermFeedInput {
 export function decideTermFeed(input: TermFeedInput): TermFeed {
   const { selectedAgentId, lastAgentId, transcript, lastTranscript } = input;
   if (selectedAgentId !== lastAgentId) {
+    return { kind: 'reset', data: transcript };
+  }
+  if (
+    input.transcriptGeneration != null &&
+    input.lastTranscriptGeneration != null &&
+    input.transcriptGeneration !== input.lastTranscriptGeneration
+  ) {
     return { kind: 'reset', data: transcript };
   }
   if (input.transcriptOffset != null && input.lastTranscriptOffset != null) {

@@ -378,6 +378,7 @@ export class ConductorEngine {
    * backfill. Dropped on release.
    */
   private readonly transcriptAccumulators = new Map<string, TranscriptTailAccumulator>();
+  private readonly transcriptGenerations = new Map<string, number>();
   /**
    * Per-agent PERSISTENT onData unsubscribers for the transcript stream, keyed `${projectId}:${agent}`
    * (Stage 12 C-P1) — DISTINCT from the per-turn observer in {@link observeTurnEnd}. Torn down on
@@ -409,12 +410,12 @@ export class ConductorEngine {
     { hosted: HostedPane; options: { readonly onPaneKillError?: (error: unknown) => void } }
   >();
   /**
-   * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, chunk)` on every new
-   * pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A plain
-   * subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
+   * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, generation, chunk)` on
+   * every new pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A
+   * plain subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
    */
   private readonly transcriptListeners = new Set<
-    (projectId: ProjectId, agent: string, chunk: string, offset: number) => void
+    (projectId: ProjectId, agent: string, generation: number, chunk: string, offset: number) => void
   >();
   /**
    * When each unresolved clarify was FIRST observed by a tick, keyed
@@ -499,6 +500,7 @@ export class ConductorEngine {
     const snapshot = this.transcriptAccumulators.get(agentKey)?.snapshot();
     return {
       agentId: agent,
+      generation: this.transcriptGenerations.get(agentKey) ?? 0,
       offset: snapshot?.offset ?? 0,
       tail: snapshot?.tail ?? '',
     };
@@ -559,7 +561,13 @@ export class ConductorEngine {
    * METHOD, not a tool (Principle D4 — the Conductor is never agent-callable).
    */
   onTranscript(
-    listener: (projectId: ProjectId, agent: string, chunk: string, offset: number) => void,
+    listener: (
+      projectId: ProjectId,
+      agent: string,
+      generation: number,
+      chunk: string,
+      offset: number,
+    ) => void,
   ): () => void {
     this.transcriptListeners.add(listener);
     return () => this.transcriptListeners.delete(listener);
@@ -626,6 +634,8 @@ export class ConductorEngine {
     // Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe before startup driving so the operator tail and live
     // stream include early provider interstitials/login prompts as well as post-ready turn bytes.
     this.transcriptAccumulators.set(agentKey, new TranscriptTailAccumulator());
+    const transcriptGeneration = (this.transcriptGenerations.get(agentKey) ?? 0) + 1;
+    this.transcriptGenerations.set(agentKey, transcriptGeneration);
     this.transcriptUnsub.set(
       agentKey,
       pane.onData((chunk) =>
@@ -1272,10 +1282,11 @@ export class ConductorEngine {
     this.lastByteAt.set(agentKey, this.deps.now()); // P6: track last-byte time for liveness probe
     const accumulator = this.transcriptAccumulators.get(agentKey);
     const chunkOffset = accumulator?.snapshot().nextOffset ?? 0;
+    const generation = this.transcriptGenerations.get(agentKey) ?? 0;
     accumulator?.append(chunk);
     for (const listener of [...this.transcriptListeners]) {
       try {
-        listener(projectId, agent, chunk, chunkOffset);
+        listener(projectId, agent, generation, chunk, chunkOffset);
       } catch {
         /* transcript subscribers are diagnostic surfaces; pane output must keep flowing */
       }

@@ -299,8 +299,8 @@ function makeControl(
     // engine's global stream to this project. The cross-process proofs run against these real accessors.
     transcriptTail: (agentId) => engine.transcriptTailSnapshot(projectId, agentId),
     onTranscript: (listener) =>
-      engine.onTranscript((pid, agent, chunk, offset) => {
-        if (pid === projectId) listener(agent, chunk, offset);
+      engine.onTranscript((pid, agent, generation, chunk, offset) => {
+        if (pid === projectId) listener(agent, generation, chunk, offset);
       }),
     reviewContext,
     deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
@@ -345,8 +345,8 @@ function wireTranscriptPush(
   control: ConductorControlSurface,
   server: OperatorIpcServer,
 ): () => void {
-  return control.onTranscript((agentId, chunk, offset) =>
-    server.pushTranscript(agentId, chunk, offset),
+  return control.onTranscript((agentId, generation, chunk, offset) =>
+    server.pushTranscript(agentId, generation, chunk, offset),
   );
 }
 
@@ -863,7 +863,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     const fakeControl = {
       router: {} as DaemonBackedAgentRouter,
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
-      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
@@ -916,7 +916,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     const fakeControl = {
       router: {} as DaemonBackedAgentRouter,
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
-      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
@@ -972,7 +972,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     const fakeControl = {
       router: {} as DaemonBackedAgentRouter,
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
-      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
@@ -1025,7 +1025,7 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     const fakeControl = {
       router: {} as DaemonBackedAgentRouter,
       observe: () => ({ snapshot: staticSnapshot, agents: [] }),
-      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      transcriptTail: (agentId: string) => ({ agentId, generation: 0, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
@@ -1201,7 +1201,12 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     client.onTranscript((t) => got.push(t));
 
     // Down: transcript() degrades to an EMPTY tail; never hangs, never throws (Principle 9 / MNR #3).
-    expect(await client.transcript('impl-x')).toEqual({ agentId: 'impl-x', offset: 0, tail: '' });
+    expect(await client.transcript('impl-x')).toEqual({
+      agentId: 'impl-x',
+      generation: 0,
+      offset: 0,
+      tail: '',
+    });
     expect(client.connected).toBe(false);
 
     // Up: start the daemon on the same socket, wire the push, reconnect.
@@ -2247,6 +2252,7 @@ describe('serveConductor wiring — the IPC server rides the cadence runner (pus
     // (an unknown agent has no warm pane → an empty tail; never a throw).
     expect(runner.control?.transcriptTail('impl-x')).toEqual({
       agentId: 'impl-x',
+      generation: 0,
       offset: 0,
       tail: '',
     });
@@ -2406,7 +2412,7 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       observe: () => {
         throw new Error('observe boom in test');
       },
-      transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
+      transcriptTail: (agentId) => ({ agentId, generation: 0, offset: 0, tail: '' }),
       onTranscript: () => () => {},
       reviewContext: (reviewId) => Promise.resolve({ kind: 'not-found', reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),

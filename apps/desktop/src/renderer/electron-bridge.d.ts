@@ -106,6 +106,7 @@ interface AgentsConsoleState {
   selectedAgentId: string | null;
   selectedStatus: AgentStatus | null;
   transcript: string;
+  transcriptGeneration: number;
   transcriptOffset: number;
   connection: 'live' | 'degraded';
 }

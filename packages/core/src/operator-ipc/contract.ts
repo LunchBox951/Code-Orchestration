@@ -280,6 +280,8 @@ export interface OperatorIpcTick {
  */
 export interface OperatorIpcTranscript {
   readonly agentId: string;
+  /** Monotonic same-agent pane transcript generation; increments whenever a hosted pane is recreated. */
+  readonly generation: number;
   /** Absolute character offset where `chunk` starts in the agent's pane transcript stream. */
   readonly offset: number;
   readonly chunk: string;
@@ -299,6 +301,8 @@ export interface OperatorIpcTranscript {
  */
 export interface TranscriptTail {
   readonly agentId: string;
+  /** Monotonic same-agent pane transcript generation; increments whenever a hosted pane is recreated. */
+  readonly generation: number;
   /** Absolute character offset where `tail` starts in the agent's pane transcript stream. */
   readonly offset: number;
   readonly tail: string;

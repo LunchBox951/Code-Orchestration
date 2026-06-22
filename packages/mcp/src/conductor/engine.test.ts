@@ -1387,7 +1387,7 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
     const { engine, pty } = makeEngine();
     const seen: string[] = [];
-    const unsub = engine.onTranscript((pid, agent, chunk) => {
+    const unsub = engine.onTranscript((pid, agent, _generation, chunk) => {
       if (pid === projectId && agent === 'impl-x') seen.push(chunk);
     });
 
@@ -1459,16 +1459,18 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     const { engine, pty } = makeEngine();
     const { pane } = await hostPane(engine, pty, identity);
 
-    const seen: Array<[ProjectId, string, string]> = [];
-    const unsub = engine.onTranscript((pid, agent, chunk) => seen.push([pid, agent, chunk]));
+    const seen: Array<[ProjectId, string, number, string]> = [];
+    const unsub = engine.onTranscript((pid, agent, generation, chunk) =>
+      seen.push([pid, agent, generation, chunk]),
+    );
     pane.emit('one');
     pane.emit('two');
     unsub();
     pane.emit('three'); // after unsubscribe — not observed
 
     expect(seen).toEqual([
-      [projectId, 'impl-x', 'one'],
-      [projectId, 'impl-x', 'two'],
+      [projectId, 'impl-x', 1, 'one'],
+      [projectId, 'impl-x', 1, 'two'],
     ]);
   });
 
@@ -1483,10 +1485,31 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     engine.onTranscript(() => {
       throw new Error('subscriber failed');
     });
-    engine.onTranscript((_pid, _agent, chunk) => seen.push(chunk));
+    engine.onTranscript((_pid, _agent, _generation, chunk) => seen.push(chunk));
 
     expect(() => pane.emit('still delivered')).not.toThrow();
     expect(seen).toEqual(['still delivered']);
+  });
+
+  it('increments transcript generation when the same agent is rehosted', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+
+    await hostPane(engine, pty, identity);
+    expect(engine.transcriptTailSnapshot(projectId, 'impl-x').generation).toBe(1);
+    await engine.release(projectId, 'impl-x');
+
+    const ensureP = engine.ensureHosted(identity);
+    const pane = pty.panes[pty.panes.length - 1]!;
+    pane.emit(CLAUDE_READY);
+    await ensureP;
+    pane.emit('new generation');
+
+    const snap = engine.transcriptTailSnapshot(projectId, 'impl-x');
+    expect(snap.generation).toBe(2);
+    expect(snap.tail).toBe(CLAUDE_READY + 'new generation');
   });
 
   it('drops the tail + stops the stream once the pane is released', async () => {
@@ -1500,7 +1523,7 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     expect(engine.transcriptTail(projectId, 'impl-x')).toBe(CLAUDE_READY + 'before release');
 
     const seen: string[] = [];
-    engine.onTranscript((_pid, _agent, chunk) => seen.push(chunk));
+    engine.onTranscript((_pid, _agent, _generation, chunk) => seen.push(chunk));
     await engine.release(projectId, 'impl-x'); // tears down the persistent onData subscription + tail
 
     pane.emit('after release'); // the pane is detached — no listener fires, no buffer grows
