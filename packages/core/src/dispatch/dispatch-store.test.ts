@@ -367,6 +367,37 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
     }
   });
 
+  it('deduplicates repeated provider source observations across different proposed turns', () => {
+    const store = openDispatchStore('p-rollup-source-dedupe');
+    try {
+      store.recordCost({
+        provider: 'claude',
+        agent: 'a1',
+        task: 't1',
+        turn: 0,
+        source_id: 'claude-jsonl:v1:path:12',
+        input_tokens: 100,
+        output_tokens: 200,
+      });
+      const duplicate = store.recordCost({
+        provider: 'claude',
+        agent: 'a1',
+        task: 't1',
+        turn: 1,
+        source_id: 'claude-jsonl:v1:path:12',
+        input_tokens: 100,
+        output_tokens: 200,
+      });
+
+      expect(duplicate.agent.inputTokens).toBe(100);
+      expect(duplicate.agent.totalTokens).toBe(300);
+      expect(duplicate.agent.observations).toBe(1);
+      expect(store.latestCostSourceId('claude', 'a1', 't1')).toBe('claude-jsonl:v1:path:12');
+    } finally {
+      store.close();
+    }
+  });
+
   it('backfills cost observation identities for pre-idempotency rollups before accepting duplicates', () => {
     const pid = 'p-rollup-legacy-dedupe';
     const obs = {

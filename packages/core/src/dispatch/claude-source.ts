@@ -272,20 +272,20 @@ export interface ClaudeTurnCost {
 }
 
 /**
- * Parse the LATEST per-turn cost out of a Claude Code transcript JSONL — DEFENSIVE, fail-soft. Each line
- * is a JSON record; an `assistant` message carries `message.usage` with `input_tokens` / `output_tokens`
- * / `cache_read_input_tokens` / `cache_creation_input_tokens`. This scans the lines from the END and
- * returns the token counts of the most-recent assistant `usage` it can read, plus a `total_cost_usd`
- * from a `result` line if one is present (the `claude -p --output-format stream-json` shape). Returns
- * `undefined` when no usage is found (the caller records nothing — never throws the turn).
+ * Parse per-turn cost out of a Claude Code transcript JSONL slice — DEFENSIVE, fail-soft. Each line is a
+ * JSON record; an `assistant` message carries `message.usage` with `input_tokens` / `output_tokens` /
+ * `cache_read_input_tokens` / `cache_creation_input_tokens`. The caller supplies the not-yet-recorded
+ * slice for one co turn, so every assistant usage in that slice is summed. A `result.total_cost_usd`
+ * only pairs with usage that precedes it; a later assistant usage resets that pairing so an older result
+ * is not attached to newer assistant-only usage. Returns `undefined` when no usage/cost is found.
  *
  * NEVER an inference call (AC11): a pure parse of an already-written transcript file.
  */
 export function parseClaudeTranscriptTurnCost(jsonl: string): ClaudeTurnCost | undefined {
   const lines = jsonl.split(/\r?\n/);
-  let usage: Record<string, unknown> | undefined;
+  const totals: MutableClaudeTurnCost = {};
   let costUsd: number | undefined;
-  for (let i = lines.length - 1; i >= 0; i--) {
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line === undefined || line.trim().length === 0) continue;
     let parsed: unknown;
@@ -296,23 +296,47 @@ export function parseClaudeTranscriptTurnCost(jsonl: string): ClaudeTurnCost | u
     }
     const record = asRecord(parsed);
     if (!record) continue;
-    if (costUsd === undefined) {
-      const cost = numberish(pick(record, 'total_cost_usd', 'totalCostUsd', 'cost_usd'));
-      if (cost !== undefined) costUsd = cost;
+    const found = findAssistantUsage(record);
+    if (found) {
+      addUsageTokens(totals, readUsageTokens(found));
+      costUsd = undefined;
+      continue;
     }
-    if (usage === undefined) {
-      const found = findAssistantUsage(record);
-      if (found) usage = found;
+    const cost = numberish(pick(record, 'total_cost_usd', 'totalCostUsd', 'cost_usd'));
+    if (cost !== undefined) {
+      costUsd = cost;
     }
-    if (usage !== undefined && costUsd !== undefined) break;
   }
-  if (usage === undefined && costUsd === undefined) return undefined;
+
   const result: ClaudeTurnCost = {
-    ...(usage ? readUsageTokens(usage) : {}),
+    ...totals,
     ...(costUsd !== undefined ? { costUsd } : {}),
   };
   // Guard against an all-undefined result (a record that had neither usable usage nor a cost).
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+type MutableClaudeTurnCost = {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+};
+
+function addUsageTokens(total: MutableClaudeTurnCost, next: ClaudeTurnCost): void {
+  addTokenField(total, 'inputTokens', next.inputTokens);
+  addTokenField(total, 'outputTokens', next.outputTokens);
+  addTokenField(total, 'cacheReadInputTokens', next.cacheReadInputTokens);
+  addTokenField(total, 'cacheCreationInputTokens', next.cacheCreationInputTokens);
+}
+
+function addTokenField(
+  total: MutableClaudeTurnCost,
+  key: keyof MutableClaudeTurnCost,
+  value: number | undefined,
+): void {
+  if (value === undefined) return;
+  total[key] = (total[key] ?? 0) + value;
 }
 
 /** Find an assistant-message `usage` object inside a transcript record (DEFENSIVE over shape variants). */

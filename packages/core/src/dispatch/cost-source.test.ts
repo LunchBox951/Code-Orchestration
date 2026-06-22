@@ -8,6 +8,7 @@ import { parseClaudeTranscriptTurnCost } from './claude-source.js';
 import {
   parseCodexTokenCount,
   readLatestCodexTokenCount,
+  readLatestCodexTokenCountReadout,
   openCodexLogsDb,
 } from './codex-source.js';
 import { openDispatchStore } from './dispatch-store.js';
@@ -55,7 +56,7 @@ describe('parseClaudeTranscriptTurnCost — the assistant-message usage + result
     });
   });
 
-  it('returns the MOST-RECENT assistant usage when several are present', () => {
+  it('sums every assistant usage record in the supplied turn slice', () => {
     const jsonl = [
       JSON.stringify({
         type: 'assistant',
@@ -67,8 +68,48 @@ describe('parseClaudeTranscriptTurnCost — the assistant-message usage + result
       }),
     ].join('\n');
     const cost = parseClaudeTranscriptTurnCost(jsonl);
-    expect(cost?.inputTokens).toBe(99);
-    expect(cost?.outputTokens).toBe(88);
+    expect(cost?.inputTokens).toBe(100);
+    expect(cost?.outputTokens).toBe(89);
+  });
+
+  it('does not attach an older result cost after a later assistant usage resets cost pairing', () => {
+    const jsonl = [
+      JSON.stringify({
+        type: 'assistant',
+        message: { usage: { input_tokens: 10, output_tokens: 20 } },
+      }),
+      JSON.stringify({ type: 'result', total_cost_usd: 0.01, subtype: 'success' }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { usage: { input_tokens: 30, output_tokens: 40 } },
+      }),
+    ].join('\n');
+    const cost = parseClaudeTranscriptTurnCost(jsonl);
+    expect(cost).toEqual({ inputTokens: 40, outputTokens: 60 });
+  });
+
+  it('pairs result cost with the usage slice when a result follows the latest assistant usage', () => {
+    const jsonl = [
+      JSON.stringify({
+        type: 'assistant',
+        message: { usage: { input_tokens: 10, output_tokens: 20 } },
+      }),
+      JSON.stringify({ type: 'result', total_cost_usd: 0.01, subtype: 'success' }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { usage: { input_tokens: 30, output_tokens: 40 } },
+      }),
+      JSON.stringify({ type: 'result', total_cost_usd: 0.03, subtype: 'success' }),
+    ].join('\n');
+    const cost = parseClaudeTranscriptTurnCost(jsonl);
+    expect(cost).toEqual({ inputTokens: 40, outputTokens: 60, costUsd: 0.03 });
+  });
+
+  it('can record a result-only slice as dollar cost', () => {
+    const cost = parseClaudeTranscriptTurnCost(
+      JSON.stringify({ type: 'result', total_cost_usd: 0.04, subtype: 'success' }),
+    );
+    expect(cost).toEqual({ costUsd: 0.04 });
   });
 
   it('tolerates a truncated trailing line (fail-soft) and skips it', () => {
@@ -97,6 +138,26 @@ const codexTokenCountObject = {
     primary: { used_percent: 12.5, window_minutes: 300, resets_in_seconds: 1000 },
   },
 };
+
+function codexResponseCompletedBody(overrides: Partial<Record<string, number>> = {}): string {
+  const input = overrides.input_token_count ?? 1234;
+  const output = overrides.output_token_count ?? 56;
+  return (
+    'event.name="codex.sse_event" event.kind=response.completed ' +
+    `input_token_count=${input} output_token_count=${output} ` +
+    'cached_token_count=100 reasoning_token_count=7 ' +
+    `tool_token_count=${input + output} event.timestamp=2026-06-22T20:22:34.682Z ` +
+    'conversation.id=019ef0fe-a3d5-72d1-b4c5-539e9a174a4a model=gpt-5.5'
+  );
+}
+
+function codexPostSamplingBody(total = 57314): string {
+  return (
+    'session_loop{thread_id=019ef0fe-a3d5}:turn{turn.id=019ef0fe-a6a9}:session_task.run: ' +
+    `post sampling token usage turn_id=019ef0fe-a6a9 total_usage_tokens=${total} ` +
+    'auto_compact_scope_tokens=57314 estimated_token_count=Some(54615) token_limit_reached=false'
+  );
+}
 
 /** The REAL feedback_log_body shape: OTel prefix + `websocket event: {…JSON…}` + trailing prose. */
 function codexTokenCountBody(): string {
@@ -164,6 +225,110 @@ describe('readLatestCodexTokenCount — pin the latest genuine token_count event
       expect(cost?.totalTokens).toBe(4999);
     } finally {
       db.close();
+    }
+  });
+
+  it('extracts current response.completed token rows from logs_2.sqlite', () => {
+    const dbPath = join(dataDir, 'logs_2.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec('CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER, feedback_log_body TEXT)');
+    const insert = seed.prepare('INSERT INTO logs (ts, feedback_log_body) VALUES (?, ?)');
+    insert.run(1, 'assistant prose mentioning response.completed input_token_count=999');
+    insert.run(2, codexResponseCompletedBody({ input_token_count: 321, output_token_count: 45 }));
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      const payload = readLatestCodexTokenCount(db);
+      expect(payload).toBeDefined();
+      const cost = parseCodexTokenCount(payload);
+      expect(cost).toEqual({ inputTokens: 321, outputTokens: 45, totalTokens: 366 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('falls back to current post-sampling cumulative token rows when response.completed is absent', () => {
+    const dbPath = join(dataDir, 'logs_2.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec('CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER, feedback_log_body TEXT)');
+    seed
+      .prepare('INSERT INTO logs (ts, feedback_log_body) VALUES (?, ?)')
+      .run(1, codexPostSamplingBody(98765));
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      const payload = readLatestCodexTokenCount(db);
+      expect(payload).toBeDefined();
+      const cost = parseCodexTokenCount(payload);
+      expect(cost).toEqual({ totalTokens: 98765, cumulative: true });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('chooses the newest token row across all supported Codex token signatures', () => {
+    const dbPath = join(dataDir, 'logs_2.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec('CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER, feedback_log_body TEXT)');
+    const insert = seed.prepare('INSERT INTO logs (ts, feedback_log_body) VALUES (?, ?)');
+    insert.run(1, codexResponseCompletedBody({ input_token_count: 321, output_token_count: 45 }));
+    insert.run(2, codexPostSamplingBody(98765));
+    seed.close();
+
+    const db = openCodexLogsDb(dbPath);
+    try {
+      const payload = readLatestCodexTokenCount(db);
+      expect(payload).toBeDefined();
+      const cost = parseCodexTokenCount(payload);
+      expect(cost).toEqual({ totalTokens: 98765, cumulative: true });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('can continue Codex token reads from a prior source cursor', () => {
+    const dbPath = join(dataDir, 'logs_2.sqlite');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec('CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER, feedback_log_body TEXT)');
+    const insert = seed.prepare('INSERT INTO logs (ts, feedback_log_body) VALUES (?, ?)');
+    insert.run(1, codexResponseCompletedBody({ input_token_count: 10, output_token_count: 2 }));
+    seed.close();
+
+    const firstDb = openCodexLogsDb(dbPath);
+    const first = readLatestCodexTokenCountReadout(firstDb);
+    firstDb.close();
+    expect(first).toBeDefined();
+
+    const noneDb = openCodexLogsDb(dbPath);
+    try {
+      expect(
+        readLatestCodexTokenCountReadout(noneDb, { afterSourceId: first!.sourceId }),
+      ).toBeUndefined();
+    } finally {
+      noneDb.close();
+    }
+
+    const append = new DatabaseSync(dbPath);
+    const appendRow = append.prepare('INSERT INTO logs (ts, feedback_log_body) VALUES (?, ?)');
+    appendRow.run(2, codexPostSamplingBody(1000));
+    for (let i = 0; i < 75; i++) {
+      appendRow.run(3 + i, `noise row ${i}`);
+    }
+    append.close();
+
+    const secondDb = openCodexLogsDb(dbPath);
+    try {
+      const second = readLatestCodexTokenCountReadout(secondDb, {
+        afterSourceId: first!.sourceId,
+      });
+      expect(parseCodexTokenCount(second?.payload)).toEqual({
+        totalTokens: 1000,
+        cumulative: true,
+      });
+    } finally {
+      secondDb.close();
     }
   });
 });

@@ -874,6 +874,7 @@ export {
 export type {
   CodexAccountInfo,
   CodexRateLimitsReading,
+  CodexTokenCountReadout,
   CodexUsageSourceDeps,
   CodexUsageSourceOptions,
   CodexCli,
@@ -893,6 +894,7 @@ export {
   parseCodexRateLimits,
   readLatestCodexRateLimits,
   readLatestRolloutRateLimits,
+  readLatestCodexTokenCountReadout,
 } from './dispatch/codex-source.js';
 export type { UsageSourceAttempt } from './dispatch/usage-adapter-common.js';
 export { buildSnapshot, layeredRead } from './dispatch/usage-adapter-common.js';

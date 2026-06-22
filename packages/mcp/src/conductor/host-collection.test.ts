@@ -6,7 +6,8 @@
  * round left DEAD; here we exercise the engine→host→store path end-to-end (NOT the parser in isolation).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -25,7 +26,11 @@ import {
 } from '@co/core';
 import { ConductorEngine, type ConductorEngineDeps, type HostedPane } from './engine.js';
 import type { TurnCostCapture } from './engine.js';
-import { makeTurnCostCapture, makeToolActivityRecorder } from './host.js';
+import {
+  makeHostedUsageSourceFactory,
+  makeTurnCostCapture,
+  makeToolActivityRecorder,
+} from './host.js';
 import type { HostedIdentity } from '../live-session-host.js';
 
 const ESC = '\u001B';
@@ -319,7 +324,11 @@ describe('host.ts collection wiring — records cost + tool usage over a product
         throw new Error('disk gone');
       },
     });
-    const { engine, pty, clock, qw } = makeEngine({ captureTurnCost });
+    const diagnostics: unknown[] = [];
+    const { engine, pty, clock, qw } = makeEngine({
+      captureTurnCost,
+      onCollectionError: (diagnostic) => diagnostics.push(diagnostic),
+    });
     const hosted = await hostPane(engine, pty, identity);
     const pane = pty.panes[0]!;
 
@@ -328,12 +337,55 @@ describe('host.ts collection wiring — records cost + tool usage over a product
     const outcome = await turnP;
 
     expect(outcome.errored).toBe(false); // a thrown cost reader must not fail the turn
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      kind: 'cost',
+      identity: { agent: 'impl-x' },
+      turn: 0,
+    });
     const store = openDispatchStore(projectId);
     try {
       expect(store.getAgentCostRollup('impl-x')).toBeNull();
     } finally {
       store.close();
     }
+  });
+
+  it('a throwing tool-usage recorder is fail-soft but surfaced as a collection diagnostic', async () => {
+    const { projectId, cwd } = makeProject();
+    seedRoster(projectId);
+    const item = seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const diagnostics: unknown[] = [];
+    const { engine, pty, clock, qw } = makeEngine({
+      onToolActivity: () => {
+        throw new Error('tool store unavailable');
+      },
+      onCollectionError: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    const hosted = await hostPane(engine, pty, identity);
+    const pane = pty.panes[0]!;
+    const client = new Client({ name: 'co-collect-tool-error-test', version: '0.0.0' });
+    clients.push(client);
+    await client.connect(hosted.clientTransport);
+
+    const turnP = engine.runOneTurn(hosted, item, {
+      onInjected: () => {
+        void client.callTool({ name: 'co_status', arguments: {} });
+      },
+    });
+    await tick();
+    await tick();
+    await driveTurnToIdle(pane, item, clock, qw);
+    const outcome = await turnP;
+
+    expect(outcome.errored).toBe(false);
+    expect(diagnostics).toHaveLength(2); // start + end events both attempted durable collection.
+    expect(diagnostics[0]).toMatchObject({
+      kind: 'tool',
+      identity: { agent: 'impl-x' },
+      turn: 0,
+    });
   });
 });
 
@@ -418,6 +470,111 @@ describe('host.ts collection — DEFAULT Claude transcript reader over the real 
     }
   });
 
+  it('does not re-record an unchanged transcript after restart and only records appended usage', async () => {
+    const { projectId } = makeProject();
+    const dataDir = process.env.CO_DATA_DIR!;
+    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    const home = isolatedHomeDirFor('impl-x');
+    const transcriptPath = join(
+      home,
+      'projects',
+      '-tmp-co-repo',
+      'cccccccc-1111-2222-3333-444444444444.jsonl',
+    );
+    mkdirSync(join(home, 'projects', '-tmp-co-repo'), { recursive: true });
+    writeFileSync(
+      transcriptPath,
+      JSON.stringify({
+        type: 'assistant',
+        message: { usage: { input_tokens: 10, output_tokens: 5 } },
+      }),
+    );
+
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd: join(dataDir, 'repo') });
+    await makeTurnCostCapture(projectId, { isolatedHomeDirFor })({
+      identity,
+      turn: 0,
+    } satisfies TurnCostCapture);
+    await makeTurnCostCapture(projectId, { isolatedHomeDirFor })({
+      identity,
+      turn: 0,
+    } satisfies TurnCostCapture);
+    writeFileSync(
+      transcriptPath,
+      '\n' +
+        JSON.stringify({
+          type: 'assistant',
+          message: { usage: { input_tokens: 30, output_tokens: 7 } },
+        }),
+      { flag: 'a' },
+    );
+    await makeTurnCostCapture(projectId, { isolatedHomeDirFor })({
+      identity,
+      turn: 0,
+    } satisfies TurnCostCapture);
+
+    const store = openDispatchStore(projectId);
+    try {
+      const rollup = store.getAgentCostRollup('impl-x');
+      expect(rollup?.inputTokens).toBe(40);
+      expect(rollup?.outputTokens).toBe(12);
+      expect(rollup?.totalTokens).toBe(52);
+      expect(store.getRollup('agent', 'impl-x')?.observations).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('does not switch to an unrelated newer Claude transcript once an active cursor exists', async () => {
+    const { projectId } = makeProject();
+    const dataDir = process.env.CO_DATA_DIR!;
+    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    const home = isolatedHomeDirFor('impl-x');
+    const activeDir = join(home, 'projects', '-tmp-co-repo');
+    const unrelatedDir = join(home, 'projects', '-tmp-other-repo');
+    mkdirSync(activeDir, { recursive: true });
+    mkdirSync(unrelatedDir, { recursive: true });
+    const activePath = join(activeDir, 'active.jsonl');
+    writeFileSync(
+      activePath,
+      JSON.stringify({
+        type: 'assistant',
+        message: { usage: { input_tokens: 10, output_tokens: 5 } },
+      }),
+    );
+
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd: join(dataDir, 'repo') });
+    await makeTurnCostCapture(projectId, { isolatedHomeDirFor })({
+      identity,
+      turn: 0,
+    } satisfies TurnCostCapture);
+
+    writeFileSync(
+      join(unrelatedDir, 'newer.jsonl'),
+      JSON.stringify({
+        type: 'assistant',
+        message: { usage: { input_tokens: 999, output_tokens: 999 } },
+      }),
+    );
+    const fresh = new Date(Date.now() + 60_000);
+    utimesSync(join(unrelatedDir, 'newer.jsonl'), fresh, fresh);
+
+    await makeTurnCostCapture(projectId, { isolatedHomeDirFor })({
+      identity,
+      turn: 1,
+    } satisfies TurnCostCapture);
+
+    const store = openDispatchStore(projectId);
+    try {
+      const rollup = store.getAgentCostRollup('impl-x');
+      expect(rollup?.inputTokens).toBe(10);
+      expect(rollup?.outputTokens).toBe(5);
+      expect(store.getRollup('agent', 'impl-x')?.observations).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
   it('records NOTHING (never throws) when no projects transcript tree exists (fail-soft)', async () => {
     const { projectId } = makeProject();
     const dataDir = process.env.CO_DATA_DIR!;
@@ -438,6 +595,170 @@ describe('host.ts collection — DEFAULT Claude transcript reader over the real 
   });
 });
 
+describe('host.ts collection — DEFAULT Codex logs_2.sqlite reader under isolated home', () => {
+  function writeCodexLogsDb(isolatedHome: string, bodies?: readonly string[]): void {
+    mkdirSync(isolatedHome, { recursive: true });
+    const dbPath = join(isolatedHome, 'logs_2.sqlite');
+    const rows = bodies ?? [
+      'event.name="codex.sse_event" event.kind=response.completed ' +
+        'input_token_count=222 output_token_count=33 cached_token_count=10 ' +
+        'reasoning_token_count=5 tool_token_count=255 event.timestamp=2026-06-22T20:22:34.682Z',
+    ];
+    execFileSync(
+      process.execPath,
+      [
+        '-e',
+        `
+          const { DatabaseSync } = require('node:sqlite');
+          const rows = ${JSON.stringify(rows)};
+          const db = new DatabaseSync(${JSON.stringify(dbPath)});
+          db.exec('CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER, feedback_log_body TEXT)');
+          const insert = db.prepare('INSERT INTO logs (ts, feedback_log_body) VALUES (?, ?)');
+          for (const [index, body] of rows.entries()) insert.run(index + 1, body);
+          db.close();
+        `,
+      ],
+      { env: { ...process.env, NODE_NO_WARNINGS: '1' } },
+    );
+  }
+
+  it('opens ${isolatedHome}/logs_2.sqlite by default and records Codex token usage', async () => {
+    const { projectId } = makeProject();
+    const dataDir = process.env.CO_DATA_DIR!;
+    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    writeCodexLogsDb(isolatedHomeDirFor('codex-1'));
+    const captureTurnCost = makeTurnCostCapture(projectId, { isolatedHomeDirFor });
+    const identity = makeIdentity({
+      agent: 'codex-1',
+      projectId,
+      cwd: join(dataDir, 'repo'),
+    });
+    const codexIdentity: HostedIdentity = {
+      ...identity,
+      provider: 'codex',
+      resume: { provider: 'codex', codexHome: isolatedHomeDirFor('codex-1') },
+    };
+
+    await captureTurnCost({ identity: codexIdentity, turn: 0 } satisfies TurnCostCapture);
+
+    const store = openDispatchStore(projectId);
+    try {
+      const rollup = store.getAgentCostRollup('codex-1');
+      expect(rollup?.inputTokens).toBe(222);
+      expect(rollup?.outputTokens).toBe(33);
+      expect(rollup?.totalTokens).toBe(255);
+      expect(rollup?.costUsd).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('does not re-record an unchanged latest Codex token row after capture restart', async () => {
+    const { projectId } = makeProject();
+    const dataDir = process.env.CO_DATA_DIR!;
+    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    writeCodexLogsDb(isolatedHomeDirFor('codex-1'));
+    const identity = makeIdentity({
+      agent: 'codex-1',
+      projectId,
+      cwd: join(dataDir, 'repo'),
+    });
+    const codexIdentity: HostedIdentity = {
+      ...identity,
+      provider: 'codex',
+      resume: { provider: 'codex', codexHome: isolatedHomeDirFor('codex-1') },
+    };
+
+    await makeTurnCostCapture(projectId, { isolatedHomeDirFor })({
+      identity: codexIdentity,
+      turn: 0,
+    } satisfies TurnCostCapture);
+    await makeTurnCostCapture(projectId, { isolatedHomeDirFor })({
+      identity: codexIdentity,
+      turn: 0,
+    } satisfies TurnCostCapture);
+
+    const store = openDispatchStore(projectId);
+    try {
+      const rollup = store.getAgentCostRollup('codex-1');
+      expect(rollup?.inputTokens).toBe(222);
+      expect(rollup?.outputTokens).toBe(33);
+      expect(rollup?.totalTokens).toBe(255);
+      expect(store.getRollup('agent', 'codex-1')?.observations).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('host.ts collection — hosted Claude usage source reads the isolated statusLine file', () => {
+  it('does not depend on daemon-global CO_CLAUDE_STATUSLINE_PATH', async () => {
+    const { projectId } = makeProject();
+    const dataDir = process.env.CO_DATA_DIR!;
+    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    const home = isolatedHomeDirFor('impl-x');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, 'co-statusline.json'),
+      JSON.stringify({
+        rate_limits: {
+          five_hour: { used_percentage: 12, resets_at: '2026-06-22T21:00:00.000Z' },
+        },
+      }),
+    );
+    const binDir = join(dataDir, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    const fakeClaude = join(binDir, 'claude');
+    writeFileSync(fakeClaude, '#!/usr/bin/env sh\necho \'{"logged_in":false,"plan":"max"}\'\n');
+    chmodSync(fakeClaude, 0o755);
+    process.env.PATH = `${binDir}:${process.env.PATH ?? ''}`;
+    delete process.env.CO_CLAUDE_STATUSLINE_PATH;
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd: join(dataDir, 'repo') });
+    const factory = makeHostedUsageSourceFactory(identity, isolatedHomeDirFor);
+
+    const snapshot = await factory({ provider: 'claude', account: 'claude:max' }).read('claude');
+
+    expect(snapshot.available).toBe(true);
+    expect(snapshot.source).toBe('statusLine');
+    expect(snapshot.account).toBe('claude:max');
+    expect(snapshot.windows).toEqual([
+      { kind: 'five_hour', used_pct: 12, reset_at: '2026-06-22T21:00:00.000Z' },
+    ]);
+  });
+});
+
+describe('host.ts collection — durable cost turn identity across capture restarts', () => {
+  it('does not reuse turn 0 after the capture closure is recreated for an agent with prior cost', async () => {
+    const { projectId } = makeProject();
+    const dataDir = process.env.CO_DATA_DIR!;
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd: join(dataDir, 'repo') });
+
+    const captureFirst = makeTurnCostCapture(projectId, {
+      readClaudeTranscript: async () =>
+        JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 10 } } }),
+    });
+    await captureFirst({ identity, turn: 0 } satisfies TurnCostCapture);
+
+    const captureAfterRestart = makeTurnCostCapture(projectId, {
+      readClaudeTranscript: async () =>
+        JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 30 } } }),
+    });
+    await expect(
+      captureAfterRestart({ identity, turn: 0 } satisfies TurnCostCapture),
+    ).resolves.toBeUndefined();
+
+    const store = openDispatchStore(projectId);
+    try {
+      const rollup = store.getAgentCostRollup('impl-x');
+      expect(rollup?.inputTokens).toBe(40);
+      expect(rollup?.totalTokens).toBe(0); // only input tokens were observed, no input+output pair.
+      expect(store.getRollup('agent', 'impl-x')?.observations).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 // ── Fix-up: Codex cumulative `total_token_usage` is recorded as the PER-TURN DELTA (no over-count) ──
 //
 // Codex's `total_token_usage` is a session-running total. The prior wiring recorded it verbatim per
@@ -450,6 +771,15 @@ describe('host.ts collection — Codex cumulative token_count is delta-d per tur
       type: 'token_count',
       info: {
         total_token_usage: { input_tokens: input, output_tokens: output, total_tokens: total },
+      },
+    };
+  }
+
+  function codexPerTurn(input: number, output: number, total: number): unknown {
+    return {
+      type: 'token_count',
+      info: {
+        last_token_usage: { input_tokens: input, output_tokens: output, total_tokens: total },
       },
     };
   }
@@ -487,6 +817,99 @@ describe('host.ts collection — Codex cumulative token_count is delta-d per tur
       expect(rollup?.inputTokens).toBe(300);
       expect(rollup?.outputTokens).toBe(160);
       expect(rollup?.totalTokens).toBe(460);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('treats a lower cumulative reading as a new Codex session boundary', async () => {
+    const { projectId } = makeProject();
+    const identity = makeIdentity({
+      agent: 'codex-1',
+      projectId,
+      cwd: join(process.env.CO_DATA_DIR!, 'repo'),
+    });
+    const codexIdentity: HostedIdentity = { ...identity, provider: 'codex' };
+    const readings = [codexCumulative(500, 100, 600), codexCumulative(50, 20, 70)];
+    let call = 0;
+    const captureTurnCost = makeTurnCostCapture(projectId, {
+      readCodexTokenCount: async () => readings[call++],
+    });
+
+    for (let turn = 0; turn < readings.length; turn++) {
+      await captureTurnCost({ identity: codexIdentity, turn } satisfies TurnCostCapture);
+    }
+
+    const store = openDispatchStore(projectId);
+    try {
+      const rollup = store.getAgentCostRollup('codex-1');
+      expect(rollup?.inputTokens).toBe(550);
+      expect(rollup?.outputTokens).toBe(120);
+      expect(rollup?.totalTokens).toBe(670);
+      expect(store.getRollup('agent', 'codex-1')?.observations).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('uses the persisted cumulative source cursor after capture restart', async () => {
+    const { projectId } = makeProject();
+    const identity = makeIdentity({
+      agent: 'codex-1',
+      projectId,
+      cwd: join(process.env.CO_DATA_DIR!, 'repo'),
+    });
+    const codexIdentity: HostedIdentity = { ...identity, provider: 'codex' };
+
+    await makeTurnCostCapture(projectId, {
+      readCodexTokenCount: async () => codexCumulative(500, 100, 600),
+    })({ identity: codexIdentity, turn: 0 } satisfies TurnCostCapture);
+
+    await makeTurnCostCapture(projectId, {
+      readCodexTokenCount: async () => codexCumulative(700, 140, 840),
+    })({ identity: codexIdentity, turn: 0 } satisfies TurnCostCapture);
+
+    const store = openDispatchStore(projectId);
+    try {
+      const rollup = store.getAgentCostRollup('codex-1');
+      expect(rollup?.inputTokens).toBe(700);
+      expect(rollup?.outputTokens).toBe(140);
+      expect(rollup?.totalTokens).toBe(840);
+      expect(store.getRollup('agent', 'codex-1')?.observations).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('does not double-count a per-turn Codex row between cumulative readings', async () => {
+    const { projectId } = makeProject();
+    const identity = makeIdentity({
+      agent: 'codex-1',
+      projectId,
+      cwd: join(process.env.CO_DATA_DIR!, 'repo'),
+    });
+    const codexIdentity: HostedIdentity = { ...identity, provider: 'codex' };
+    const readings = [
+      codexCumulative(100, 10, 110),
+      codexPerTurn(20, 2, 22),
+      codexCumulative(150, 15, 165),
+    ];
+    let call = 0;
+    const captureTurnCost = makeTurnCostCapture(projectId, {
+      readCodexTokenCount: async () => readings[call++],
+    });
+
+    for (let turn = 0; turn < readings.length; turn++) {
+      await captureTurnCost({ identity: codexIdentity, turn } satisfies TurnCostCapture);
+    }
+
+    const store = openDispatchStore(projectId);
+    try {
+      const rollup = store.getAgentCostRollup('codex-1');
+      expect(rollup?.inputTokens).toBe(150);
+      expect(rollup?.outputTokens).toBe(15);
+      expect(rollup?.totalTokens).toBe(165);
+      expect(store.getRollup('agent', 'codex-1')?.observations).toBe(3);
     } finally {
       store.close();
     }

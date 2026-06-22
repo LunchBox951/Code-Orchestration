@@ -36,6 +36,7 @@ const CREATE_COST_TABLES = `
     agent          TEXT NOT NULL,
     task           TEXT NOT NULL,
     turn           INTEGER NOT NULL,
+    source_id      TEXT,
     cost_usd       REAL,
     input_tokens   INTEGER,
     output_tokens  INTEGER,
@@ -86,6 +87,12 @@ export function ensureCostTables(db: DatabaseSync): void {
   // so a re-fold of its log lands the cache totals without dropping the table (replay-safe, freeze #6).
   ensureColumn(db, 'cost_observations', 'cache_read_tokens', 'INTEGER');
   ensureColumn(db, 'cost_observations', 'cache_creation_tokens', 'INTEGER');
+  ensureColumn(db, 'cost_observations', 'source_id', 'TEXT');
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS cost_observations_source_identity
+      ON cost_observations(provider, agent, task, source_id)
+      WHERE source_id IS NOT NULL
+  `);
   ensureColumn(db, 'cost_rollup', 'cache_read_tokens', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'cost_rollup', 'cache_creation_tokens', 'INTEGER NOT NULL DEFAULT 0');
   backfillCostObservationState(db);
@@ -247,6 +254,44 @@ export function selectAllCostRollups(db: DatabaseSync): CostRollup[] {
   return rows.map((r) => rowToCostRollup(r as Record<string, unknown>));
 }
 
+/** Highest recorded cost turn for `(provider, agent, task)`, or undefined when no observation exists. */
+export function selectMaxCostTurn(
+  db: DatabaseSync,
+  provider: Provider,
+  agent: string,
+  task: string,
+): number | undefined {
+  ensureCostTables(db);
+  const row = db
+    .prepare(
+      `SELECT MAX(turn) AS max_turn
+         FROM cost_observations
+        WHERE provider = ? AND agent = ? AND task = ?`,
+    )
+    .get(provider, agent, task) as { readonly max_turn?: unknown } | undefined;
+  return row?.max_turn == null ? undefined : Number(row.max_turn);
+}
+
+/** Latest non-null provider-reader source id for `(provider, agent, task)`, ordered by recorded turn. */
+export function selectLatestCostSourceId(
+  db: DatabaseSync,
+  provider: Provider,
+  agent: string,
+  task: string,
+): string | undefined {
+  ensureCostTables(db);
+  const row = db
+    .prepare(
+      `SELECT source_id
+         FROM cost_observations
+        WHERE provider = ? AND agent = ? AND task = ? AND source_id IS NOT NULL
+        ORDER BY turn DESC
+        LIMIT 1`,
+    )
+    .get(provider, agent, task) as { readonly source_id?: unknown } | undefined;
+  return typeof row?.source_id === 'string' ? row.source_id : undefined;
+}
+
 /** One near-budget record by its event `seq`, or undefined. */
 export function selectNearBudgetBySeq(db: DatabaseSync, seq: number): NearBudgetRecord | undefined {
   ensureCostTables(db);
@@ -375,6 +420,7 @@ interface NormalizedCostObservation {
   readonly agent: string;
   readonly task: string;
   readonly turn: number;
+  readonly sourceId: string | null;
   readonly costUsd: number | null;
   readonly inputTokens: number | null;
   readonly outputTokens: number | null;
@@ -390,15 +436,16 @@ function recordCostObservation(db: DatabaseSync, p: CostRecorded): boolean {
   const result = db
     .prepare(
       `INSERT OR IGNORE INTO cost_observations
-         (provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens,
+         (provider, agent, task, turn, source_id, cost_usd, input_tokens, output_tokens, total_tokens,
           cache_read_tokens, cache_creation_tokens, used_pct)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       n.provider,
       n.agent,
       n.task,
       n.turn,
+      n.sourceId,
       n.costUsd,
       n.inputTokens,
       n.outputTokens,
@@ -411,13 +458,29 @@ function recordCostObservation(db: DatabaseSync, p: CostRecorded): boolean {
 
   const existing = db
     .prepare(
-      `SELECT provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens,
+      `SELECT provider, agent, task, turn, source_id, cost_usd, input_tokens, output_tokens, total_tokens,
               cache_read_tokens, cache_creation_tokens, used_pct
          FROM cost_observations
         WHERE provider = ? AND agent = ? AND task = ? AND turn = ?`,
     )
     .get(n.provider, n.agent, n.task, n.turn) as Record<string, unknown> | undefined;
   if (existing !== undefined && observationsMatch(rowToObservation(existing), n)) return false;
+  if (n.sourceId !== null) {
+    const sameSource = db
+      .prepare(
+        `SELECT provider, agent, task, turn, source_id, cost_usd, input_tokens, output_tokens, total_tokens,
+                cache_read_tokens, cache_creation_tokens, used_pct
+           FROM cost_observations
+          WHERE provider = ? AND agent = ? AND task = ? AND source_id = ?`,
+      )
+      .get(n.provider, n.agent, n.task, n.sourceId) as Record<string, unknown> | undefined;
+    if (
+      sameSource !== undefined &&
+      observationsMatchIgnoringTurn(rowToObservation(sameSource), n)
+    ) {
+      return false;
+    }
+  }
   throw new Error(
     `cost-projector: conflicting duplicate cost observation for ` +
       `${n.provider}/${n.agent}/${n.task}/turn-${n.turn}`,
@@ -430,6 +493,7 @@ function normalizeCostObservation(p: CostRecorded): NormalizedCostObservation {
     agent: p.agent,
     task: p.task,
     turn: p.turn,
+    sourceId: p.source_id ?? null,
     costUsd: p.cost_usd ?? null,
     inputTokens: p.input_tokens ?? null,
     outputTokens: p.output_tokens ?? null,
@@ -454,6 +518,7 @@ function rowToObservation(row: Record<string, unknown>): NormalizedCostObservati
     agent: String(row.agent),
     task: String(row.task),
     turn: Number(row.turn),
+    sourceId: nullableString(row.source_id),
     costUsd: nullableNumber(row.cost_usd),
     inputTokens: nullableNumber(row.input_tokens),
     outputTokens: nullableNumber(row.output_tokens),
@@ -462,6 +527,10 @@ function rowToObservation(row: Record<string, unknown>): NormalizedCostObservati
     cacheCreationTokens: nullableNumber(row.cache_creation_tokens),
     usedPct: nullableNumber(row.used_pct),
   };
+}
+
+function nullableString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -474,6 +543,26 @@ function observationsMatch(a: NormalizedCostObservation, b: NormalizedCostObserv
     a.agent === b.agent &&
     a.task === b.task &&
     a.turn === b.turn &&
+    a.sourceId === b.sourceId &&
+    a.costUsd === b.costUsd &&
+    a.inputTokens === b.inputTokens &&
+    a.outputTokens === b.outputTokens &&
+    a.totalTokens === b.totalTokens &&
+    a.cacheReadTokens === b.cacheReadTokens &&
+    a.cacheCreationTokens === b.cacheCreationTokens &&
+    a.usedPct === b.usedPct
+  );
+}
+
+function observationsMatchIgnoringTurn(
+  a: NormalizedCostObservation,
+  b: NormalizedCostObservation,
+): boolean {
+  return (
+    a.provider === b.provider &&
+    a.agent === b.agent &&
+    a.task === b.task &&
+    a.sourceId === b.sourceId &&
     a.costUsd === b.costUsd &&
     a.inputTokens === b.inputTokens &&
     a.outputTokens === b.outputTokens &&

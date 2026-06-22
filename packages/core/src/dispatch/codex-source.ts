@@ -489,9 +489,15 @@ export function parseCodexTokenCount(payload: unknown): CodexTurnCost | undefine
   const match = findTokenUsageBody(root);
   const body = match?.body ?? root;
   const cumulative = match?.cumulative ?? false;
-  const input = numberish(pick(body, 'input_tokens', 'inputTokens', 'prompt_tokens'));
-  const output = numberish(pick(body, 'output_tokens', 'outputTokens', 'completion_tokens'));
-  const total = numberish(pick(body, 'total_tokens', 'totalTokens', 'total_token_count'));
+  const input = numberish(
+    pick(body, 'input_tokens', 'inputTokens', 'prompt_tokens', 'input_token_count'),
+  );
+  const output = numberish(
+    pick(body, 'output_tokens', 'outputTokens', 'completion_tokens', 'output_token_count'),
+  );
+  const total = numberish(
+    pick(body, 'total_tokens', 'totalTokens', 'total_token_count', 'total_usage_tokens'),
+  );
   const rateBody = findRateLimitsBody(root);
   const primary = rateBody ? asRecord(pick(rateBody, 'primary')) : undefined;
   const usedPct = primary
@@ -545,9 +551,14 @@ function findTokenUsageBody(value: unknown, depth = 0): TokenUsageBodyMatch | un
 
 function hasTokenFields(record: Record<string, unknown>): boolean {
   return (
-    numberish(pick(record, 'input_tokens', 'inputTokens', 'prompt_tokens')) !== undefined ||
-    numberish(pick(record, 'output_tokens', 'outputTokens', 'completion_tokens')) !== undefined ||
-    numberish(pick(record, 'total_tokens', 'totalTokens', 'total_token_count')) !== undefined
+    numberish(pick(record, 'input_tokens', 'inputTokens', 'prompt_tokens', 'input_token_count')) !==
+      undefined ||
+    numberish(
+      pick(record, 'output_tokens', 'outputTokens', 'completion_tokens', 'output_token_count'),
+    ) !== undefined ||
+    numberish(
+      pick(record, 'total_tokens', 'totalTokens', 'total_token_count', 'total_usage_tokens'),
+    ) !== undefined
   );
 }
 
@@ -556,34 +567,223 @@ function hasTokenFields(record: Record<string, unknown>): boolean {
  * pin the latest GENUINE token_count event past prose that merely mentions the event name.
  */
 const TOKEN_COUNT_SIGNATURE = 'websocket event: {"type":"token_count"';
+const RESPONSE_COMPLETED_SIGNATURE = 'event.kind=response.completed';
+const POST_SAMPLING_SIGNATURE = 'post sampling token usage';
+
+export interface CodexTokenCountReadout {
+  readonly payload: unknown;
+  readonly sourceId: string;
+}
 
 /**
- * Scan a Codex log database (read-only) for the LATEST `token_count` payload — DEFENSIVE, mirroring
- * {@link readLatestCodexRateLimits}. Returns the parsed embedded JSON of the newest genuine `token_count`
- * websocket event, or undefined when none is found.
+ * Scan a Codex log database (read-only) for the LATEST token payload — DEFENSIVE, mirroring
+ * {@link readLatestCodexRateLimits}. Returns the parsed payload and a stable row source identity, or
+ * undefined when none is found.
+ */
+export function readLatestCodexTokenCountReadout(
+  db: DatabaseSync,
+  opts: { readonly afterSourceId?: string } = {},
+): CodexTokenCountReadout | undefined {
+  const after = parseCodexLogSourceId(opts.afterSourceId);
+  if (after !== undefined) {
+    const continued = readCodexTokenCandidatesAfter(db, after);
+    if (continued !== undefined) return latestCodexTokenCandidate(continued);
+  }
+  const columns = collectTextColumns(db);
+  const candidates = [
+    ...readCodexTokenCandidates(db, columns, RESPONSE_COMPLETED_SIGNATURE, 'response-completed'),
+    ...readCodexTokenCandidates(db, columns, TOKEN_COUNT_SIGNATURE, 'token-count'),
+    ...readCodexTokenCandidates(db, columns, POST_SAMPLING_SIGNATURE, 'post-sampling'),
+  ];
+  return latestCodexTokenCandidate(candidates);
+}
+
+/**
+ * Back-compat payload-only helper for callers that do not need the source cursor.
  */
 export function readLatestCodexTokenCount(db: DatabaseSync): unknown | undefined {
-  const columns = collectTextColumns(db);
-  for (const textColumn of columns) {
-    const { table, column } = textColumn;
+  return readLatestCodexTokenCountReadout(db)?.payload;
+}
+
+interface CodexTokenCandidate extends CodexTokenCountReadout {
+  readonly table: string;
+  readonly rowid: number;
+  readonly columnIndex: number;
+  readonly timestampMs?: number;
+}
+
+function readCodexTokenCandidates(
+  db: DatabaseSync,
+  columns: readonly TextColumn[],
+  signature: string,
+  label: string,
+): CodexTokenCandidate[] {
+  const candidates: CodexTokenCandidate[] = [];
+  columns.forEach((textColumn, columnIndex) => {
+    const { table, column, timeColumn } = textColumn;
+    const observedAt = timeColumn ? `, ${quoteIdent(timeColumn)} AS observed_at` : '';
     let rows: Array<Record<string, unknown>>;
     try {
       rows = db
         .prepare(
-          `SELECT ${quoteIdent(column)} AS value FROM ${quoteIdent(table)} ` +
-            `WHERE ${quoteIdent(column)} LIKE ? ESCAPE '\\' ORDER BY rowid DESC LIMIT 1`,
+          `SELECT rowid AS rowid, ${quoteIdent(column)} AS value${observedAt} FROM ${quoteIdent(table)} ` +
+            `WHERE ${quoteIdent(column)} LIKE ? ESCAPE '\\' ORDER BY rowid DESC LIMIT 50`,
         )
-        .all(`%${escapeLikeLiteral(TOKEN_COUNT_SIGNATURE)}%`) as Array<Record<string, unknown>>;
+        .all(`%${escapeLikeLiteral(signature)}%`) as Array<Record<string, unknown>>;
     } catch {
-      continue; // a column a text LIKE cannot bind against is skipped.
+      return; // a column a text LIKE cannot bind against is skipped.
     }
     for (const row of rows) {
       if (typeof row.value !== 'string') continue;
-      const parsed = tryParseJson(extractEmbeddedJson(row.value));
-      if (parsed !== undefined && parseCodexTokenCount(parsed) !== undefined) return parsed;
+      const rowid = numberish(row.rowid);
+      if (rowid === undefined) continue;
+      const payload = parseCodexTokenRowText(row.value);
+      if (payload === undefined || parseCodexTokenCount(payload) === undefined) continue;
+      const timestampMs =
+        timestampMsFromUnknown(row.observed_at) ?? timestampMsFromPayload(payload);
+      const sourceLabel = codexTokenSignatureLabel(row.value) ?? label;
+      candidates.push({
+        payload,
+        sourceId: codexLogSourceId(table, column, rowid, sourceLabel),
+        table,
+        rowid,
+        columnIndex,
+        ...(timestampMs !== undefined ? { timestampMs } : {}),
+      });
     }
+  });
+  return candidates;
+}
+
+interface CodexLogCursor {
+  readonly table: string;
+  readonly column: string;
+  readonly rowid: number;
+}
+
+function readCodexTokenCandidatesAfter(
+  db: DatabaseSync,
+  cursor: CodexLogCursor,
+): CodexTokenCandidate[] | undefined {
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = db
+      .prepare(
+        `SELECT rowid AS rowid, ${quoteIdent(cursor.column)} AS value FROM ${quoteIdent(cursor.table)} ` +
+          `WHERE rowid > ? AND (` +
+          `${quoteIdent(cursor.column)} LIKE ? ESCAPE '\\' OR ` +
+          `${quoteIdent(cursor.column)} LIKE ? ESCAPE '\\' OR ` +
+          `${quoteIdent(cursor.column)} LIKE ? ESCAPE '\\') ` +
+          `ORDER BY rowid DESC LIMIT 50`,
+      )
+      .all(
+        cursor.rowid,
+        `%${escapeLikeLiteral(RESPONSE_COMPLETED_SIGNATURE)}%`,
+        `%${escapeLikeLiteral(TOKEN_COUNT_SIGNATURE)}%`,
+        `%${escapeLikeLiteral(POST_SAMPLING_SIGNATURE)}%`,
+      ) as Array<Record<string, unknown>>;
+  } catch {
+    return undefined; // schema changed or cursor path vanished; caller falls back to discovery.
+  }
+  const candidates: CodexTokenCandidate[] = [];
+  for (const row of rows) {
+    if (typeof row.value !== 'string') continue;
+    const rowid = numberish(row.rowid);
+    const label = codexTokenSignatureLabel(row.value);
+    if (rowid === undefined || label === undefined) continue;
+    const payload = parseCodexTokenRowText(row.value);
+    if (payload === undefined || parseCodexTokenCount(payload) === undefined) continue;
+    candidates.push({
+      payload,
+      sourceId: codexLogSourceId(cursor.table, cursor.column, rowid, label),
+      table: cursor.table,
+      rowid,
+      columnIndex: 0,
+    });
+  }
+  return candidates;
+}
+
+function latestCodexTokenCandidate(
+  candidates: readonly CodexTokenCandidate[],
+): CodexTokenCountReadout | undefined {
+  return [...candidates].sort(compareCodexTokenCandidate)[0];
+}
+
+function compareCodexTokenCandidate(a: CodexTokenCandidate, b: CodexTokenCandidate): number {
+  if (
+    a.timestampMs !== undefined &&
+    b.timestampMs !== undefined &&
+    a.timestampMs !== b.timestampMs
+  ) {
+    return b.timestampMs - a.timestampMs;
+  }
+  if (a.timestampMs !== undefined && b.timestampMs === undefined) return -1;
+  if (a.timestampMs === undefined && b.timestampMs !== undefined) return 1;
+  if (a.table === b.table && a.rowid !== b.rowid) return b.rowid - a.rowid;
+  return a.table.localeCompare(b.table) || b.rowid - a.rowid || b.columnIndex - a.columnIndex;
+}
+
+function codexLogSourceId(table: string, column: string, rowid: number, label: string): string {
+  return `codex-log:v2:${escapeSourcePart(table)}:${escapeSourcePart(column)}:${rowid}:${label}`;
+}
+
+function parseCodexLogSourceId(sourceId: string | undefined): CodexLogCursor | undefined {
+  if (sourceId === undefined) return undefined;
+  const match = /^codex-log:v2:([^:]+):([^:]+):(\d+):[^:]+$/u.exec(sourceId);
+  if (!match) return undefined;
+  return {
+    table: unescapeSourcePart(match[1]!),
+    column: unescapeSourcePart(match[2]!),
+    rowid: Number(match[3]),
+  };
+}
+
+function escapeSourcePart(part: string): string {
+  return encodeURIComponent(part);
+}
+
+function unescapeSourcePart(part: string): string {
+  return decodeURIComponent(part);
+}
+
+function parseCodexTokenRowText(text: string): unknown | undefined {
+  return tryParseJson(extractEmbeddedJson(text)) ?? parseCodexTokenLogText(text);
+}
+
+function codexTokenSignatureLabel(text: string): string | undefined {
+  if (text.includes(RESPONSE_COMPLETED_SIGNATURE)) return 'response-completed';
+  if (text.includes(TOKEN_COUNT_SIGNATURE)) return 'token-count';
+  if (text.includes(POST_SAMPLING_SIGNATURE)) return 'post-sampling';
+  return undefined;
+}
+
+function parseCodexTokenLogText(text: string): unknown | undefined {
+  if (text.includes(RESPONSE_COMPLETED_SIGNATURE)) {
+    const input = logfmtNumber(text, 'input_token_count');
+    const output = logfmtNumber(text, 'output_token_count');
+    if (input === undefined && output === undefined) return undefined;
+    const usage = {
+      ...(input !== undefined ? { input_tokens: input } : {}),
+      ...(output !== undefined ? { output_tokens: output } : {}),
+      ...(input !== undefined && output !== undefined ? { total_tokens: input + output } : {}),
+    };
+    return { type: 'token_count', info: { last_token_usage: usage } };
+  }
+  if (text.includes(POST_SAMPLING_SIGNATURE)) {
+    const total = logfmtNumber(text, 'total_usage_tokens');
+    if (total === undefined) return undefined;
+    return { type: 'token_count', info: { total_token_usage: { total_tokens: total } } };
   }
   return undefined;
+}
+
+function logfmtNumber(text: string, key: string): number | undefined {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`(?:^|\\s)${escaped}=([^\\s]+)`, 'u').exec(text);
+  if (!match) return undefined;
+  const raw = match[1]!.replace(/^Some\(/u, '').replace(/\)$/u, '');
+  return numberish(raw);
 }
 
 /** Default `logs_2.sqlite` path (`$CO_CODEX_LOGS_DB` or `~/.codex/logs_2.sqlite`). */

@@ -113,6 +113,9 @@ export const costRecordedSchema = z
     agent: z.string().min(1),
     task: z.string().min(1),
     turn: z.number().int().nonnegative(),
+    // Optional provider-reader sample identity. When present, the cost projector deduplicates the same
+    // underlying provider sample even if a restarted engine proposes a new in-memory turn ordinal.
+    source_id: z.string().min(1).optional(),
     cost_usd: z.number().nonnegative().optional(), // Claude dollar cost; absent for Codex (no price table).
     input_tokens: z.number().int().nonnegative().optional(),
     output_tokens: z.number().int().nonnegative().optional(),

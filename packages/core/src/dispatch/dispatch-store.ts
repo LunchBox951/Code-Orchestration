@@ -40,6 +40,8 @@ import {
   ensureCostTables,
   selectAllCostRollups,
   selectCostRollup,
+  selectLatestCostSourceId,
+  selectMaxCostTurn,
   selectNearBudgetBySeq,
   selectNearBudgetEvents,
 } from './cost-projector.js';
@@ -172,6 +174,14 @@ export interface DispatchStore {
    * `cost.near_budget` observability event (never a gate). Returns both rollups + any near-budget event.
    */
   recordCost(obs: CostRecorded, budget?: BudgetCap): CostRecordResult;
+  /**
+   * Resolve a durable cost-observation turn id for `(provider, agent, task)`. The engine supplies a
+   * proposed in-memory turn ordinal, but hosted panes can be released or the daemon can restart; this
+   * read keeps the persisted `(provider, agent, task, turn)` identity monotonic across those lifetimes.
+   */
+  nextCostTurn(provider: Provider, agent: string, task: string, proposedTurn: number): number;
+  /** Latest provider-reader source id recorded for `(provider, agent, task)`, if any. */
+  latestCostSourceId(provider: Provider, agent: string, task: string): string | undefined;
   /** The rollup total for `(kind, id)`, or undefined. */
   getRollup(kind: CostRollupKind, id: string): CostRollup | undefined;
   /** Every rollup total, in (kind, id) order. */
@@ -430,6 +440,19 @@ export function openDispatchStore(projectId: string): DispatchStore {
 
         return nearBudget ? { agent, task, nearBudget } : { agent, task };
       });
+    },
+
+    nextCostTurn(provider: Provider, agent: string, task: string, proposedTurn: number): number {
+      return store.transaction((tx) => {
+        const maxTurn = selectMaxCostTurn(tx.raw as DatabaseSync, provider, agent, task);
+        return Math.max(proposedTurn, maxTurn === undefined ? proposedTurn : maxTurn + 1);
+      });
+    },
+
+    latestCostSourceId(provider: Provider, agent: string, task: string): string | undefined {
+      return store.transaction((tx) =>
+        selectLatestCostSourceId(tx.raw as DatabaseSync, provider, agent, task),
+      );
     },
 
     getRollup(kind: CostRollupKind, id: string): CostRollup | undefined {

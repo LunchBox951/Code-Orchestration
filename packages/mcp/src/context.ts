@@ -22,6 +22,7 @@ import {
   type Role,
   type ToolContext,
   type ToolSpec,
+  type UsageSourceFactory,
 } from '@co/core';
 import { resolve } from 'node:path';
 
@@ -133,6 +134,12 @@ export interface OpenContextStoresOptions {
    * Absent ⇒ headless behaviour (unchanged).
    */
   readonly reviewerSpawnGate?: ReviewerSpawnGate;
+  /**
+   * Passive usage-source factory for this mounted context. Hosted panes can inject identity-scoped
+   * provider readers (for example the pane's isolated Claude statusLine file) instead of using daemon
+   * process globals.
+   */
+  readonly usageSourceFactory?: UsageSourceFactory;
 }
 
 /**
@@ -205,7 +212,7 @@ export function openContextStores(
       plans,
       issues,
       research,
-      usageSourceFactory: defaultUsageSourceFactory,
+      usageSourceFactory: opts?.usageSourceFactory ?? defaultUsageSourceFactory,
       ...(opts?.reviewerSpawnGate != null ? { reviewerSpawnGate: opts.reviewerSpawnGate } : {}),
     };
     return { ctx, close: closeAll };

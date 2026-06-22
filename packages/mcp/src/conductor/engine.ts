@@ -48,6 +48,7 @@ import {
   type ToolSpec,
   type TurnEndConfig,
   type TurnEndResult,
+  type UsageSourceFactory,
   CLARIFY_TIMEOUT_SECONDS_DEFAULT,
   CLARIFY_TIMEOUT_SECONDS_KEY,
   LiveDelivery,
@@ -192,6 +193,11 @@ export interface ConductorEngineDeps {
    */
   readonly reviewerSpawnGate?: () => ReviewerSpawnGate | undefined;
   /**
+   * Optional per-hosted-session passive usage-source factory. Host-live uses this to scope provider
+   * reads to the pane's isolated home instead of daemon-wide environment variables.
+   */
+  readonly usageSourceFactoryFor?: (identity: HostedIdentity) => UsageSourceFactory | undefined;
+  /**
    * PR-B COLLECTION (cost) — per-turn cost-capture seam, called in the turn-END region of
    * {@link ConductorEngine.runOneTurn} (after the detector yields, before the warm yield). The host
    * binds a closure that reads the provider's per-turn usage (Claude: the isolated transcript JSONL
@@ -209,6 +215,17 @@ export interface ConductorEngineDeps {
    * collection (headless / sandbox path).
    */
   readonly onToolActivity?: (capture: ToolActivityCapture) => void;
+  /** Collection failure diagnostic hook. Absent means report to stderr; failures remain fail-soft. */
+  readonly onCollectionError?: (diagnostic: CollectionDiagnostic) => void;
+}
+
+/** A fail-soft collection failure that still needs surfacing (Principle 9 — no silent failures). */
+export interface CollectionDiagnostic {
+  readonly kind: 'cost' | 'tool';
+  readonly identity: HostedIdentity;
+  readonly turn: number;
+  readonly error: unknown;
+  readonly activity?: ToolActivityEvent;
 }
 
 /** The per-turn cost-capture invocation: the acting agent's identity + the engine's per-agent turn ordinal. */
@@ -675,10 +692,12 @@ export class ConductorEngine {
       clientTransport = transportClient;
       const spawnGate = this.deps.reviewerSpawnGate?.();
       const sessionTools = this.deps.sessionTools?.(identity);
+      const usageSourceFactory = this.deps.usageSourceFactoryFor?.(identity);
       session = await this.host.hostSession(identity, serverTransport, {
         deliveryFactory: this.routingDeliveryFactory(),
         ...(spawnGate != null ? { reviewerSpawnGate: spawnGate } : {}),
         ...(sessionTools != null ? { tools: sessionTools } : {}),
+        ...(usageSourceFactory != null ? { usageSourceFactory } : {}),
         onToolActivity: (activity) => this.emitToolActivity(agentKey, activity, identity),
       });
 
@@ -803,8 +822,13 @@ export class ConductorEngine {
       if (this.deps.captureTurnCost != null && !(sawOverload && !sawMcpActivity)) {
         try {
           await this.deps.captureTurnCost({ identity: hosted.identity, turn: turnOrdinal });
-        } catch {
-          /* cost capture is best-effort; the turn result stands */
+        } catch (error) {
+          this.reportCollectionError({
+            kind: 'cost',
+            identity: hosted.identity,
+            turn: turnOrdinal,
+            error,
+          });
         }
       }
       return { turnEnd, errored: false, liveness };
@@ -1011,8 +1035,14 @@ export class ConductorEngine {
           turn: this.turnOrdinal.get(agentKey) ?? 0,
           activity,
         });
-      } catch {
-        /* durable tool-usage collection is best-effort; the MCP call path must keep flowing */
+      } catch (error) {
+        this.reportCollectionError({
+          kind: 'tool',
+          identity,
+          turn: this.turnOrdinal.get(agentKey) ?? 0,
+          activity,
+          error,
+        });
       }
     }
     const listeners = this.toolActivityListeners.get(agentKey);
@@ -1024,6 +1054,28 @@ export class ConductorEngine {
       ...(activity.phase === 'end' ? { ok: activity.ok } : {}),
     };
     for (const listener of [...listeners]) listener(ev);
+  }
+
+  private reportCollectionError(diagnostic: CollectionDiagnostic): void {
+    if (this.deps.onCollectionError != null) {
+      try {
+        this.deps.onCollectionError(diagnostic);
+        return;
+      } catch (hookError) {
+        console.error(
+          '[co-mcp collection] diagnostic hook failed:',
+          hookError,
+          'while reporting:',
+          diagnostic.error,
+        );
+        return;
+      }
+    }
+    console.error(
+      `[co-mcp collection] ${diagnostic.kind} collection failed for ` +
+        `${diagnostic.identity.projectId}/${diagnostic.identity.agent}/turn-${diagnostic.turn}:`,
+      diagnostic.error,
+    );
   }
 
   private consumeOneShotKickoff(projectId: ProjectId, mail: DeliveredMail): void {
