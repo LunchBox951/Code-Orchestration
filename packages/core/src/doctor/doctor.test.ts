@@ -219,9 +219,7 @@ describe('doctor check: global-data-integrity', () => {
 
     const store2 = openGlobalStore();
     store2.transaction((tx) => {
-      (tx.raw as DatabaseSync)
-        .prepare(`DELETE FROM "${tables[0]!.name}"`)
-        .run();
+      (tx.raw as DatabaseSync).prepare(`DELETE FROM "${tables[0]!.name}"`).run();
     });
     store2.close();
 

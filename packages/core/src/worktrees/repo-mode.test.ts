@@ -777,7 +777,10 @@ describe('CoRepoModeGate.enactPrMerge — PR creation enactment (AC-L5-6)', () =
   });
 
   it('scrubs the merge message before it is baked into history, preserving [reviewed:] (#7 §5 #4)', () => {
-    const git = { calls: [] as string[][], exec: (_c: string, a: readonly string[]) => void git.calls.push([...a]) };
+    const git = {
+      calls: [] as string[][],
+      exec: (_c: string, a: readonly string[]) => void git.calls.push([...a]),
+    };
     new CoRepoModeGate().enactPublish(
       {
         branch: 'co/l5-phase-a',

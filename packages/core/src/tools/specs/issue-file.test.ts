@@ -356,10 +356,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     const gh = fakeGh('https://github.com/acme/co/issues/6');
     const ctx = makeCtx(id, stores, gh);
 
-    const req = (await fileWithTitle(ctx, 'approved /home/alice title')) as Record<
-      string,
-      unknown
-    >;
+    const req = (await fileWithTitle(ctx, 'approved /home/alice title')) as Record<string, unknown>;
     const held = stores.mail
       .inbox(OPERATOR)
       .find((m) => m.seq === (req['approval_seq'] as number))!;

@@ -271,14 +271,16 @@ describe('matchBlock — blocked commands', () => {
 
   it('raw-gh-pr-merge: gh api graphql read-only queries stay permitted (#64)', () => {
     expect(matchBlock(`gh api graphql -f query='query{ viewer{ login } }'`)).toBeNull();
-    expect(matchBlock(`gh api graphql -f query='{ repository(owner:"o",name:"r"){ id } }'`)).toBeNull();
+    expect(
+      matchBlock(`gh api graphql -f query='{ repository(owner:"o",name:"r"){ id } }'`),
+    ).toBeNull();
   });
 
   it('raw-gh-pr-merge: gh api repos/.../pulls implicit POST via field flags (#64)', () => {
     // gh auto-POSTs when -f/-F/--field/--raw-field/--input are present, even without -X POST.
-    expect(matchBlock('gh api repos/owner/repo/pulls -f title=x -f head=co/x -f base=dev')?.id).toBe(
-      'raw-gh-pr-merge',
-    );
+    expect(
+      matchBlock('gh api repos/owner/repo/pulls -f title=x -f head=co/x -f base=dev')?.id,
+    ).toBe('raw-gh-pr-merge');
     expect(matchBlock('gh api /repos/owner/repo/pulls -F title=x')?.id).toBe('raw-gh-pr-merge');
     expect(matchBlock('gh api repos/owner/repo/pulls --field title=x')?.id).toBe('raw-gh-pr-merge');
     expect(matchBlock('gh api repos/owner/repo/pulls --raw-field title=x')?.id).toBe(

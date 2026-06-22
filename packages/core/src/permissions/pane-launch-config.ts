@@ -402,7 +402,10 @@ function buildClaudeLaunchConfig(
   if (allowedTools.length > 0) {
     args.push('--allowedTools', allowedTools.join(','));
   }
-  const patterns = [...claudeDisallowedPatterns(blockList), ...(webAllowed ? [] : WEB_SEARCH_TOOLS)];
+  const patterns = [
+    ...claudeDisallowedPatterns(blockList),
+    ...(webAllowed ? [] : WEB_SEARCH_TOOLS),
+  ];
   if (patterns.length > 0) {
     args.push('--disallowedTools', patterns.join(','));
   }

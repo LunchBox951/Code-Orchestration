@@ -538,21 +538,21 @@ export class MailProjector implements Projector {
          WHERE idempotency_key IS NOT NULL DO NOTHING`,
       )
       .run(
-      event.seq,
-      recipient,
-      event.actor,
-      type,
-      subject,
-      body,
-      event.correlationId ?? null,
-      event.causationId ?? null,
-      event.idempotencyKey ?? null,
-      event.ts,
-      mailKind(type),
-      threadId,
-      decision,
-      reviewVerdict,
-    );
+        event.seq,
+        recipient,
+        event.actor,
+        type,
+        subject,
+        body,
+        event.correlationId ?? null,
+        event.causationId ?? null,
+        event.idempotencyKey ?? null,
+        event.ts,
+        mailKind(type),
+        threadId,
+        decision,
+        reviewVerdict,
+      );
 
     // A duplicate idempotency_key collapsed onto an existing inbox row (#7 §5 #8): the INSERT
     // affected no rows. This event is a read-model no-op — the canonical earlier mail already
