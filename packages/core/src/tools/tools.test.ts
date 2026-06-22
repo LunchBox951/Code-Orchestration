@@ -28,25 +28,13 @@ let dataDirs: string[] = [];
 let repoDirs: string[] = [];
 const CWD = '/work/p-tools'; // a fixed logical worktree path; the mail/status tools never touch disk
 
-const ORIENT_FIELD_NAME_STOPLIST = new Set([
-  'to',
-  'type',
-  'subject',
-  'body',
-  'decision',
-  'id',
-  'ids',
-  'role',
-  'topic',
-]);
-
 function distinctiveToolFieldIdentifiers(): string[] {
   const out = new Set<string>();
   for (const spec of buildCoreRegistry().list()) {
     const schema = spec.inputSchema;
     if (schema instanceof z.ZodObject) {
       for (const field of Object.keys(schema.shape)) {
-        if (!ORIENT_FIELD_NAME_STOPLIST.has(field) && field.includes('_')) out.add(field);
+        if (field.includes('_')) out.add(field);
       }
     }
   }

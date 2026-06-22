@@ -16,21 +16,10 @@ import { BASE_ROLES } from './scoping.js';
 //        regardless of a `CLAUDE.md` fixture in cwd.
 
 // ── (i) The P5 anti-drift checker, keyed on DISTINCTIVE field identifiers ──────────────────────────
-// Single-word input field names are ordinary English, indistinguishable from prose — excluded via a
-// curated stoplist. What survives is the DISTINCTIVE set (in practice the underscored compounds, e.g.
-// `in_reply_to`): these never occur in natural workflow prose, so finding one in orient text IS a
-// tool field-list restatement. Collected LIVE from the registry so a new field is covered for free.
-const FIELD_NAME_STOPLIST = new Set([
-  'to',
-  'type',
-  'subject',
-  'body',
-  'decision',
-  'id',
-  'ids',
-  'role',
-  'topic',
-]);
+// Single-word input field names are ordinary English, indistinguishable from prose. What survives is
+// the DISTINCTIVE set: underscored compounds such as `in_reply_to`. These never occur in natural
+// workflow prose, so finding one in orient text IS a tool field-list restatement. Collected LIVE from
+// the registry so a new distinctive field is covered for free.
 
 function distinctiveFieldIdentifiers(): string[] {
   const out = new Set<string>();
@@ -38,7 +27,7 @@ function distinctiveFieldIdentifiers(): string[] {
     const schema = spec.inputSchema;
     if (schema instanceof z.ZodObject) {
       for (const field of Object.keys(schema.shape)) {
-        if (!FIELD_NAME_STOPLIST.has(field) && field.includes('_')) out.add(field);
+        if (field.includes('_')) out.add(field);
       }
     }
   }
