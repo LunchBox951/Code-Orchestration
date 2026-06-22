@@ -23,7 +23,8 @@ function esc(s: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;'); // also encode the single quote (#7 §5 #16 — single-quoted-attr safety)
 }
 
 // ── Design system (mirrors the handoff tokens) ──────────────────────────────────
@@ -1635,10 +1636,12 @@ function setSourceTabCount(id: string, count: number): void {
 }
 
 function sourceMessage(glyph: string, lead: string, sub: string): string {
+  // Escape inside the helper (#7 §5 #17): callers pass static text today, but interpolating
+  // unescaped into innerHTML is a latent injection foot-gun — make the helper safe by construction.
   return `<div class="empty-inline" style="padding:70px 40px">
-      <span class="glyph">${glyph}</span>
-      <span class="lead">${lead}</span>
-      <span class="sub">${sub}</span>
+      <span class="glyph">${esc(glyph)}</span>
+      <span class="lead">${esc(lead)}</span>
+      <span class="sub">${esc(sub)}</span>
     </div>`;
 }
 

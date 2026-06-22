@@ -179,7 +179,12 @@ function materializePrelaunchFiles(files: readonly PrelaunchFile[]): void {
     if (!isAbsolute(file.path)) {
       throw new Error(`NodePtyHost.spawn: prelaunch file path must be absolute: '${file.path}'`);
     }
-    mkdirSync(dirname(file.path), { recursive: true });
+    // Create the isolated pane dir owner-only (#7 §5 #15): it holds credentials and config, and a
+    // default-umask dir is world-traversable on a multi-user host. chmod after mkdir too, since
+    // mkdir's mode is masked by the process umask.
+    const dir = dirname(file.path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
     writeFileSync(file.path, file.contents, {
       encoding: 'utf8',
       mode: file.mode ?? 0o600,
