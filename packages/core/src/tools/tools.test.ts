@@ -159,7 +159,7 @@ describe('buildCoreRegistry — the canonical single source of truth', () => {
   // .describe() stays syntax-focused). These are regression GUARDS keyed to the post-trim lengths,
   // so a future re-bloat past the trimmed budget fails loudly. Baselines (pre-trim → post-trim):
   //   co_research_finalize 362→164, co_plan_ingest 495→232, co_review_finalize 282→182,
-  //   co_pr_merge 363→231, co_sling 451→256.
+  //   co_pr_merge 363→231, co_sling 451→282.
   it('the five costliest tool descriptions stay within their trimmed budgets (≥30% cut held)', () => {
     const reg = buildCoreRegistry();
     const budgets: Record<string, { preTrim: number; max: number }> = {
@@ -167,7 +167,7 @@ describe('buildCoreRegistry — the canonical single source of truth', () => {
       co_plan_ingest: { preTrim: 495, max: 280 },
       co_review_finalize: { preTrim: 282, max: 197 },
       co_pr_merge: { preTrim: 363, max: 254 },
-      co_sling: { preTrim: 451, max: 315 },
+      co_sling: { preTrim: 451, max: 290 },
     };
     for (const [name, { preTrim, max }] of Object.entries(budgets)) {
       const desc = reg.get(name)?.description ?? '';
