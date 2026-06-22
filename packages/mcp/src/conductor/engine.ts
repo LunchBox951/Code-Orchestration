@@ -678,8 +678,19 @@ export class ConductorEngine {
       // (turnActive=false), so the classifier reads `dead` (pane exited) or a `silent_stop` break
       // (idle without a completion verb); otherwise the session is healthy and the pane stays WARM.
       const liveness = this.classifyTurnLiveness(hosted, trace, observedAt);
+      // F5: a one-shot kickoff is a scheduling NUDGE, not a sticky obligation (isTurnKickoffMail).
+      // Once the daemon has driven the agent through one full turn-to-idle on it, the kickoff has
+      // served its purpose and MUST be retracted so it is never re-selected and re-injected. The
+      // prior code only consumed it when the turn happened to call an MCP tool (`sawMcpActivity`),
+      // so a kickoff turn that oriented/read without a co_* call — or ran while the MCP surface was
+      // unreachable (F1) — left the kickoff outstanding and the daemon re-injected it every tick
+      // (the operator kickoff arrived ~8×). consumeOneShotKickoff is a no-op unless `mail` IS the
+      // kickoff, so ordinary actionable mail is unaffected; the errored branch below still never
+      // consumes (MNR-2 — a turn that threw before completing is re-injected). Wake mail
+      // (clarify_response / worker_done) is a DIFFERENT class the agent must actually act on, so it
+      // stays gated on real MCP progress.
+      this.consumeOneShotKickoff(hosted.identity.projectId, mail);
       if (sawMcpActivity) {
-        this.consumeOneShotKickoff(hosted.identity.projectId, mail);
         this.consumeUnreadTurnWakeMail(hosted.identity.projectId, mail);
       }
       this.lastTurnErrored.delete(agentKey);

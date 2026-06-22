@@ -22,6 +22,7 @@ import {
   MAIL_CLARIFY_RESPONSE,
   MAIL_WORKER_DONE,
   defaultMailRenderer,
+  turnKickoffCorrelationId,
   openMailStore,
   openRegistry,
   openRosterStore,
@@ -162,6 +163,23 @@ function seedActionableMail(projectId: ProjectId, agent: string, from = 'lead-1'
       from,
       subject: 'do the thing',
       body: 'please act',
+    });
+  } finally {
+    mail.close();
+  }
+}
+
+/** Seed a one-shot kickoff (`clarify_request` carrying the turn-kickoff correlation id) for `agent`. */
+function seedKickoffMail(projectId: ProjectId, agent: string): void {
+  const mail = openMailStore(projectId);
+  try {
+    mail.send({
+      type: 'clarify_request',
+      to: agent,
+      from: '@operator',
+      subject: 'Operator kickoff',
+      body: 'orchestrate the thing',
+      correlationId: turnKickoffCorrelationId(agent),
     });
   } finally {
     mail.close();
@@ -509,6 +527,47 @@ describe('ConductorEngine — ensure-hosted → bind → inject → ONE turn →
     const outcome = await turnP;
     expect(outcome.errored).toBe(false);
     expect(outcome.turnEnd?.idle).toBe(true);
+  });
+});
+
+// ── F5: a one-shot kickoff is consumed after a single driven turn (never re-injected) ──────────
+describe('ConductorEngine — one-shot kickoff consumption (F5)', () => {
+  it('retracts a one-shot kickoff after a non-errored turn EVEN without MCP activity', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedKickoffMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    // No mcpActivity seam → sawMcpActivity is false; the prior code left the kickoff outstanding and
+    // the daemon re-injected it every tick (the ~8× operator-kickoff duplication).
+    const { engine, pty, clock, qw } = makeEngine();
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    expect(outstandingCount(projectId, 'impl-x')).toBe(1);
+    const item = outstandingItem(projectId, 'impl-x');
+    const turnP = engine.runOneTurn(hosted, item);
+    await driveTurnToIdle(pane, item, clock, qw);
+    const outcome = await turnP;
+
+    expect(outcome.errored).toBe(false);
+    // The kickoff has served its purpose and is retracted — a second tick would select nothing.
+    expect(outstandingCount(projectId, 'impl-x')).toBe(0);
+  });
+
+  it('does NOT consume ordinary actionable mail on a turn without MCP activity (no over-consume)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x'); // a normal clarify_request, NOT a kickoff
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty, clock, qw } = makeEngine();
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    const item = outstandingItem(projectId, 'impl-x');
+    const turnP = engine.runOneTurn(hosted, item);
+    await driveTurnToIdle(pane, item, clock, qw);
+    await turnP;
+
+    // A non-kickoff item without MCP progress stays outstanding (MNR-2: re-injected until acted on).
+    expect(outstandingCount(projectId, 'impl-x')).toBe(1);
   });
 });
 

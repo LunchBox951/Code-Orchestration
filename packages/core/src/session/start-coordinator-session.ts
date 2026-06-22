@@ -166,6 +166,11 @@ export function startCoordinatorSession(
         subject: fromPrompt ? 'Operator kickoff' : 'Operator kickoff (draft spec)',
         body: fromPrompt ? prompt : specBody,
         correlationId: turnKickoffCorrelationId(coordinator),
+        // F5 defense-in-depth: a stable per-coordinator idempotency key so the read-model dedup
+        // (partial UNIQUE index + ON CONFLICT collapse) folds any repeated kickoff seed for this
+        // coordinator to a single inbox row — the deterministic coordinator id makes a re-issued
+        // kickoff (e.g. an operator-IPC retry) a no-op rather than a second actionable item.
+        idempotencyKey: `kickoff:${coordinator}`,
       });
     } finally {
       mail.close();
