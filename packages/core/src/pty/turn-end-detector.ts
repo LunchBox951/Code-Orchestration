@@ -153,6 +153,29 @@ function isCodexIdleTitle(title: string): boolean {
   return !isSpinner && first !== CLAUDE_ACTIVITY;
 }
 
+// Transient provider-overload banners (#68). A turn whose only output is one of these — with no MCP
+// progress — means the model could not work this turn (e.g. Anthropic 529 `overloaded_error`); the
+// caller backs the agent off instead of re-injecting the same mail every tick. Conservative by
+// design: a false positive merely delays one re-wake (cleared by the next turn that makes progress),
+// while a miss reverts to the old hammering. Provider-neutral — both providers surface 5xx/overload.
+const OVERLOAD_PATTERNS: readonly RegExp[] = [
+  /overloaded/iu, // Anthropic `overloaded_error` / a rendered "Overloaded" banner (the 529 body)
+  /api[ _-]?error[^\n]{0,16}\b529\b/iu, // "API Error: 529" rendered without the word "overloaded"
+  /\b5(?:29|03)\b[^\n]{0,40}(?:overload|unavailable|temporarily|try again)/iu,
+  /(?:overload|unavailable|temporarily)[^\n]{0,40}\b5(?:29|03)\b/iu,
+  /temporarily[^\n]{0,20}(?:unavailable|overloaded)/iu,
+];
+
+/**
+ * True iff `text` (a single turn's rendered output) carries a transient provider-overload banner
+ * (#68). Pure + deterministic; the integration layer pairs it with "no MCP progress" before backing
+ * an agent off.
+ */
+export function detectOverloadBanner(text: string): boolean {
+  if (text.length === 0) return false;
+  return OVERLOAD_PATTERNS.some((re) => re.test(text));
+}
+
 // OSC 0 terminal-title set: `ESC ] 0 ; <title> (BEL | ESC \)`. Authored with `\u` escapes so the
 // SOURCE holds no raw control bytes; the title body excludes the terminators.
 const OSC0_PATTERN = '\\u001B\\]0;([^\\u0007\\u001B]*)(?:\\u0007|\\u001B\\\\)';

@@ -54,6 +54,7 @@ import {
   classifyLiveness,
   defaultMailRenderer,
   detectTurnEnd,
+  detectOverloadBanner,
   driveToReady,
   forwardOnTimeout,
   injectMail,
@@ -371,6 +372,13 @@ export class ConductorEngine {
    */
   private readonly transcriptUnsub = new Map<string, () => void>();
   /**
+   * Per-agent transient-overload backoff (#68), keyed `${projectId}:${agent}`. Set when a turn's
+   * only output is a provider-overload banner (e.g. Anthropic 529) with NO MCP progress; while
+   * `now() < nextRewakeAt` the agent is skipped by {@link runCycle}, so the daemon stops re-injecting
+   * the same mail every ~1s tick. Cleared on any turn that makes progress. Dropped on release.
+   */
+  private readonly overloadBackoff = new Map<string, { nextRewakeAt: number; attempt: number }>();
+  /**
    * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, chunk)` on every new
    * pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A plain
    * subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
@@ -672,7 +680,8 @@ export class ConductorEngine {
         ...this.deps.injectOptions,
       });
       opts.onInjected?.();
-      const { turnEnd, trace, observedAt, sawMcpActivity } = await this.observeTurnEnd(hosted);
+      const { turnEnd, trace, observedAt, sawMcpActivity, sawOverload } =
+        await this.observeTurnEnd(hosted);
       if (turnEnd.sawCompletionVerb) this.turnStartedAt.delete(agentKey);
       // P1b: classify liveness over the SAME turn trace and surface it. The turn has yielded
       // (turnActive=false), so the classifier reads `dead` (pane exited) or a `silent_stop` break
@@ -684,14 +693,25 @@ export class ConductorEngine {
       // prior code only consumed it when the turn happened to call an MCP tool (`sawMcpActivity`),
       // so a kickoff turn that oriented/read without a co_* call — or ran while the MCP surface was
       // unreachable (F1) — left the kickoff outstanding and the daemon re-injected it every tick
-      // (the operator kickoff arrived ~8×). consumeOneShotKickoff is a no-op unless `mail` IS the
-      // kickoff, so ordinary actionable mail is unaffected; the errored branch below still never
-      // consumes (MNR-2 — a turn that threw before completing is re-injected). Wake mail
-      // (clarify_response / worker_done) is a DIFFERENT class the agent must actually act on, so it
-      // stays gated on real MCP progress.
-      this.consumeOneShotKickoff(hosted.identity.projectId, mail);
-      if (sawMcpActivity) {
-        this.consumeUnreadTurnWakeMail(hosted.identity.projectId, mail);
+      // (the operator kickoff arrived ~8×). So consume it on any non-errored turn EXCEPT a transient
+      // overload (#68, below). consumeOneShotKickoff is a no-op unless `mail` IS the kickoff, so
+      // ordinary actionable mail is unaffected; the errored branch below still never consumes (MNR-2
+      // — a turn that threw before completing is re-injected). Wake mail (clarify_response /
+      // worker_done) is a DIFFERENT class the agent must actually act on, so it stays gated on real
+      // MCP progress.
+      // #68: a turn whose only output was a transient overload banner (529 / overloaded) with NO MCP
+      // progress means the model could not work this turn. Do NOT consume the mail (keep it for the
+      // next attempt) and schedule an exponential backoff so the daemon stops re-injecting the same
+      // mail every ~1s tick while the provider is overloaded. Any turn that DID make progress (or ran
+      // clean) clears the backoff and consumes as usual.
+      if (sawOverload && !sawMcpActivity) {
+        this.recordOverloadBackoff(agentKey);
+      } else {
+        this.clearOverloadBackoff(agentKey);
+        this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+        if (sawMcpActivity) {
+          this.consumeUnreadTurnWakeMail(hosted.identity.projectId, mail);
+        }
       }
       this.lastTurnErrored.delete(agentKey);
       return { turnEnd, errored: false, liveness };
@@ -717,6 +737,7 @@ export class ConductorEngine {
     trace: readonly DetectorEvent[];
     observedAt: number;
     sawMcpActivity: boolean;
+    sawOverload: boolean;
   }> {
     const trace: DetectorEvent[] = [];
     let currentTurnOutput = '';
@@ -777,7 +798,9 @@ export class ConductorEngine {
         ...this.deps.turnConfig,
         provider: hosted.identity.provider,
       });
-      return { turnEnd, trace, observedAt, sawMcpActivity };
+      // #68: did this turn's output carry a transient provider-overload banner (529 / overloaded)?
+      const sawOverload = detectOverloadBanner(currentTurnOutput);
+      return { turnEnd, trace, observedAt, sawMcpActivity, sawOverload };
     } finally {
       unsubData();
       unsubToolActivity();
@@ -939,7 +962,12 @@ export class ConductorEngine {
    * {@link CycleOutcome}, or `null` when no candidate is eligible.
    */
   async runCycle(candidates: readonly HostedIdentity[]): Promise<CycleOutcome | null> {
-    const selected = selectEligible(candidates, this.openMail);
+    // #68: skip agents in a transient-overload backoff window — selecting them would re-inject the
+    // same mail into a provider that is still overloaded. The backoff elapses on a later tick.
+    const eligible = candidates.filter(
+      (c) => !this.inOverloadBackoff(ConductorEngine.agentKey(c.projectId, c.agent)),
+    );
+    const selected = selectEligible(eligible, this.openMail);
     if (selected == null) return null;
     const { identity, mail } = selected;
     const hosted =
@@ -1180,6 +1208,33 @@ export class ConductorEngine {
     this.turnStartedAt.delete(agentKey); // P6
     this.lastTurnErrored.delete(agentKey);
     this.toolActivityListeners.delete(agentKey);
+    this.overloadBackoff.delete(agentKey); // #68
+  }
+
+  // #68 — transient-overload backoff. Base/cap chosen so a 529 storm backs off exponentially
+  // (1s, 2s, 4s, …) up to a 60s ceiling instead of re-injecting the same mail every ~1s tick.
+  private static readonly OVERLOAD_BACKOFF_BASE_MS = 1_000;
+  private static readonly OVERLOAD_BACKOFF_CAP_MS = 60_000;
+
+  /** True while `agentKey` is in an overload backoff window (skip it this cycle). */
+  private inOverloadBackoff(agentKey: string): boolean {
+    const b = this.overloadBackoff.get(agentKey);
+    return b != null && this.deps.now() < b.nextRewakeAt;
+  }
+
+  /** Record/extend an exponential backoff for `agentKey` after an overload-with-no-progress turn. */
+  private recordOverloadBackoff(agentKey: string): void {
+    const attempt = (this.overloadBackoff.get(agentKey)?.attempt ?? 0) + 1;
+    const delay = Math.min(
+      ConductorEngine.OVERLOAD_BACKOFF_CAP_MS,
+      ConductorEngine.OVERLOAD_BACKOFF_BASE_MS * 2 ** (attempt - 1),
+    );
+    this.overloadBackoff.set(agentKey, { nextRewakeAt: this.deps.now() + delay, attempt });
+  }
+
+  /** Clear any overload backoff for `agentKey` (a turn made progress / ran clean). */
+  private clearOverloadBackoff(agentKey: string): void {
+    this.overloadBackoff.delete(agentKey);
   }
 }
 

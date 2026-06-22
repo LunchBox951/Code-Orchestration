@@ -1400,6 +1400,7 @@ export type {
 } from './pty/turn-end-detector.js';
 export {
   detectTurnEnd,
+  detectOverloadBanner,
   parseOsc0Titles,
   QUIET_WINDOW_MS,
   COMPLETION_VERBS,

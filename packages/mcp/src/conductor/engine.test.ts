@@ -571,6 +571,61 @@ describe('ConductorEngine — one-shot kickoff consumption (F5)', () => {
   });
 });
 
+// ── #68: a transient overload backs the agent off instead of re-injecting every tick ───────────
+describe('ConductorEngine — transient-overload backoff (#68)', () => {
+  it('keeps mail outstanding and skips re-selection after an overload turn with no MCP progress', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty, clock, qw } = makeEngine(); // no mcpActivity seam → no MCP progress
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    const item = outstandingItem(projectId, 'impl-x');
+    const turnP = engine.runOneTurn(hosted, item);
+    await tick();
+    pane.emit(defaultMailRenderer(item));
+    await tick();
+    clock.set(1000);
+    pane.emit('API Error: 529 {"type":"overloaded_error"}\r\n'); // the provider could not work
+    await tick();
+    clock.set(1000 + WEDGE_MS + 1);
+    qw.settle();
+    const outcome = await turnP;
+
+    expect(outcome.errored).toBe(false);
+    // The mail is NOT consumed (it must be retried once the provider recovers)...
+    expect(outstandingCount(projectId, 'impl-x')).toBe(1);
+    // ...and the agent is in a backoff window, so the next cycle SKIPS it (no re-inject storm).
+    expect(await engine.runCycle([identity])).toBeNull();
+
+    // After the backoff window elapses, the agent is selectable again (a clean turn would clear it).
+    clock.set(1000 + WEDGE_MS + 1 + 5_000); // > nextRewakeAt (observedAt + 1s for the first attempt)
+    const resumed = engine.runCycle([identity]);
+    await driveTurnToIdle(pane, item, clock, qw);
+    expect(await resumed).not.toBeNull();
+  });
+
+  it('does NOT back off a normal (non-overload) turn', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty, clock, qw } = makeEngine();
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    const item = outstandingItem(projectId, 'impl-x');
+    const turnP = engine.runOneTurn(hosted, item);
+    await driveTurnToIdle(pane, item, clock, qw); // emits a normal working spinner, no overload
+    await turnP;
+
+    // A normal turn does not back off — the agent stays immediately selectable.
+    const next = engine.runCycle([identity]);
+    await driveTurnToIdle(pane, item, clock, qw);
+    expect(await next).not.toBeNull();
+  });
+});
+
 // ── completion stays verb-keyed (turn-end ≠ work-end) ──────────────────────────
 describe('ConductorEngine — turn-end is a liveness signal only; completion stays verb-keyed', () => {
   it('reflects a co_finish verb in the trace but STILL yields on byte-quiescence (never on the verb)', async () => {

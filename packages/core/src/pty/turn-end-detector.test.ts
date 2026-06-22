@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   detectTurnEnd,
+  detectOverloadBanner,
   parseOsc0Titles,
   QUIET_WINDOW_MS,
   type DetectorEvent,
@@ -215,5 +216,22 @@ describe('parseOsc0Titles — pure OSC-0 extraction from raw pty bytes', () => {
 
   it('returns [] when no OSC-0 title is present', () => {
     expect(parseOsc0Titles('plain output, no title set')).toEqual([]);
+  });
+});
+
+describe('detectOverloadBanner — transient provider-overload detection (#68)', () => {
+  it('matches 529 / overloaded / transient-5xx banners', () => {
+    expect(detectOverloadBanner('API Error: 529 {"type":"overloaded_error"}')).toBe(true);
+    expect(detectOverloadBanner('The model is currently Overloaded, please try again')).toBe(true);
+    expect(detectOverloadBanner('HTTP 503 Service Unavailable (overloaded)')).toBe(true);
+    expect(detectOverloadBanner('the service is temporarily unavailable')).toBe(true);
+  });
+
+  it('does NOT match normal turn output (no false backoff)', () => {
+    expect(detectOverloadBanner('')).toBe(false);
+    expect(detectOverloadBanner('⠋ working…\r\n')).toBe(false);
+    // A bare "529" in ordinary output must NOT trigger a backoff — only error/overload context does.
+    expect(detectOverloadBanner('Done. Wrote 529 lines to the file.')).toBe(false);
+    expect(detectOverloadBanner('co_finish called; tests pass')).toBe(false);
   });
 });
