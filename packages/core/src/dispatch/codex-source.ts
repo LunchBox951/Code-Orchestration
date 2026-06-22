@@ -459,25 +459,36 @@ const realCodexCli: CodexCli = (args) =>
  * The per-turn token cost read off a Codex `token_count` payload. Codex ships NO price table (v1), so
  * there is no `costUsd` — only token counts (and a usage-% expression where present). Any field may be
  * undefined when the payload did not report it.
+ *
+ * `cumulative` is `true` when the token counts came from Codex's SESSION-CUMULATIVE `total_token_usage`
+ * (a running total that grows every turn) rather than its per-turn `last_token_usage`. The collection
+ * caller MUST subtract the previous cumulative reading before recording, or the per-turn rollup (which
+ * SUMS observations) would massively over-count across a multi-turn session. When `last_token_usage` is
+ * present it is preferred (it is already the per-turn delta) and `cumulative` is omitted/false.
  */
 export interface CodexTurnCost {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly totalTokens?: number;
   readonly usedPct?: number;
+  /** True when the counts are session-cumulative (`total_token_usage`) and need delta-ing per turn. */
+  readonly cumulative?: boolean;
 }
 
 /**
  * Parse a Codex `token_count` payload into a {@link CodexTurnCost} — DEFENSIVE over the
- * unknown-but-host-validated schema. It locates the object carrying `total_token_usage` /
- * `last_token_usage` / `info` (tolerating an envelope), reads `input_tokens` / `output_tokens` /
+ * unknown-but-host-validated schema. It PREFERS the per-turn `last_token_usage` body (already a per-turn
+ * delta) and otherwise falls back to the session-cumulative `total_token_usage` (flagged
+ * `cumulative: true` so the caller can delta it). It reads `input_tokens` / `output_tokens` /
  * `total_tokens` (with aliases), and — when a rate-limits body is present — the primary window's
  * `used_percent`. Returns `undefined` when no token field is found (the caller records nothing).
  */
 export function parseCodexTokenCount(payload: unknown): CodexTurnCost | undefined {
   const root = asRecord(payload);
   if (!root) return undefined;
-  const body = findTokenUsageBody(root) ?? root;
+  const match = findTokenUsageBody(root);
+  const body = match?.body ?? root;
+  const cumulative = match?.cumulative ?? false;
   const input = numberish(pick(body, 'input_tokens', 'inputTokens', 'prompt_tokens'));
   const output = numberish(pick(body, 'output_tokens', 'outputTokens', 'completion_tokens'));
   const total = numberish(pick(body, 'total_tokens', 'totalTokens', 'total_token_count'));
@@ -494,18 +505,36 @@ export function parseCodexTokenCount(payload: unknown): CodexTurnCost | undefine
     ...(output !== undefined ? { outputTokens: output } : {}),
     ...(total !== undefined ? { totalTokens: total } : {}),
     ...(usedPct !== undefined ? { usedPct } : {}),
+    ...(cumulative ? { cumulative: true } : {}),
   };
 }
 
-/** Locate the object carrying token-usage counts inside an arbitrary Codex `token_count` envelope. */
-function findTokenUsageBody(value: unknown, depth = 0): Record<string, unknown> | undefined {
+/** A located token-usage body plus whether it is the session-cumulative `total_token_usage`. */
+interface TokenUsageBodyMatch {
+  readonly body: Record<string, unknown>;
+  readonly cumulative: boolean;
+}
+
+/**
+ * Locate the object carrying token-usage counts inside an arbitrary Codex `token_count` envelope. The
+ * per-turn `last_token_usage` is preferred over the session-cumulative `total_token_usage` (each turn's
+ * `total_token_usage` is a running session total — recording it per turn would over-count once the
+ * rollup sums observations). The match flags `cumulative: true` when only `total_token_usage` was found
+ * so the caller can subtract the previous reading.
+ */
+function findTokenUsageBody(value: unknown, depth = 0): TokenUsageBodyMatch | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
-  for (const key of ['total_token_usage', 'last_token_usage', 'token_usage', 'usage', 'info']) {
+  // Per-turn deltas first (never cumulative); then the session-cumulative running total.
+  for (const key of ['last_token_usage', 'token_usage', 'usage', 'info']) {
     const nested = asRecord(pick(record, key));
-    if (nested && hasTokenFields(nested)) return nested;
+    if (nested && hasTokenFields(nested)) return { body: nested, cumulative: false };
   }
-  if (hasTokenFields(record)) return record;
+  const cumulativeBody = asRecord(pick(record, 'total_token_usage'));
+  if (cumulativeBody && hasTokenFields(cumulativeBody)) {
+    return { body: cumulativeBody, cumulative: true };
+  }
+  if (hasTokenFields(record)) return { body: record, cumulative: false };
   if (depth >= 4) return undefined;
   for (const child of Object.values(record)) {
     const found = findTokenUsageBody(child, depth + 1);

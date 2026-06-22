@@ -19,7 +19,7 @@
  */
 import { performance } from 'node:perf_hooks';
 import { spawnSync } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   GH_AUTH_TOKEN_COMMANDS,
@@ -55,6 +55,7 @@ import {
   QUIET_WINDOW_MS,
   type ArchiveEntry,
   type BreakSignal,
+  type CodexTurnCost,
   type CostRecorded,
   type DispatchStore,
   type InjectNudgeFn,
@@ -412,6 +413,65 @@ export function codexTurnCostToObservation(
   return hasMeasuredCostField(obs) ? obs : undefined;
 }
 
+/**
+ * The per-agent last SESSION-CUMULATIVE Codex token reading, kept so a cumulative `total_token_usage`
+ * payload can be recorded as the PER-TURN DELTA (this turn's cumulative minus the previous one). Codex's
+ * `total_token_usage` is a running session total; recording it verbatim per turn would over-count
+ * massively once {@link CostProjector} sums the observations. `usedPct` is a point-in-time gauge (not
+ * additive) and is NOT delta-d.
+ */
+interface CodexCumulativeReading {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly totalTokens?: number;
+}
+
+/**
+ * Resolve a parsed Codex {@link CodexTurnCost} into the PER-TURN delta to record, updating `lastByAgent`.
+ * For a per-turn (`cumulative: false`) reading the counts are already the delta — pass them through. For
+ * a session-cumulative (`cumulative: true`) reading, subtract the previous cumulative for this agent and
+ * store the new cumulative; a non-positive delta (no new tokens since last turn, or a session reset that
+ * lowered the total) records nothing for those fields. `usedPct` is passed through untouched (it is a
+ * gauge, not a sum).
+ */
+function codexPerTurnDelta(
+  agent: string,
+  parsed: CodexTurnCost,
+  lastByAgent: Map<string, CodexCumulativeReading>,
+): { inputTokens?: number; outputTokens?: number; totalTokens?: number; usedPct?: number } {
+  if (!parsed.cumulative) {
+    return {
+      ...(parsed.inputTokens !== undefined ? { inputTokens: parsed.inputTokens } : {}),
+      ...(parsed.outputTokens !== undefined ? { outputTokens: parsed.outputTokens } : {}),
+      ...(parsed.totalTokens !== undefined ? { totalTokens: parsed.totalTokens } : {}),
+      ...(parsed.usedPct !== undefined ? { usedPct: parsed.usedPct } : {}),
+    };
+  }
+  const prev = lastByAgent.get(agent);
+  lastByAgent.set(agent, {
+    ...(parsed.inputTokens !== undefined ? { inputTokens: parsed.inputTokens } : {}),
+    ...(parsed.outputTokens !== undefined ? { outputTokens: parsed.outputTokens } : {}),
+    ...(parsed.totalTokens !== undefined ? { totalTokens: parsed.totalTokens } : {}),
+  });
+  return {
+    ...positiveDelta('inputTokens', parsed.inputTokens, prev?.inputTokens),
+    ...positiveDelta('outputTokens', parsed.outputTokens, prev?.outputTokens),
+    ...positiveDelta('totalTokens', parsed.totalTokens, prev?.totalTokens),
+    ...(parsed.usedPct !== undefined ? { usedPct: parsed.usedPct } : {}),
+  };
+}
+
+/** The positive per-turn delta for one cumulative field, or `{}` when there is no new usage to record. */
+function positiveDelta(
+  key: 'inputTokens' | 'outputTokens' | 'totalTokens',
+  current: number | undefined,
+  previous: number | undefined,
+): { inputTokens?: number; outputTokens?: number; totalTokens?: number } {
+  if (current === undefined) return {};
+  const delta = current - (previous ?? 0);
+  return delta > 0 ? { [key]: delta } : {};
+}
+
 function hasMeasuredCostField(obs: CostRecorded): boolean {
   return (
     obs.cost_usd !== undefined ||
@@ -424,24 +484,70 @@ function hasMeasuredCostField(obs: CostRecorded): boolean {
   );
 }
 
-/** Default Claude transcript reader: the host writes the per-account transcript path; absent ⇒ no read. */
+/**
+ * Default Claude transcript reader. Claude Code, run with CLAUDE_CONFIG_DIR = the agent's isolated home,
+ * writes its session transcript under `${isolatedHome}/projects/<slugified-cwd>/<session-uuid>.jsonl`
+ * — each assistant message line carrying `message.usage` ({ input_tokens, output_tokens,
+ * cache_read_input_tokens, cache_creation_input_tokens }). NOTHING in co writes a
+ * `co-transcript-<agent>.jsonl`, so the prior reader targeted a path that never existed (a dead seam).
+ *
+ * This globs every `projects/**\/*.jsonl` under the isolated home, picks the NEWEST by mtime (the file
+ * the most-recent turn appended to), and returns its contents for {@link parseClaudeTranscriptTurnCost}.
+ * FAIL-SOFT: a missing tree / unreadable file / no transcript resolves `undefined` (record nothing) and
+ * never throws the turn.
+ *
+ * needsLiveVerification: this now targets the REAL `projects/**\/*.jsonl` tree Claude Code writes; the
+ * exact per-line `message.usage` field mapping still needs a real `claude` run to confirm end-to-end.
+ */
 const defaultReadClaudeTranscript = (
   isolatedHomeDirFor: ((agent: string) => string) | undefined,
 ): ((identity: HostedIdentity) => Promise<string | undefined>) => {
   return async (identity) => {
     if (isolatedHomeDirFor == null) return undefined;
-    // The isolated Claude transcript jsonl lives under CLAUDE_CONFIG_DIR (= the isolated home). The
-    // exact filename is provider-version-specific (needsLiveVerification); read the captured statusLine
-    // tee's sibling transcript when present. Best-effort: a missing file resolves undefined (no record).
     const home = isolatedHomeDirFor(identity.agent).replace(/\/+$/u, '');
-    const path = `${home}/co-transcript-${identity.agent}.jsonl`;
+    const newest = await newestClaudeTranscriptPath(join(home, 'projects'));
+    if (newest == null) return undefined;
     try {
-      return await readFile(path, 'utf8');
+      return await readFile(newest, 'utf8');
     } catch {
-      return undefined;
+      return undefined; // file vanished/unreadable between stat and read ⇒ no record (fail-soft).
     }
   };
 };
+
+/**
+ * Recursively find the newest-by-mtime `*.jsonl` under `projectsDir` (Claude Code's per-cwd transcript
+ * tree). Tolerates a missing directory (returns undefined) and skips unreadable entries — best-effort,
+ * never throws.
+ */
+async function newestClaudeTranscriptPath(projectsDir: string): Promise<string | undefined> {
+  let newest: { path: string; mtimeMs: number } | undefined;
+  const walk = async (current: string): Promise<void> => {
+    let entries: Array<{ name: string; isDirectory: () => boolean; isFile: () => boolean }>;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return; // missing/unreadable dir — skip.
+    }
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        try {
+          const info = await stat(full);
+          if (newest == null || info.mtimeMs > newest.mtimeMs) {
+            newest = { path: full, mtimeMs: info.mtimeMs };
+          }
+        } catch {
+          // unreadable entry — skip.
+        }
+      }
+    }
+  };
+  await walk(projectsDir);
+  return newest?.path;
+}
 
 /** Default Codex token_count reader: open the per-agent isolated `logs_2.sqlite` read-only. */
 const defaultReadCodexTokenCount = (
@@ -480,9 +586,19 @@ export function makeTurnCostCapture(
   const readClaude =
     deps.readClaudeTranscript ?? defaultReadClaudeTranscript(deps.isolatedHomeDirFor);
   const readCodex = deps.readCodexTokenCount ?? defaultReadCodexTokenCount(deps.isolatedHomeDirFor);
+  // Per-agent cumulative-token memory, lives for the lifetime of this capture closure (one per project,
+  // built once in serveConductor) so Codex's session-cumulative `total_token_usage` is delta-d per turn.
+  const codexLastCumulative = new Map<string, CodexCumulativeReading>();
   return async ({ identity, turn }: TurnCostCapture): Promise<void> => {
     const task = taskFor(identity);
-    const obs = await readTurnCostObservation(identity, task, turn, readClaude, readCodex);
+    const obs = await readTurnCostObservation(
+      identity,
+      task,
+      turn,
+      readClaude,
+      readCodex,
+      codexLastCumulative,
+    );
     if (obs == null) return; // no usage observed — record nothing (never a fabricated zero).
     const store = openDispatch(projectId);
     try {
@@ -500,6 +616,7 @@ async function readTurnCostObservation(
   turn: number,
   readClaude: (identity: HostedIdentity) => Promise<string | undefined>,
   readCodex: (identity: HostedIdentity) => Promise<unknown | undefined>,
+  codexLastCumulative: Map<string, CodexCumulativeReading>,
 ): Promise<CostRecorded | undefined> {
   const provider: Provider = identity.provider;
   if (provider === 'claude') {
@@ -511,7 +628,11 @@ async function readTurnCostObservation(
   const payload = await readCodex(identity);
   if (payload == null) return undefined;
   const parsed = parseCodexTokenCount(payload);
-  return parsed ? codexTurnCostToObservation(identity, task, turn, parsed) : undefined;
+  if (!parsed) return undefined;
+  // Codex `total_token_usage` is session-cumulative — record only the per-turn DELTA so cost_rollup's
+  // SUM across turns reflects real per-turn spend, not a cumulative-of-cumulatives over-count.
+  const perTurn = codexPerTurnDelta(identity.agent, parsed, codexLastCumulative);
+  return codexTurnCostToObservation(identity, task, turn, perTurn);
 }
 
 /**
@@ -533,6 +654,10 @@ export function makeToolActivityRecorder(
     if (activity.phase !== 'end') return; // one record per completed call (start/end is one call).
     const store = openDispatch(projectId);
     try {
+      // NOT-YET-DERIVED: `redundant_read` / `permission_ask` are deliberately left unset — the
+      // ToolActivityEvent seam carries no such signal yet (only phase/tool/ok/durationMs), so both
+      // rollup columns stay 0 ("no signal yet observed", NOT "zero friction confirmed"). See
+      // tool-usage-projector.ts. (stillNeedsLive.)
       store.recordToolInvoked({
         agent: identity.agent,
         task: taskFor(identity),

@@ -25,6 +25,15 @@ import {
  * A "productive co call" is a SUCCESSFUL (`ok`) call to a `co_*` (or `mcp__co__*`) tool — the agent's
  * first real orchestration action, distinct from reads/permission-asks. AC8: this is INTERNAL
  * orchestration state — not agent-facing; recorded entirely in program-data (AC9, P12).
+ *
+ * NOT-YET-DERIVED IN PRODUCTION (`redundant_read` / `permission_ask`): these are canonical fields on
+ * {@link ToolInvoked} and roll up into `redundantReads` / `permissionAsks`, but NOTHING populates them on
+ * the live path yet — the engine's {@link import('../../mcp/server.js').ToolActivityEvent} carries only
+ * `phase`/`tool`/`ok`/`durationMs`, no redundant-read or permission-ask signal, so the host recorder
+ * never sets either flag and BOTH columns stay 0 in a real run. That 0 means "no signal yet observed",
+ * NOT "zero friction confirmed"; downstream `contextEfficiency` treats 0 as "no friction observed".
+ * They remain canonical so that, once the live providers expose a redundant-read / permission-prompt
+ * signal, the existing fold lights up with no schema change. (stillNeedsLive — see the fix-up note.)
  */
 const CREATE_TOOL_USAGE_TABLES = `
   CREATE TABLE IF NOT EXISTS tool_invocations (

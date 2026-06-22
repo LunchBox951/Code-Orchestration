@@ -6,7 +6,7 @@
  * round left DEAD; here we exercise the engine→host→store path end-to-end (NOT the parser in isolation).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -24,6 +24,7 @@ import {
   type ProjectRegistry,
 } from '@co/core';
 import { ConductorEngine, type ConductorEngineDeps, type HostedPane } from './engine.js';
+import type { TurnCostCapture } from './engine.js';
 import { makeTurnCostCapture, makeToolActivityRecorder } from './host.js';
 import type { HostedIdentity } from '../live-session-host.js';
 
@@ -330,6 +331,162 @@ describe('host.ts collection wiring — records cost + tool usage over a product
     const store = openDispatchStore(projectId);
     try {
       expect(store.getAgentCostRollup('impl-x')).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// ── Fix-up: the DEFAULT reader against a real Claude Code transcript tree (the dead-seam catcher) ───
+//
+// This is the test the prior round LACKED: it does NOT inject a fixture readClaudeTranscript. It builds
+// a temp isolated-home `projects/<slug>/<uuid>.jsonl` tree exactly as Claude Code writes (under
+// CLAUDE_CONFIG_DIR = the isolated home) and drives the PRODUCTION default reader via makeTurnCostCapture
+// with only `isolatedHomeDirFor` wired. The prior reader targeted `${home}/co-transcript-<agent>.jsonl`
+// — a path nothing ever writes — so it would silently record nothing here (the dead seam).
+describe('host.ts collection — DEFAULT Claude transcript reader over the real projects/**/*.jsonl tree', () => {
+  function writeClaudeTranscript(
+    isolatedHome: string,
+    slug: string,
+    uuid: string,
+    lines: unknown[],
+  ): void {
+    const dir = join(isolatedHome, 'projects', slug);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${uuid}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n'));
+  }
+
+  it('the default reader globs projects/**/*.jsonl, picks the newest, and extracts the TurnUsage', async () => {
+    const { projectId } = makeProject();
+    const dataDir = process.env.CO_DATA_DIR!;
+    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    const home = isolatedHomeDirFor('impl-x');
+
+    // An older transcript (a stale session) and a newer one (this session's). The default reader must
+    // pick the NEWEST by mtime — so the recorded usage must be the newer file's, not the stale one's.
+    writeClaudeTranscript(home, '-tmp-co-old', 'aaaaaaaa-1111-2222-3333-444444444444', [
+      { type: 'assistant', message: { usage: { input_tokens: 1, output_tokens: 1 } } },
+    ]);
+    writeClaudeTranscript(home, '-tmp-co-repo', 'bbbbbbbb-5555-6666-7777-888888888888', [
+      { type: 'user', message: { role: 'user', content: 'go' } },
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          usage: {
+            input_tokens: 321,
+            output_tokens: 654,
+            cache_read_input_tokens: 9876,
+            cache_creation_input_tokens: 1234,
+          },
+        },
+      },
+    ]);
+    // Make the second file unambiguously newer than the first.
+    const old = new Date(Date.now() - 60_000);
+    const fresh = new Date();
+    utimesSync(
+      join(home, 'projects', '-tmp-co-old', 'aaaaaaaa-1111-2222-3333-444444444444.jsonl'),
+      old,
+      old,
+    );
+    utimesSync(
+      join(home, 'projects', '-tmp-co-repo', 'bbbbbbbb-5555-6666-7777-888888888888.jsonl'),
+      fresh,
+      fresh,
+    );
+
+    // The PRODUCTION default reader path: only isolatedHomeDirFor wired — NO injected readClaudeTranscript.
+    const captureTurnCost = makeTurnCostCapture(projectId, { isolatedHomeDirFor });
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd: join(dataDir, 'repo') });
+    await captureTurnCost({ identity, turn: 0 } satisfies TurnCostCapture);
+
+    const store = openDispatchStore(projectId);
+    try {
+      const cost = store.getAgentCostRollup('impl-x');
+      expect(cost).toEqual({
+        agentId: 'impl-x',
+        inputTokens: 321,
+        outputTokens: 654,
+        cacheReadTokens: 9876,
+        cacheCreationTokens: 1234,
+        totalTokens: 975, // input + output (no explicit total in the transcript)
+        costUsd: null,
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it('records NOTHING (never throws) when no projects transcript tree exists (fail-soft)', async () => {
+    const { projectId } = makeProject();
+    const dataDir = process.env.CO_DATA_DIR!;
+    const isolatedHomeDirFor = (agent: string): string => join(dataDir, 'isolated', agent);
+    // No projects/ tree written at all — the default reader must resolve undefined and record nothing.
+    const captureTurnCost = makeTurnCostCapture(projectId, { isolatedHomeDirFor });
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd: join(dataDir, 'repo') });
+    await expect(
+      captureTurnCost({ identity, turn: 0 } satisfies TurnCostCapture),
+    ).resolves.toBeUndefined();
+
+    const store = openDispatchStore(projectId);
+    try {
+      expect(store.getAgentCostRollup('impl-x')).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// ── Fix-up: Codex cumulative `total_token_usage` is recorded as the PER-TURN DELTA (no over-count) ──
+//
+// Codex's `total_token_usage` is a session-running total. The prior wiring recorded it verbatim per
+// turn, and cost_rollup SUMS observations → a cumulative-of-cumulatives over-count across turns. This
+// drives a multi-turn Codex sequence through makeTurnCostCapture with an injected token-count reader
+// returning rising cumulative totals, and asserts the rollup reflects per-turn deltas, not the sum.
+describe('host.ts collection — Codex cumulative token_count is delta-d per turn', () => {
+  function codexCumulative(input: number, output: number, total: number): unknown {
+    return {
+      type: 'token_count',
+      info: {
+        total_token_usage: { input_tokens: input, output_tokens: output, total_tokens: total },
+      },
+    };
+  }
+
+  it('three rising cumulative readings roll up to the LAST cumulative, not the sum of cumulatives', async () => {
+    const { projectId } = makeProject();
+    const identity = makeIdentity({
+      agent: 'codex-1',
+      projectId,
+      cwd: join(process.env.CO_DATA_DIR!, 'repo'),
+    });
+    const codexIdentity: HostedIdentity = { ...identity, provider: 'codex' };
+
+    // Cumulative session totals after turns 0, 1, 2. Per-turn deltas: 100/40, +100/+60, +100/+60.
+    const readings = [
+      codexCumulative(100, 40, 140),
+      codexCumulative(200, 100, 300),
+      codexCumulative(300, 160, 460),
+    ];
+    let call = 0;
+    const captureTurnCost = makeTurnCostCapture(projectId, {
+      readCodexTokenCount: async () => readings[call++],
+    });
+
+    for (let turn = 0; turn < readings.length; turn++) {
+      await captureTurnCost({ identity: codexIdentity, turn } satisfies TurnCostCapture);
+    }
+
+    const store = openDispatchStore(projectId);
+    try {
+      const rollup = store.getAgentCostRollup('codex-1');
+      // The SUM of per-turn DELTAS equals the LAST cumulative reading (140 + 160 + 160 = 460 input,
+      // 40 + 60 + 60 = 160 output). The buggy verbatim-cumulative path would have summed 100+200+300=600
+      // input and 40+100+160=300 output (a cumulative-of-cumulatives over-count).
+      expect(rollup?.inputTokens).toBe(300);
+      expect(rollup?.outputTokens).toBe(160);
+      expect(rollup?.totalTokens).toBe(460);
     } finally {
       store.close();
     }

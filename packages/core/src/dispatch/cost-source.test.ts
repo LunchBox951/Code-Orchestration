@@ -106,14 +106,32 @@ function codexTokenCountBody(): string {
 }
 
 describe('parseCodexTokenCount — token counts + usage-% (no dollars; Codex has no price table)', () => {
-  it('reads input/output/total tokens and the primary window used_percent', () => {
+  it('reads input/output/total tokens and the primary window used_percent (flags cumulative)', () => {
+    // The fixture carries only `total_token_usage` (session-cumulative) → cumulative: true so the
+    // collection caller knows to record the per-turn DELTA, not this running total verbatim.
     const cost = parseCodexTokenCount(codexTokenCountObject);
     expect(cost).toEqual({
       inputTokens: 4321,
       outputTokens: 678,
       totalTokens: 4999,
       usedPct: 12.5,
+      cumulative: true,
     });
+  });
+
+  it('PREFERS per-turn last_token_usage over the cumulative total_token_usage (not cumulative)', () => {
+    const payload = {
+      type: 'token_count',
+      info: {
+        // Codex emits BOTH: total_token_usage (session-running) and last_token_usage (this turn).
+        total_token_usage: { input_tokens: 9000, output_tokens: 3000, total_tokens: 12000 },
+        last_token_usage: { input_tokens: 120, output_tokens: 60, total_tokens: 180 },
+      },
+    };
+    const cost = parseCodexTokenCount(payload);
+    expect(cost).toEqual({ inputTokens: 120, outputTokens: 60, totalTokens: 180 });
+    // No `cumulative` flag — last_token_usage is already the per-turn delta.
+    expect(cost?.cumulative).toBeUndefined();
   });
 
   it('returns undefined for a payload with no token fields', () => {
