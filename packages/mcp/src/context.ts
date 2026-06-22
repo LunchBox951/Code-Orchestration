@@ -8,6 +8,7 @@ import {
   openIssueStore,
   openMailStore,
   openPlanStore,
+  openArchiveStore,
   openRegistry,
   openResearchStore,
   openReviewStore,
@@ -197,6 +198,8 @@ export function openContextStores(
     closeOnFailure.push(() => issues.close());
     const research = openResearchStore(projectId);
     closeOnFailure.push(() => research.close());
+    const archive = openArchiveStore(projectId);
+    closeOnFailure.push(() => archive.close());
 
     const ctx: ToolContext = {
       agent,
@@ -212,6 +215,7 @@ export function openContextStores(
       plans,
       issues,
       research,
+      archive,
       usageSourceFactory: opts?.usageSourceFactory ?? defaultUsageSourceFactory,
       ...(opts?.reviewerSpawnGate != null ? { reviewerSpawnGate: opts.reviewerSpawnGate } : {}),
     };
