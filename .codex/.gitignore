@@ -1,8 +1,0 @@
-# co orchestrator installs its Codex gate hooks here for the local
-# user's Codex sessions. They're personal tooling, not a project
-# mandate — collaborators run `co init` themselves.
-hooks.json
-hooks/codex_gate_publishing_verbs.py
-hooks/codex_gate_polling_loops.py
-hooks/gate_publishing_verbs.py
-hooks/gate_polling_loops.py

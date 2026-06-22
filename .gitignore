@@ -8,16 +8,3 @@ coverage/
 # OS / editor
 .DS_Store
 *.log
-
-# ============================================================
-# PROTOTYPE FOOTPRINT (temporary) — Claude-Orchestrator drives this build.
-# Remove this block at migration. See docs/migration.md.
-# NOTE: .co/ is intentionally NOT ignored here. Its own .co/.gitignore tracks
-# specs/plans/issues (which worktree agents read from COMMITTED history — a git
-# worktree only sees committed files) and ignores config.yaml/state.db/worktrees/
-# logs/transcripts. A root-level `.co/` ignore would break those re-include
-# negations and make worktree agents lose their specs.
-# ============================================================
-.claude/
-.codex/
-# ============================================================

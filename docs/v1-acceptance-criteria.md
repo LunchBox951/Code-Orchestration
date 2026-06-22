@@ -35,6 +35,15 @@ The motivating sentence: **"`co` built the next `co`."**
 
 These are the top-level conditions that, all met, *are* v1.
 
+> **Operator override (2026-06-21, first coordinator run).** The §2 footprint teardown was executed
+> on branch `co/v1-soak-prep` **ahead of** the §1 host-live evidence gate, by explicit operator
+> direction (Principle 7 — audited override). Reason: *the resulting clean build is what the operator
+> soaks against real `claude`/`codex` before landing on `main`; SH-1/SH-4/SH-5 evidence is captured
+> during that soak.* `SH-2` is independently verified (read-guard + `assertRepoPristine`), so the
+> teardown is runtime-safe. `SH-1`, `SH-4`, `SH-5` remain open **pending the soak** — they are NOT
+> marked met without host-live evidence. This document is therefore **not yet archived** (its
+> Lifecycle requires all of §A `☑`).
+
 - `SH-1` ◐ `co` runs a real multi-phase change on the **`co` repo itself** start to finish
   (spec-lock → phases → worktrees → review gate → gated merge) with zero prototype involvement.
   **In-sandbox autonomy is proven:** the Stage 15 `sh1-dry-run` harness
@@ -46,24 +55,31 @@ These are the top-level conditions that, all met, *are* v1.
   (Principle 9). The spec-lock path is now public-CLI driven (`co spec lock`, PR #50) — the operator
   approval gate, not an automation gap — so a clean host-live run can flip `SH-1` to `☑`; the host
   run itself remains the only gate.
-- `SH-2` ☐ `co` reads all of its own state/specs/plans from its **own program-data** — no `.co/`
-  dependency remains (Principle 12 — `pristine-repo`; Principle 14 — `recoverable`). L6b lands the
+- `SH-2` ☑ `co` reads all of its own state/specs/plans from its **own program-data** — no `.co/`
+  dependency remains (Principle 12 — `pristine-repo`; Principle 14 — `recoverable`). Met: the
+  read-side guard (`packages/core/src/tools/sh2-no-co-read.test.ts`) + write-side `assertRepoPristine`
+  are green, and the prototype footprint was removed on `co/v1-soak-prep` (SH-3). L6b lands the
   **records half**: specs (`draft→locked→archived`, queryable via `co_spec_get`) and plans
   (`co_plan_ingest`) are durable event-sourced program-data records with no `.co/specs` dependency
   (see [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md), AC-L6b-1/4/5). No live `.co/`-read
   paths remain in production source (read-side guard `sh2-no-co-read.test.ts`, complementing the
   write-side `assertRepoPristine`). Remaining: the SH-3 migration that removes the prototype footprint
   and confirms `co` self-hosts from program-data.
-- `SH-3` ☐ The prototype footprint (`.co/`, `.claude/`, `.codex/`) is removed and the migration PR
-  has landed on `main` ([`migration.md`](migration.md)).
+- `SH-3` ◐ The prototype footprint (`.co/`, `.claude/`, `.codex/`, `.goals/`, `.research/`,
+  `PORTING-CO.md`, `PRINCIPLES.md`) is removed and the migration PR has landed on `main`
+  ([`migration.md`](migration.md)). The **removal** is done on `co/v1-soak-prep` (tracked footprint
+  deleted; `.gitignore`/`.prettierignore`/`eslint.config.js`/`package.json`/`CLAUDE.md`/`AGENTS.md`
+  cleaned; dangling-reference sweep run). Remaining: the gated land on `main` after the soak.
 - `SH-4` ☐ `co` successfully operates on **at least one stranger repo**, including a **local-only
   (Offline-mode)** repo with no remote — proving Principle 5 (`self-describing`) and that GitHub is
-  never a hard dependency.
+  never a hard dependency. **Pending the soak** (captured during the host-live run, per the override
+  banner above).
 - `SH-5` ☐ Every hard gate holds under self-hosting: no raw `git push` / `gh pr create` /
   `gh pr merge` path exists; only gated MCP tools (`co_merge`, `co_push`, `co_pr_merge`) reach
   `master`/remote/PR (Principle 7 — `gated-by-default`). Stage 15 adds the widened static source /
   scripts / workflow guard and the live deny step in [`host-proof.md`](host-proof.md); `☑` still
-  requires a real provider-pane denial artifact.
+  requires a real provider-pane denial artifact. **Pending the soak.** The static no-raw-path guard
+  was re-confirmed green on the post-teardown tree (#7 §5 re-prove).
 
 ## B. The two surfaces (P1, P2, P3, P15)
 

@@ -21,14 +21,11 @@ This repo is a TypeScript pnpm-workspace monorepo:
 - [`docs/concepts.md`](docs/concepts.md) — the shared vocabulary for Operator, Conductor, Agent,
   Mail, Task, Phase, Spec, Review, Worktree, and Provider.
 - [`docs/principles.md`](docs/principles.md) — the 16 invariants, preferably cited as
-  `Principle N — handle`;
-  use this instead of the frozen root `PRINCIPLES.md` migration residue.
+  `Principle N — handle`.
 - [`docs/v1-acceptance-criteria.md`](docs/v1-acceptance-criteria.md) — the project-wide definition
   of v1; every spec's acceptance criteria must ladder up to IDs here.
 - [`docs/architecture/review-gates.md`](docs/architecture/review-gates.md) — the merge/push/PR gate
   model; read before any outward publishing path.
-- [`docs/migration.md`](docs/migration.md) — explains the temporary `.co/`, `.claude/`, and
-  `.codex/` prototype footprint and when it disappears.
 
 ## Operating Notes
 
@@ -36,5 +33,5 @@ This repo is a TypeScript pnpm-workspace monorepo:
   only if every agent truly needs the pointer.
 - Follow the check and contribution flow in [`CONTRIBUTING.md`](CONTRIBUTING.md) before considering a
   diff done.
-- Do not treat `.co/`, `.claude/`, or `.codex/` as product code; they are temporary prototype
-  residue documented in [`docs/migration.md`](docs/migration.md).
+- Keep orchestration state out of the repo (Principle 12 — pristine-repo); the only sanctioned repo
+  files are the memory files.

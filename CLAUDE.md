@@ -26,7 +26,7 @@ Run all five (`test` included) before considering a diff done.
 
 - TypeScript monorepo, **pnpm workspaces**. `packages/core` is the single source of truth;
   `packages/cli` and `packages/mcp` are thin adapters that `import` it — never duplicate core
-  logic in an adapter. `apps/desktop` is a parked stub.
+  logic in an adapter. `apps/desktop` is the Electron operator cockpit (same thin-adapter rule).
 - ESM only (`"type": "module"`, NodeNext). Import local files with the `.js` extension.
 - Strict TypeScript. Use `assertNever` from `@co/core` for exhaustive discriminated-union
   switches rather than a silent default branch.
@@ -46,12 +46,3 @@ living document; advance and mark criteria as work lands.
 - Do not put orchestration state in the repo (Principle 12 — pristine-repo). The only
   sanctioned repo files are these memory files.
 - Do not duplicate core logic into `cli`/`mcp`.
-
-## Prototype footprint (temporary)
-
-This repo is built by the Claude-Orchestrator **prototype**, which writes `.co/`, `.claude/`,
-`.codex/` into the tree — a temporary tenant that violates Principle 12, **not part of the
-product**. `.co/specs|plans|issues` are tracked only because worktree agents read _committed_
-specs; everything else is ignored. The whole footprint is removed in the migration commit once
-`co` can self-host. Don't build on, document, or treat `.co/` as product code. See
-`docs/migration.md`.

@@ -1,8 +1,0 @@
-# co orchestrator installs its gate hooks here for the local user's
-# Claude Code sessions. They're personal tooling, not a project
-# mandate — collaborators run `co init` themselves.
-settings.json
-settings.local.json
-hooks/gate-publishing-verbs.py
-hooks/gate-polling-loops.py
-*.local.md
