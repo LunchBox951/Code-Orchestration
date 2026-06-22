@@ -18,6 +18,8 @@ import {
   MAIL_CLARIFY_REQUEST,
   OPERATOR,
   addModuleScenario,
+  buildToolEfficiency,
+  correctnessScore,
   defaultMailRenderer,
   openMailStore,
   openRegistry,
@@ -34,7 +36,6 @@ import {
   parentInboxMaxSeq,
   readWorkerEcon,
   workerBenchRenderer,
-  workerCorrectness,
   type WorkerBenchmarkResult,
 } from './worker-benchmark.js';
 
@@ -197,13 +198,23 @@ describe('workerBenchRenderer (hermetic)', () => {
   });
 });
 
-describe('workerCorrectness — single-agent CORRECTNESS score (hermetic)', () => {
+describe('single-agent CORRECTNESS score via core correctnessScore (hermetic)', () => {
   const artifact = (casesPassed: number, casesTotal: number): ArtifactCheck => ({
     correct: casesPassed === casesTotal && casesTotal > 0,
     detail: `${casesPassed}/${casesTotal}`,
     casesPassed,
     casesTotal,
   });
+  // The single-agent invocation the worker driver makes: no implementer merges, so the merge-up /
+  // every-merge-reviewed factors are vacuously 1 (correctness reduces to caseFraction × completion).
+  const workerCorrectness = (a: ArtifactCheck, completed: boolean): number =>
+    correctnessScore({
+      artifact: a,
+      completed,
+      implementerBranchesMergedUp: 0,
+      requiredImplementerMerges: 0,
+      everyMergeHadReview: true,
+    });
 
   it('a correct, completed artifact scores 1 (every case passed, done-mail observed)', () => {
     expect(workerCorrectness(artifact(4, 4), true)).toBe(1);
@@ -269,15 +280,24 @@ describe('readWorkerEcon — sandbox cost-skip parity + log-don’t-swallow (her
     totalTokens: 3100,
     costUsd: 0.42,
   };
-  // An injected econ store that DOES return a non-null cost rollup (present, not PR-B-absent), so the
+  // A non-null tool rollup so the tool-usage read (both arms) + the driver-DERIVED diagnostic are exercised.
+  const TOOL_ROLLUP = {
+    agentId: 'wb-1',
+    toolCalls: 6,
+    toolErrors: 0,
+    redundantReads: 0,
+    permissionAsks: 0,
+    turnsToFirstProductiveCoCall: 0,
+  };
+  // An injected econ store that DOES return non-null cost + tool rollups (present, not PR-B-absent), so the
   // sandbox-fake null below is the fidelity short-circuit at work, not a missing store.
   const openEconWithCost = (): {
     getAgentCostRollup: () => typeof ECON_ROLLUP;
-    getAgentToolUsage: () => null;
+    getAgentToolUsage: () => typeof TOOL_ROLLUP;
     close: () => void;
   } => ({
     getAgentCostRollup: () => ECON_ROLLUP,
-    getAgentToolUsage: () => null,
+    getAgentToolUsage: () => TOOL_ROLLUP,
     close: () => {},
   });
 
@@ -288,11 +308,30 @@ describe('readWorkerEcon — sandbox cost-skip parity + log-don’t-swallow (her
     // store would have returned a rollup. If the sandbox-fake skip is removed, this cost is non-null ⇒ fail.
     const sandbox = readWorkerEcon(projectId, 'wb-1', 'sandbox-fake', openEconWithCost);
     expect(sandbox.cost).toBeNull();
+    // The tool rollup IS read in BOTH arms (tool calls are observable in the sandbox too).
+    expect(sandbox.tool).toEqual(TOOL_ROLLUP);
 
     // HOST-LIVE arm: the SAME injected rollup IS read — proving the short-circuit is the only thing nulling
     // the sandbox arm (parity with the orchestration driver's readAgentEcon).
     const live = readWorkerEcon(projectId, 'wb-1', 'host-live', openEconWithCost);
     expect(live.cost).toEqual(ECON_ROLLUP);
+    expect(live.tool).toEqual(TOOL_ROLLUP);
+  });
+
+  it('folds a non-null tool rollup into a non-null contextEfficiency + the completion-gated toolCallsPerCompletedTask the driver derives', () => {
+    // Mirrors runWorkerBenchmark's derivation: toolCallsPerCompletedTask = (tool == null || !completed)
+    // ? null : tool.toolCalls — single-agent, so it is the whole tool-call count when the run completed.
+    const derive = (tool: typeof TOOL_ROLLUP | null, completed: boolean): number | null =>
+      tool == null || !completed ? null : tool.toolCalls;
+
+    const completed = buildToolEfficiency(TOOL_ROLLUP, derive(TOOL_ROLLUP, true));
+    expect(completed.contextEfficiency).not.toBeNull();
+    expect(completed.toolCallsPerCompletedTask).toBe(TOOL_ROLLUP.toolCalls);
+
+    // A not-completed run has no completed task to divide by ⇒ the diagnostic is null (never a wrong count).
+    const notCompleted = buildToolEfficiency(TOOL_ROLLUP, derive(TOOL_ROLLUP, false));
+    expect(notCompleted.contextEfficiency).not.toBeNull();
+    expect(notCompleted.toolCallsPerCompletedTask).toBeNull();
   });
 
   it('LOGS (does not silently swallow) when the econ store open throws, still degrading to null', () => {

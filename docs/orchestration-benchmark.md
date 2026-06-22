@@ -109,7 +109,8 @@ orchestration-benchmark calc-lib — PASS (host-live, claude-only)
         tools=… err=0 redundantReads=0 permAsks=0 ctxEff=0.96 [diag: firstCoCall=… tools/task=…]
 ```
 
-(In a **sandbox** run the `token-economy` column and every raw token field render as `N/A`, not `0` — the
+(In a **sandbox** run the `token-economy` column and every raw token field render as `N/A`, not `0`;
+`context-efficiency` also renders `N/A` until PR B's per-agent tool-usage rollup lands — see the
 N/A-in-sandbox rule below.)
 
 ### Provider-pinning modes
@@ -184,7 +185,7 @@ They are independent on purpose: a high token-economy can **never** mask a corre
 | --- | --- | --- | --- |
 | **CORRECTNESS** | both | `(casesPassed/casesTotal) × (completed?1:0) × clamp01(mergedUp/required) × (everyMergeReviewed?1:0)` | objective; refines the binary oracle into a case fraction, gated by structural completeness |
 | **TOKEN-ECONOMY** | **live only** | `clamp01(budgetTokens / max(actualTokens, 1))` | **`null` in the sandbox arm** (`fidelity === 'sandbox-fake'` — no real tokens are spent). Sub-signal `cacheEfficiency = cacheReadTokens / max(cacheReadTokens + cacheCreationTokens, 1)` |
-| **CONTEXT/TOOL-EFFICIENCY** | both | `0.4·(1−toolFailRate) + 0.4·(1−redundantReadRate) + 0.2·(1−permissionAskRate)` | `xRate = x / max(toolCalls, 1)`; the weights are **tunable** (`CONTEXT_EFFICIENCY_WEIGHTS`) |
+| **CONTEXT/TOOL-EFFICIENCY** | both | `0.4·(1−toolFailRate) + 0.4·(1−redundantReadRate) + 0.2·(1−permissionAskRate)` | `xRate = x / max(toolCalls, 1)`; the weights are **tunable** (`CONTEXT_EFFICIENCY_WEIGHTS`); `null` until the per-agent tool-usage rollup lands |
 
 Raw per-agent fields backing the scores: `tokenEconomy.{inputTokens, outputTokens, cacheReadTokens,
 cacheCreationTokens, totalTokens, costUsd, tokenEconomy, cacheEfficiency}` (live-only; every field `null`

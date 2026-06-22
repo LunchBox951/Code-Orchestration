@@ -477,6 +477,44 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
+  it('stop({ waitForInFlight: false }) skips the in-flight drain and runs teardown immediately', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const pane = await hostPane(engine, pty, makeIdentity('impl-x', projectId, cwd));
+    seedActionableMail(projectId, 'impl-x');
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+    });
+    const scheduler = new FakeScheduler();
+    const onStop = vi.fn();
+    const runner = new ConductorHostRunner({
+      daemon,
+      intervalMs: 1000,
+      scheduler,
+      onStop,
+    });
+    runner.start();
+
+    scheduler.fire();
+    await tick(); // beat #1's daemon tick is now in flight, parked at the unsettled turn
+
+    // stop with waitForInFlight:false resolves WITHOUT awaiting the still-pending tick — the false branch
+    // skips the `await this.inFlight`/`watchdogInFlight` drain that the default-true case deliberately does.
+    await runner.stop({ waitForInFlight: false });
+    expect(onStop).toHaveBeenCalledTimes(1);
+
+    // Drain the pending tick cleanly so the test does not leak an unhandled promise.
+    await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
+    await flush();
+  });
+
   it('step() is awaitable and resolves only after the daemon tick completes', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);

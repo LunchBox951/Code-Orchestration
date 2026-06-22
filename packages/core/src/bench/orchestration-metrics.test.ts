@@ -423,6 +423,21 @@ describe('the three scores — TOKEN-ECONOMY (live-only; N/A in the sandbox arm)
     expect(tokenEconomyScore(null, 2000)).toBeNull();
   });
 
+  it('tokenEconomyScore: a PRESENT rollup with no real tokens (totalTokens=0) ⇒ null (N/A), not a perfect score', () => {
+    // A partial/failed cost capture that records a rollup row but no token counts must NOT surface as a
+    // flawless economy run — "no economy evidence" is N/A, never 1.0 (the inverse silent-zero trap).
+    const zero: AgentCostRollup = {
+      agentId: 'a',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+    };
+    expect(tokenEconomyScore(zero, 2000)).toBeNull();
+  });
+
   it('cacheEfficiency: read share of cacheable tokens; null cost ⇒ null', () => {
     const cached: AgentCostRollup = {
       agentId: 'a',

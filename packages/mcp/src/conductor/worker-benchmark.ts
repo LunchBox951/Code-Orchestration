@@ -22,7 +22,7 @@ import {
   budgetTokensForScenario,
   buildTokenEconomy,
   buildToolEfficiency,
-  clamp01,
+  correctnessScore,
   defaultMailRenderer,
   openDispatchStore,
   openMailStore,
@@ -257,7 +257,16 @@ export async function runWorkerBenchmark(
     // there is no rollup / the single task did not complete (never a divide-by-zero).
     const toolCallsPerCompletedTask = tool == null || !completed ? null : tool.toolCalls;
     const scores: WorkerScores = {
-      correctness: workerCorrectness(artifact, completed),
+      // Single-agent CORRECTNESS via core's scorer: there are no implementer merges, so the merge-up /
+      // every-merge-reviewed factors are vacuously 1. Core owns the normalization + the fail-closed
+      // zero-case rule so the worker corpus shares ONE correctness definition with orchestration.
+      correctness: correctnessScore({
+        artifact,
+        completed,
+        implementerBranchesMergedUp: 0,
+        requiredImplementerMerges: 0, // requiredImplementerMerges <= 0 ⇒ mergeFactor = 1 (vacuous)
+        everyMergeHadReview: true, // ⇒ reviewFactor = 1 (vacuous)
+      }),
       tokenEconomy: buildTokenEconomy(cost, budgetTokensForScenario(scenario.id)),
       toolEfficiency: buildToolEfficiency(tool, toolCallsPerCompletedTask),
     };
@@ -379,20 +388,6 @@ export function doneMailObserved(
   } finally {
     store.close();
   }
-}
-
-/**
- * The single-agent CORRECTNESS score: the oracle case fraction, gated by completion. There are no
- * implementer merges in the single-agent case, so the orchestration merge-up / every-merge-reviewed
- * factors are vacuously 1 — correctness reduces to `(casesPassed/casesTotal) × (completed ? 1 : 0)`.
- * `casesTotal === 0` (a scenario with no oracle cases) yields 0 (we cannot claim correctness with no
- * evidence — fail-closed, mirrors the orchestration `correctnessScore`).
- */
-export function workerCorrectness(artifact: ArtifactCheck, completed: boolean): number {
-  const casesPassed = artifact.casesPassed ?? (artifact.correct ? 1 : 0);
-  const casesTotal = artifact.casesTotal ?? 1;
-  if (casesTotal <= 0) return 0;
-  return clamp01((casesPassed / casesTotal) * (completed ? 1 : 0));
 }
 
 /**

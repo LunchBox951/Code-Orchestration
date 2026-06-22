@@ -104,15 +104,18 @@ export function correctnessScore(input: {
 /**
  * The TOKEN-ECONOMY score (LIVE-ONLY). `null` when no cost rollup is available — i.e. a SANDBOX run spends
  * no real tokens, so the driver passes `null` and this returns `null` (N/A), NEVER 0 (the silent-zero trap
- * that already afflicts live `turnsUsed`). When a rollup IS present:
- *   tokenEconomy = clamp01(budgetTokens / max(actualTokens, 1))
+ * that already afflicts live `turnsUsed`). A PRESENT rollup that reports no real token observation
+ * (`totalTokens <= 0` — a partial/failed cost capture) is also `null` (N/A), never a misleading perfect
+ * score; this matches the fail-closed `casesTotal <= 0` rule in {@link correctnessScore}. When a rollup IS
+ * present with real tokens:
+ *   tokenEconomy = clamp01(budgetTokens / actualTokens)
  */
 export function tokenEconomyScore(
   cost: AgentCostRollup | null,
   budgetTokens: number,
 ): number | null {
-  if (cost == null) return null;
-  return clamp01(budgetTokens / Math.max(cost.totalTokens, 1));
+  if (cost == null || cost.totalTokens <= 0) return null;
+  return clamp01(budgetTokens / cost.totalTokens);
 }
 
 /**
@@ -163,7 +166,7 @@ export interface AgentTokenEconomy {
   readonly cacheCreationTokens: number | null;
   readonly totalTokens: number | null;
   readonly costUsd: number | null;
-  /** clamp01(budgetTokens / max(totalTokens, 1)); `null` in the sandbox arm. */
+  /** clamp01(budgetTokens / totalTokens); `null` in the sandbox arm or with no real tokens observed. */
   readonly tokenEconomy: number | null;
   /** cacheRead / (cacheRead + cacheCreation); `null` in the sandbox arm. */
   readonly cacheEfficiency: number | null;
@@ -443,11 +446,13 @@ function buildRunScores(
 }
 
 function normalizeArtifactCheck(artifact: ArtifactCheck): ArtifactCheckWithCases {
-  return {
-    ...artifact,
-    casesPassed: artifact.casesPassed ?? (artifact.correct ? 1 : 0),
-    casesTotal: artifact.casesTotal ?? 1,
-  };
+  // The two case fields encode ONE invariant (`correct === (casesPassed === casesTotal)`, `casesTotal > 0`),
+  // so normalize them as a UNIT: if EITHER is absent, fall back to the legacy default block atomically
+  // rather than mixing a present field with a defaulted one (which could synthesize a passed>total state).
+  if (artifact.casesPassed == null || artifact.casesTotal == null) {
+    return { ...artifact, casesPassed: artifact.correct ? 1 : 0, casesTotal: 1 };
+  }
+  return { ...artifact, casesPassed: artifact.casesPassed, casesTotal: artifact.casesTotal };
 }
 
 function normalizeAgentRunMetric(

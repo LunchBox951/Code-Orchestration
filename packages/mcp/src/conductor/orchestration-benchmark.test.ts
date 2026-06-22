@@ -25,7 +25,7 @@
  * back from the store, never asserted as a literal). Git fixtures are init'd with `commit.gpgsign=false`
  * and a Signed-off-by (mirrors sh1-dry-run's `git()` setup).
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -1149,13 +1149,23 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
       totalTokens: 3100,
       costUsd: 0.42,
     };
+    // A non-null tool rollup so the live arm exercises the live tool-usage read + the driver-DERIVED
+    // toolCallsPerCompletedTask (toolCalls / completedTaskCount) and its divide-by-zero guard.
+    const TOOL_ROLLUP = {
+      agentId: 'coord-a',
+      toolCalls: 6,
+      toolErrors: 0,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: 0,
+    };
     const openEconWithCost = (): {
       getAgentCostRollup: () => typeof ECON_ROLLUP;
-      getAgentToolUsage: () => null;
+      getAgentToolUsage: () => typeof TOOL_ROLLUP;
       close: () => void;
     } => ({
       getAgentCostRollup: () => ECON_ROLLUP,
-      getAgentToolUsage: () => null,
+      getAgentToolUsage: () => TOOL_ROLLUP,
       close: () => {},
     });
 
@@ -1181,6 +1191,46 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
     expect(liveCoord?.tokenEconomy?.totalTokens).toBe(3100);
     expect(liveCoord?.tokenEconomy?.costUsd).toBe(0.42);
     expect(liveCoord?.tokenEconomy?.tokenEconomy).not.toBeNull();
+    // The live tool rollup is read + folded: contextEfficiency is non-null and the DERIVED diagnostic is
+    // toolCalls / completedTaskCount = 6 / 1 = 6.
+    expect(liveCoord?.toolEfficiency?.contextEfficiency).not.toBeNull();
+    expect(liveCoord?.toolEfficiency?.toolCallsPerCompletedTask).toBe(6);
+
+    // The divide-by-zero guard: with completedTaskCount 0 the derived diagnostic is null (no Infinity),
+    // even though the tool rollup is present.
+    const liveNoTasks = aggregateAgentMetrics(
+      projectId,
+      {},
+      'calc-lib',
+      'host-live',
+      0,
+      openEconWithCost,
+    );
+    const liveNoTasksCoord = liveNoTasks.find((a) => a.agentId === 'coord-a');
+    expect(liveNoTasksCoord?.toolEfficiency?.toolCallsPerCompletedTask).toBeNull();
+  });
+
+  it('aggregateAgentMetrics LOGS (does not silently swallow) when the econ store open throws, still degrading to null scores', () => {
+    const { projectId } = makeProject();
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-a', role: 'coordinator', parent: OPERATOR });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const throwingOpen = (): never => {
+        throw new Error('boom: dispatch store unavailable');
+      };
+      // host-live (NOT sandbox-fake) so the cost read is attempted and openEcon is actually called.
+      const agents = aggregateAgentMetrics(projectId, {}, 'calc-lib', 'host-live', 1, throwingOpen);
+      const coord = agents.find((a) => a.agentId === 'coord-a');
+      // Degrades to null scores (the run is still graded) AND the failure is surfaced on stderr (Principle 9).
+      expect(coord?.tokenEconomy?.tokenEconomy).toBeNull();
+      expect(coord?.toolEfficiency?.contextEfficiency).toBeNull();
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]?.[0]).toMatch(/econ read failed/u);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('aggregateMergeOutcomes + countImplementerBranchesMergedUp read review rounds/kickbacks/merge-up from the stores', () => {

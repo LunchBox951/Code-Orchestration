@@ -368,6 +368,44 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
     }
   });
 
+  it('rejects a cold-started Codex root when no isolated CODEX_HOME seam is provided', async () => {
+    const { projectId, repo } = makeProject();
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+    const tier = resolveTier('technical', 'deep', 'codex');
+    const dispatch = openDispatchStore(projectId);
+    try {
+      dispatch.recordPlacement(coordinator, {
+        kind: 'placed',
+        role: 'coordinator',
+        work_size: 'technical',
+        reasoning_budget: 'deep',
+        provider: 'codex',
+        account: accountForProvider('codex'),
+        model: tier.model,
+        effort: tier.effort,
+        context: tier.context,
+      });
+    } finally {
+      dispatch.close();
+    }
+
+    const clock = makeClock();
+    const daemon = new ConductorDaemon({
+      engine: makeEngine(new FakePty(), clock, makeQuietWindow()),
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+      // intentionally NO codexHomeFor — the cold-start must fail loud rather than launch without isolation.
+    });
+    // The throw propagates out of the tick (toColdAgentIdentity runs during discovery, before the agent
+    // is driven), so the pane/CODEX_READY/driveTurnToIdle dance is unnecessary here.
+    await expect(daemon.tick()).rejects.toThrow(/no isolated CODEX_HOME seam/);
+  });
+
   it('cold-starts an operator-started Codex-only root from the start primitive placement', async () => {
     const { projectId, repo } = makeProject();
     const config = openConfigStore();
