@@ -18,6 +18,7 @@ import { openProjectStore } from '../../store/sqlite-store.js';
 import { openDispatchStore } from '../../dispatch/dispatch-store.js';
 import { accountForProvider } from '../../dispatch/provider-source.js';
 import type { ReviewerSpawnGate } from '../../review/merge.js';
+import * as branchState from '../../worktrees/branch-state.js';
 import { openSpecStore, type SpecStore } from '../../specs/specs-store.js';
 import { buildCoreRegistry } from '../core-registry.js';
 import { invokeTool } from '../invoke.js';
@@ -274,6 +275,166 @@ describe('co_merge (AC-L5-1, AC-L5-3)', () => {
     expect(existsSync(join(repo, 'feature.txt'))).toBe(true);
     expect(existsSync(join(repo, '.co'))).toBe(false);
     expect(out.baseline_failures).toBeUndefined();
+  });
+
+  it('merge-time teardown of a LIVE+DIRTY sandbox snapshots residue then force-removes it (#76)', async () => {
+    // Every other merge test records the worktree at the absent path '/tmp/fake', so the teardown
+    // closure's dirty PROBE hits the absent-dir fallback (existsSync → false) and the new
+    // archive-then-force branch is DEAD. Here the sandbox dir EXISTS and reports dirty, so the closure
+    // must snapshot the residue first and force-remove the worktree — the #76 cure. This test fails
+    // against a plain (no-force) teardown and passes with the archive-then-force hardening.
+    const repo = makeRepo();
+    // A real, present sandbox dir so the tightened probe (existsSync → isWorktreeDirty) is reached.
+    const sandbox = mkdtempSync(join(tmpdir(), 'co-merge-tool-sandbox-'));
+    tmpDirs.push(sandbox);
+    const reg = buildCoreRegistry();
+    const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+    const reviewedHead = git(repo, 'rev-parse', 'co/feature');
+    // Record the worktree at the REAL sandbox path (not '/tmp/fake') so getWorktree returns a live
+    // record (removed=false) whose path actually exists on disk.
+    worktreeStore!.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        path: sandbox,
+        parent: 'lead-2',
+      },
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        tests: [{ name: 'test-a', passed: true }],
+      },
+    );
+    worktreeStore!.recordFinish({
+      branch: 'co/feature',
+      baseSha: FAKE_SHA,
+      commitSha: reviewedHead,
+      tests: [{ name: 'test-a', passed: true }],
+    });
+    reviewStore!.recordVerdict({
+      reviewId: 'rev-1',
+      target: 'main',
+      branch: 'co/feature',
+      reviewer: 'rev-7',
+      verdict: 'PASS',
+      blockers: [],
+      suggestions: [],
+      verification: { commands_run: ['pnpm test'], suite_result: 'pass', baseline_compared: true },
+    });
+
+    // The present sandbox reports dirty; the snapshot is stubbed (no real git commit on the temp dir);
+    // removeWorktree is stubbed to capture the deps without performing the real bounded-path teardown.
+    const dirtySpy = vi.spyOn(branchState, 'isWorktreeDirty').mockReturnValue(true);
+    const snapshotSpy = vi
+      .spyOn(branchState, 'snapshotDirtyWorktree')
+      .mockReturnValue('f'.repeat(40));
+    const removeSpy = vi.spyOn(worktreeStore!, 'removeWorktree').mockImplementation((branch) => ({
+      branch,
+      baseRef: 'main',
+      baseSha: FAKE_SHA,
+      path: sandbox,
+      parent: 'lead-2',
+      agent: 'lead-2',
+      createdTs: 0,
+      removed: true,
+    }));
+    try {
+      const out = (await invokeTool(reg, ctx, 'co_merge', {
+        branch: 'co/feature',
+        into: 'main',
+        intent: { summary: 'land the feature' },
+      })) as MergeOut & { tore_down?: boolean };
+
+      expect(out.merged).toBe(true);
+      expect(out.tore_down).toBe(true);
+      // The dirty residue was snapshotted onto the branch BEFORE the worktree was removed.
+      expect(snapshotSpy).toHaveBeenCalledTimes(1);
+      expect(snapshotSpy.mock.calls[0]![0]).toBe(sandbox);
+      // The worktree was FORCE-removed — git refuses a non-force remove of a dirty tree (#76).
+      expect(removeSpy).toHaveBeenCalledTimes(1);
+      const removeDeps = removeSpy.mock.calls[0]![1];
+      expect(removeDeps.force).toBe(true);
+      expect(removeDeps.repoCwd).toBe(repo);
+      // The probe was reached on the present sandbox (not short-circuited away).
+      expect(dirtySpy).toHaveBeenCalled();
+    } finally {
+      dirtySpy.mockRestore();
+      snapshotSpy.mockRestore();
+      removeSpy.mockRestore();
+    }
+  });
+
+  it('merge-time teardown does NOT downgrade a PRESENT dirty tree to a non-force remove on a transient git failure (#76, Principle 9)', async () => {
+    // Review hardening: probeWorktreeDirty must swallow ONLY an absent-dir (ENOENT) failure. A transient
+    // git failure on a PRESENT sandbox is an UNKNOWN state — silently treating it as "not dirty" would
+    // route a possibly-dirty tree through a non-force remove (which git refuses, stranding it + losing
+    // the residue). So the probe re-throws; the teardown closure surfaces toreDown=false and NEVER calls
+    // removeWorktree, leaving the sandbox intact for a later retry rather than risking data loss.
+    const repo = makeRepo();
+    const sandbox = mkdtempSync(join(tmpdir(), 'co-merge-tool-sandbox-'));
+    tmpDirs.push(sandbox);
+    const reg = buildCoreRegistry();
+    const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+    const reviewedHead = git(repo, 'rev-parse', 'co/feature');
+    worktreeStore!.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        path: sandbox,
+        parent: 'lead-2',
+      },
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        tests: [{ name: 'test-a', passed: true }],
+      },
+    );
+    worktreeStore!.recordFinish({
+      branch: 'co/feature',
+      baseSha: FAKE_SHA,
+      commitSha: reviewedHead,
+      tests: [{ name: 'test-a', passed: true }],
+    });
+    reviewStore!.recordVerdict({
+      reviewId: 'rev-1',
+      target: 'main',
+      branch: 'co/feature',
+      reviewer: 'rev-7',
+      verdict: 'PASS',
+      blockers: [],
+      suggestions: [],
+      verification: { commands_run: ['pnpm test'], suite_result: 'pass', baseline_compared: true },
+    });
+
+    // The present sandbox throws a NON-ENOENT (transient git) failure on the dirty probe.
+    const dirtySpy = vi.spyOn(branchState, 'isWorktreeDirty').mockImplementation(() => {
+      throw new Error('fatal: git index lock held by another process');
+    });
+    const snapshotSpy = vi.spyOn(branchState, 'snapshotDirtyWorktree');
+    const removeSpy = vi.spyOn(worktreeStore!, 'removeWorktree');
+    try {
+      const out = (await invokeTool(reg, ctx, 'co_merge', {
+        branch: 'co/feature',
+        into: 'main',
+        intent: { summary: 'land the feature' },
+      })) as MergeOut & { tore_down?: boolean };
+
+      // The merge still LANDED — teardown never masks it (AC-L5-7).
+      expect(out.merged).toBe(true);
+      // But the teardown did NOT complete: the unknown dirty state propagated.
+      expect(out.tore_down).toBe(false);
+      // Crucially the tree was NOT removed at all — not force, and (the bug we guard) not plain either.
+      expect(snapshotSpy).not.toHaveBeenCalled();
+      expect(removeSpy).not.toHaveBeenCalled();
+    } finally {
+      dirtySpy.mockRestore();
+      snapshotSpy.mockRestore();
+      removeSpy.mockRestore();
+    }
   });
 
   it('refuses a local merge when reviewed commits are missing Signed-off-by trailers', async () => {

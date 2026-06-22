@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { OPERATOR } from '../../mail/events.js';
 import { roleParentResolver } from '../../mail/escalation.js';
 import {
@@ -197,16 +198,40 @@ function resolveMergeBaseSha(repoCwd: string, into: string, branch: string): str
 }
 
 /**
+ * Does the merge-time error mean the sandbox dir is simply ABSENT (so the dirty-probe should fall
+ * through to the plain remove), rather than a transient git/IO failure on a PRESENT tree?
+ *
+ * Only an ENOENT — a `cwd`/dir that vanished between the `existsSync` check and the `git status` read
+ * (a TOCTOU race against a concurrent teardown) — is treated as "absent". Every other failure (a git
+ * binary error, a permissions/EACCES fault, or `isWorktreeDirty`'s own "unable to read git status"
+ * throw on a present worktree) is a genuine, unknown state that MUST propagate: silently downgrading
+ * it to `false` here would route a possibly-dirty tree through a NON-force remove, which git refuses —
+ * stranding the sandbox and losing the residue it was supposed to snapshot first (Principle 9).
+ */
+function isAbsentDirError(cause: unknown): boolean {
+  return (
+    cause != null &&
+    typeof cause === 'object' &&
+    'code' in cause &&
+    (cause as { code?: unknown }).code === 'ENOENT'
+  );
+}
+
+/**
  * A defensive `isWorktreeDirty` for the merge-time teardown closure (#76): returns false (rather than
- * throwing) when the sandbox dir is gone/unreadable, so a half-torn-down or never-materialized sandbox
+ * throwing) ONLY when the sandbox dir is absent, so a half-torn-down or never-materialized sandbox
  * falls through to the plain remove instead of becoming a new teardown failure. A genuinely
- * present-but-dirty tree still reports dirty so its residue is snapshotted before a force-remove.
+ * present-but-dirty tree still reports dirty so its residue is snapshotted before a force-remove, and a
+ * transient git failure on a PRESENT tree propagates (never silently downgraded to a non-force remove —
+ * Principle 9).
  */
 function probeWorktreeDirty(sandboxPath: string): boolean {
+  if (!existsSync(sandboxPath)) return false;
   try {
     return isWorktreeDirty(sandboxPath);
-  } catch {
-    return false;
+  } catch (cause) {
+    if (isAbsentDirError(cause)) return false;
+    throw cause;
   }
 }
 

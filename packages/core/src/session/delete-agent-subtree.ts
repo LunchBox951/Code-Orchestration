@@ -377,7 +377,13 @@ export function deleteAgentSubtree(
               // worktree here when its archive write has NOT yet landed; reaching the merged arm with
               // `wt.removed` set therefore means a prior pass force-removed-then-failed-to-archive — that
               // residue belongs to the archive lifecycle (self-heal the missing record), never `branch -d`.
-              const needsArchive = wt.removed || isWorktreeDirty(wt.path, gitReader);
+              // Read the dirty state ONCE and reuse it for both the archive decision and the snapshot
+              // guard below (it was previously read twice on the dirty path). `wt.removed` short-circuits
+              // the read on a retry whose sandbox a prior pass already force-removed (the dir is gone, so
+              // `isWorktreeDirty` would throw on its absent cwd) — that residue still `needsArchive` to
+              // self-heal the missing record, and the snapshot guard is skipped under `!wt.removed`.
+              const dirty = !wt.removed && isWorktreeDirty(wt.path, gitReader);
+              const needsArchive = wt.removed || dirty;
 
               if (needsArchive) {
                 // Mirror the unmerged dirty path: snapshot → force-remove → archive (branch ref kept).
@@ -385,7 +391,7 @@ export function deleteAgentSubtree(
                 // only needs the missing archive record self-heals without re-snapshotting/-removing.
                 if (!wt.removed) {
                   try {
-                    if (isWorktreeDirty(wt.path, gitReader)) {
+                    if (dirty) {
                       snapshotDirtyWorktree(
                         wt.path,
                         'co: archive snapshot before delete',
