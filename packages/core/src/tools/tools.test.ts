@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { z } from 'zod';
 import { assertRepoPristine } from '../config/pristine.js';
 import {
   MAIL_CHAT,
@@ -26,6 +27,31 @@ const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
 let repoDirs: string[] = [];
 const CWD = '/work/p-tools'; // a fixed logical worktree path; the mail/status tools never touch disk
+
+const ORIENT_FIELD_NAME_STOPLIST = new Set([
+  'to',
+  'type',
+  'subject',
+  'body',
+  'decision',
+  'id',
+  'ids',
+  'role',
+  'topic',
+]);
+
+function distinctiveToolFieldIdentifiers(): string[] {
+  const out = new Set<string>();
+  for (const spec of buildCoreRegistry().list()) {
+    const schema = spec.inputSchema;
+    if (schema instanceof z.ZodObject) {
+      for (const field of Object.keys(schema.shape)) {
+        if (!ORIENT_FIELD_NAME_STOPLIST.has(field) && field.includes('_')) out.add(field);
+      }
+    }
+  }
+  return [...out];
+}
 
 function useDataDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'co-tools-'));
@@ -702,6 +728,8 @@ describe('co_status — the honest L2 agent record; counts track the bus', () =>
 });
 
 describe('co_orient — workflow-only guidance (Principle 5: schemas are the syntax source)', () => {
+  const distinctiveFieldTokens = distinctiveToolFieldIdentifiers();
+
   it('returns non-empty workflow guidance and restates NO tool field-name list', async () => {
     const { reg, ctx, close } = setup();
     try {
@@ -710,17 +738,8 @@ describe('co_orient — workflow-only guidance (Principle 5: schemas are the syn
       expect(out.guidance.toLowerCase()).toContain('mail'); // it teaches the coordination workflow
 
       // The schemas are the single syntax source — orient must not restate any tool's fields.
-      const FORBIDDEN_FIELD_TOKENS = [
-        'in_reply_to',
-        'idempotency_key',
-        'unread_only',
-        'thread_id',
-        'head_sha',
-        'inbox_unread',
-        'correlation_id',
-        'causation_id',
-      ];
-      for (const token of FORBIDDEN_FIELD_TOKENS) {
+      expect(distinctiveFieldTokens.length).toBeGreaterThan(0);
+      for (const token of distinctiveFieldTokens) {
         expect(out.guidance).not.toContain(token);
       }
     } finally {
@@ -736,7 +755,9 @@ describe('co_orient — workflow-only guidance (Principle 5: schemas are the syn
         topic: 'finish',
       })) as OrientOut;
       expect(out.guidance).toContain('implementer');
-      expect(out.guidance).not.toContain('in_reply_to');
+      for (const token of distinctiveFieldTokens) {
+        expect(out.guidance).not.toContain(token);
+      }
     } finally {
       close();
     }
