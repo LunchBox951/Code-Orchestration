@@ -44,6 +44,7 @@ import {
   GH_AUTH_TOKEN_TIMEOUT_MS,
   defaultServeCoMcpPaths,
   hostLiveTransportRequired,
+  hostLiveCaptureUsageSourceFactory,
   makeGhCommandResolver,
   makeGhAuthTokenRunner,
   resolveAndApplyDaemonGithubAuth,
@@ -475,6 +476,59 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     await stopP;
 
     expect(onStop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('hostLiveCaptureUsageSourceFactory', () => {
+  it('records the exact usage snapshot returned by the underlying source', async () => {
+    const samples: unknown[] = [];
+    const capture = {
+      armed: true,
+      captureMcpApproval: () => {},
+      captureClaudeStatusLine: () => {},
+      captureUsageSample: (obs: unknown) => samples.push(obs),
+    };
+    const factory = hostLiveCaptureUsageSourceFactory(capture, (account) => ({
+      read: async (provider) => ({
+        provider,
+        account: account.account,
+        available: true,
+        source: 'fake-live-source',
+        sampled_at: '2026-06-22T00:00:00.000Z',
+        windows: [],
+      }),
+    }));
+
+    expect(factory).toBeDefined();
+    const snapshot = await factory!({ provider: 'claude', account: 'claude:max' }).read('claude');
+
+    expect(snapshot).toEqual({
+      provider: 'claude',
+      account: 'claude:max',
+      available: true,
+      source: 'fake-live-source',
+      sampled_at: '2026-06-22T00:00:00.000Z',
+      windows: [],
+    });
+    expect(samples).toEqual([
+      {
+        provider: 'claude',
+        account: 'claude:max',
+        source: 'fake-live-source',
+        raw: snapshot,
+      },
+    ]);
+  });
+
+  it('does not wrap the usage source when capture is inert', () => {
+    const factory = hostLiveCaptureUsageSourceFactory({
+      armed: false,
+      captureMcpApproval: () => {},
+      captureClaudeStatusLine: () => {},
+      captureUsageSample: () => {},
+    });
+
+    expect(factory).toBeUndefined();
   });
 });
 

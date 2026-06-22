@@ -33,6 +33,7 @@ import {
   assertDeleteAgentSubtreePreflight,
   deleteAgentSubtree,
   descendantsLeafFirst,
+  defaultUsageSourceFactory,
   isMissingBranchDeleteError,
   openArchiveStore,
   openMailStore,
@@ -57,6 +58,9 @@ import {
   type RunningAgent,
   type TranscriptTail,
   type GitExec,
+  type ProviderAccount,
+  type ProviderUsageSource,
+  type UsageSourceFactory,
 } from '@co/core';
 import { ReconcileLoop } from '@co/core';
 import { ConductorEngine, type TransportPair } from './engine.js';
@@ -343,6 +347,32 @@ function statusLineCandidates(chunk: string): string[] {
     .filter((line) => line.length > 0 && /\b(usage|limit|reset|tokens?|%|context)\b/iu.test(line));
 }
 
+/**
+ * [host-live capture · usage sample] Wrap the normal passive usage source when capture is armed so a
+ * real dispatcher read records the exact snapshot it consumed. Unarmed capture gets no wrapper.
+ */
+export function hostLiveCaptureUsageSourceFactory(
+  capture: HostLiveCapture | undefined,
+  baseFactory: UsageSourceFactory = defaultUsageSourceFactory,
+): UsageSourceFactory | undefined {
+  if (capture?.armed !== true) return undefined;
+  return (account: ProviderAccount): ProviderUsageSource => {
+    const source = baseFactory(account);
+    return {
+      async read(provider) {
+        const snapshot = await source.read(provider);
+        capture.captureUsageSample({
+          provider: snapshot.provider,
+          account: snapshot.account,
+          source: snapshot.source,
+          raw: snapshot,
+        });
+        return snapshot;
+      },
+    };
+  };
+}
+
 function reportServeControlDiagnostic(
   onError: ((error: unknown) => void) | undefined,
   error: Error,
@@ -572,6 +602,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   // so a real provider's composer echo is recorded (#77). Inert (adds nothing) when unarmed.
   const injectCapture =
     opts.hostLiveCapture != null ? injectCaptureOptions(opts.hostLiveCapture) : {};
+  const usageSourceFactory = hostLiveCaptureUsageSourceFactory(opts.hostLiveCapture);
   const engine = new ConductorEngine({
     pty,
     makeTransport,
@@ -580,6 +611,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     reviewerSpawnGate: () => spawnGate,
     ...(spawnSpecFor != null ? { spawnSpecFor } : {}),
     ...('onPasteEcho' in injectCapture ? { injectOptions: injectCapture } : {}),
+    ...(usageSourceFactory != null ? { usageSourceFactory } : {}),
   });
   if (opts.coMcpPaths != null) {
     ownedWtStore = openWorktreeStore(projectId);
@@ -597,9 +629,8 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
   // (inert by default — zero overhead). The unsubscribe is torn down with the engine on stop.
   if (opts.hostLiveCapture?.armed === true) {
     const capture = opts.hostLiveCapture;
-    engine.onTranscript((pid, agentId, chunk) => {
+    engine.onTranscript((pid, agentId, chunk, _offset, provider) => {
       if (pid !== projectId) return;
-      const provider = engine.getHosted(projectId, agentId)?.identity.provider ?? 'unknown';
       // #78 — an interactive MCP-tool approval prompt in the pane stream means the pre-grant did NOT
       // suppress it (the codex pane would deadlock). Record an excerpt so the real prompt is captured.
       if (looksLikeApprovalPrompt(chunk)) {
@@ -1184,11 +1215,14 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   // [host-live capture] Arm the observation harness when CO_HOST_LIVE_CAPTURE=<dir> is set, so a single
   // real run records the codex paste-preview bytes / MCP-approval prompt / status-line / usage sample
   // that finalize the PLACEHOLDER constants. INERT (zero overhead) when the env is unset.
-  const hostLiveCapture = openHostLiveCapture(process.env);
+  const hostLiveCapture = openHostLiveCapture(process.env, undefined, {
+    forbiddenRoot: process.cwd(),
+    onError: (error) => console.error(`[co-mcp serve] ${error.message}`),
+  });
   if (hostLiveCapture.armed) {
     console.error(
       `[co-mcp serve] host-live capture: ARMED — recording observations to ` +
-        `${process.env['CO_HOST_LIVE_CAPTURE']} (#77/#78 placeholder finalization).`,
+        `${hostLiveCapture.dir} (#77/#78 placeholder finalization).`,
     );
   }
   const runner = await serveConductor({

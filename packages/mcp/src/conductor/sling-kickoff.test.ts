@@ -605,6 +605,7 @@ async function hostCodexPane(
 function seedCodexKickoff(
   projectId: ProjectId,
   repo: string,
+  from = 'lead-1',
 ): { kickoff: DeliveredMail; worktreePath: string; ctxMail: MailStore } {
   const roster = openRosterStore(projectId);
   rosterStores.push(roster);
@@ -614,7 +615,7 @@ function seedCodexKickoff(
   mailStores.push(mail);
   const kickoff = mail.send({
     type: 'clarify_request',
-    from: 'lead-1',
+    from,
     to: 'impl-cx',
     subject: 'kickoff',
     body: 'Implement the feature per the spec in your session context.',
@@ -642,6 +643,12 @@ function kickoffOutstanding(projectId: ProjectId, seq: number): boolean {
   const store = openMailStore(projectId);
   mailStores.push(store);
   return store.outstanding('impl-cx').some((m) => m.seq === seq);
+}
+
+function outstandingFor(projectId: ProjectId, agent: string): readonly DeliveredMail[] {
+  const store = openMailStore(projectId);
+  mailStores.push(store);
+  return store.outstanding(agent);
 }
 
 /** Drive ONE successful codex turn: emit the collapsed-paste preview (needle-matching), then idle. */
@@ -720,6 +727,33 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
     await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 3 == cap → retracted
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+  });
+
+  it('surfaces a durable actionable notice to the kickoff sender when the cap retracts it', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo, '@operator');
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    const [notice] = outstandingFor(projectId, '@operator').filter(
+      (item) =>
+        item.sender === 'impl-cx' &&
+        item.type === 'clarify_request' &&
+        item.subject === 'Kickoff injection failed for impl-cx',
+    );
+    expect(notice).toBeDefined();
+    expect(notice!.body).toContain('retracted after 3 failed injection attempt(s)');
+    expect(notice!.body).toContain(`Original kickoff seq: ${kickoff.seq}`);
+    expect(notice!.body).toContain('Original kickoff body:');
   });
 
   it('resets the budget after a SUCCESS — NON-VACUOUS: 2 more failed injects after a success stay under the cap', async () => {

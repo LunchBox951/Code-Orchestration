@@ -1399,6 +1399,31 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     expect(seen).toEqual([CLAUDE_READY]);
   });
 
+  it('tags startup transcript bytes with the authoritative provider before the pane is registered', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({
+      agent: 'impl-codex',
+      projectId,
+      cwd,
+      provider: 'codex',
+      resume: { provider: 'codex', codexHome: join(cwd, '.codex-home') },
+    });
+    const { engine, pty } = makeEngine();
+    const seen: Array<[ProjectId, string, string, string]> = [];
+    const unsub = engine.onTranscript((pid, agent, chunk, _offset, provider) =>
+      seen.push([pid, agent, chunk, provider]),
+    );
+
+    const ensureP = engine.ensureHosted(identity);
+    const pane = pty.panes[pty.panes.length - 1]!;
+    pane.emit('› \r\n  send · newline\r\n');
+    await ensureP;
+    unsub();
+
+    expect(seen).toEqual([[projectId, 'impl-codex', '› \r\n  send · newline\r\n', 'codex']]);
+  });
+
   it('accumulates a hosted pane’s output (ANSI/ESC bytes intact) into the tail', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
@@ -1450,23 +1475,25 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     expect(engine.transcriptTail(projectId, 'nobody')).toBe('');
   });
 
-  it('onTranscript fires (projectId, agent, chunk) on every chunk; unsubscribe stops it', async () => {
+  it('onTranscript fires (projectId, agent, chunk, provider) on every chunk; unsubscribe stops it', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
     const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
     const { engine, pty } = makeEngine();
     const { pane } = await hostPane(engine, pty, identity);
 
-    const seen: Array<[ProjectId, string, string]> = [];
-    const unsub = engine.onTranscript((pid, agent, chunk) => seen.push([pid, agent, chunk]));
+    const seen: Array<[ProjectId, string, string, string]> = [];
+    const unsub = engine.onTranscript((pid, agent, chunk, _offset, provider) =>
+      seen.push([pid, agent, chunk, provider]),
+    );
     pane.emit('one');
     pane.emit('two');
     unsub();
     pane.emit('three'); // after unsubscribe — not observed
 
     expect(seen).toEqual([
-      [projectId, 'impl-x', 'one'],
-      [projectId, 'impl-x', 'two'],
+      [projectId, 'impl-x', 'one', 'claude'],
+      [projectId, 'impl-x', 'two', 'claude'],
     ]);
   });
 

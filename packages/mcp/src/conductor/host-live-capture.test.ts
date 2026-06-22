@@ -6,14 +6,31 @@
  *   - SET env ⇒ ARMED (`onPasteEcho` present, observations shaped + appended through the sink).
  * The sink is injected so the gating/shaping is proven WITHOUT real I/O or a live binary.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   CAPTURE_FILES,
   CO_HOST_LIVE_CAPTURE_ENV,
+  fileCaptureSink,
   injectCaptureOptions,
   openHostLiveCapture,
   type HostLiveCaptureSink,
 } from './host-live-capture.js';
+
+let tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+  tempDirs = [];
+});
 
 function recordingSink(): {
   sink: HostLiveCaptureSink;
@@ -112,5 +129,70 @@ describe('openHostLiveCapture — armed when CO_HOST_LIVE_CAPTURE=<dir>', () => 
     const spread = injectCaptureOptions(capture);
     expect('onPasteEcho' in spread).toBe(true);
     expect(typeof (spread as { onPasteEcho?: unknown }).onPasteEcho).toBe('function');
+  });
+});
+
+describe('openHostLiveCapture — rejects unsafe or unwritable capture paths', () => {
+  it('refuses a relative capture path and reports a diagnostic', () => {
+    const errors: string[] = [];
+    const capture = openHostLiveCapture(
+      { [CO_HOST_LIVE_CAPTURE_ENV]: 'captures' },
+      recordingSink().sink,
+      { onError: (error) => errors.push(error.message) },
+    );
+
+    expect(capture.armed).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('must be an absolute path outside the repo');
+  });
+
+  it('refuses an absolute capture path inside the forbidden repo root', () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'co-capture-repo-'));
+    tempDirs.push(repoRoot);
+    const errors: string[] = [];
+    const capture = openHostLiveCapture(
+      { [CO_HOST_LIVE_CAPTURE_ENV]: join(repoRoot, 'captures') },
+      recordingSink().sink,
+      { forbiddenRoot: repoRoot, onError: (error) => errors.push(error.message) },
+    );
+
+    expect(capture.armed).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('refusing to write capture evidence inside');
+  });
+
+  it('probes the default sink before arming and reports an unwritable path', () => {
+    const root = mkdtempSync(join(tmpdir(), 'co-capture-unwritable-'));
+    tempDirs.push(root);
+    const fileAsDir = join(root, 'not-a-dir');
+    writeFileSync(fileAsDir, 'not a directory');
+    const errors: string[] = [];
+
+    const capture = openHostLiveCapture(
+      { [CO_HOST_LIVE_CAPTURE_ENV]: join(fileAsDir, 'captures') },
+      undefined,
+      { onError: (error) => errors.push(error.message) },
+    );
+
+    expect(capture.armed).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('is not writable');
+  });
+
+  it('reports append failures from the file sink once instead of silently swallowing them', () => {
+    const root = mkdtempSync(join(tmpdir(), 'co-capture-write-fail-'));
+    tempDirs.push(root);
+    const fileAsDir = join(root, 'not-a-dir');
+    writeFileSync(fileAsDir, 'not a directory');
+    const errors: string[] = [];
+    const sink = fileCaptureSink(join(fileAsDir, 'captures'), {
+      onError: (error) => errors.push(error.message),
+    });
+
+    sink.append(CAPTURE_FILES.pasteEcho, { chunk: 'one' });
+    sink.append(CAPTURE_FILES.pasteEcho, { chunk: 'two' });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('failed to append capture evidence');
   });
 });

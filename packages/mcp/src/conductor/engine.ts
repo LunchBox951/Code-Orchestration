@@ -66,6 +66,7 @@ import {
   normalizeStartupOutput,
   isTurnKickoffMail,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_CLARIFY_REQUEST,
   MAIL_CLARIFY_RESPONSE,
   MAIL_REVIEW_RESPONSE,
   MAIL_WORKER_DONE,
@@ -76,6 +77,7 @@ import {
   WEDGE_MS,
   COMPLETION_VERBS,
   type ReviewerSpawnGate,
+  type UsageSourceFactory,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -123,6 +125,8 @@ export interface ConductorEngineDeps {
    * to offer the smallest surface needed for the binary proof.
    */
   readonly sessionTools?: (identity: HostedIdentity) => readonly ToolSpec[] | undefined;
+  /** Optional per-session usage-source factory override. */
+  readonly usageSourceFactory?: UsageSourceFactory;
   /**
    * Monotonic ms source — the `at` for synthesized {@link DetectorEvent}s and the `observedAt` for
    * {@link detectTurnEnd}. This is DATA, never a wall clock (the detector's replay-determinism rests on
@@ -396,12 +400,18 @@ export class ConductorEngine {
     { hosted: HostedPane; options: { readonly onPaneKillError?: (error: unknown) => void } }
   >();
   /**
-   * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, chunk)` on every new
+   * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, chunk, offset, provider)` on every new
    * pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A plain
    * subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
    */
   private readonly transcriptListeners = new Set<
-    (projectId: ProjectId, agent: string, chunk: string, offset: number) => void
+    (
+      projectId: ProjectId,
+      agent: string,
+      chunk: string,
+      offset: number,
+      provider: HostedIdentity['provider'],
+    ) => void
   >();
   /**
    * When each unresolved clarify was FIRST observed by a tick, keyed
@@ -560,12 +570,18 @@ export class ConductorEngine {
 
   /**
    * Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe to the live transcript stream: `listener` fires with
-   * `(projectId, agent, chunk)` on EVERY new pane chunk from any hosted agent (the operator-IPC live
+   * `(projectId, agent, chunk, offset, provider)` on EVERY new pane chunk from any hosted agent (the operator-IPC live
    * push fan-out). Returns an unsubscribe fn. Transport-agnostic, NO I/O, never throws. This is a
    * METHOD, not a tool (Principle D4 — the Conductor is never agent-callable).
    */
   onTranscript(
-    listener: (projectId: ProjectId, agent: string, chunk: string, offset: number) => void,
+    listener: (
+      projectId: ProjectId,
+      agent: string,
+      chunk: string,
+      offset: number,
+      provider: HostedIdentity['provider'],
+    ) => void,
   ): () => void {
     this.transcriptListeners.add(listener);
     return () => this.transcriptListeners.delete(listener);
@@ -637,7 +653,13 @@ export class ConductorEngine {
     this.transcriptUnsub.set(
       agentKey,
       pane.onData((chunk) =>
-        this.appendTranscript(agentKey, identity.projectId, identity.agent, chunk),
+        this.appendTranscript(
+          agentKey,
+          identity.projectId,
+          identity.agent,
+          identity.provider,
+          chunk,
+        ),
       ),
     );
     const startupP = driveToReady(pane, identity.provider);
@@ -663,6 +685,9 @@ export class ConductorEngine {
         deliveryFactory: this.routingDeliveryFactory(),
         ...(spawnGate != null ? { reviewerSpawnGate: spawnGate } : {}),
         ...(sessionTools != null ? { tools: sessionTools } : {}),
+        ...(this.deps.usageSourceFactory != null
+          ? { usageSourceFactory: this.deps.usageSourceFactory }
+          : {}),
         onToolActivity: (activity) => this.emitToolActivity(agentKey, activity),
       });
 
@@ -806,6 +831,7 @@ export class ConductorEngine {
         this.kickoffInjectAttempts.set(kickoffKey, attempts);
         if (attempts >= ConductorEngine.KICKOFF_INJECT_ATTEMPT_CAP) {
           this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+          this.surfaceCappedKickoffFailure(hosted, mail, attempts, error);
           this.kickoffInjectAttempts.delete(kickoffKey);
           console.error(
             `[ConductorEngine] RETRACTING one-shot kickoff for agent '${hosted.identity.agent}' in ` +
@@ -1308,6 +1334,7 @@ export class ConductorEngine {
     agentKey: string,
     projectId: ProjectId,
     agent: string,
+    provider: HostedIdentity['provider'],
     chunk: string,
   ): void {
     this.lastByteAt.set(agentKey, this.deps.now()); // P6: track last-byte time for liveness probe
@@ -1325,10 +1352,39 @@ export class ConductorEngine {
     }
     for (const listener of [...this.transcriptListeners]) {
       try {
-        listener(projectId, agent, chunk, chunkOffset);
+        listener(projectId, agent, chunk, chunkOffset, provider);
       } catch {
         /* transcript subscribers are diagnostic surfaces; pane output must keep flowing */
       }
+    }
+  }
+
+  private surfaceCappedKickoffFailure(
+    hosted: HostedPane,
+    mail: DeliveredMail,
+    attempts: number,
+    error: unknown,
+  ): void {
+    const store = this.openMail(hosted.identity.projectId);
+    try {
+      store.send({
+        type: MAIL_CLARIFY_REQUEST,
+        from: hosted.identity.agent,
+        to: mail.sender,
+        subject: `Kickoff injection failed for ${hosted.identity.agent}`,
+        body:
+          `The one-shot kickoff for ${hosted.identity.agent} was retracted after ${attempts} ` +
+          `failed injection attempt(s), so the warm pane is no longer stuck re-pasting it every ` +
+          `tick. Provider: ${hosted.identity.provider}. Original kickoff seq: ${mail.seq}. ` +
+          `Last error: ${errorMessage(error)}\n\nOriginal kickoff subject:\n${mail.subject}\n\n` +
+          `Original kickoff body:\n${mail.body}`,
+        causationId: String(mail.seq),
+        idempotencyKey:
+          `kickoff-injection-failed:${hosted.identity.projectId}:` +
+          `${hosted.identity.agent}:${mail.sender}:${mail.seq}`,
+      });
+    } finally {
+      store.close();
     }
   }
 

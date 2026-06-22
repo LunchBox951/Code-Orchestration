@@ -18,7 +18,8 @@ import {
 import {
   buildPaneLaunchConfig,
   paneMayUseWebTools,
-  CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS,
+  CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY,
+  CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE,
   CODEX_NON_INTERACTIVE_APPROVAL_ARGS,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
@@ -485,14 +486,12 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
 // ---------------------------------------------------------------------------
 
 describe('#78 codex MCP-tool pre-approval', () => {
-  it('codex config.toml pre-grants the co MCP tools under [mcp_servers.co] (best candidate key)', () => {
+  it('codex config.toml pre-grants the co MCP tools under [mcp_servers.co] with the documented key', () => {
     const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
     const toml = config.codexConfigToml ?? '';
-    // At least one candidate auto-approve key is present (the emitted best candidate).
-    const present = CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS.some((key) =>
-      new RegExp(`^\\s*${key}\\s*=`, 'mu').test(toml),
+    expect(toml).toContain(
+      `${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY} = "${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE}"`,
     );
-    expect(present).toBe(true);
   });
 
   it('codex args apply the non-interactive approval launch flag', () => {
@@ -505,11 +504,10 @@ describe('#78 codex MCP-tool pre-approval', () => {
 
   it('drift REQUIRES the pre-grant: removing it → a DISTINCT codex-mcp-pre-grant-missing violation (NOT block-list drift)', () => {
     const good = buildPaneLaunchConfig('codex', BASE_IDENTITY);
-    // Strip EVERY candidate auto-approve assignment from the [mcp_servers.co] block.
-    let toml = good.codexConfigToml ?? '';
-    for (const key of CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS) {
-      toml = toml.replace(new RegExp(`^\\s*${key}\\s*=.*$\\n?`, 'mu'), '');
-    }
+    const toml = (good.codexConfigToml ?? '').replace(
+      new RegExp(`^\\s*${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY}\\s*=.*$\\n?`, 'mu'),
+      '',
+    );
     const config: PaneLaunchConfig = {
       ...good,
       codexConfigToml: toml,
@@ -529,20 +527,13 @@ describe('#78 codex MCP-tool pre-approval', () => {
     expect(violations.some((v) => v.kind === 'declared-not-enforced')).toBe(false);
   });
 
-  it('drift is TOLERANT of the key: swapping the emitted key for ANOTHER candidate stays drift-clean', () => {
+  it('drift REQUIRES an enabled pre-grant: setting the candidate key false still violates', () => {
     const good = buildPaneLaunchConfig('codex', BASE_IDENTITY);
-    const emittedKey = CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS.find((key) =>
-      new RegExp(`^\\s*${key}\\s*=`, 'mu').test(good.codexConfigToml ?? ''),
-    );
-    expect(emittedKey).toBeDefined();
-    const otherKey = CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS.find((key) => key !== emittedKey);
-    expect(otherKey).toBeDefined();
-    // Swap the emitted candidate for a DIFFERENT candidate (simulating the real key landing later).
     const toml = (good.codexConfigToml ?? '').replace(
-      new RegExp(`^(\\s*)${emittedKey}(\\s*=.*)$`, 'mu'),
-      `$1${otherKey}$2`,
+      new RegExp(`^(\\s*)${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY}(\\s*=).*$`, 'mu'),
+      `$1${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY}$2 "prompt"`,
     );
-    expect(toml).not.toBe(good.codexConfigToml); // the swap actually changed the TOML
+    expect(toml).not.toBe(good.codexConfigToml);
     const config: PaneLaunchConfig = {
       ...good,
       codexConfigToml: toml,
@@ -550,8 +541,35 @@ describe('#78 codex MCP-tool pre-approval', () => {
         file.path === good.codexConfigTomlPath ? { ...file, contents: toml } : file,
       ),
     };
-    // Still drift-clean — the swap did NOT read as permanent drift (the whole point of #78 tolerance).
-    expect(checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config))).toEqual([]);
+
+    const violations = checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config));
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toMatchObject({
+      id: CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+      kind: 'codex-mcp-pre-grant-missing',
+    });
+  });
+
+  it('drift rejects the old placeholder auto_approve key even when present', () => {
+    const good = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    const toml = (good.codexConfigToml ?? '').replace(
+      new RegExp(`^(\\s*)${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY}(\\s*=.*)$`, 'mu'),
+      '$1auto_approve = true',
+    );
+    expect(toml).not.toBe(good.codexConfigToml);
+    const config: PaneLaunchConfig = {
+      ...good,
+      codexConfigToml: toml,
+      prelaunchFiles: good.prelaunchFiles?.map((file) =>
+        file.path === good.codexConfigTomlPath ? { ...file, contents: toml } : file,
+      ),
+    };
+    const violations = checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config));
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toMatchObject({
+      id: CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+      kind: 'codex-mcp-pre-grant-missing',
+    });
   });
 });
 

@@ -10,7 +10,8 @@
 
 import {
   claudeDisallowedPatternsForRule,
-  CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS,
+  CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY,
+  CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
 import { BLOCK_LIST, type BlockRule } from './block-list.js';
@@ -161,14 +162,13 @@ function readCodexEnforcedConfig(config: PaneLaunchConfig): EnforcedConfig {
   }
   // The block list is FULLY enforced (isolated policy + hook + rule sidecar): read the enforced ids.
   const blockedIds = readCodexHookRuleIds(config.codexBlockListRulesJson);
-  // #78: REQUIRE the MCP-tool pre-grant (else a hosted codex pane deadlocks on the approval prompt),
-  // but be TOLERANT of WHICH candidate key carries it — swapping a wrong guess for the real key (once
-  // the capture harness identifies it) must not read as permanent drift. A MISSING pre-grant is its OWN
-  // regression, DISTINCT from block-list drift: the block list above is intact, so we keep the enforced
-  // ids (no false declared-not-enforced for every rule) and instead flag the pre-grant separately so the
-  // drift check can raise a `codex-mcp-pre-grant-missing` violation. Blaming the block list when the
-  // pre-grant is what regressed would be a misleading operator signal (Principle 9 — no-silent-failures
-  // is about accurate signal, not just loud signal).
+  // #78: REQUIRE the documented MCP-tool pre-grant (else a hosted codex pane deadlocks on the approval
+  // prompt). A MISSING/DISABLED pre-grant is its OWN regression, DISTINCT from block-list drift: the
+  // block list above is intact, so we keep the enforced ids (no false declared-not-enforced for every
+  // rule) and instead flag the pre-grant separately so the drift check can raise a
+  // `codex-mcp-pre-grant-missing` violation. Blaming the block list when the pre-grant is what regressed
+  // would be a misleading operator signal (Principle 9 — no-silent-failures is about accurate signal,
+  // not just loud signal).
   return {
     blockedIds,
     ...(codexConfigTomlHasMcpAutoApprove(toml) ? {} : { codexMcpPreGrantMissing: true }),
@@ -176,13 +176,13 @@ function readCodexEnforcedConfig(config: PaneLaunchConfig): EnforcedConfig {
 }
 
 /**
- * #78 — TOLERANT check that `[mcp_servers.co]` carries an MCP-tool pre-approval. Accepts an active
- * assignment for ANY key in {@link CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS} (the honored key is not yet
- * pinned). Loop-safety / block-list enforcement does not hinge on this; it guards the #78 deadlock fix.
+ * #78 — `[mcp_servers.co]` must carry Codex's documented MCP-tool pre-approval:
+ * `default_tools_approval_mode = "approve"`.
  */
 function codexConfigTomlHasMcpAutoApprove(toml: string): boolean {
-  return CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS.some(
-    (key) => tomlActiveAssignmentValue(toml, 'mcp_servers.co', key) != null,
+  return (
+    tomlActiveScalar(toml, 'mcp_servers.co', CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY) ===
+    CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE
   );
 }
 

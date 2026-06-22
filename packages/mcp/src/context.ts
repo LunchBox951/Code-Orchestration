@@ -22,6 +22,7 @@ import {
   type Role,
   type ToolContext,
   type ToolSpec,
+  type UsageSourceFactory,
 } from '@co/core';
 import { resolve } from 'node:path';
 
@@ -133,6 +134,8 @@ export interface OpenContextStoresOptions {
    * Absent ⇒ headless behaviour (unchanged).
    */
   readonly reviewerSpawnGate?: ReviewerSpawnGate;
+  /** Optional L4 usage-source factory override, used by host-live capture wrappers. */
+  readonly usageSourceFactory?: UsageSourceFactory;
 }
 
 /**
@@ -205,7 +208,7 @@ export function openContextStores(
       plans,
       issues,
       research,
-      usageSourceFactory: defaultUsageSourceFactory,
+      usageSourceFactory: opts?.usageSourceFactory ?? defaultUsageSourceFactory,
       ...(opts?.reviewerSpawnGate != null ? { reviewerSpawnGate: opts.reviewerSpawnGate } : {}),
     };
     return { ctx, close: closeAll };

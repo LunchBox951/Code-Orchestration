@@ -258,35 +258,12 @@ function requireTrustedMcpExecutableArgs(
 // so a hosted codex pane STILL raises an interactive "allow this MCP tool?" prompt and — with no
 // operator at its stdin — deadlocks the turn. We need codex's MCP-tool AUTO-APPROVAL.
 //
-// The exact honored config key is UNKNOWN (codex's config schema for per-MCP-server tool approval is
-// not publicly pinned). So we emit a small CANDIDATE SET of plausible keys under `[mcp_servers.co]`
-// rather than betting on one, and the drift check (drift.ts) is TOLERANT — it requires that AT LEAST
-// ONE candidate is present, not a specific one. Swapping a wrong guess for the real key (once the
-// capture harness records which prompt is suppressed) is then a one-line constant change that does
-// NOT read as permanent drift. These keys are SCHEMA-SPECULATIVE (see the inline note in the TOML
-// builder) and harmless if codex ignores them.
-
-/**
- * [PLACEHOLDER · #78] Candidate `[mcp_servers.co]` keys that may auto-approve the co MCP tools.
- *
- * SCOPED to keys that ONLY make sense as a per-MCP-server tool-approval setting under
- * `[mcp_servers.co]`. We deliberately EXCLUDE generic keys (`trust_level`, `approval_policy`) that
- * legitimately recur ELSEWHERE in the same `config.toml` — `approval_policy = "never"` is the
- * top-level syscall-approval axis and `[projects."<cwd>"].trust_level = "trusted"` pre-seeds project
- * trust. Although the drift reader matches keys section-scoped to `[mcp_servers.co]`, keeping the
- * candidate set free of those names avoids any chance of a generic key reading as the MCP pre-grant
- * (a drift false-positive) and keeps the operator signal unambiguous about WHICH knob the pre-grant
- * rides on. `auto_approve` is the emitted best candidate; `mcp_tool_trust` is the MCP-scoped trust
- * alternative the real key can land on without reading as permanent drift.
- */
-export const CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS = ['auto_approve', 'mcp_tool_trust'] as const;
-
-/**
- * [PLACEHOLDER · #78] The `[mcp_servers.co]` TOML lines that pre-grant the co MCP tools. We emit the
- * single best candidate (`auto_approve = true`) as the active assignment; the drift check accepts any
- * key in {@link CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS}, so the real key can be swapped in later.
- */
-const CODEX_MCP_AUTO_APPROVE_TOML_LINES: readonly string[] = ['auto_approve = true'];
+// Codex documents per-MCP-server tool approval as `default_tools_approval_mode`, with `approve`
+// meaning calls from that server are pre-approved. This is the same axis Claude covers with
+// `--allowedTools mcp__co__*`; do not confuse it with top-level `approval_policy`, which governs
+// shell/sandbox approvals.
+export const CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY = 'default_tools_approval_mode';
+export const CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE = 'approve';
 
 /**
  * [PLACEHOLDER · #78] The codex CLI flag that runs the pane NON-INTERACTIVELY for tool approvals.
@@ -360,11 +337,10 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
     `args = ${tomlArray(args)}`,
     'required = true',
     'startup_timeout_sec = 60',
-    // #78 [PLACEHOLDER] Pre-approve the co MCP tools so a hosted codex pane never deadlocks on an
-    // interactive "allow this MCP tool?" prompt (Claude pre-grants via --allowedTools; codex's
-    // approval_policy = "never" only covers the syscall axis). SCHEMA-SPECULATIVE key — the real one
-    // is pending the capture harness; the drift check is tolerant of the whole candidate set.
-    ...CODEX_MCP_AUTO_APPROVE_TOML_LINES,
+    // #78: Pre-approve the co MCP tools so a hosted codex pane never deadlocks on an interactive
+    // "allow this MCP tool?" prompt. This is the documented MCP-tool approval axis; top-level
+    // approval_policy = "never" covers shell/sandbox approval only.
+    `${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY} = "${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE}"`,
     '',
     ...(mcpEnvLines.length > 0 ? ['[mcp_servers.co.env]', ...mcpEnvLines, ''] : []),
     '[[hooks.PreToolUse]]',

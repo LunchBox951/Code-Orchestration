@@ -201,6 +201,23 @@ co mail send --to impl-abc123 --type operator_message --subject "steer" --body "
 
 The daemon picks it up on the next beat and runs one turn.
 
+### Recording host-live capture evidence
+
+`co-mcp serve` can record the real provider bytes needed to finalize the live-readiness placeholders
+for #77/#78. Set `CO_HOST_LIVE_CAPTURE` to an **absolute path outside the repository** before
+starting the daemon:
+
+```sh
+mkdir -p /tmp/co-host-live-capture
+CO_HOST_LIVE_CAPTURE=/tmp/co-host-live-capture co-mcp serve <projectId>
+```
+
+When armed, the daemon logs the resolved capture directory and writes JSONL files such as
+`paste-echo.jsonl`, `mcp-approval.jsonl`, `claude-status-line.jsonl`, and `usage-sample.jsonl`.
+These files are raw host-live evidence; inspect and attach the relevant excerpts to the issue or PR,
+but do not commit them to the repo. Relative paths and paths inside the repo are rejected to preserve
+Principle 12 — pristine-repo.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

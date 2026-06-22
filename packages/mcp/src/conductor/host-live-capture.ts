@@ -23,8 +23,8 @@
  * without a live binary. NEVER throws into the caller (Principle 9 stays the daemon's; capture is
  * diagnostic and must never break a turn).
  */
-import { appendFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { InjectMailOptions } from '@co/core';
 
 /** The env var that arms the harness; its value is the capture output directory. */
@@ -70,6 +70,8 @@ export interface UsageSampleObservation {
 export interface HostLiveCapture {
   /** Armed iff `CO_HOST_LIVE_CAPTURE` was set to a non-empty dir. */
   readonly armed: boolean;
+  /** Absolute output directory when armed. */
+  readonly dir?: string;
   /**
    * The composer-echo tap for {@link InjectMailOptions.onPasteEcho}. `undefined` when inert, so
    * `{ ...injectOptions, ...(capture.onPasteEcho ? { onPasteEcho: capture.onPasteEcho } : {}) }`
@@ -90,9 +92,31 @@ export interface HostLiveCaptureSink {
   readonly append: (file: string, record: unknown) => void;
 }
 
+export interface HostLiveCaptureOptions {
+  /** Directory that capture output must not live inside (normally the project/repo cwd). */
+  readonly forbiddenRoot?: string;
+  /** Diagnostic sink for rejected paths or write failures. */
+  readonly onError?: (error: Error) => void;
+}
+
 /** The default sink: appends one JSON line per record to `<dir>/<file>`, creating `<dir>` if needed. */
-export function fileCaptureSink(dir: string): HostLiveCaptureSink {
+export function fileCaptureSink(
+  dir: string,
+  opts: Pick<HostLiveCaptureOptions, 'onError'> = {},
+): HostLiveCaptureSink {
   let ensuredDir = false;
+  let reportedWriteFailure = false;
+  const reportWriteFailure = (cause: unknown): void => {
+    if (reportedWriteFailure) return;
+    reportedWriteFailure = true;
+    reportCaptureError(
+      opts.onError,
+      new Error(
+        `host-live capture: failed to append capture evidence under '${dir}': ${errorMessage(cause)}`,
+        cause instanceof Error ? { cause } : undefined,
+      ),
+    );
+  };
   return {
     append: (file, record) => {
       try {
@@ -104,8 +128,8 @@ export function fileCaptureSink(dir: string): HostLiveCaptureSink {
           join(dir, file),
           JSON.stringify({ at: new Date().toISOString(), ...asObject(record) }) + '\n',
         );
-      } catch {
-        /* capture is diagnostic; a write failure must never break the live run */
+      } catch (cause) {
+        reportWriteFailure(cause);
       }
     },
   };
@@ -136,12 +160,51 @@ const INERT_CAPTURE: HostLiveCapture = {
 export function openHostLiveCapture(
   env: NodeJS.ProcessEnv = process.env,
   sink?: HostLiveCaptureSink,
+  opts: HostLiveCaptureOptions = {},
 ): HostLiveCapture {
   const dir = env[CO_HOST_LIVE_CAPTURE_ENV];
   if (dir == null || dir.trim() === '') return INERT_CAPTURE;
-  const resolvedSink = sink ?? fileCaptureSink(dir);
+  const rawDir = dir.trim();
+  const resolvedDir = resolve(rawDir);
+  if (!isAbsolute(rawDir)) {
+    reportCaptureError(
+      opts.onError,
+      new Error(
+        `host-live capture: ${CO_HOST_LIVE_CAPTURE_ENV} must be an absolute path outside the repo; ` +
+          `got '${dir}'. Capture is disabled.`,
+      ),
+    );
+    return INERT_CAPTURE;
+  }
+  if (opts.forbiddenRoot != null && isPathInsideOrEqual(opts.forbiddenRoot, resolvedDir)) {
+    reportCaptureError(
+      opts.onError,
+      new Error(
+        `host-live capture: refusing to write capture evidence inside '${resolve(opts.forbiddenRoot)}' ` +
+          `(got '${resolvedDir}'). Capture is disabled to preserve the pristine repo invariant.`,
+      ),
+    );
+    return INERT_CAPTURE;
+  }
+  if (sink == null) {
+    try {
+      probeCaptureDir(resolvedDir);
+    } catch (cause) {
+      reportCaptureError(
+        opts.onError,
+        new Error(
+          `host-live capture: '${resolvedDir}' is not writable: ${errorMessage(cause)}. ` +
+            'Capture is disabled.',
+          cause instanceof Error ? { cause } : undefined,
+        ),
+      );
+      return INERT_CAPTURE;
+    }
+  }
+  const resolvedSink = sink ?? fileCaptureSink(resolvedDir, opts);
   return {
     armed: true,
+    dir: resolvedDir,
     onPasteEcho: (chunk, multiline) =>
       resolvedSink.append(CAPTURE_FILES.pasteEcho, {
         multiline,
@@ -153,6 +216,34 @@ export function openHostLiveCapture(
     captureClaudeStatusLine: (obs) => resolvedSink.append(CAPTURE_FILES.claudeStatusLine, obs),
     captureUsageSample: (obs) => resolvedSink.append(CAPTURE_FILES.usageSample, obs),
   };
+}
+
+function probeCaptureDir(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  const probe = join(dir, '.co-host-live-capture-probe');
+  appendFileSync(probe, '');
+  try {
+    unlinkSync(probe);
+  } catch {
+    /* best-effort cleanup; a leftover empty probe is harmless in the capture dir */
+  }
+}
+
+function isPathInsideOrEqual(parent: string, child: string): boolean {
+  const rel = relative(resolve(parent), resolve(child));
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function reportCaptureError(onError: ((error: Error) => void) | undefined, error: Error): void {
+  try {
+    onError?.(error);
+  } catch {
+    /* diagnostic sinks must never break host startup */
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
