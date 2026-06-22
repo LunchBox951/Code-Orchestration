@@ -391,6 +391,23 @@ describe('ConductorDaemon — recover → reconstruct live set → select → dr
     await daemon.tick();
     expect(recoverCalls).toBe(1); // still once — recovery is a one-time start operation
   });
+
+  it('recovers the GLOBAL store (config + registry) on start, not just the project (#7 §5 #7)', () => {
+    const { projectId } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    let projectRecovers = 0;
+    let globalRecovers = 0;
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      recover: () => void (projectRecovers += 1),
+      recoverGlobal: () => void (globalRecovers += 1),
+    });
+
+    daemon.recover();
+    expect(projectRecovers).toBe(1);
+    expect(globalRecovers).toBe(1);
+  });
 });
 
 // ── AC-S10-1 (2) / Principle 9: a session with no roster record fails loud (never silently dropped) ──

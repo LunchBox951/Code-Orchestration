@@ -14,11 +14,17 @@ import type { DatabaseSync } from 'node:sqlite';
 import { CLAUDE_AUTH_STATUS_ARGS, parseClaudeAuthStatus } from '../dispatch/claude-source.js';
 import { CODEX_DOCTOR_ARGS, parseCodexDoctor } from '../dispatch/codex-source.js';
 import type { Provider } from '../dispatch/usage-source.js';
-import { openProjectStore } from '../store/sqlite-store.js';
+import { openGlobalStore, openProjectStore } from '../store/sqlite-store.js';
 import { buildCoreRegistry } from '../tools/core-registry.js';
 import { checkToolCompleteness } from '../tools/completeness.js';
-import { buildProjectProjectors, buildProjectDecode } from '../replay/recovery.js';
-import { rebuildAll } from '../replay/projector.js';
+import {
+  buildProjectProjectors,
+  buildProjectDecode,
+  buildGlobalProjectors,
+  buildGlobalDecode,
+} from '../replay/recovery.js';
+import { replayInto, type Projector } from '../replay/projector.js';
+import type { Store, StoredEvent } from '../store/types.js';
 import { assertNever } from '../assert-never.js';
 
 // ─── Report types ─────────────────────────────────────────────────────────────
@@ -303,19 +309,50 @@ function compareSnapshots(
 
 // ─── Individual checks ────────────────────────────────────────────────────────
 
+/** Thrown solely to roll back the integrity probe's transaction (never escapes the helper). */
+const INTEGRITY_ROLLBACK = Symbol('doctor-integrity-rollback');
+
 /**
- * Program-data integrity: snapshot the live projections, rebuild from the event log, compare.
- * Any divergence (or a decode/validate error during rebuild) is surfaced as fail.
- * After this check the store is in a consistent (rebuilt) state regardless of outcome.
+ * Non-destructively detect whether a store's LIVE projections match a fresh replay of its event
+ * log. Snapshots the live read-models, replays the whole log into the SAME transaction, snapshots
+ * the rebuilt read-models, compares — then ROLLS THE TRANSACTION BACK so the live store is never
+ * mutated (#7 §5 #5: a read-only-named diagnostic must not rebuild the live store in place, which
+ * would erase the very divergence it detects). Doing pre-snapshot + rebuild + post-snapshot in ONE
+ * transaction also closes the former 3-transaction TOCTOU (#7 §5 #6): a concurrent writer can no
+ * longer make the two snapshots diverge spuriously, because both are read inside one isolated
+ * transaction. Returns a human divergence reason, or null when consistent.
+ */
+function projectionDivergence(
+  store: Store,
+  projectors: readonly Projector[],
+  decode: (e: StoredEvent) => StoredEvent,
+): string | null {
+  let divergence: string | null = null;
+  try {
+    store.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      const pre = snapshotProjections(db);
+      replayInto(tx, store, projectors, decode);
+      divergence = compareSnapshots(pre, snapshotProjections(db));
+      throw INTEGRITY_ROLLBACK; // discard the rebuild — the probe is read-only
+    });
+  } catch (err) {
+    if (err !== INTEGRITY_ROLLBACK) throw err;
+  }
+  return divergence;
+}
+
+/**
+ * Program-data integrity: compare the live per-project projections against a fresh replay of the
+ * event log, WITHOUT mutating the live store (the rebuild is rolled back — see
+ * {@link projectionDivergence}). Any divergence (or a decode/validate error during replay) is
+ * surfaced as fail.
  */
 function checkProgramDataIntegrity(projectId: string): DoctorCheck {
   const name = 'program-data-integrity';
   const store = openProjectStore(projectId);
   try {
-    const pre = store.transaction((tx) => snapshotProjections(tx.raw as DatabaseSync));
-    rebuildAll(store, buildProjectProjectors(), buildProjectDecode());
-    const post = store.transaction((tx) => snapshotProjections(tx.raw as DatabaseSync));
-    const divergence = compareSnapshots(pre, post);
+    const divergence = projectionDivergence(store, buildProjectProjectors(), buildProjectDecode());
     if (divergence != null) {
       return { name, status: 'fail', reason: divergence };
     }
@@ -325,6 +362,35 @@ function checkProgramDataIntegrity(projectId: string): DoctorCheck {
       name,
       status: 'fail',
       reason: `Rebuild/decode failure: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Global-data integrity (#7 §5 #7): the global store (config + registry) was previously never
+ * integrity-checked. Compare its live projections against a fresh replay of its event log, again
+ * non-destructively. A corrupt global store can silently break every project, so this is a fail.
+ */
+function checkGlobalStoreIntegrity(): DoctorCheck {
+  const name = 'global-data-integrity';
+  const store = openGlobalStore();
+  try {
+    const divergence = projectionDivergence(store, buildGlobalProjectors(), buildGlobalDecode());
+    if (divergence != null) {
+      return { name, status: 'fail', reason: divergence };
+    }
+    return {
+      name,
+      status: 'ok',
+      reason: 'Live global projections (config + registry) are consistent with the event log.',
+    };
+  } catch (err) {
+    return {
+      name,
+      status: 'fail',
+      reason: `Global rebuild/decode failure: ${err instanceof Error ? err.message : String(err)}`,
     };
   } finally {
     store.close();
@@ -464,6 +530,7 @@ function checkProviderCompatibility(providerProbe: ProviderProbeSeam | undefined
 export function runDoctor(deps: DoctorDeps): DoctorReport {
   const checks: DoctorCheck[] = [
     checkProgramDataIntegrity(deps.projectId),
+    checkGlobalStoreIntegrity(),
     checkProjectMemoryValidity(deps.repoRoot),
     checkMcpSurfaceCompleteness(),
     checkProviderCompatibility(deps.providerProbe),

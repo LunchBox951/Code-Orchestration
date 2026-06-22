@@ -58,21 +58,35 @@ export function rebuildAll(
   projectors: readonly Projector[],
   decode: (e: StoredEvent) => StoredEvent = (e) => e,
 ): void {
-  store.transaction((tx) => {
-    for (const projector of projectors) {
-      projector.reset(tx);
+  store.transaction((tx) => replayInto(tx, store, projectors, decode));
+}
+
+/**
+ * Reset all projections then re-fold the whole log into the CALLER'S transaction `tx` — the same
+ * work {@link rebuildAll} does, but without opening (or committing) a transaction of its own. This
+ * lets a caller compose the rebuild inside a larger transaction it controls — e.g. the doctor's
+ * read-only integrity probe, which rebuilds, compares, and then ROLLS THE TRANSACTION BACK so the
+ * live store is never mutated by a diagnostic.
+ */
+export function replayInto(
+  tx: StoreTx,
+  store: Store,
+  projectors: readonly Projector[],
+  decode: (e: StoredEvent) => StoredEvent = (e) => e,
+): void {
+  for (const projector of projectors) {
+    projector.reset(tx);
+  }
+  // Reading from `store` inside the same tx is safe: node:sqlite is synchronous
+  // on a single connection, and replay only writes projection tables (never
+  // `events`), so the log we page over is stable.
+  let afterSeq = 0;
+  for (;;) {
+    const batch = store.readAll({ afterSeq, limit: REPLAY_PAGE_SIZE });
+    for (const event of batch) {
+      applyEvent(tx, decode(event), projectors);
+      afterSeq = event.seq;
     }
-    // Reading from `store` inside the same tx is safe: node:sqlite is synchronous
-    // on a single connection, and replay only writes projection tables (never
-    // `events`), so the log we page over is stable.
-    let afterSeq = 0;
-    for (;;) {
-      const batch = store.readAll({ afterSeq, limit: REPLAY_PAGE_SIZE });
-      for (const event of batch) {
-        applyEvent(tx, decode(event), projectors);
-        afterSeq = event.seq;
-      }
-      if (batch.length < REPLAY_PAGE_SIZE) break;
-    }
-  });
+    if (batch.length < REPLAY_PAGE_SIZE) break;
+  }
 }

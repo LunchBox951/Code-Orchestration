@@ -14,7 +14,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { openProjectStore } from '../store/sqlite-store.js';
+import { openGlobalStore, openProjectStore } from '../store/sqlite-store.js';
+import { openConfigStore } from '../config/config-store.js';
 import { openRosterStore } from '../roles/roster-store.js';
 import { openPlanStore } from '../plans/plans-store.js';
 import { openDispatchStore } from '../dispatch/dispatch-store.js';
@@ -149,6 +150,83 @@ describe('doctor check: program-data-integrity', () => {
 
     const report = runDoctor({ projectId: PROJECT_ID, repoRoot: repoDir });
     const check = report.checks.find((c) => c.name === 'program-data-integrity')!;
+    expect(check.status).toBe('fail');
+    expect(check.reason).toMatch(/divergence/i);
+  });
+
+  it('is read-only: a detected divergence is NOT repaired in the live store (#7 §5 #5)', () => {
+    seedRoster();
+    const store = openProjectStore(PROJECT_ID);
+    store.transaction((tx) => {
+      (tx.raw as DatabaseSync)
+        .prepare(
+          `INSERT OR IGNORE INTO roster (agent_id, role, parent, registered_ts)
+           VALUES ('ghost-agent', 'implementer', 'coord-1', 9999999)`,
+        )
+        .run();
+    });
+    store.close();
+
+    const report = runDoctor({ projectId: PROJECT_ID, repoRoot: repoDir });
+    expect(report.checks.find((c) => c.name === 'program-data-integrity')!.status).toBe('fail');
+
+    // The diagnostic must NOT have rebuilt the live store in place (which would erase the very
+    // divergence it detected). The injected ghost row is still present.
+    const after = openProjectStore(PROJECT_ID);
+    const rows = after.transaction(
+      (tx) =>
+        (tx.raw as DatabaseSync)
+          .prepare(`SELECT agent_id FROM roster WHERE agent_id = 'ghost-agent'`)
+          .all() as Array<{ agent_id: string }>,
+    );
+    after.close();
+    expect(rows).toHaveLength(1);
+  });
+});
+
+// ── global-data-integrity (#7 §5 #7) ──────────────────────────────────────────
+
+describe('doctor check: global-data-integrity', () => {
+  it('returns ok on a healthy (log-consistent) global store', () => {
+    const cfg = openConfigStore();
+    cfg.setGlobal('repo.mode', 'owner');
+    cfg.close();
+
+    const report = runDoctor({ projectId: PROJECT_ID, repoRoot: repoDir });
+    const check = report.checks.find((c) => c.name === 'global-data-integrity')!;
+    expect(check).toBeDefined();
+    expect(check.status).toBe('ok');
+  });
+
+  it('returns fail when a global projection diverges from the event log', () => {
+    const cfg = openConfigStore();
+    cfg.setGlobal('repo.mode', 'owner');
+    cfg.close();
+
+    // Inject a config row outside the event log → a fresh replay won't reproduce it → divergence.
+    const store = openGlobalStore();
+    const tables = store.transaction(
+      (tx) =>
+        (tx.raw as DatabaseSync)
+          .prepare(
+            `SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'config%' ORDER BY name`,
+          )
+          .all() as Array<{ name: string }>,
+    );
+    store.close();
+    // Guard: the config projection table must exist for this test to be meaningful.
+    expect(tables.length).toBeGreaterThan(0);
+
+    const store2 = openGlobalStore();
+    store2.transaction((tx) => {
+      (tx.raw as DatabaseSync)
+        .prepare(`DELETE FROM "${tables[0]!.name}"`)
+        .run();
+    });
+    store2.close();
+
+    const report = runDoctor({ projectId: PROJECT_ID, repoRoot: repoDir });
+    const check = report.checks.find((c) => c.name === 'global-data-integrity')!;
     expect(check.status).toBe('fail');
     expect(check.reason).toMatch(/divergence/i);
   });
@@ -417,11 +495,12 @@ describe('defaultProviderProbe', () => {
 // ── runDoctor integration ─────────────────────────────────────────────────────
 
 describe('runDoctor integration', () => {
-  it('emits exactly four checks', () => {
+  it('emits exactly five checks', () => {
     const report = runDoctor({ projectId: PROJECT_ID, repoRoot: repoDir });
-    expect(report.checks).toHaveLength(4);
+    expect(report.checks).toHaveLength(5);
     const names = report.checks.map((c) => c.name);
     expect(names).toContain('program-data-integrity');
+    expect(names).toContain('global-data-integrity');
     expect(names).toContain('project-memory-validity');
     expect(names).toContain('mcp-surface-completeness');
     expect(names).toContain('provider-compatibility');

@@ -38,6 +38,7 @@ import {
   openRosterStore,
   openSessionStore,
   openWorktreeStore,
+  recoverGlobalStore,
   recoverProjectStore,
   type AgentRecord,
   type DeliveredMail,
@@ -86,6 +87,12 @@ export interface ConductorDaemonDeps {
   readonly reconcileEvery: number;
   /** Holistic recovery on start. Default: {@link recoverProjectStore} (rebuild every read-model). */
   readonly recover?: (projectId: ProjectId) => void;
+  /**
+   * Holistic GLOBAL-store recovery on start (config + registry). Default: {@link recoverGlobalStore}.
+   * Previously the global store was never recovered (#7 §5 #7); a corrupt global read-model could
+   * silently break every project. Injectable so tests can stub it.
+   */
+  readonly recoverGlobal?: () => void;
   /** Opens the durable session store for the RUNNING set. Default: {@link openSessionStore}. */
   readonly openSessions?: (projectId: ProjectId) => SessionStore;
   /** Opens the roster store to join role/sub-role/parent onto each session. Default: {@link openRosterStore}. */
@@ -202,6 +209,7 @@ export class ConductorDaemon {
   private readonly now: () => number;
   private readonly reconcileEvery: number;
   private readonly recoverFn: (projectId: ProjectId) => void;
+  private readonly recoverGlobalFn: () => void;
   private readonly openSessions: (projectId: ProjectId) => SessionStore;
   private readonly openRoster: (projectId: ProjectId) => RosterStore;
   private readonly openWorktrees: (projectId: ProjectId) => WorktreeStore;
@@ -231,6 +239,7 @@ export class ConductorDaemon {
     this.now = deps.now;
     this.reconcileEvery = deps.reconcileEvery;
     this.recoverFn = deps.recover ?? recoverProjectStore;
+    this.recoverGlobalFn = deps.recoverGlobal ?? recoverGlobalStore;
     this.openSessions = deps.openSessions ?? openSessionStore;
     this.openRoster = deps.openRoster ?? openRosterStore;
     this.openWorktrees = deps.openWorktrees ?? openWorktreeStore;
@@ -251,6 +260,9 @@ export class ConductorDaemon {
    * host (and the AC test) can observe what the daemon will drive.
    */
   recover(): readonly HostedIdentity[] {
+    // Recover the GLOBAL store (config + registry) too, not just this project's (#7 §5 #7) — a
+    // corrupt global read-model would otherwise silently mis-drive every project.
+    this.recoverGlobalFn();
     this.recoverFn(this.projectId);
     this.recovered = true;
     return this.buildCandidates();
