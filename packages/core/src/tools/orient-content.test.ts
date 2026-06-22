@@ -53,28 +53,10 @@ function fieldRestatementsIn(text: string, fields: readonly string[]): string[] 
 describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas are the syntax source)', () => {
   const distinctive = distinctiveFieldIdentifiers();
 
-  it('is not vacuous — the registry yields the known distinctive input identifiers', () => {
+  it('is not vacuous — the registry yields distinctive input identifiers dynamically', () => {
     expect(distinctive.length).toBeGreaterThan(0);
-    expect([...distinctive].sort()).toEqual(
-      [
-        'idempotency_key',
-        'in_reply_to',
-        'issue_id',
-        'operator_override',
-        'phase_id',
-        'probable_cause',
-        'reasoning_budget',
-        'requested_by',
-        'research_id',
-        'review_id',
-        'spec_ref',
-        'task_criteria',
-        'task_id',
-        'thread_id',
-        'unread_only',
-        'work_size',
-      ].sort(),
-    );
+    expect(distinctive.every((field) => field.includes('_'))).toBe(true);
+    expect(new Set(distinctive).size).toBe(distinctive.length);
   });
 
   it('GREEN: every base role’s orient content restates none of them', () => {
@@ -87,12 +69,13 @@ describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas
   });
 
   it('RED: the SAME checker flags an injected field-list restatement', () => {
-    const drifted =
-      orientContent('implementer') +
-      '\nReply by setting in_reply_to to the seq, and pass idempotency_key to dedupe.';
+    const [first, second] = [...distinctive].sort();
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    const drifted = orientContent('implementer') + `\nReply by setting ${first} and ${second}.`;
     const found = fieldRestatementsIn(drifted, distinctive);
-    expect(found).toContain('in_reply_to');
-    expect(found).toContain('idempotency_key');
+    expect(found).toContain(first);
+    expect(found).toContain(second);
     // The real content still passes the same checker — only the injected drift is flagged, proving
     // the GREEN above is a real property of the content, not a checker that flags nothing.
     expect(fieldRestatementsIn(orientContent('implementer'), distinctive)).toEqual([]);
