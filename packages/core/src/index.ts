@@ -945,10 +945,8 @@ export {
   calcLibScenario,
   getOrchestrationScenario,
 } from './bench/orchestration-scenarios.js';
-// Shared economy/tool rollup shapes used by the exported benchmark score helpers. These remain bench-local
-// until the cost/tool-usage read-model lands, but the root barrel exports the names because the helper
-// signatures are public.
-export type { AgentCostRollup, AgentToolUsage } from './bench/bench-econ-types.js';
+// AgentCostRollup / AgentToolUsage are exported from the dispatch read-model (PR #81) above — the
+// canonical source. bench-econ-types keeps structurally-identical local copies for bench-internal use.
 export type {
   ProviderMode,
   RunFidelity,
