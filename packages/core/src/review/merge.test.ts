@@ -1005,12 +1005,13 @@ describe('CoReviewGate.prMerge — PASS gate + PR creation via renderPrMessage',
     expect(result.prDescription).toContain('## Verification');
     expect(result.prDescription).toContain('## Conventions');
     expect(result.prDescription).toContain('Needed to land L5 Phase C.');
-    // gh was called with the rendered description as --body, not the raw intent fields.
+    // gh was called with the rendered description as --body=<value>, not the raw intent fields.
+    // (equals form so a leading-dash value can't be misread as an option — #7 §5 #12.)
     const ghCall = gh.calls[0];
     expect(ghCall).toBeDefined();
-    const bodyIdx = ghCall!.indexOf('--body');
-    expect(bodyIdx).toBeGreaterThanOrEqual(0);
-    expect(ghCall![bodyIdx + 1]).toContain('## Why');
+    const bodyArg = ghCall!.find((a) => a.startsWith('--body='));
+    expect(bodyArg).toBeDefined();
+    expect(bodyArg).toContain('## Why');
     expect(reviews.serializedBranches(TARGET)).toContain(BRANCH);
     expect(reviews.activeSerialized(TARGET)).toBeUndefined();
   });

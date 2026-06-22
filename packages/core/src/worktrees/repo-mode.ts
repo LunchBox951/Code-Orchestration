@@ -3,8 +3,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertNever } from '../assert-never.js';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
+import { scrubOutwardText } from '../issues/scrub.js';
 import { defaultGitReader } from './detect-base.js';
-import { defaultGitExec, type GitExec } from './sling.js';
+import { defaultGitExec, execFailureDetail, redactExecArgs, type GitExec } from './sling.js';
 
 /**
  * Mutating `gh` seam — runs `gh <args>` in `cwd` and returns the trimmed stdout string (e.g. a
@@ -23,10 +24,10 @@ export const defaultGhExec: GhExec = (cwd, args) => {
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
   } catch (cause) {
-    const detail = cause instanceof Error ? cause.message : String(cause);
-    throw new Error(`co repo-mode: \`gh ${args.join(' ')}\` failed in '${cwd}': ${detail}`, {
-      cause,
-    });
+    throw new Error(
+      `co repo-mode: \`gh ${redactExecArgs(args)}\` failed in '${cwd}': ${execFailureDetail(cause)}`,
+      { cause },
+    );
   }
 };
 
@@ -637,8 +638,11 @@ export class CoRepoModeGate implements RepoModeGate {
         // of the reviewed branch with the already-rendered house-style message. Owner's remote PUSH is
         // Phase C (`co_push`); Offline never pushes (repoModeCapabilities). The merge commit is the
         // only repo write — orchestration state is recorded to program-data (Principle 12).
+        // Scrub the rendered message before it is baked into git history (#7 §5 #4). Scrubbing is
+        // content-only, so the `[reviewed: PASS]` / `[reviewed: override — …]` trailer is preserved.
+        const message = scrubOutwardText(req.message);
         gitExec(req.repoCwd, ['checkout', req.into]);
-        gitExec(req.repoCwd, ['merge', '--no-ff', '--signoff', '-m', req.message, req.branch]);
+        gitExec(req.repoCwd, ['merge', '--no-ff', '--signoff', '-m', message, req.branch]);
         return { merged: true, commitSha: headReader(req.repoCwd), mode };
       }
       case 'contributor':
@@ -686,20 +690,22 @@ export class CoRepoModeGate implements RepoModeGate {
     const ghExec = deps.ghExec ?? defaultGhExec;
     assertSafeBranchName('RepoModeGate.enactPrMerge', 'branch', req.branch);
     assertSafeBranchName('RepoModeGate.enactPrMerge', 'into', req.into);
+    // Scrub the outward title/body (#7 §5 #2) and pass them in `--flag=value` equals form so a
+    // leading-dash value can never be misread as an option (#7 §5 #12). base/head are already
+    // constrained by assertSafeBranchName above.
+    const prArgs = [
+      'pr',
+      'create',
+      '--base',
+      req.into,
+      '--head',
+      req.branch,
+      `--title=${scrubOutwardText(req.title)}`,
+      `--body=${scrubOutwardText(req.description)}`,
+    ];
     switch (mode) {
       case 'owner': {
-        const prUrl = ghExec(req.repoCwd, [
-          'pr',
-          'create',
-          '--base',
-          req.into,
-          '--head',
-          req.branch,
-          '--title',
-          req.title,
-          '--body',
-          req.description,
-        ]);
+        const prUrl = ghExec(req.repoCwd, prArgs);
         return { prUrl, mode: 'owner' };
       }
       case 'contributor': {
@@ -707,18 +713,7 @@ export class CoRepoModeGate implements RepoModeGate {
         // CONTRIBUTING.md / PR-template parse is available via parseHostConventions (WT4-HC, L9).
         // Phase C: we probe and note conventions; the agent has already surfaced them in PrIntent.conventions.
         void detectHostConventions(req.repoCwd, deps.readFile);
-        const prUrl = ghExec(req.repoCwd, [
-          'pr',
-          'create',
-          '--base',
-          req.into,
-          '--head',
-          req.branch,
-          '--title',
-          req.title,
-          '--body',
-          req.description,
-        ]);
+        const prUrl = ghExec(req.repoCwd, prArgs);
         return { prUrl, mode: 'contributor' };
       }
       case 'offline':

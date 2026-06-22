@@ -691,9 +691,8 @@ describe('CoRepoModeGate.enactPrMerge — PR creation enactment (AC-L5-6)', () =
     expect(call).toContain('co/l5-review-gate');
     expect(call).toContain('--head');
     expect(call).toContain('co/l5-phase-a');
-    expect(call).toContain('--title');
-    expect(call).toContain('feat: land L5 phase A');
-    expect(call).toContain('--body');
+    expect(call).toContain('--title=feat: land L5 phase A');
+    expect(call.some((a) => a.startsWith('--body='))).toBe(true);
   });
 
   it('contributor mode: creates a PR via gh and returns the URL', () => {
@@ -744,5 +743,55 @@ describe('CoRepoModeGate.enactPrMerge — PR creation enactment (AC-L5-6)', () =
       );
       expect(gh.calls).toEqual([]);
     }
+  });
+
+  it('scrubs the PR title/body and passes them in equals form (#7 §5 #2/#12)', () => {
+    const gh = recordingGhExec();
+    const leaky = {
+      ...prReq,
+      title: 'feat: fix /home/alice/secret path',
+      description: '## Why\n\nsee /home/alice/x and token ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+    };
+    new CoRepoModeGate().enactPrMerge(leaky, 'owner', { ghExec: gh.exec });
+    const call = gh.calls[0]!;
+    const titleArg = call.find((a) => a.startsWith('--title='))!;
+    const bodyArg = call.find((a) => a.startsWith('--body='))!;
+    // equals form (leading-dash values can't be misread as options), and secrets redacted.
+    expect(titleArg).toContain('/home/[redacted]');
+    expect(titleArg).not.toContain('alice');
+    expect(bodyArg).toContain('/home/[redacted]');
+    expect(bodyArg).toContain('[redacted-token]');
+    expect(bodyArg).not.toContain('alice');
+    expect(bodyArg).not.toContain('ghp_');
+    // No bare token may be misread as an option.
+    expect(call).not.toContain('--title');
+    expect(call).not.toContain('--body');
+  });
+
+  it('a leading-dash PR title cannot be misread as a gh option (#7 §5 #12)', () => {
+    const gh = recordingGhExec();
+    new CoRepoModeGate().enactPrMerge({ ...prReq, title: '--fill' }, 'owner', { ghExec: gh.exec });
+    // The whole value rides inside one `--title=…` token, never a standalone `--fill`.
+    expect(gh.calls[0]).toContain('--title=--fill');
+    expect(gh.calls[0]).not.toContain('--fill');
+  });
+
+  it('scrubs the merge message before it is baked into history, preserving [reviewed:] (#7 §5 #4)', () => {
+    const git = { calls: [] as string[][], exec: (_c: string, a: readonly string[]) => void git.calls.push([...a]) };
+    new CoRepoModeGate().enactPublish(
+      {
+        branch: 'co/l5-phase-a',
+        into: 'co/l5-review-gate',
+        message: 'merge(co/l5-phase-a): land it via /home/alice/wt  [reviewed: PASS]',
+        repoCwd: '/repo',
+      },
+      'owner',
+      { gitExec: git.exec, headReader: () => 'c'.repeat(40) },
+    );
+    const mergeCall = git.calls.find((c) => c[0] === 'merge')!;
+    const message = mergeCall[mergeCall.indexOf('-m') + 1]!;
+    expect(message).toContain('/home/[redacted]');
+    expect(message).toContain('[reviewed: PASS]'); // structural trailer preserved
+    expect(message).not.toContain('/home/alice');
   });
 });

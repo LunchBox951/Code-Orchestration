@@ -57,10 +57,15 @@ function redactTokenMatch(match: string): string {
 }
 
 /**
- * Scrub an outward issue text: redact home-directory usernames, email addresses, and
+ * Scrub an outward-facing artifact: redact home-directory usernames, email addresses, and
  * credential-shaped tokens. Returns the scrubbed text; clean text passes through unchanged.
+ *
+ * This is the single redaction pass for ANY text leaving `co` for a human/remote surface — issue
+ * titles/bodies, PR titles/descriptions, and merge commit messages (#7 §5 findings #2/#4). It is
+ * deliberately content-only: it never touches structural markers a renderer adds (e.g. a merge
+ * message's `[reviewed: PASS]` trailer carries no path/email/token, so it survives verbatim).
  */
-export function scrubIssueText(text: string): string {
+export function scrubOutwardText(text: string): string {
   let scrubbed = text.replace(HOME_PATH_RE, `$1${REDACTED_PATH}`);
   scrubbed = scrubbed.replace(EMAIL_RE, REDACTED_EMAIL);
   for (const re of TOKEN_RES) {
@@ -68,3 +73,9 @@ export function scrubIssueText(text: string): string {
   }
   return scrubbed;
 }
+
+/**
+ * @deprecated Prefer {@link scrubOutwardText}. Retained as the issue-filing call sites' name; it is
+ * the same pass (issue text is one kind of outward artifact).
+ */
+export const scrubIssueText = scrubOutwardText;

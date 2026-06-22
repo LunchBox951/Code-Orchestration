@@ -11,11 +11,36 @@ import { openWorktreeStore, type WorktreeStore } from './worktree-store.js';
 import { type GitReader } from './detect-base.js';
 import {
   defaultGitExec,
+  execFailureDetail,
+  redactExecArgs,
   slingWorktree,
   worktreePathFor,
   type BaselineProbe,
   type GitExec,
 } from './sling.js';
+
+describe('redactExecArgs / execFailureDetail (#7 §5 #11 — no value leak in exec-failure logs)', () => {
+  it('masks value-bearing flag values (separate-token and equals forms), keeps flag names', () => {
+    expect(redactExecArgs(['merge', '--no-ff', '-m', 'land /home/alice/x', 'co/b'])).toBe(
+      'merge --no-ff -m [redacted] co/b',
+    );
+    expect(redactExecArgs(['pr', 'create', '--title=secret /home/alice', '--body=ghp_xxx'])).toBe(
+      'pr create --title=[redacted] --body=[redacted]',
+    );
+    // non-value flags and positionals survive untouched
+    expect(redactExecArgs(['push', 'origin', 'co/b'])).toBe('push origin co/b');
+  });
+
+  it('derives a diagnostic from stderr/status, never the argv-laden node message', () => {
+    expect(execFailureDetail({ stderr: 'fatal: not a git repository', status: 128 })).toBe(
+      'fatal: not a git repository',
+    );
+    expect(execFailureDetail({ stderr: '', status: 1 })).toBe('exit code 1');
+    expect(execFailureDetail(new Error('Command failed: git merge -m secret'))).toBe(
+      'command failed',
+    );
+  });
+});
 
 // AC-L3-1 (co_sling core): from the auto-detected base, create an isolated worktree+branch under
 // program-data, record it, and capture a branch-off baseline — never touching the repo with

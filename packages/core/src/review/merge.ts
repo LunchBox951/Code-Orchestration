@@ -9,6 +9,7 @@ import type { DispatchStore } from '../dispatch/dispatch-store.js';
 import type { PlacementDecided, PlacementRecord } from '../dispatch/events.js';
 import type { DispatchResolution } from '../dispatch/throttle.js';
 import type { ReasoningBudget, WorkSize } from '../dispatch/tier.js';
+import { scrubOutwardText } from '../issues/scrub.js';
 import { renderMergeMessage, renderPrMessage, type PrIntent } from '../worktrees/messages.js';
 import {
   CoRepoModeGate,
@@ -1228,8 +1229,9 @@ export class CoReviewGate implements FinishReviewGate {
     const slot = this.acquirePublishSlot(req.into, req.branch, 'co_pr_merge');
 
     // Render the house-style PR description from the structured intent (Principle 3 — co owns the
-    // contract; provider voice cannot reach the artifact by construction).
-    const prDescription = renderPrMessage(req.intent);
+    // contract; provider voice cannot reach the artifact by construction), then scrub it so the
+    // returned operator-approval preview is redacted to match what enactPrMerge posts (#7 §5 #2).
+    const prDescription = scrubOutwardText(renderPrMessage(req.intent));
 
     let result;
     try {

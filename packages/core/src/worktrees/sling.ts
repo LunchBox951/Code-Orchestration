@@ -17,15 +17,72 @@ import { rollbackError, throwWithRollbackErrors } from '../rollback-errors.js';
  */
 export type GitExec = (cwd: string, args: readonly string[]) => void;
 
+/** Flags whose VALUE can carry free text or secrets — masked in exec-failure logs (#7 §5 #11). */
+const VALUE_BEARING_FLAGS = new Set([
+  '-m',
+  '--message',
+  '-F',
+  '--file',
+  '--body',
+  '-b',
+  '--title',
+  '-t',
+  '-f',
+  '--field',
+  '--raw-field',
+  '--input',
+]);
+
+/**
+ * Render an argv for an error/log message with value-bearing flags MASKED (#7 §5 #11): a
+ * `gh pr create --body <text>` or `git merge -m <text>` failure must not leak the message
+ * (which can carry pasted command output, paths, or credentials) into transcripts. Flag NAMES
+ * stay so the failure is still diagnosable; only their value tokens become `[redacted]`. Handles
+ * both separate-token (`--body x`) and equals (`--body=x`) forms.
+ */
+export function redactExecArgs(args: readonly string[]): string {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i]!;
+    const eq = /^(--?[A-Za-z][\w-]*)=/u.exec(token);
+    if (eq != null && VALUE_BEARING_FLAGS.has(eq[1]!)) {
+      out.push(`${eq[1]}=[redacted]`);
+      continue;
+    }
+    out.push(token);
+    if (VALUE_BEARING_FLAGS.has(token) && i + 1 < args.length) {
+      out.push('[redacted]');
+      i++;
+    }
+  }
+  return out.join(' ');
+}
+
+/**
+ * A safe one-line diagnostic from a failed `execFileSync`: prefer the child's stderr (the genuine
+ * git/gh error), else the exit status/signal — never the Node error message, which embeds the full
+ * unredacted argv (#7 §5 #11).
+ */
+export function execFailureDetail(cause: unknown): string {
+  if (cause != null && typeof cause === 'object') {
+    const e = cause as { stderr?: unknown; status?: unknown; signal?: unknown };
+    const stderr = e.stderr == null ? '' : String(e.stderr).trim();
+    if (stderr.length > 0) return stderr;
+    if (e.status != null) return `exit code ${String(e.status)}`;
+    if (e.signal != null) return `signal ${String(e.signal)}`;
+  }
+  return 'command failed';
+}
+
 /** The production {@link GitExec}: run `git <args>` in `cwd`, surfacing a non-zero exit as a throw. */
 export const defaultGitExec: GitExec = (cwd, args) => {
   try {
     execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (cause) {
-    const detail = cause instanceof Error ? cause.message : String(cause);
-    throw new Error(`co worktrees: \`git ${args.join(' ')}\` failed in '${cwd}': ${detail}`, {
-      cause,
-    });
+    throw new Error(
+      `co worktrees: \`git ${redactExecArgs(args)}\` failed in '${cwd}': ${execFailureDetail(cause)}`,
+      { cause },
+    );
   }
 };
 

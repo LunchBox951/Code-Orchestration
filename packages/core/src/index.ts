@@ -1191,7 +1191,7 @@ export {
   layerIssueOptIns,
   resolveIssueOptIns,
 } from './issues/opt-in.js';
-export { scrubIssueText } from './issues/scrub.js';
+export { scrubIssueText, scrubOutwardText } from './issues/scrub.js';
 export {
   ISSUE_CO_REPO_KEY,
   issueFilingApprovalKey,
