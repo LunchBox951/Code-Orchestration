@@ -14,7 +14,8 @@
  *      the daemon's run-cycle: selection reads `store.outstanding`, which is ACTIONABLE-only. An
  *      `operator_message` is classified INFORMATIONAL and would NOT drive a turn — so the kickoff must be
  *      a `clarify_request` (the same actionable kickoff the harnesses use).
- *   3. REGISTER the root in the roster as a `coordinator` whose parent is {@link OPERATOR} (idempotent —
+ *   3. RECORD the root dispatch placement so cold-start honors provider pins / enabled-provider settings.
+ *   4. REGISTER the root in the roster as a `coordinator` whose parent is {@link OPERATOR} (idempotent —
  *      re-asserting the same agent is safe).
  *
  * ⚠ It deliberately DOES NOT mint a `session.created` record. Minting the session is the daemon's job
@@ -26,7 +27,7 @@
  *
  * Ordering note: the worktree is provisioned BEFORE the roster registration, so a `slingWorktree`
  * failure leaves NO dangling root coordinator (which the daemon would otherwise try — and fail-loud — to
- * cold-start, having no provisioned cwd). On success all three records exist; the set matches the frozen
+ * cold-start, having no provisioned cwd). On success all four records exist; the set matches the frozen
  * contract regardless of order.
  *
  * DETERMINISTIC (no `Math.random()` / wall clock): the adapter may pass a name-derived
@@ -34,6 +35,22 @@
  * fallback for direct callers and fixtures.
  */
 import { createHash } from 'node:crypto';
+import { openConfigStore, type ConfigStore } from '../config/config-store.js';
+import {
+  defaultProviderAccounts,
+  placeAgent,
+  resolvePinTable,
+  type ProviderAccount,
+  type ProviderHeadroom,
+} from '../dispatch/balancer.js';
+import {
+  resolveDefaultReasoningBudget,
+  resolveDefaultWorkSize,
+  resolveEnabledProviders,
+  resolveModels,
+} from '../dispatch/dispatch-config.js';
+import { openDispatchStore, type DispatchStore } from '../dispatch/dispatch-store.js';
+import type { PlacementDecided } from '../dispatch/events.js';
 import {
   MAIL_CLARIFY_REQUEST,
   OPERATOR,
@@ -74,6 +91,8 @@ export interface StartCoordinatorSessionDeps {
   readonly openRoster?: (projectId: string) => RosterStore;
   readonly openWorktrees?: (projectId: string) => WorktreeStore;
   readonly openMail?: (projectId: string) => MailStore;
+  readonly openDispatch?: (projectId: string) => DispatchStore;
+  readonly openConfig?: () => ConfigStore;
   /** Seams forwarded to {@link slingWorktree} (git/probe/provisioner) — defaults to production. */
   readonly slingDeps?: SlingDeps;
 }
@@ -101,9 +120,9 @@ export function rootCoordinatorId(projectId: string): string {
 
 /**
  * Start a ROOT coordinator session (the operator entry point). See the file docstring for the full
- * contract; in short: provision the worktree → seed the actionable `clarify_request` kickoff →
- * register the roster coordinator (parent `@operator`) — but mint NO session (the daemon does that on cold
- * start). Fails loud (Principle 9) unless exactly one of `prompt` / `specBody` is supplied.
+ * contract; in short: provision the worktree → seed the actionable `clarify_request` kickoff → record root
+ * placement → register the roster coordinator (parent `@operator`) — but mint NO session (the daemon does
+ * that on cold start). Fails loud (Principle 9) unless exactly one of `prompt` / `specBody` is supplied.
  */
 export function startCoordinatorSession(
   params: StartCoordinatorSessionParams,
@@ -130,6 +149,8 @@ export function startCoordinatorSession(
   const openRoster = deps.openRoster ?? openRosterStore;
   const openWorktrees = deps.openWorktrees ?? openWorktreeStore;
   const openMail = deps.openMail ?? openMailStore;
+  const openDispatch = deps.openDispatch ?? openDispatchStore;
+  const openConfig = deps.openConfig ?? openConfigStore;
 
   // 1) PROVISION the root's worktree FIRST (before any roster/mail write) so a sling failure leaves no
   //    dangling root for the daemon to cold-start. slingWorktree records the worktree keyed to `agent`.
@@ -176,7 +197,18 @@ export function startCoordinatorSession(
       mail.close();
     }
 
-    // 3) REGISTER the root in the roster (idempotent): a coordinator parented to @operator.
+    // 3) RECORD the root dispatch placement. Root start is operator-initiated, so it is not usage-gated;
+    //    it still uses the shared dispatch config/tier policy to honor coordinator pins and provider-only
+    //    settings before the daemon cold-starts the registered root.
+    const placement = rootCoordinatorPlacement(projectId, openConfig);
+    const dispatch = openDispatch(projectId);
+    try {
+      dispatch.recordPlacement(coordinator, placement);
+    } finally {
+      dispatch.close();
+    }
+
+    // 4) REGISTER the root in the roster (idempotent): a coordinator parented to @operator.
     const roster = openRoster(projectId);
     try {
       roster.recordAgent({
@@ -202,6 +234,67 @@ export function startCoordinatorSession(
     branch: slung.branch,
     baseRef: slung.baseRef,
     baseSha: slung.baseSha,
+  };
+}
+
+const ROOT_COORDINATOR_SYNTHETIC_RESET_AT = '9999-12-31T23:59:59.999Z';
+
+function rootCoordinatorPlacement(
+  projectId: string,
+  openConfig: () => ConfigStore,
+): PlacementDecided {
+  const config = openConfig();
+  try {
+    const enabled = new Set(resolveEnabledProviders(projectId, config));
+    const accounts = defaultProviderAccounts().filter((account) => enabled.has(account.provider));
+    if (accounts.length === 0) {
+      throw new Error(
+        `startCoordinatorSession: no enabled provider account is available for root coordinator ` +
+          `placement (project '${projectId}').`,
+      );
+    }
+    const workSize = resolveDefaultWorkSize(projectId, config);
+    const reasoningBudget = resolveDefaultReasoningBudget(projectId, config);
+    const decision = placeAgent({
+      role: 'coordinator',
+      workSize,
+      reasoningBudget,
+      pins: resolvePinTable(projectId, config),
+      candidates: accounts.map(rootCandidate),
+      nowMs: 0,
+      modelOverrides: resolveModels(projectId, config),
+    });
+    if (decision.kind === 'no-candidate') {
+      throw new Error(
+        `startCoordinatorSession: could not place root coordinator: ${decision.reason}`,
+      );
+    }
+    return {
+      kind: 'placed',
+      role: 'coordinator',
+      work_size: workSize,
+      reasoning_budget: reasoningBudget,
+      provider: decision.placement.provider,
+      account: decision.placement.account,
+      model: decision.placement.model,
+      effort: decision.placement.effort,
+      context: decision.placement.context,
+    };
+  } finally {
+    config.close();
+  }
+}
+
+function rootCandidate(account: ProviderAccount): ProviderHeadroom {
+  return {
+    provider: account.provider,
+    account: account.account,
+    available: true,
+    headroom: {
+      kind: 'known',
+      used_pct: 0,
+      reset_at: ROOT_COORDINATOR_SYNTHETIC_RESET_AT,
+    },
   };
 }
 

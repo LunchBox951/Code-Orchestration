@@ -27,6 +27,7 @@
 
 import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
+import { CO_CLAUDE_STATUSLINE_PATH_ENV } from '../dispatch/statusline-env.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
 import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
 import { findSubRole } from '../roles/sub-roles.js';
@@ -471,8 +472,14 @@ function buildClaudeLaunchConfig(
   // hasCompletedOnboarding — is seeded separately from the operator's ~/.claude.json via the conductor's
   // CLAUDE_STATE_ALLOWLIST.) Without this companion file the keystone deadlocks every agent on the
   // warning screen — verified against real claude 2.1.181.
-  const claudeSettingsPath = `${identity.isolatedHomeDir.replace(/\/+$/u, '')}/settings.json`;
-  const claudeSettingsJson = buildClaudeSettingsJson();
+  const isolatedHome = identity.isolatedHomeDir.replace(/\/+$/u, '');
+  const claudeSettingsPath = `${isolatedHome}/settings.json`;
+  // #67 COLLECTION — the per-account file the statusLine command tees the live rate-limit payload to.
+  // Sits under the isolated CLAUDE_CONFIG_DIR (never the user's home), and is named for the agent so a
+  // re-used home never crosses accounts. `claude-source.ts`'s `realReadStatusLine` reads it back via the
+  // CO_CLAUDE_STATUSLINE_PATH env set below.
+  const statusLinePath = `${isolatedHome}/co-statusline.json`;
+  const claudeSettingsJson = buildClaudeSettingsJson(statusLinePath);
   const settingsPrelaunch: PrelaunchFile = {
     path: claudeSettingsPath,
     contents: claudeSettingsJson,
@@ -485,7 +492,13 @@ function buildClaudeLaunchConfig(
     // console reassembles an append-only offset transcript, so a redraw replayed as appended frames
     // renders garbled (codex, which is already append-friendly, looked fine). This makes Claude's
     // stream match that model at the source.
-    env: { CLAUDE_CONFIG_DIR: identity.isolatedHomeDir, CLAUDE_CODE_NO_FLICKER: '1' },
+    // CO_CLAUDE_STATUSLINE_PATH (#67) names the file the statusLine command tees its payload to, so the
+    // passive Claude usage source reads the live rate-limits without spending a turn (AC11).
+    env: {
+      CLAUDE_CONFIG_DIR: identity.isolatedHomeDir,
+      CLAUDE_CODE_NO_FLICKER: '1',
+      [CO_CLAUDE_STATUSLINE_PATH_ENV]: statusLinePath,
+    },
     claudeSettingsJson,
     claudeSettingsPath,
     prelaunchFiles: [settingsPrelaunch],
@@ -503,16 +516,47 @@ function buildClaudeLaunchConfig(
   };
 }
 
+/**
+ * Env var naming the file the statusLine command tees the Claude Code rate-limit payload to. Re-exported
+ * from the shared {@link CO_CLAUDE_STATUSLINE_PATH_ENV} leaf constant (the single source of truth shared
+ * with `dispatch/claude-source.ts`) — imported, not re-declared, so the two can never drift while still
+ * keeping the permissions module free of a dispatch-logic import.
+ */
+export { CO_CLAUDE_STATUSLINE_PATH_ENV } from '../dispatch/statusline-env.js';
+
+/**
+ * Build the Claude statusLine command (#67 COLLECTION). Claude Code pipes the statusLine JSON payload
+ * (carrying `rate_limits`) to the command on STDIN every refresh; the command must print the status line
+ * to STDOUT. This command TEES stdin to `statusLinePath` (the passive usage source reads it back) and
+ * prints nothing (an empty status line) — so the collection is invisible to the operator and spends no
+ * turn (AC11). `tee` writes the file atomically-enough for a single small JSON blob; `>/dev/null`
+ * discards the echoed status. The path is shell-single-quoted (the isolated home is host-controlled, but
+ * quoting keeps a path with spaces safe).
+ */
+export function buildClaudeStatusLineCommand(statusLinePath: string): string {
+  return `tee ${shellSingleQuote(statusLinePath)} >/dev/null`;
+}
+
+/** Single-quote a string for safe POSIX-shell interpolation (`'` → `'\''`). */
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 // The isolated `settings.json` that makes a fresh-config-dir agent non-interactive: pre-accept the
 // bypassPermissions warning + suppress the first-session nag dialogs. Deny rules (`--disallowedTools`)
-// are unaffected — they apply in every mode, including bypassPermissions.
-function buildClaudeSettingsJson(): string {
+// are unaffected — they apply in every mode, including bypassPermissions. It also carries the #67
+// statusLine command that tees the rate-limit payload to `statusLinePath` for passive usage collection.
+function buildClaudeSettingsJson(statusLinePath: string): string {
   return (
     JSON.stringify(
       {
         skipDangerousModePermissionPrompt: true,
         skipWorkflowUsageWarning: true,
         skipAutoPermissionPrompt: true,
+        statusLine: {
+          type: 'command',
+          command: buildClaudeStatusLineCommand(statusLinePath),
+        },
       },
       null,
       2,

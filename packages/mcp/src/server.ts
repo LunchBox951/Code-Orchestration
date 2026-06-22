@@ -24,6 +24,11 @@ export interface ToolActivityEvent {
   readonly tool: string;
   /** Present on end events; true only when the tool handler returned successfully. */
   readonly ok?: boolean;
+  /**
+   * Present on end events: the wall duration of the tool call in ms (PR-B collection). Observability
+   * only — the watchdog-liveness consumer ignores it; the durable tool-usage recorder folds it in.
+   */
+  readonly durationMs?: number;
 }
 
 export interface CoMcpServerOptions {
@@ -90,8 +95,12 @@ export function createCoMcpServer(opts: CoMcpServerOptions): McpServer {
     };
     server.registerTool(spec.name, config, async (args: unknown) => {
       opts.onToolActivity?.({ phase: 'start', tool: spec.name });
+      const startedAtMs = Date.now();
       let ok = false;
       try {
+        // contextFactory runs INSIDE the try so a context-build failure still emits end{ok:false} in
+        // the finally — a turn whose context could not be built is a tool ERROR, recorded as such, not
+        // a silently-dropped call (PR-B collection: the tool-usage projection must see the error).
         const ctx = await opts.contextFactory();
         const structured = await invokeTool(registry, ctx, spec.name, args);
         ok = true;
@@ -100,7 +109,12 @@ export function createCoMcpServer(opts: CoMcpServerOptions): McpServer {
           structuredContent: structured as Record<string, unknown>,
         };
       } finally {
-        opts.onToolActivity?.({ phase: 'end', tool: spec.name, ok });
+        opts.onToolActivity?.({
+          phase: 'end',
+          tool: spec.name,
+          ok,
+          durationMs: Date.now() - startedAtMs,
+        });
       }
     });
   }

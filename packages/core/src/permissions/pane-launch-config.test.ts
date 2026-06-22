@@ -13,8 +13,10 @@ import { BLOCK_LIST } from './block-list.js';
 import { checkBlockListDrift, readEnforcedConfig } from './drift.js';
 import {
   buildPaneLaunchConfig,
+  buildClaudeStatusLineCommand,
   paneMayUseWebTools,
   CODEX_BASE_PROMPT_CONFIG_KEY,
+  CO_CLAUDE_STATUSLINE_PATH_ENV,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
 import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
@@ -349,6 +351,45 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
       path: `${ISOLATED_HOME}/settings.json`,
       contents: config.claudeSettingsJson,
     });
+  });
+
+  it('claude (#67): settings.json carries a statusLine command teeing to the isolated payload file', () => {
+    const config = buildPaneLaunchConfig('claude', BASE_IDENTITY);
+    const settings = JSON.parse(config.claudeSettingsJson ?? '{}') as Record<string, unknown>;
+    const statusLine = settings['statusLine'] as Record<string, unknown> | undefined;
+    expect(statusLine).toBeDefined();
+    expect(statusLine?.['type']).toBe('command');
+    const statusLinePath = `${ISOLATED_HOME}/co-statusline.json`;
+    // The command must TEE the statusLine payload to the per-account file under the isolated home, and
+    // discard the echoed status (the collection is invisible — no status text, no spent turn / AC11).
+    expect(statusLine?.['command']).toBe(buildClaudeStatusLineCommand(statusLinePath));
+    expect(statusLine?.['command']).toContain(`tee '${statusLinePath}'`);
+    expect(statusLine?.['command']).toContain('>/dev/null');
+    // The path is under the ISOLATED home, never the user's ~/.claude.
+    expect(statusLinePath).toContain(ISOLATED_HOME);
+    expect(statusLinePath).not.toContain('/.claude');
+  });
+
+  it('claude (#67): CO_CLAUDE_STATUSLINE_PATH env points at the isolated statusLine payload file', () => {
+    const config = buildPaneLaunchConfig('claude', BASE_IDENTITY);
+    expect(config.env[CO_CLAUDE_STATUSLINE_PATH_ENV]).toBe(`${ISOLATED_HOME}/co-statusline.json`);
+    expect(CO_CLAUDE_STATUSLINE_PATH_ENV).toBe('CO_CLAUDE_STATUSLINE_PATH');
+    // The companion path env never leaks the user home.
+    expect(config.env[CO_CLAUDE_STATUSLINE_PATH_ENV]).toContain(ISOLATED_HOME);
+    expect(config.env[CO_CLAUDE_STATUSLINE_PATH_ENV]).not.toContain('/.claude');
+  });
+
+  it('codex: the statusLine collection is Claude-only (no CO_CLAUDE_STATUSLINE_PATH on codex)', () => {
+    const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    expect(config.env[CO_CLAUDE_STATUSLINE_PATH_ENV]).toBeUndefined();
+    expect(config.claudeSettingsJson).toBeUndefined();
+  });
+
+  it('claude (#67): statusLine command single-quotes a path with shell metacharacters', () => {
+    // A path with a space / quote must be safely single-quoted (the isolated home is host-controlled,
+    // but the builder must never produce an unquoted shell injection).
+    const cmd = buildClaudeStatusLineCommand("/tmp/iso home/it's/co-statusline.json");
+    expect(cmd).toBe(`tee '/tmp/iso home/it'\\''s/co-statusline.json' >/dev/null`);
   });
 
   it('claude: args allow the CO MCP bus without allowing shell tools', () => {

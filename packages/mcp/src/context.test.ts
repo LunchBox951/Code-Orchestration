@@ -622,6 +622,7 @@ describe('defaultContextFactory — production context resolution', () => {
       expect(ctx.dispatch).toBeDefined();
       expect(ctx.reviews).toBeDefined();
       expect(ctx.roster).toBeDefined();
+      expect(ctx.archive).toBeDefined();
       expect(typeof ctx.usageSourceFactory).toBe('function');
     } finally {
       ctx.mail.close();
