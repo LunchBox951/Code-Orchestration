@@ -735,6 +735,20 @@ describe('role base-prompt injection into builder args', () => {
     expect(noRole.args).not.toContain('-c');
   });
 
+  it('codex: preserves the shipped sub-role approach in developer_instructions', () => {
+    const config = buildPaneLaunchConfig('codex', {
+      ...BASE_IDENTITY,
+      role: 'reviewer',
+      subRole: 'pr',
+    });
+    const idx = config.args.indexOf('-c');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const override = config.args[idx + 1] ?? '';
+    expect(override).toContain(`${CODEX_BASE_PROMPT_CONFIG_KEY}=`);
+    expect(override).toContain('Sub-role focus (reviewer:pr)');
+    expect(override).toContain('PR review');
+  });
+
   it('the base prompt is repo-agnostic: no project-memory / CLAUDE.md leakage, and stays short', () => {
     for (const role of ['coordinator', 'lead', 'implementer', 'reviewer', 'researcher'] as const) {
       const prompt = roleBasePrompt(role);

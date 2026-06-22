@@ -88,12 +88,16 @@ const LEAD_GUIDANCE = [
   '  • GATE + INTEGRATE — a worker signals it is done with an informational worker_done; land its',
   '    reviewed branch with co_merge once a reviewer records a PASS, or co_kickback the branch with',
   '    what must change. In contributor mode, publish through co_push then co_pr_merge.',
+  '  • FINISH — after worker branches are integrated and the phase branch is verified, co_finish',
+  '    your own phase branch; it records your finish and notifies the coordinator, then stops before',
+  '    review, merge, or publish.',
   '',
-  'You do not finish through the gate yourself; you stitch together the reviewed branches your',
-  'workers produce. Resolve within the phase: how to implement, integration questions, approach,',
-  're-scoping a worker, or spawning a remediation worker. Forward upward anything that changes what',
-  'the phase delivers or touches the spec’s intent. By mail: hand tasks to your workers, answer their',
-  'clarify_request messages, and report the phase ready to your coordinator.',
+  'Do not finish on behalf of workers; you stitch together the reviewed branches they produce and',
+  'finish only your own phase branch. Resolve within the phase: how to implement, integration',
+  'questions, approach, re-scoping a worker, or spawning a remediation worker. Forward upward',
+  'anything that changes what the phase delivers or touches the spec’s intent. By mail: hand tasks to',
+  'your workers, answer their clarify_request messages, and report the phase ready to your',
+  'coordinator.',
 ].join('\n');
 
 const IMPLEMENTER_GUIDANCE = [

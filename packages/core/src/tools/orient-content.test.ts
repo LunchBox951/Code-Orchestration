@@ -188,9 +188,18 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
 
   it('the lead arc NAMES its workflow verbs (F4 — drive every arc from orient, not just coordinator)', () => {
     const out = orientContent('lead');
-    for (const verb of ['co_sling', 'co_merge', 'co_kickback', 'co_push', 'co_pr_merge']) {
+    for (const verb of [
+      'co_sling',
+      'co_merge',
+      'co_kickback',
+      'co_push',
+      'co_pr_merge',
+      'co_finish',
+    ]) {
       expect(out, `lead orient should name ${verb}`).toContain(verb);
     }
+    expect(out).toContain('finish only your own phase branch');
+    expect(out).not.toContain('You do not finish through the gate yourself');
   });
 
   it('the implementer arc NAMES co_finish as the verb that advances the gate (F4)', () => {

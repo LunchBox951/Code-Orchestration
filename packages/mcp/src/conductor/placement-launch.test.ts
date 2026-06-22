@@ -1090,6 +1090,33 @@ describe('role base-prompt reaches the spawned SpawnSpec.args (PR D — item 1 w
     expect(prompt).toContain('co-orchestrated reviewer');
   });
 
+  it('codex sub-role launches carry mounted CO_ROLE and developer_instructions focus', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-test-cx', 'implementer:test', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-test-cx', 'co/feat-impl-test', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-test-cx');
+
+    const { identity, spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    expect(identity.role).toBe('implementer');
+    expect(identity.subRole).toBe('test');
+    const flagIdx = spec.args.indexOf('-c');
+    expect(flagIdx).toBeGreaterThanOrEqual(0);
+    const override = spec.args[flagIdx + 1] ?? '';
+    expect(override).toContain('developer_instructions=');
+    expect(override).toContain('Sub-role focus (implementer:test)');
+    expect(override).toContain('test-first');
+    const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
+    expect(configToml).toBeDefined();
+    expect(configToml!.contents).toContain('CO_ROLE = "implementer:test"');
+  });
+
   it('researcher launches through the same path and gets the researcher base prompt', () => {
     const { projectId, cwd, dataDir } = makeProject();
     const placement = recordPlacement(projectId, 'res-bp', 'researcher', 'claude');
