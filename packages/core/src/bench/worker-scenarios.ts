@@ -18,12 +18,22 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-/** The objective grade of a produced artifact: did the EXECUTED code satisfy the scenario? */
+/**
+ * The objective grade of a produced artifact: did the EXECUTED code satisfy the scenario? Beyond the
+ * binary `correct`, the evaluator reports the oracle case tally (`casesPassed`/`casesTotal`) so the
+ * three-score CORRECTNESS metric (in {@link ../bench/orchestration-metrics.ts}) can refine the pass into
+ * a fraction of oracle cases passed rather than an all-or-nothing 0/1. `correct` stays for back-compat
+ * and is exactly `casesPassed === casesTotal` (with `casesTotal > 0`).
+ */
 export interface ArtifactCheck {
-  /** True only when the artifact exists, imports, and passes every assertion. */
+  /** True only when the artifact exists, imports, and passes every assertion (= `casesPassed === casesTotal`). */
   readonly correct: boolean;
   /** A concrete, human-legible reason (the failing case, or a pass summary). */
   readonly detail: string;
+  /** Oracle cases that passed (the artifact must exist + import for any case to pass; 0 on a hard miss). */
+  readonly casesPassed: number;
+  /** Total oracle cases the scenario grades (a fixed scenario property, > 0). */
+  readonly casesTotal: number;
 }
 
 /** The substitution context for a scenario's prompt text. */
@@ -72,33 +82,45 @@ async function evaluateAddModule(
   worktreeDir: string,
   artifactPath: string,
 ): Promise<ArtifactCheck> {
+  const casesTotal = ADD_CASES.length;
   const file = join(worktreeDir, artifactPath);
   if (!existsSync(file)) {
-    return { correct: false, detail: `${artifactPath} not found in ${worktreeDir}` };
+    return miss(`${artifactPath} not found in ${worktreeDir}`, casesTotal);
   }
   let mod: Record<string, unknown>;
   try {
     mod = await importFreshModule(file);
   } catch (error) {
-    return { correct: false, detail: `import threw: ${errorMessage(error)}` };
+    return miss(`import threw: ${errorMessage(error)}`, casesTotal);
   }
   const add = mod['add'];
   if (typeof add !== 'function') {
-    return { correct: false, detail: `${artifactPath} does not export a function 'add'` };
+    return miss(`${artifactPath} does not export a function 'add'`, casesTotal);
   }
   const addFn = add as (a: number, b: number) => unknown;
+  let casesPassed = 0;
   for (const [a, b, want] of ADD_CASES) {
     let got: unknown;
     try {
       got = addFn(a, b);
     } catch (error) {
-      return { correct: false, detail: `add(${a}, ${b}) threw: ${errorMessage(error)}` };
+      return { correct: false, detail: `add(${a}, ${b}) threw: ${errorMessage(error)}`, casesPassed, casesTotal };
     }
     if (got !== want) {
-      return { correct: false, detail: `add(${a}, ${b}) = ${String(got)}, want ${want}` };
+      return { correct: false, detail: `add(${a}, ${b}) = ${String(got)}, want ${want}`, casesPassed, casesTotal };
     }
+    casesPassed += 1;
   }
-  return { correct: true, detail: `add() correct over ${ADD_CASES.length} cases` };
+  return { correct: true, detail: `add() correct over ${casesTotal} cases`, casesPassed, casesTotal };
+}
+
+/**
+ * A hard artifact miss (the file is absent / does not import / does not export the contract): zero oracle
+ * cases passed out of `casesTotal`. Factored so the no-silent-zero contract (`casesTotal` is always the
+ * scenario's true case count even on a structural miss) is uniform.
+ */
+function miss(detail: string, casesTotal: number): ArtifactCheck {
+  return { correct: false, detail, casesPassed: 0, casesTotal };
 }
 
 /**

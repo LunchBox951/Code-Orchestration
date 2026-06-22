@@ -923,11 +923,32 @@ export type {
   RunFidelity,
   StopReason,
   AgentRunMetric,
+  AgentTokenEconomy,
+  AgentToolEfficiency,
   MergeOutcome,
   OrchestrationRunInput,
   OrchestrationScorecard,
+  RunScores,
+  RoleScoreAggregate,
+  AgentCostRollup,
+  AgentToolUsage,
 } from './bench/orchestration-metrics.js';
-export { summarizeRun, toJsonl, renderScorecard } from './bench/orchestration-metrics.js';
+export {
+  summarizeRun,
+  toJsonl,
+  renderScorecard,
+  correctnessScore,
+  tokenEconomyScore,
+  cacheEfficiency,
+  contextEfficiencyScore,
+  buildTokenEconomy,
+  buildToolEfficiency,
+  budgetTokensForScenario,
+  clamp01,
+  BUDGET_TOKENS_BY_SCENARIO,
+  DEFAULT_BUDGET_TOKENS,
+  CONTEXT_EFFICIENCY_WEIGHTS,
+} from './bench/orchestration-metrics.js';
 
 // L6a Phase A — authoritative role profiles + durable agent→role→parent projection + spawn rules
 // (AC-L6a-1, AC-L6a-3, AC-L6a-8, AC-L6a-9, AC-L6a-10). Five base roles promoted from a seed

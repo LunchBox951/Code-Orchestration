@@ -58,6 +58,7 @@ import {
   openSpecStore,
   openWorktreeStore,
   parseSubRoleId,
+  renderScorecard,
   reviewRequestEnvelope,
   reviewReviewerKey,
   startCoordinatorSession,
@@ -987,6 +988,19 @@ describe('orchestration benchmark — sandbox harness drives the FULL coordinato
 
     // (8) NO orchestration footprint left in the repo tree (Principle 12).
     expect(existsSync(join(repo, '.co'))).toBe(false);
+
+    // (9) THE THREE SCORES — correctness is a real number (the oracle case fraction, gated); token-economy
+    //     is NULL in the sandbox arm (N/A, never a silent zero — no real tokens are spent); context/tool
+    //     efficiency is also null until the per-agent tool-usage rollup surface lands (read via optional
+    //     chaining — an absent rollup is an honest N/A, not a 0).
+    expect(scorecard.scores.correctness).toBe(1);
+    expect(scorecard.scores.tokenEconomy).toBeNull();
+    for (const a of scorecard.agents) {
+      expect(a.tokenEconomy.tokenEconomy).toBeNull();
+      expect(a.tokenEconomy.totalTokens).toBeNull();
+    }
+    // The rendered scorecard shows N/A (not 0) for the sandbox-arm token economy.
+    expect(renderScorecard(scorecard)).toMatch(/token-economy=N\/A/u);
   });
 });
 
@@ -1051,12 +1065,20 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
       body: 'wedged',
     });
 
-    const agents = aggregateAgentMetrics(projectId, {
-      'coord-a': { turnsUsed: 3, wallClockMs: 3000 },
-      'lead-a': { turnsUsed: 2, wallClockMs: 2000 },
-    });
+    const agents = aggregateAgentMetrics(
+      projectId,
+      {
+        'coord-a': { turnsUsed: 3, wallClockMs: 3000 },
+        'lead-a': { turnsUsed: 2, wallClockMs: 2000 },
+      },
+      'calc-lib',
+    );
     // @operator is excluded; every roster agent appears (impl-a with zeroed samples).
     expect(agents.map((a) => a.agentId).sort()).toEqual(['coord-a', 'impl-a', 'lead-a']);
+    // Without PR B's cost/tool rollups on the dispatch store, the live-only economy score is null (N/A) —
+    // NOT a silent zero — and the tool-efficiency score is null too (no tool-usage rollup yet).
+    expect(agents.find((a) => a.agentId === 'coord-a')?.tokenEconomy.tokenEconomy).toBeNull();
+    expect(agents.find((a) => a.agentId === 'coord-a')?.toolEfficiency.contextEfficiency).toBeNull();
     const summary = summarizeRun({
       runId: 'r',
       scenarioId: 's',
@@ -1064,7 +1086,7 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
       providerMode: 'claude-only',
       fidelity: 'sandbox-fake',
       completed: true,
-      artifact: { correct: true, detail: 'ok' },
+      artifact: { correct: true, detail: 'ok', casesPassed: 1, casesTotal: 1 },
       agents,
       merges: [
         {

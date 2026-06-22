@@ -288,7 +288,10 @@ describe(`LIVE worker benchmark [local only; skips loudly unless ${CO_LIVE_E2E_E
         console.error(
           `[worker-benchmark] ${provider}: fidelity=${result.fidelity} completed=${result.completed} ` +
             `artifact=${result.artifact.correct} (${result.artifact.detail}) turns=${result.turnsUsed} ` +
-            `stop=${result.stopReason} wall=${result.wallClockMs}ms` +
+            `stop=${result.stopReason} wall=${result.wallClockMs}ms ` +
+            `correctness=${result.scores.correctness.toFixed(2)} ` +
+            `token-economy=${result.scores.tokenEconomy.tokenEconomy ?? 'N/A'} ` +
+            `context-efficiency=${result.scores.toolEfficiency.contextEfficiency ?? 'N/A'}` +
             (result.turnError != null ? ` err=${result.turnError}` : ''),
         );
 
@@ -300,6 +303,11 @@ describe(`LIVE worker benchmark [local only; skips loudly unless ${CO_LIVE_E2E_E
         expect(result.completed).toBe(true);
         // QUALITY (the headline metric): the produced module, EXECUTED, computes add() correctly.
         expect(result.artifact.correct).toBe(true);
+
+        // CORRECTNESS score: a completed + correct single-agent run scores 1 (the oracle-case fraction
+        // gated by completion). The other two scores are reported but may be N/A until PR B's per-agent
+        // cost/tool rollups land — they ride along via optional chaining (a null is honest, not a zero).
+        expect(result.scores.correctness).toBe(1);
 
         expect(result.turnsUsed).toBeGreaterThan(0);
         expect(result.turnsUsed).toBeLessThanOrEqual(benchMaxTurns);

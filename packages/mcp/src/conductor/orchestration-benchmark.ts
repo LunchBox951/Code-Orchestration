@@ -29,6 +29,9 @@
  */
 import {
   OPERATOR,
+  budgetTokensForScenario,
+  buildTokenEconomy,
+  buildToolEfficiency,
   openDispatchStore,
   openMailStore,
   openPlanStore,
@@ -36,7 +39,9 @@ import {
   openRosterStore,
   openWorktreeStore,
   summarizeRun,
+  type AgentCostRollup,
   type AgentRunMetric,
+  type AgentToolUsage,
   type MergeOutcome,
   type OrchestrationScenario,
   type OrchestrationScorecard,
@@ -233,7 +238,7 @@ export async function runOrchestrationBenchmark(
   }
 
   // ── Aggregate the OBJECTIVE record from the stores + git (never the automation's claims). ──────────
-  const agents = aggregateAgentMetrics(projectId, driveResult?.agentTurns ?? {});
+  const agents = aggregateAgentMetrics(projectId, driveResult?.agentTurns ?? {}, scenario.id);
   const merges = aggregateMergeOutcomes(projectId, integrationBranch, repoCwd);
   const implementerBranchesMergedUp = countImplementerBranchesMergedUp(
     projectId,
@@ -280,17 +285,41 @@ export function detectChainCompletion(projectId: ProjectId, taskId: string): boo
 }
 
 /**
+ * The PR B read-model surface this driver reads PER AGENT — declared HERE (not imported from B) so this
+ * module compiles on `dev` WITHOUT B. Both methods are OPTIONAL: when the store handle does not provide
+ * them (the surface that produces this data has not landed yet, or it is the sandbox arm), the optional
+ * call short-circuits to `undefined` and the corresponding three-score component becomes `null` (N/A) —
+ * never a silent zero. The shapes are the `@co/core`-owned {@link AgentCostRollup}/{@link AgentToolUsage}
+ * (the contract both this branch and B agree on); a `null` return is an explicit "no rollup".
+ */
+interface BenchEconStore {
+  /** LIVE-ONLY per-agent token cost rollup, or `null` (sandbox / not yet recorded). */
+  readonly getAgentCostRollup?: (agentId: string) => AgentCostRollup | null;
+  /** Per-agent tool-usage rollup (both arms), or `null` (not yet recorded). */
+  readonly getAgentToolUsage?: (agentId: string) => AgentToolUsage | null;
+}
+
+/**
  * Aggregate the per-agent {@link AgentRunMetric}s from the roster (role) + the dispatch store (provider) +
- * the mail log (escalations), folding in the automation-measured turn/wall samples. The roster is the
- * authoritative agent set; provider/escalation come from the objective record. An agent the automation
- * never sampled still appears (turns/wall = 0) so the scorecard reflects every registered agent.
+ * the mail log (escalations) + PR B's per-agent cost/tool rollups, folding in the automation-measured
+ * turn/wall samples. The roster is the authoritative agent set; provider/escalation come from the
+ * objective record. An agent the automation never sampled still appears (turns/wall = 0) so the scorecard
+ * reflects every registered agent.
+ *
+ * The token-economy + context/tool-efficiency raw signals are read via OPTIONAL CHAINING against an
+ * extended store type ({@link BenchEconStore}) so this compiles on `dev` WITHOUT PR B: when the rollup
+ * methods are absent (or return `null`), {@link buildTokenEconomy}/{@link buildToolEfficiency} fold a
+ * `null` score — never a silent zero (the trap that already afflicts the live `turnsUsed`). `scenarioId`
+ * resolves the (uncalibrated) per-scenario token budget the economy score is measured against.
  */
 export function aggregateAgentMetrics(
   projectId: ProjectId,
   agentTurns: Readonly<Record<string, AgentTurnSample>>,
+  scenarioId: string,
 ): readonly AgentRunMetric[] {
   const roster = openRosterStore(projectId);
   const mail = openMailStore(projectId);
+  const budgetTokens = budgetTokensForScenario(scenarioId);
   try {
     const escalationsBy = escalationCountsByAgent(mail);
     return roster
@@ -298,6 +327,7 @@ export function aggregateAgentMetrics(
       .filter((a) => a.agentId !== OPERATOR)
       .map((a): AgentRunMetric => {
         const sample = agentTurns[a.agentId];
+        const { cost, tool } = readAgentEcon(projectId, a.agentId);
         return {
           agentId: a.agentId,
           role: a.role,
@@ -305,11 +335,35 @@ export function aggregateAgentMetrics(
           turnsUsed: sample?.turnsUsed ?? 0,
           wallClockMs: sample?.wallClockMs ?? 0,
           escalations: escalationsBy[a.agentId] ?? 0,
+          tokenEconomy: buildTokenEconomy(cost, budgetTokens),
+          toolEfficiency: buildToolEfficiency(tool),
         };
       });
   } finally {
     mail.close();
     roster.close();
+  }
+}
+
+/**
+ * Read PR B's per-agent cost + tool-usage rollups via OPTIONAL CHAINING against the dispatch store cast to
+ * {@link BenchEconStore}. On `dev` WITHOUT B the methods are absent ⇒ both reads return `null` (the score
+ * becomes N/A). Never throws: a store-open failure or a missing method degrades to `null`, never a crash.
+ */
+function readAgentEcon(
+  projectId: ProjectId,
+  agentId: string,
+): { cost: AgentCostRollup | null; tool: AgentToolUsage | null } {
+  let store: (ReturnType<typeof openDispatchStore> & BenchEconStore) | undefined;
+  try {
+    store = openDispatchStore(projectId) as ReturnType<typeof openDispatchStore> & BenchEconStore;
+    const cost = store.getAgentCostRollup?.(agentId) ?? null;
+    const tool = store.getAgentToolUsage?.(agentId) ?? null;
+    return { cost, tool };
+  } catch {
+    return { cost: null, tool: null };
+  } finally {
+    store?.close();
   }
 }
 

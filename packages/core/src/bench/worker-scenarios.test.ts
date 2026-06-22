@@ -30,6 +30,9 @@ describe('addModuleScenario — objective evaluator (hermetic)', () => {
     const check = await scenario.evaluate(dir);
     expect(check.correct).toBe(true);
     expect(check.detail).toMatch(/correct over/);
+    // A clean pass = every oracle case passed; `correct` is exactly `casesPassed === casesTotal`.
+    expect(check.casesTotal).toBe(4);
+    expect(check.casesPassed).toBe(4);
   });
 
   it('fails a wrong solution.mjs with a concrete reason', async () => {
@@ -40,12 +43,18 @@ describe('addModuleScenario — objective evaluator (hermetic)', () => {
     const check = await scenario.evaluate(dir);
     expect(check.correct).toBe(false);
     expect(check.detail).toMatch(/add\(/);
+    // add(2,3) is the FIRST case and is wrong ⇒ zero cases passed before the bail (a real partial count).
+    expect(check.casesPassed).toBe(0);
+    expect(check.casesTotal).toBe(4);
   });
 
   it('fails when the artifact is missing', async () => {
     const check = await scenario.evaluate(dir);
     expect(check.correct).toBe(false);
     expect(check.detail).toMatch(/not found/);
+    // A hard miss reports zero of the full case total — never a silent partial.
+    expect(check.casesPassed).toBe(0);
+    expect(check.casesTotal).toBe(4);
   });
 
   it('fails when the export is not a function', async () => {

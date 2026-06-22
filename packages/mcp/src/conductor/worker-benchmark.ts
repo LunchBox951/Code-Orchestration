@@ -19,9 +19,18 @@
 import {
   MAIL_CLARIFY_REQUEST,
   OPERATOR,
+  budgetTokensForScenario,
+  buildTokenEconomy,
+  buildToolEfficiency,
+  clamp01,
   defaultMailRenderer,
+  openDispatchStore,
   openMailStore,
   toolsForRole,
+  type AgentCostRollup,
+  type AgentToolEfficiency,
+  type AgentTokenEconomy,
+  type AgentToolUsage,
   type ArtifactCheck,
   type BenchmarkScenario,
   type DeliveredMail,
@@ -111,6 +120,27 @@ export interface WorkerBenchmarkResult {
   readonly stopReason: WorkerBenchmarkStopReason;
   /** Diagnostic: the turn error, when a turn threw or timed out. */
   readonly turnError?: string;
+  /**
+   * The three comparable scores for the single-agent case (mirrors the orchestration scorecard so the
+   * per-provider corpus is uniform):
+   *   - CORRECTNESS (objective; both arms): the artifact's oracle case fraction, gated by `completed`.
+   *     There are no implementer merges in the single-agent case, so the merge-up / review factors are
+   *     vacuously satisfied — correctness reduces to `(casesPassed/casesTotal) × (completed ? 1 : 0)`.
+   *   - TOKEN-ECONOMY (LIVE-ONLY): `null` until a per-agent cost rollup is available (read via optional
+   *     chaining against PR B's store surface) — never a silent zero.
+   *   - CONTEXT/TOOL-EFFICIENCY (both arms): `null` until a per-agent tool-usage rollup is available.
+   */
+  readonly scores: WorkerScores;
+}
+
+/** The single-agent three-score block (parallels the orchestration `RunScores`). */
+export interface WorkerScores {
+  /** CORRECTNESS ∈ [0,1] (objective; both arms) — the oracle case fraction gated by completion. */
+  readonly correctness: number;
+  /** LIVE-ONLY token economy (raw tokens + economy/cache scores); `null` fields with no cost rollup. */
+  readonly tokenEconomy: AgentTokenEconomy;
+  /** Context/tool efficiency (raw rates + the contextEfficiency score); `null` fields with no rollup. */
+  readonly toolEfficiency: AgentToolEfficiency;
 }
 
 /**
@@ -221,6 +251,16 @@ export async function runWorkerBenchmark(
     // ALWAYS grade the artifact — a correct file with no done-mail still reports artifact.correct.
     const artifact = await scenario.evaluate(identity.cwd);
 
+    // The three comparable scores for the single-agent case. Token/tool rollups are read via OPTIONAL
+    // CHAINING against PR B's store surface (declared locally; see {@link WorkerEconStore}) so this
+    // compiles on `dev` WITHOUT B — a `null` rollup ⇒ a `null` score (N/A), never a silent zero.
+    const { cost, tool } = readWorkerEcon(projectId, identity.agent);
+    const scores: WorkerScores = {
+      correctness: workerCorrectness(artifact, completed),
+      tokenEconomy: buildTokenEconomy(cost, budgetTokensForScenario(scenario.id)),
+      toolEfficiency: buildToolEfficiency(tool),
+    };
+
     return {
       provider,
       scenarioId: scenario.id,
@@ -231,6 +271,7 @@ export async function runWorkerBenchmark(
       wallClockMs: Date.now() - wallStart,
       stopReason,
       ...(turnError != null ? { turnError } : {}),
+      scores,
     };
   } finally {
     unsubData();
@@ -336,6 +377,50 @@ export function doneMailObserved(
       );
   } finally {
     store.close();
+  }
+}
+
+/**
+ * The single-agent CORRECTNESS score: the oracle case fraction, gated by completion. There are no
+ * implementer merges in the single-agent case, so the orchestration merge-up / every-merge-reviewed
+ * factors are vacuously 1 — correctness reduces to `(casesPassed/casesTotal) × (completed ? 1 : 0)`.
+ * `casesTotal === 0` (a scenario with no oracle cases) yields 0 (we cannot claim correctness with no
+ * evidence — fail-closed, mirrors the orchestration `correctnessScore`).
+ */
+export function workerCorrectness(artifact: ArtifactCheck, completed: boolean): number {
+  if (artifact.casesTotal <= 0) return 0;
+  return clamp01((artifact.casesPassed / artifact.casesTotal) * (completed ? 1 : 0));
+}
+
+/**
+ * PR B's per-agent read-model surface, declared HERE (not imported from B) so this module compiles on
+ * `dev` WITHOUT B. Both methods OPTIONAL: an absent method / `null` return ⇒ a `null` score (N/A), never a
+ * silent zero. The shapes are the `@co/core`-owned {@link AgentCostRollup}/{@link AgentToolUsage} contract.
+ */
+interface WorkerEconStore {
+  readonly getAgentCostRollup?: (agentId: string) => AgentCostRollup | null;
+  readonly getAgentToolUsage?: (agentId: string) => AgentToolUsage | null;
+}
+
+/**
+ * Read PR B's per-agent cost + tool-usage rollups via OPTIONAL CHAINING against the dispatch store cast to
+ * {@link WorkerEconStore}. On `dev` WITHOUT B the methods are absent ⇒ both reads return `null`. Never
+ * throws: a store-open failure or a missing method degrades to `null`.
+ */
+function readWorkerEcon(
+  projectId: ProjectId,
+  agentId: string,
+): { cost: AgentCostRollup | null; tool: AgentToolUsage | null } {
+  let store: (ReturnType<typeof openDispatchStore> & WorkerEconStore) | undefined;
+  try {
+    store = openDispatchStore(projectId) as ReturnType<typeof openDispatchStore> & WorkerEconStore;
+    const cost = store.getAgentCostRollup?.(agentId) ?? null;
+    const tool = store.getAgentToolUsage?.(agentId) ?? null;
+    return { cost, tool };
+  } catch {
+    return { cost: null, tool: null };
+  } finally {
+    store?.close();
   }
 }
 

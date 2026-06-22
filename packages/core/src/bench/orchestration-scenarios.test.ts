@@ -47,6 +47,9 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(true);
     expect(result.detail).toMatch(/calc\.mjs correct/);
+    // A clean pass = every oracle case passed; `correct` is exactly `casesPassed === casesTotal`.
+    expect(result.casesTotal).toBe(13); // add(3)+sub(3)+mul(3)+tokenize(4)
+    expect(result.casesPassed).toBe(result.casesTotal);
   });
 
   it('fails when the lead barrel never merged up (calc.mjs missing)', async () => {
@@ -56,6 +59,9 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
     expect(result.detail).toMatch(/calc\.mjs not found/);
+    // A hard structural miss reports zero of the full case total — never a silent partial.
+    expect(result.casesPassed).toBe(0);
+    expect(result.casesTotal).toBe(13);
   });
 
   it('fails when an implementer module did not merge up (barrel imports a missing module)', async () => {
@@ -65,12 +71,14 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
     expect(result.detail).toMatch(/import of calc\.mjs threw/);
+    expect(result.casesPassed).toBe(0);
+    expect(result.casesTotal).toBe(13);
   });
 
   it('fails when a numeric op is wrong (executes the artifact, names the failing case)', async () => {
     const files = referenceFiles();
     files['calc-lib/ops.mjs'] = [
-      'export function add(a, b) { return a - b; }', // wrong
+      'export function add(a, b) { return a - b; }', // wrong on the FIRST add case
       'export function sub(a, b) { return a - b; }',
       'export function mul(a, b) { return a * b; }',
       '',
@@ -79,6 +87,25 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
     expect(result.detail).toMatch(/add\(2, 3\) = -1, want 5/);
+    // add fails on its first case ⇒ zero cases passed before the bail; the tally is a real partial count.
+    expect(result.casesPassed).toBe(0);
+    expect(result.casesTotal).toBe(13);
+  });
+
+  it('reports a PARTIAL case tally when later cases fail (add+sub pass, mul wrong)', async () => {
+    const files = referenceFiles();
+    files['calc-lib/ops.mjs'] = [
+      'export function add(a, b) { return a + b; }', // 3 add cases pass
+      'export function sub(a, b) { return a - b; }', // 3 sub cases pass
+      'export function mul(a, b) { return a + b; }', // mul wrong → fails its first case
+      '',
+    ].join('\n');
+    writeFiles(files);
+    const result = await calcLibScenario().evaluate(dir);
+    expect(result.correct).toBe(false);
+    // 3 add + 3 sub passed before mul's first case fails → casesPassed=6 of 13 (a true partial, not 0/1).
+    expect(result.casesPassed).toBe(6);
+    expect(result.casesTotal).toBe(13);
   });
 
   it('fails when tokenize is wrong', async () => {

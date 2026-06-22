@@ -70,7 +70,7 @@ a claude-only pass does not discharge it). Each provider that is not ready skips
 Each case prints a scorecard line to stderr, e.g.:
 
 ```
-[worker-benchmark] claude: fidelity=host-live completed=true artifact=true (add() correct over 4 cases) turns=1 stop=done-mail wall=24213ms
+[worker-benchmark] claude: fidelity=host-live completed=true artifact=true (add() correct over 4 cases) turns=1 stop=done-mail wall=24213ms correctness=1.00 token-economy=N/A context-efficiency=N/A
 ```
 
 ### What the case asserts (hard) vs reports (metric)
@@ -81,10 +81,37 @@ Hard-asserted (a failure fails the test):
 - `completed` — the agent routed its nonce `clarify_request` to its parent through the live MCP
   surface (proves bind + `LiveDelivery` + mail store end to end);
 - `artifact.correct` — the produced `solution.mjs`, **executed**, computes `add()` correctly;
+- `scores.correctness === 1` — a completed + correct single-agent run scores a full CORRECTNESS;
 - the CO repo tree is unchanged before/after the run (Principle 12 — the agent's cwd is a throwaway
   tmp git repo and all program-data is under a throwaway `CO_DATA_DIR`).
 
-Reported as metrics (logged, not gated): `turnsUsed`, `wallClockMs`, `stopReason`, `artifact.detail`.
+Reported as metrics (logged, not gated): `turnsUsed`, `wallClockMs`, `stopReason`, `artifact.detail`,
+and the three scores (below).
+
+### The three scores (`result.scores` — the single-agent twin of the orchestration scorecard)
+
+Each score is `∈ [0,1]` **or `null` = N/A** (never a silent zero). They mirror the orchestration
+scorecard so the per-provider corpus is uniform:
+
+| Score | Arms | Definition | Notes |
+| --- | --- | --- | --- |
+| **CORRECTNESS** | both | `(casesPassed/casesTotal) × (completed ? 1 : 0)` | objective; no implementer merges in the single-agent case, so the orchestration merge-up / review factors are vacuously 1 |
+| **TOKEN-ECONOMY** | **live only** | `clamp01(budgetTokens / max(actualTokens, 1))` | **`null` in the sandbox arm** (no real tokens). Sub-signal `cacheEfficiency`. Read via optional chaining against the conductor's per-agent cost rollup — `null` until that surface lands |
+| **CONTEXT/TOOL-EFFICIENCY** | both | `0.4·(1−toolFailRate) + 0.4·(1−redundantReadRate) + 0.2·(1−permissionAskRate)` | tunable weights; `null` until the per-agent tool-usage rollup lands |
+
+Raw backing fields ride on `result.scores.tokenEconomy.{inputTokens, outputTokens, cacheReadTokens,
+cacheCreationTokens, totalTokens, costUsd, tokenEconomy, cacheEfficiency}` (live-only; `null` in the
+sandbox arm) and `result.scores.toolEfficiency.{toolCalls, toolErrors, redundantReads, permissionAsks,
+contextEfficiency, turnsToFirstProductiveCoCall, toolCallsPerCompletedTask}` (the last two are un-scored
+diagnostics).
+
+> **N/A-in-sandbox rule (no silent zero):** the sandbox arm spends no real tokens, so TOKEN-ECONOMY (and
+> every raw token field) is `null`, NOT `0` — a `0` would falsely read as "infinitely wasteful".
+> CONTEXT/TOOL-EFFICIENCY is available in both arms (tool calls are observable in the sandbox too).
+
+> **Uncalibrated (honest):** the per-scenario token budget (`add-module = 200,000`) and the
+> context-efficiency weights were not measured against a real binary — treat TOKEN-ECONOMY as a relative
+> yardstick and tune as the corpus grows.
 
 ---
 
@@ -98,7 +125,8 @@ proof: a **new** `clarify_request` **from** the hosted agent carrying the run no
 
 Add scenarios by extending `WORKER_BENCH_SCENARIOS`: a `BenchmarkScenario` is `{ id, artifactPath,
 subject, body, evaluate }`, where `evaluate(worktreeDir)` executes the artifact and returns
-`{ correct, detail }`.
+`{ correct, detail, casesPassed, casesTotal }` — the oracle case tally that backs the CORRECTNESS score
+(`correct` is exactly `casesPassed === casesTotal`).
 
 ---
 

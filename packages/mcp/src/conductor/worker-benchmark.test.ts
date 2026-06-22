@@ -26,9 +26,15 @@ import {
   type ProjectId,
   type ProjectRegistry,
 } from '@co/core';
+import type { ArtifactCheck } from '@co/core';
 import type { HostedIdentity } from '../live-session-host.js';
 import { assertHostLiveProof, type ProofFidelity, type ProofResult } from './host-proof.js';
-import { doneMailObserved, parentInboxMaxSeq, workerBenchRenderer } from './worker-benchmark.js';
+import {
+  doneMailObserved,
+  parentInboxMaxSeq,
+  workerBenchRenderer,
+  workerCorrectness,
+} from './worker-benchmark.js';
 
 const ORIGINAL_ENV = process.env;
 let dataDirs: string[] = [];
@@ -186,6 +192,33 @@ describe('workerBenchRenderer (hermetic)', () => {
     expect(rendered).toContain('clarify_request');
 
     expect(renderer(otherMail)).toBe(defaultMailRenderer(otherMail));
+  });
+});
+
+describe('workerCorrectness — single-agent CORRECTNESS score (hermetic)', () => {
+  const artifact = (casesPassed: number, casesTotal: number): ArtifactCheck => ({
+    correct: casesPassed === casesTotal && casesTotal > 0,
+    detail: `${casesPassed}/${casesTotal}`,
+    casesPassed,
+    casesTotal,
+  });
+
+  it('a correct, completed artifact scores 1 (every case passed, done-mail observed)', () => {
+    expect(workerCorrectness(artifact(4, 4), true)).toBe(1);
+  });
+
+  it('refines a partial oracle pass into a fraction of cases (2/4), gated by completion', () => {
+    expect(workerCorrectness(artifact(2, 4), true)).toBeCloseTo(0.5, 10);
+  });
+
+  it('a not-completed run zeroes correctness even with a perfect tally (completion gate)', () => {
+    // The exact lazy-agent trap at single-agent scale: the file is correct but the agent never signalled
+    // done — correctness must reflect the incomplete run, not just the artifact tally.
+    expect(workerCorrectness(artifact(4, 4), false)).toBe(0);
+  });
+
+  it('is fail-closed on a zero-case oracle (no evidence ⇒ 0, never 1)', () => {
+    expect(workerCorrectness(artifact(0, 0), true)).toBe(0);
   });
 });
 

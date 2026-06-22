@@ -37,20 +37,31 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CO_LIVE_E2E_ENV,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
   NodePtyHost,
   OPERATOR,
   buildCoreRegistry,
   calcLibScenario,
   defaultGitExec,
+  defaultGitRawReader,
   invokeTool,
   isLiveE2EEnabled,
   openConfigStore,
+  openDispatchStore,
+  openMailStore,
   openPlanStore,
   openRegistry,
+  openReviewStore,
+  openRosterStore,
+  openSpecStore,
+  openWorktreeStore,
   renderScorecard,
+  reviewRequestEnvelope,
   reviewReviewerKey,
   startCoordinatorSession,
   toJsonl,
+  type DeliveredMail,
   type OrchestrationScenario,
   type ProjectId,
   type ProviderMode,
@@ -58,11 +69,16 @@ import {
 import { openContextStores } from '../context.js';
 import { defaultServeCoMcpPaths, serveConductor, type IntervalScheduler } from './host.js';
 import { resolveHostLiveSeams } from './host-live-seams.js';
+import { resolveReviewContext } from './review-context.js';
+import { OperatorIpcServer } from '../operator-ipc/server.js';
 import { OperatorIpcClient } from '../operator-ipc/client.js';
+import type { ConductorControlSurface } from './host.js';
+import type { DaemonBackedAgentRouter } from './agent-router.js';
 import {
   ORCH_BENCH_DEFAULTS,
   ORCH_BENCH_TASK_ID,
   runOrchestrationBenchmark,
+  type AgentTurnSample,
   type AutomationDriveResult,
   type OrchestrationAutomation,
 } from './orchestration-benchmark.js';
@@ -144,6 +160,186 @@ afterEach(() => {
       /* best-effort */
     }
   }
+});
+
+// ── Non-vacuous hermetic regression for maybePassReviews (always runs; no node-pty, no provider) ───────
+//
+// Proves the live arm's `maybePassReviews` WIRING actually drives a pending review to a recorded PASS via
+// the REAL operator-IPC reviewContext + reply path — the exact gate a live chain hangs on if this is the
+// no-op stub it used to be (`void ipc; void projectId`). It builds a real throwaway git repo + worktree so
+// `resolveReviewContext` yields a `patch` diff (the server requires it), locks a spec so the request has
+// criteria, seeds one `review_request`, stands up a real OperatorIpcServer (its `reviewContext` is the
+// production resolver), then calls `maybePassReviews` and asserts the review store recorded a PASS verdict.
+// WITHOUT the implementation (the old no-op) NO verdict is recorded and the assertion fails — non-vacuous.
+describe('maybePassReviews — drives a pending review to PASS over the real operator-IPC path (hermetic)', () => {
+  it('records a PASS verdict for the pending review_request (fails if maybePassReviews is a no-op)', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'co-ob-mpr-data-'));
+    dataDirs.push(dataDir);
+    process.env.CO_DATA_DIR = dataDir;
+
+    // A real git repo: target `main` + a divergent `feat` branch + a checked-out worktree for `feat`, so
+    // `git diff main...feat` is a real patch (the server's evidence-ready gate requires diff.kind==='patch').
+    const repo = mkdtempSync(join(tmpdir(), 'co-ob-mpr-repo-'));
+    repoDirs.push(repo);
+    const target = 'main';
+    const branch = 'feat';
+    defaultGitExec(repo, ['init', '-b', target]);
+    defaultGitExec(repo, ['config', 'user.email', 'mpr@example.com']);
+    defaultGitExec(repo, ['config', 'user.name', 'MPR']);
+    defaultGitExec(repo, ['config', 'commit.gpgsign', 'false']);
+    writeFileSync(join(repo, 'README.md'), 'base\n');
+    defaultGitExec(repo, ['add', '.']);
+    defaultGitExec(repo, ['commit', '-m', 'chore: base', '-m', 'Signed-off-by: MPR <mpr@example.com>']);
+    defaultGitExec(repo, ['branch', branch]);
+    const wtPath = join(repo, 'wt-feat');
+    defaultGitExec(repo, ['worktree', 'add', wtPath, branch]);
+    writeFileSync(join(wtPath, 'change.txt'), 'changed\n');
+    defaultGitExec(wtPath, ['add', '.']);
+    defaultGitExec(wtPath, [
+      'commit',
+      '-m',
+      'feat: change',
+      '-m',
+      'Signed-off-by: MPR <mpr@example.com>',
+    ]);
+
+    const registry = openRegistry();
+    let projectId: ProjectId;
+    try {
+      projectId = registry.register(repo);
+    } finally {
+      registry.close();
+    }
+
+    const taskId = 'mpr-task';
+    const reviewId = 'rev-mpr-1';
+    const specRef = `spec:${taskId}#locked`;
+
+    // Lock a spec so the review request carries criteria the resolver + server validate.
+    const specs = openSpecStore(projectId);
+    try {
+      specs.recordDraft({
+        taskId,
+        title: 'maybePassReviews regression',
+        goal: 'maybePassReviews regression',
+        criteria: [{ text: 'the change is correct', verify: 'pnpm test' }],
+        body: 'A hermetic fixture spec for the maybePassReviews PASS-path regression.',
+        actor: 'lead-mpr',
+      });
+      specs.recordLock(taskId, OPERATOR);
+    } finally {
+      specs.close();
+    }
+
+    // Record the reviewed branch's worktree so `resolveReviewContext` finds the diff sandbox. The baseSha
+    // is read with the raw git READER (defaultGitExec returns void — it is a side-effecting GitExec).
+    const baseSha = (defaultGitRawReader(repo, ['rev-parse', target]) ?? '').trim();
+    const worktrees = openWorktreeStore(projectId);
+    try {
+      worktrees.recordWorktree({
+        branch,
+        baseRef: target,
+        baseSha,
+        path: wtPath,
+        parent: 'lead-mpr',
+        agent: 'impl-mpr',
+        role: 'implementer',
+      });
+    } finally {
+      worktrees.close();
+    }
+
+    // Seed ONE pending review_request to @operator (the gate maybePassReviews must PASS), recording the
+    // durable review.requested with a criteria spec-ref (so the server's criteria check passes).
+    const mailStore = openMailStore(projectId);
+    try {
+      mailStore.requestHumanReview(
+        reviewRequestEnvelope({
+          from: 'lead-mpr',
+          subject: `review requested: '${branch}' into '${target}'`,
+          body: `review ${reviewId}`,
+          idempotencyKey: `review-request:${reviewId}`,
+        }),
+        {
+          reviewId,
+          target,
+          branch,
+          scope: 'worker_merge',
+          reviewerKind: 'human',
+          requestedBy: 'lead-mpr',
+          specRefKind: 'criteria',
+          specRefRef: specRef,
+        },
+      );
+    } finally {
+      mailStore.close();
+    }
+
+    // Stand up the REAL operator-IPC server whose reviewContext is the production resolver (verbatim from
+    // the sandbox operatorPassViaIpc control surface), plus a client the helper drives.
+    const sockDir = mkdtempSync(join(tmpdir(), 'co-ob-mpr-sock-'));
+    dataDirs.push(sockDir);
+    const socketPath = join(sockDir, 'control.sock');
+    const control: ConductorControlSurface = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => {
+        throw new Error('mpr: observe is not used by the review path');
+      },
+      transcriptTail: (agentId) => ({ agentId, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+      reviewContext: (rid) =>
+        resolveReviewContext(
+          {
+            openReviews: () => openReviewStore(projectId),
+            openSpecs: () => openSpecStore(projectId),
+            openWorktrees: () => openWorktreeStore(projectId),
+            gitReader: defaultGitRawReader,
+          },
+          rid,
+        ),
+      deleteAgent: () => Promise.reject(new Error('mpr: deleteAgent is not used here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () => Promise.reject(new Error('mpr: restoreArchive is not used here')),
+      purgeArchive: () => Promise.reject(new Error('mpr: purgeArchive is not used here')),
+    };
+    const server = new OperatorIpcServer({ control, projectId, socketPath });
+    await server.start();
+    const ipc = new OperatorIpcClient({ projectId, socketPath });
+    try {
+      // PRE: no verdict recorded yet (the gate is open).
+      const before = openReviewStore(projectId);
+      try {
+        expect(before.getVerdict(target, branch)?.verdict).toBeUndefined();
+      } finally {
+        before.close();
+      }
+
+      // THE WIRING UNDER TEST: drive the pending review to PASS.
+      await maybePassReviews(ipc, projectId);
+
+      // POST: the review store now carries a PASS verdict for (target, branch) — the gate held + passed.
+      const after = openReviewStore(projectId);
+      try {
+        expect(after.getVerdict(target, branch)?.verdict).toBe('PASS');
+      } finally {
+        after.close();
+      }
+
+      // And the request mail is now resolved (so a re-run is idempotent — it PASSes nothing new).
+      const inboxAfter = openMailStore(projectId);
+      try {
+        const req = inboxAfter
+          .inbox(OPERATOR)
+          .find((m) => m.idempotencyKey === `review-request:${reviewId}`);
+        expect(req?.resolved).toBe(true);
+      } finally {
+        inboxAfter.close();
+      }
+    } finally {
+      await ipc.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+    }
+  });
 });
 
 interface LiveRun {
@@ -263,6 +459,11 @@ async function makeLiveAutomation(
       const ipc = new OperatorIpcClient({ projectId: input.projectId, socketPath });
 
       const deadline = seams.now() + input.wallClockBudgetMs;
+      // Per-agent wall-clock: the real time between when an agent first appears in the roster (it has been
+      // provisioned + is taking turns) and the end of the drive. The daemon owns the turns themselves, so
+      // turn COUNTS are read from the durable cost read-model below (one cost.recorded per turn) rather
+      // than guessed — both are real measurements, not the `agentTurns:{}` silent zero this replaces.
+      const firstSeenMs = new Map<string, number>();
       let completed = false;
       let ticks = 0;
       try {
@@ -271,6 +472,12 @@ async function makeLiveAutomation(
           // Step one daemon tick (the runner's captured callback fires `beat()`), then settle.
           tickCb?.();
           await settle();
+
+          // Record the first wall time each non-operator agent is observed in the roster (its session
+          // is live). Cheap + monotonic — the earliest tick an agent exists bounds its active window.
+          for (const agentId of rosterAgentIds(input.projectId)) {
+            if (!firstSeenMs.has(agentId)) firstSeenMs.set(agentId, seams.now());
+          }
 
           // Between ticks, play the human operator gates: lock the spec once drafted, and PASS any
           // pending review_request. These are the ONLY hand-driven inputs — all coding/merging is the
@@ -285,15 +492,17 @@ async function makeLiveAutomation(
         await ipc.close().catch(() => undefined);
       }
 
+      const driveEndMs = seams.now();
       return {
         stopReason: completed
           ? 'task-complete'
-          : seams.now() >= deadline
+          : driveEndMs >= deadline
             ? 'wall-budget'
             : 'turn-budget',
-        // Per-agent turn samples are not separately measured in the live arm (the daemon owns the turns);
-        // the metrics aggregation still reports every roster agent with zeroed turns + real provider/role.
-        agentTurns: {},
+        // REAL per-agent samples: turns from the durable cost rollup (one observation per turn), wall from
+        // the observed active window. Replaces the `agentTurns:{}` silent zero — an agent that took turns
+        // now reports a non-zero turn count and a measured wall-clock.
+        agentTurns: measureAgentTurns(input.projectId, firstSeenMs, driveEndMs),
         integrationBranch: input.integrationBranch,
       };
     },
@@ -321,13 +530,63 @@ async function maybeLockSpec(
   }
 }
 
-/** PASS every pending review_request via the real operator-IPC path (the desktop Review-view flow). */
+/**
+ * PASS every pending `review_request` via the REAL operator-IPC path (the desktop Review-view flow), so a
+ * real chain does not hang at the first review gate. Ports the sandbox `operatorPassViaIpc` (in
+ * `orchestration-benchmark.test.ts`) onto the live arm's already-running `serveConductor` IPC surface:
+ * for each UNRESOLVED `review_request` in @operator's inbox, parse its `reviewId` from the durable
+ * `review-request:<reviewId>` idempotency key, fetch the review context over the production wire (diff +
+ * criteria + the evidence fingerprint the verdict must echo), and submit a `review_response` PASS reply
+ * carrying that fingerprint. Idempotent: a resolved item is skipped, so re-running this each tick PASSes
+ * only newly-arrived gates. Fail-soft on a single review (a transient `reviewContext` miss / fingerprint
+ * race is retried next tick) — the chain must never wedge because one PASS attempt raced the gate.
+ */
 async function maybePassReviews(ipc: OperatorIpcClient, projectId: ProjectId): Promise<void> {
-  // Implemented via the operator-IPC reviewContext + reply path (see sh1-dry-run's operatorPassViaIpc).
-  // Left as the operator-IPC integration point; the live arm exercises it once a real chain reaches a
-  // review gate. The hermetic sandbox test already proves the operatorPassViaIpc PASS path end to end.
-  void ipc;
-  void projectId;
+  for (const req of pendingReviewRequests(projectId)) {
+    const reviewId = reviewIdFromMail(req);
+    if (reviewId == null) continue;
+    try {
+      const context = await ipc.reviewContext(reviewId);
+      if (context.kind !== 'resolved') continue; // not yet resolvable — retry next tick
+      await ipc.reply(
+        { seq: req.seq, recipient: OPERATOR },
+        {
+          type: MAIL_REVIEW_RESPONSE,
+          reviewVerdict: 'PASS',
+          reviewContextFingerprint: context.evidenceFingerprint,
+          subject: `PASS: review ${reviewId}`,
+          body: 'Reviewed the diff + locked acceptance criteria. PASS.',
+        },
+      );
+    } catch {
+      // A transient reviewContext/reply race (e.g. the request landed mid-tick) — retried next tick. The
+      // chain must never wedge because a single PASS attempt raced the gate (fail-soft, Principle 9-safe:
+      // an unpassable gate simply re-surfaces, it is never silently dropped).
+    }
+  }
+}
+
+/**
+ * The UNRESOLVED `review_request` mails in @operator's inbox — the gates awaiting an operator verdict. A
+ * resolved item (already PASSed/ISSUES'd) is excluded so {@link maybePassReviews} is idempotent per tick.
+ */
+function pendingReviewRequests(projectId: ProjectId): readonly DeliveredMail[] {
+  const mail = openMailStore(projectId);
+  try {
+    return mail
+      .inbox(OPERATOR)
+      .filter((m) => m.type === MAIL_REVIEW_REQUEST && m.resolved !== true && m.retracted !== true);
+  } finally {
+    mail.close();
+  }
+}
+
+/** Parse the `reviewId` from a `review_request` mail's durable `review-request:<reviewId>` idempotency key. */
+function reviewIdFromMail(mail: DeliveredMail): string | null {
+  const key = mail.idempotencyKey;
+  if (key == null || !key.startsWith('review-request:')) return null;
+  const reviewId = key.slice('review-request:'.length);
+  return reviewId.length > 0 ? reviewId : null;
 }
 
 function planCompleted(projectId: ProjectId): boolean {
@@ -336,6 +595,48 @@ function planCompleted(projectId: ProjectId): boolean {
     return store.getPlan(ORCH_BENCH_TASK_ID)?.completedTs != null;
   } finally {
     store.close();
+  }
+}
+
+/** Every non-operator agent currently registered in the roster (the live agent set this tick). */
+function rosterAgentIds(projectId: ProjectId): readonly string[] {
+  const roster = openRosterStore(projectId);
+  try {
+    return roster
+      .listAgents()
+      .map((a) => a.agentId)
+      .filter((id) => id !== OPERATOR);
+  } finally {
+    roster.close();
+  }
+}
+
+/**
+ * Measure REAL per-agent turn/wall samples for the live arm (replacing the `agentTurns:{}` silent zero):
+ *   - turns: the agent's count of durable `cost.recorded` observations (the daemon files one per turn), so
+ *     an agent that actually took turns reports a non-zero count straight from the objective cost log.
+ *   - wall: the active window `driveEndMs − firstSeenMs[agent]` (when the agent first appeared in the
+ *     roster until the drive ended) — a real measurement, not a guess.
+ * An agent with no recorded cost yet still appears with `turnsUsed: 0` + its measured wall (it was seen).
+ */
+function measureAgentTurns(
+  projectId: ProjectId,
+  firstSeenMs: ReadonlyMap<string, number>,
+  driveEndMs: number,
+): Record<string, AgentTurnSample> {
+  const dispatch = openDispatchStore(projectId);
+  try {
+    const samples: Record<string, AgentTurnSample> = {};
+    for (const [agentId, seenMs] of firstSeenMs) {
+      const rollup = dispatch.getRollup('agent', agentId);
+      samples[agentId] = {
+        turnsUsed: rollup?.observations ?? 0,
+        wallClockMs: Math.max(0, driveEndMs - seenMs),
+      };
+    }
+    return samples;
+  } finally {
+    dispatch.close();
   }
 }
 
