@@ -266,10 +266,14 @@ export function deleteAgentSubtree(
             // then remove — so teardown no longer wedges (the #65 bug) without silently dropping
             // work:
             //   1. snapshot uncommitted changes onto the worktree HEAD;
-            //   2. if the resulting tip is not already contained in base, re-anchor it under a
-            //      recovery ref (`refs/co-recovered/<branch>`) + archive metadata, so the commit
-            //      survives GC and stays restorable. The `refs/co-recovered/` namespace avoids the
-            //      "branch already checked out" conflict that recreating `refs/heads/<branch>` hits.
+            //   2. if the resulting tip is not already contained in base, RE-CREATE the branch ref
+            //      at the tip + archive it — exactly the same lifecycle as the sibling unmerged
+            //      path (refs/heads/<branch> kept, archive keyed by branch). Reusing refs/heads/
+            //      (not a parallel recovery namespace) is essential: the reaper purges archived
+            //      branches with `git branch -D`, which only touches refs/heads/* — a refs/co-*
+            //      ref would leak forever (pinning the commit against GC) and a name-reuse would
+            //      clobber it. `git update-ref` re-creates the ref even while the worktree is still
+            //      present (it is plumbing, no checkout conflict).
             // A genuinely unrecoverable worktree (HEAD does not resolve) has nothing to preserve and
             // force-removes cleanly — the common orphaned-coordinator case #65 reported. A failure to
             // snapshot/re-anchor propagates to the outer catch and wedges THIS agent rather than
@@ -286,11 +290,11 @@ export function deleteAgentSubtree(
               );
             }
             if (tip.length > 0 && !isBranchMerged(repoCwd, tip, wt.baseRef, gitReader)) {
-              gitExec(repoCwd, ['update-ref', `refs/co-recovered/${wt.branch}`, tip]);
+              gitExec(repoCwd, ['update-ref', `refs/heads/${wt.branch}`, tip]);
               archive.appendRecord({
                 id: wt.branch,
                 name: agent.name ?? agentId,
-                branch: `refs/co-recovered/${wt.branch}`,
+                branch: wt.branch,
                 baseRef: wt.baseRef,
                 deletedAt: nowMs,
                 expiresAt: nowMs + archiveTtlMs,

@@ -1440,16 +1440,17 @@ describe('deleteAgentSubtree', () => {
       gitReader,
     });
 
-    // The tip is re-anchored under refs/co-recovered/<branch> so it survives GC...
+    // The branch ref is re-created at the tip (same reaper-purgeable lifecycle as the unmerged
+    // path) so it survives GC...
     expect(
       calls.some(
-        (c) =>
-          c[1] === 'update-ref' && c[2] === 'refs/co-recovered/co/impl' && c[3] === 'b'.repeat(40),
+        (c) => c[1] === 'update-ref' && c[2] === 'refs/heads/co/impl' && c[3] === 'b'.repeat(40),
       ),
     ).toBe(true);
-    // ...and archived (metadata points at the recovery ref) so it is discoverable/restorable.
+    // ...and archived (keyed by branch) so it is discoverable/restorable AND the reaper can purge
+    // it at TTL via `git branch -D` (which only touches refs/heads/*).
     expect(archive.records).toHaveLength(1);
-    expect(archive.records[0]?.branch).toBe('refs/co-recovered/co/impl');
+    expect(archive.records[0]?.branch).toBe('co/impl');
     // ...then the orphaned worktree is force-removed, and teardown completes.
     expect(worktreeStore.removeForce).toContain('co/impl');
     expect(roster.getAgent('impl')).toBeUndefined();
@@ -1488,10 +1489,9 @@ describe('deleteAgentSubtree', () => {
     // Dirty work is snapshotted (add -A then commit -s) BEFORE the force-remove...
     expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'add' && c[2] === '-A')).toBe(true);
     expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'commit')).toBe(true);
-    // ...and the resulting snapshot tip ('f'*40 from the post-commit rev-parse) is re-anchored.
-    expect(calls.some((c) => c[1] === 'update-ref' && c[2] === 'refs/co-recovered/co/impl')).toBe(
-      true,
-    );
+    // ...and the resulting snapshot tip ('f'*40 from the post-commit rev-parse) is re-anchored
+    // at refs/heads/<branch> (reaper-purgeable).
+    expect(calls.some((c) => c[1] === 'update-ref' && c[2] === 'refs/heads/co/impl')).toBe(true);
     expect(archive.records).toHaveLength(1);
     expect(worktreeStore.removeForce).toContain('co/impl');
   });

@@ -2172,14 +2172,22 @@ function ghCommandArgs(argv: string[]): readonly string[] {
   return ['pr', ...args.slice(i)];
 }
 
-function ghApiMethod(args: readonly string[]): string | undefined {
+// Every -X / --method value on the command line. gh allows the flag repeated and pflag takes the
+// LAST value, so reading only the first is unsound (a decoy leading `-X GET` would mask a trailing
+// `-X POST`). We collect them all and fail closed if ANY names a write verb.
+function ghApiMethods(args: readonly string[]): string[] {
+  const methods: string[] = [];
   for (let i = 1; i < args.length; i++) {
     const token = args[i]!;
-    if (token === '--method' || token === '-X') return args[i + 1]?.toUpperCase();
-    if (token.startsWith('--method=')) return token.slice('--method='.length).toUpperCase();
-    if (/^-X[A-Za-z]+$/u.test(token)) return token.slice(2).toUpperCase();
+    if (token === '--method' || token === '-X') {
+      const value = args[i + 1];
+      if (value != null) methods.push(value.toUpperCase());
+      continue;
+    }
+    if (token.startsWith('--method=')) methods.push(token.slice('--method='.length).toUpperCase());
+    else if (/^-X[A-Za-z]+$/u.test(token)) methods.push(token.slice(2).toUpperCase());
   }
-  return undefined;
+  return methods;
 }
 
 function ghApiEndpoint(args: readonly string[]): string | undefined {
@@ -2236,8 +2244,12 @@ function ghApiHasOpaqueBody(args: readonly string[]): boolean {
 // gh sends GET unless an explicit write method is given or a request-body field flag is present
 // (which makes it an implicit POST). An explicit GET/HEAD keeps `-f/-F` as read query params.
 function ghApiIsWriteRequest(args: readonly string[]): boolean {
-  const method = ghApiMethod(args);
-  if (method != null) return GH_API_WRITE_METHODS.has(method);
+  const methods = ghApiMethods(args);
+  if (methods.length > 0) {
+    // Explicit method(s): a write iff ANY names a write verb. Fail closed against repeated/mixed
+    // method flags — gh/pflag takes the LAST, so a decoy leading `-X GET` must not mask `-X POST`.
+    return methods.some((method) => GH_API_WRITE_METHODS.has(method));
+  }
   return ghApiHasFieldFlag(args);
 }
 

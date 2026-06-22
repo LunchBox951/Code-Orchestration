@@ -332,6 +332,21 @@ describe('matchBlock — blocked commands', () => {
     ).toBe('raw-gh-pr-merge');
   });
 
+  it('raw-gh-pr-merge: a decoy leading -X GET cannot mask a trailing write method (#64)', () => {
+    // gh/pflag takes the LAST repeated -X/--method value, so these all issue a real write; the gate
+    // must fail closed on any write verb present, not read only the first flag.
+    expect(matchBlock('gh api repos/o/r/merges -X GET -X POST -f base=main')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
+    expect(matchBlock('gh api repos/o/r/merges -X GET --method POST -f base=main')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
+    expect(matchBlock('gh api repos/o/r/pulls/5/merge -X GET -X PUT')?.id).toBe('raw-gh-pr-merge');
+    expect(matchBlock('gh api -X GET -X POST repos/o/r/merges -f base=main')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
+  });
+
   it('raw-gh-pr-merge: read-only gh api stays permitted (#64)', () => {
     // No write method and no request body → GET → permitted on both providers.
     expect(matchBlock('gh api repos/owner/repo/pulls/18')).toBeNull();
