@@ -389,16 +389,16 @@ export function doneMailObserved(
  * evidence — fail-closed, mirrors the orchestration `correctnessScore`).
  */
 export function workerCorrectness(artifact: ArtifactCheck, completed: boolean): number {
-  if (artifact.casesTotal <= 0) return 0;
-  return clamp01((artifact.casesPassed / artifact.casesTotal) * (completed ? 1 : 0));
+  const casesPassed = artifact.casesPassed ?? (artifact.correct ? 1 : 0);
+  const casesTotal = artifact.casesTotal ?? 1;
+  if (casesTotal <= 0) return 0;
+  return clamp01((casesPassed / casesTotal) * (completed ? 1 : 0));
 }
 
 /**
- * PR B's per-agent read-model surface, declared HERE (not imported from B, and NOT from `@co/core` — those
- * shapes are bench-local + un-exported so B owns the canonical export) so this module compiles on `dev`
- * WITHOUT B. The shapes are STRUCTURAL copies of the bench-local cost/tool-usage contract — read via
- * OPTIONAL CHAINING, so structural compatibility is all that is required. Both methods OPTIONAL: an absent
- * method / `null` return ⇒ a `null` score (N/A), never a silent zero.
+ * Optional per-agent read-model surface, declared structurally so this driver can read whichever store
+ * implementation is present via optional chaining. Both methods OPTIONAL: an absent method / `null` return
+ * ⇒ a `null` score (N/A), never a silent zero.
  */
 interface AgentCostRollup {
   readonly agentId: string;

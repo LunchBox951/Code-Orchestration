@@ -37,10 +37,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CO_LIVE_E2E_ENV,
+  DISPATCH_ENABLED_PROVIDERS_KEY,
+  DISPATCH_PINS_CONFIG_KEY,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   NodePtyHost,
   OPERATOR,
+  accountForProvider,
   buildCoreRegistry,
   calcLibScenario,
   defaultGitExec,
@@ -48,6 +51,7 @@ import {
   invokeTool,
   isLiveE2EEnabled,
   openConfigStore,
+  openDispatchStore,
   openMailStore,
   openPlanStore,
   openRegistry,
@@ -56,6 +60,8 @@ import {
   openSpecStore,
   openWorktreeStore,
   renderScorecard,
+  resolvePinTable,
+  resolveTier,
   reviewRequestEnvelope,
   reviewReviewerKey,
   startCoordinatorSession,
@@ -63,6 +69,7 @@ import {
   type DeliveredMail,
   type OrchestrationScenario,
   type ProjectId,
+  type Provider,
   type ProviderMode,
   type ReviewContext,
   type ReviewContextResolved,
@@ -602,6 +609,99 @@ describe('maybeLockSpec — failStreak + selected-turn metrics (hermetic, always
   });
 });
 
+describe('live provider pinning + bounded operator gates (hermetic, always runs)', () => {
+  it('pins provider-only benchmark runs into dispatch config and the root placement', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'co-ob-pin-data-'));
+    dataDirs.push(dataDir);
+    process.env.CO_DATA_DIR = dataDir;
+
+    const registry = openRegistry();
+    let projectId: ProjectId;
+    try {
+      projectId = registry.register(join(dataDir, 'repo'));
+    } finally {
+      registry.close();
+    }
+    const coordinator = 'coord-pin-root';
+
+    pinBenchmarkProvider(projectId, coordinator, 'codex');
+
+    const config = openConfigStore();
+    try {
+      expect(config.resolveEffective(projectId)[DISPATCH_ENABLED_PROVIDERS_KEY]).toEqual(['codex']);
+      const pins = resolvePinTable(projectId, config);
+      expect(pins.coordinator?.provider).toBe('codex');
+      expect(pins.lead?.provider).toBe('codex');
+      expect(pins.implementer?.provider).toBe('codex');
+      expect(pins.reviewer?.provider).toBe('codex');
+    } finally {
+      config.close();
+    }
+
+    const dispatch = openDispatchStore(projectId);
+    try {
+      expect(dispatch.readPlacements(coordinator).at(-1)?.provider).toBe('codex');
+    } finally {
+      dispatch.close();
+    }
+  });
+
+  it('times out hung operator-gate automation instead of parking outside the step bound', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'co-ob-gate-timeout-data-'));
+    dataDirs.push(dataDir);
+    process.env.CO_DATA_DIR = dataDir;
+
+    const registry = openRegistry();
+    let projectId: ProjectId;
+    try {
+      projectId = registry.register(join(dataDir, 'repo'));
+    } finally {
+      registry.close();
+    }
+    const reviewId = 'rev-never-resolves';
+    const mailStore = openMailStore(projectId);
+    try {
+      mailStore.requestHumanReview(
+        reviewRequestEnvelope({
+          from: 'lead-timeout',
+          subject: `review requested: 'feat' into 'main'`,
+          body: `review ${reviewId}`,
+          idempotencyKey: `review-request:${reviewId}`,
+        }),
+        {
+          reviewId,
+          target: 'main',
+          branch: 'feat',
+          scope: 'worker_merge',
+          reviewerKind: 'human',
+          requestedBy: 'lead-timeout',
+          specRefKind: 'criteria',
+          specRefRef: `spec:timeout#locked`,
+        },
+      );
+    } finally {
+      mailStore.close();
+    }
+    const ipc = {
+      reviewContext: () => new Promise<ReviewContext>(() => {}),
+      reply: () => Promise.resolve({} as DeliveredMail),
+    } as unknown as OperatorIpcClient;
+
+    await expect(
+      playOperatorGates({
+        reg: buildCoreRegistry(),
+        projectId,
+        repoCwd: tmpdir(),
+        ipc,
+        reviewFailStreak: new Map<string, number>(),
+        specLockFailStreak: new Map<string, number>(),
+        timeoutMs: 5,
+        tick: 1,
+      }),
+    ).rejects.toThrow(/operator gate automation tick 1 exceeded/u);
+  });
+});
+
 interface LiveRun {
   readonly projectId: ProjectId;
   readonly repo: string;
@@ -713,12 +813,13 @@ async function makeLiveAutomation(
       }
 
       // Provision + register the root coordinator + seed its kickoff (the daemon cold-starts it tick-0).
-      startCoordinatorSession({
+      const { coordinator } = startCoordinatorSession({
         projectId: input.projectId,
         repoCwd: input.repoCwd,
         prompt: scenario.rootBody({ nonce: input.nonce, operator: OPERATOR }),
         base: input.integrationBranch,
       });
+      pinBenchmarkProvider(input.projectId, coordinator, provider);
 
       const ipc = new OperatorIpcClient({ projectId: input.projectId, socketPath });
 
@@ -765,8 +866,23 @@ async function makeLiveAutomation(
           // Between ticks, play the human operator gates: lock the spec once drafted, and PASS any
           // pending review_request. These are the ONLY hand-driven inputs — all coding/merging is the
           // live agents' own work through the co tools.
-          await maybeLockSpec(reg, input.projectId, input.repoCwd, specLockFailStreak);
-          await maybePassReviews(ipc, input.projectId, reviewFailStreak);
+          try {
+            await playOperatorGates({
+              reg,
+              projectId: input.projectId,
+              repoCwd: input.repoCwd,
+              ipc,
+              reviewFailStreak,
+              specLockFailStreak,
+              timeoutMs: input.perStepTimeoutMs,
+              tick: ticks + 1,
+            });
+          } catch (error) {
+            stepTimedOut = true;
+            stopReason = 'wedged';
+            stepError = errorMessage(error);
+            break;
+          }
 
           completed = planCompleted(input.projectId);
           if (completed) break;
@@ -791,6 +907,60 @@ async function makeLiveAutomation(
 }
 
 type SpecLockAttempt = () => Promise<void>;
+
+function pinBenchmarkProvider(projectId: ProjectId, rootAgent: string, provider: Provider): void {
+  const pin = { provider };
+  const config = openConfigStore();
+  try {
+    config.setProjectOverride(projectId, DISPATCH_ENABLED_PROVIDERS_KEY, [provider]);
+    config.setProjectOverride(projectId, DISPATCH_PINS_CONFIG_KEY, {
+      coordinator: pin,
+      lead: pin,
+      implementer: pin,
+      reviewer: pin,
+    });
+  } finally {
+    config.close();
+  }
+
+  const tier = resolveTier('technical', 'deep', provider);
+  const dispatch = openDispatchStore(projectId);
+  try {
+    dispatch.recordPlacement(rootAgent, {
+      kind: 'placed',
+      role: 'coordinator',
+      work_size: 'technical',
+      reasoning_budget: 'deep',
+      provider,
+      account: accountForProvider(provider),
+      model: tier.model,
+      effort: tier.effort,
+      context: tier.context,
+    });
+  } finally {
+    dispatch.close();
+  }
+}
+
+async function playOperatorGates(input: {
+  readonly reg: ReturnType<typeof buildCoreRegistry>;
+  readonly projectId: ProjectId;
+  readonly repoCwd: string;
+  readonly ipc: OperatorIpcClient;
+  readonly reviewFailStreak: Map<string, number>;
+  readonly specLockFailStreak: Map<string, number>;
+  readonly timeoutMs: number;
+  readonly tick: number;
+}): Promise<void> {
+  await withTimeout(
+    (async () => {
+      await maybeLockSpec(input.reg, input.projectId, input.repoCwd, input.specLockFailStreak);
+      await maybePassReviews(input.ipc, input.projectId, input.reviewFailStreak);
+    })(),
+    input.timeoutMs,
+    `operator gate automation tick ${input.tick}`,
+  );
+}
 
 /** Lock the spec once the coordinator has drafted it (the operator's spec-lock gate). Idempotent. */
 async function maybeLockSpec(

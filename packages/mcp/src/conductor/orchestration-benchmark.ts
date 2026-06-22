@@ -29,6 +29,7 @@
  */
 import {
   OPERATOR,
+  DEFAULT_BUDGET_TOKENS,
   budgetTokensForScenario,
   buildTokenEconomy,
   buildToolEfficiency,
@@ -293,15 +294,11 @@ export function detectChainCompletion(projectId: ProjectId, taskId: string): boo
 }
 
 /**
- * The PR B read-model surface this driver reads PER AGENT — declared HERE (not imported from B, and NOT
- * imported from `@co/core`: those shapes are deliberately bench-local + un-exported so B owns the canonical
- * export) so this module compiles on `dev` WITHOUT B. The shapes are STRUCTURAL copies of the bench-local
- * {@link AgentCostRollup}/{@link AgentToolUsage} contract — the driver reads via OPTIONAL CHAINING, so
- * structural compatibility with whatever the store actually returns is all that is required. Both methods
- * are OPTIONAL: when the store handle does not provide them (the surface that produces this data has not
- * landed yet, or it is the sandbox arm), the optional call short-circuits to `undefined` and the
- * corresponding three-score component becomes `null` (N/A) — never a silent zero; a `null` return is an
- * explicit "no rollup".
+ * The optional per-agent read-model surface this driver reads. It is structural so the benchmark can read
+ * whichever store implementation is present via optional chaining. Both methods are OPTIONAL: when the
+ * store handle does not provide them, the optional call short-circuits to `undefined` and the corresponding
+ * three-score component becomes `null` (N/A) — never a silent zero; a `null` return is an explicit
+ * "no rollup".
  */
 interface AgentCostRollup {
   readonly agentId: string;
@@ -361,14 +358,28 @@ const openDispatchEcon: OpenBenchEcon = (projectId) =>
 export function aggregateAgentMetrics(
   projectId: ProjectId,
   agentTurns: Readonly<Record<string, AgentTurnSample>>,
+): readonly AgentRunMetric[];
+export function aggregateAgentMetrics(
+  projectId: ProjectId,
+  agentTurns: Readonly<Record<string, AgentTurnSample>>,
   scenarioId: string,
   fidelity: RunFidelity,
   completedTaskCount: number,
+  openEcon?: OpenBenchEcon,
+): readonly AgentRunMetric[];
+export function aggregateAgentMetrics(
+  projectId: ProjectId,
+  agentTurns: Readonly<Record<string, AgentTurnSample>>,
+  scenarioId?: string,
+  fidelity?: RunFidelity,
+  completedTaskCount = 0,
   openEcon: OpenBenchEcon = openDispatchEcon,
 ): readonly AgentRunMetric[] {
   const roster = openRosterStore(projectId);
   const mail = openMailStore(projectId);
-  const budgetTokens = budgetTokensForScenario(scenarioId);
+  const hasScoringContext = scenarioId !== undefined && fidelity !== undefined;
+  const budgetTokens =
+    scenarioId === undefined ? DEFAULT_BUDGET_TOKENS : budgetTokensForScenario(scenarioId);
   try {
     const escalationsBy = escalationCountsByAgent(mail);
     return roster
@@ -376,7 +387,9 @@ export function aggregateAgentMetrics(
       .filter((a) => a.agentId !== OPERATOR)
       .map((a): AgentRunMetric => {
         const sample = agentTurns[a.agentId];
-        const { cost, tool } = readAgentEcon(projectId, a.agentId, fidelity, openEcon);
+        const { cost, tool } = hasScoringContext
+          ? readAgentEcon(projectId, a.agentId, fidelity, openEcon)
+          : { cost: null, tool: null };
         // The throughput diagnostic is DERIVED (not a store field): tool calls per completed task, or null
         // when there is no tool rollup / the run completed no task (never a divide-by-zero Infinity).
         const toolCallsPerCompletedTask =

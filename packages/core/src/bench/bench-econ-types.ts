@@ -23,10 +23,8 @@
  * dollar cost. In a SANDBOX run no real tokens are spent, so the driver hands `null` (not a zeroed
  * rollup) and the token-economy score is `null` (N/A), per the no-silent-zero rule.
  *
- * STRUCTURAL CONTRACT (kept bench-local — NOT re-exported from the `@co/core` barrel): the canonical
- * `@co/core` export of this shape is owned by the cost read-model PR (PR B). This bench copy is the
- * IDENTICAL shape so the `@co/mcp` driver can read PR B's store via optional chaining with no import of
- * B's types — structural compatibility is sufficient.
+ * STRUCTURAL CONTRACT: the canonical `@co/core` barrel exports this shape for adapter compatibility,
+ * while the `@co/mcp` driver reads the optional store surface through a structurally compatible seam.
  */
 export interface AgentCostRollup {
   /** Which agent this rollup belongs to (matches the roster agent id). */
@@ -53,10 +51,8 @@ export interface AgentCostRollup {
  * diagnostic the STORE produces (`turnsToFirstProductiveCoCall`) is reported raw; `toolCallsPerCompletedTask`
  * is NOT a store field — it is DERIVED by the benchmark driver from `toolCalls / completed-task-count`.
  *
- * STRUCTURAL CONTRACT (kept bench-local — NOT re-exported from the `@co/core` barrel): the canonical
- * `@co/core` export of this shape is owned by the tool-usage read-model PR (PR B). This bench copy is the
- * IDENTICAL shape so the `@co/mcp` driver can read PR B's store via optional chaining with no import of
- * B's types — structural compatibility is sufficient.
+ * STRUCTURAL CONTRACT: the canonical `@co/core` barrel exports this shape for adapter compatibility,
+ * while the `@co/mcp` driver reads the optional store surface through a structurally compatible seam.
  */
 export interface AgentToolUsage {
   /** Which agent this rollup belongs to (matches the roster agent id). */

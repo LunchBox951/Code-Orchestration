@@ -1080,9 +1080,9 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
     // The sandbox arm SKIPS the cost read entirely (fidelity-enforced), so the live-only economy score is
     // GUARANTEED null (N/A) — not a silent zero, not an accident of B's store being absent. Without PR B's
     // tool-usage rollup the tool-efficiency score is null too.
-    expect(agents.find((a) => a.agentId === 'coord-a')?.tokenEconomy.tokenEconomy).toBeNull();
+    expect(agents.find((a) => a.agentId === 'coord-a')?.tokenEconomy?.tokenEconomy).toBeNull();
     expect(
-      agents.find((a) => a.agentId === 'coord-a')?.toolEfficiency.contextEfficiency,
+      agents.find((a) => a.agentId === 'coord-a')?.toolEfficiency?.contextEfficiency,
     ).toBeNull();
     const summary = summarizeRun({
       runId: 'r',
@@ -1112,6 +1112,22 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
     expect(summary.totalEscalations).toBe(1);
     expect(agents.find((a) => a.agentId === 'lead-a')?.escalations).toBe(1);
     expect(agents.find((a) => a.agentId === 'impl-a')?.turnsUsed).toBe(0);
+  });
+
+  it('aggregateAgentMetrics keeps the legacy two-argument public form with null score blocks', () => {
+    const { projectId } = makeProject();
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-a', role: 'coordinator', parent: OPERATOR });
+
+    const agents = aggregateAgentMetrics(projectId, {
+      'coord-a': { turnsUsed: 3, wallClockMs: 3000 },
+    });
+
+    expect(agents).toHaveLength(1);
+    expect(agents[0]!.turnsUsed).toBe(3);
+    expect(agents[0]!.tokenEconomy?.tokenEconomy).toBeNull();
+    expect(agents[0]!.toolEfficiency?.contextEfficiency).toBeNull();
   });
 
   it('aggregateAgentMetrics FORCES tokenEconomy=null in sandbox even when the store has a non-null cost rollup (fidelity short-circuit; non-vacuous)', () => {
@@ -1154,17 +1170,17 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
       openEconWithCost,
     );
     const sandboxCoord = sandbox.find((a) => a.agentId === 'coord-a');
-    expect(sandboxCoord?.tokenEconomy.tokenEconomy).toBeNull();
-    expect(sandboxCoord?.tokenEconomy.totalTokens).toBeNull();
-    expect(sandboxCoord?.tokenEconomy.costUsd).toBeNull();
+    expect(sandboxCoord?.tokenEconomy?.tokenEconomy).toBeNull();
+    expect(sandboxCoord?.tokenEconomy?.totalTokens).toBeNull();
+    expect(sandboxCoord?.tokenEconomy?.costUsd).toBeNull();
 
     // HOST-LIVE arm: the SAME injected rollup IS read — tokenEconomy is computed (non-null), proving the
     // short-circuit is the only thing nulling the sandbox arm (not a missing store).
     const live = aggregateAgentMetrics(projectId, {}, 'calc-lib', 'host-live', 1, openEconWithCost);
     const liveCoord = live.find((a) => a.agentId === 'coord-a');
-    expect(liveCoord?.tokenEconomy.totalTokens).toBe(3100);
-    expect(liveCoord?.tokenEconomy.costUsd).toBe(0.42);
-    expect(liveCoord?.tokenEconomy.tokenEconomy).not.toBeNull();
+    expect(liveCoord?.tokenEconomy?.totalTokens).toBe(3100);
+    expect(liveCoord?.tokenEconomy?.costUsd).toBe(0.42);
+    expect(liveCoord?.tokenEconomy?.tokenEconomy).not.toBeNull();
   });
 
   it('aggregateMergeOutcomes + countImplementerBranchesMergedUp read review rounds/kickbacks/merge-up from the stores', () => {

@@ -865,6 +865,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     projectId,
     now,
     reconcileEvery: opts.reconcileEvery ?? 5,
+    ...(isolatedHomeDirFor != null ? { codexHomeFor: isolatedHomeDirFor } : {}),
     // P3 §3c — honor `pause`/STUCK: filter the router's suppressed agents out of candidate selection.
     isSkipped: (pid, agent) => router.shouldSkip(pid, agent),
   });

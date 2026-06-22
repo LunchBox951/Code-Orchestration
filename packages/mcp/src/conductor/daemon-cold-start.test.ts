@@ -23,17 +23,21 @@ import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  CODEX_READY,
   OPERATOR,
   WEDGE_MS,
   ReconcileLoop,
+  accountForProvider,
   defaultMailRenderer,
   type DetectorEvent,
+  openDispatchStore,
   openMailStore,
   openProjectStore,
   openRegistry,
   openRosterStore,
   openSessionStore,
   openWorktreeStore,
+  resolveTier,
   startCoordinatorSession,
   type DeliveredMail,
   type ProjectId,
@@ -218,6 +222,7 @@ interface ColdStartRun {
   readonly sessionExists: boolean;
   readonly rosterRole: string | undefined;
   readonly rosterParent: string | undefined;
+  readonly sessionProvider: string | undefined;
 }
 
 /** Start a root, compose the daemon over FakePty, and drive ONE tick that cold-starts + drives it. */
@@ -262,6 +267,7 @@ async function driveColdStart(projectId: ProjectId, repo: string): Promise<ColdS
       sessionExists: session?.agentId === coordinator,
       rosterRole: agent?.role,
       rosterParent: agent?.parent,
+      sessionProvider: session?.provider,
     };
   } finally {
     sessions.close();
@@ -305,6 +311,59 @@ describe('ConductorDaemon — Stage 14 P1 root cold-start (AC-S14-1)', () => {
     expect(run.sessionExists).toBe(true);
     expect(run.rosterRole).toBe('coordinator');
     expect(run.rosterParent).toBe(OPERATOR);
+  });
+
+  it('honors a recorded root placement instead of hard-coding Claude on cold-start', async () => {
+    const { projectId, repo } = makeProject();
+    const { coordinator } = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'orchestrate', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+    const tier = resolveTier('technical', 'deep', 'codex');
+    const dispatch = openDispatchStore(projectId);
+    try {
+      dispatch.recordPlacement(coordinator, {
+        kind: 'placed',
+        role: 'coordinator',
+        work_size: 'technical',
+        reasoning_budget: 'deep',
+        provider: 'codex',
+        account: accountForProvider('codex'),
+        model: tier.model,
+        effort: tier.effort,
+        context: tier.context,
+      });
+    } finally {
+      dispatch.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const engine = makeEngine(pty, clock, qw);
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+      codexHomeFor: (agent) => join(repo, `.codex-home-${agent}`),
+    });
+    const kickoff = kickoffFor(projectId, coordinator);
+
+    const tickP = daemon.tick();
+    await tick();
+    const rootPane = pty.panes[pty.panes.length - 1]!;
+    rootPane.emit(CODEX_READY);
+    await driveTurnToIdle(rootPane, kickoff, clock, qw);
+    await tickP;
+
+    const sessions = openSessionStore(projectId);
+    try {
+      expect(sessions.getSession(coordinator)?.provider).toBe('codex');
+    } finally {
+      sessions.close();
+    }
   });
 
   it('does not re-select the consumed root kickoff when later operator work arrives', async () => {

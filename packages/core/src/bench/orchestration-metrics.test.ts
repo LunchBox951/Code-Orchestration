@@ -16,8 +16,7 @@ import {
   type AgentRunMetric,
   type MergeOutcome,
 } from './orchestration-metrics.js';
-// AgentCostRollup / AgentToolUsage are bench-local (NOT re-exported from orchestration-metrics nor the
-// @co/core barrel — PR B owns the canonical export); import them from their declaring module.
+// Import from the declaring module here; the public barrel export is covered by packages/mcp's guard.
 import type { AgentCostRollup, AgentToolUsage } from './bench-econ-types.js';
 import type { ArtifactCheck } from './orchestration-scenarios.js';
 
@@ -203,6 +202,32 @@ describe('summarizeRun — the hard structural PASS verdict + totals', () => {
     expect(s.totalKickbacks).toBe(1);
     expect(s.totalEscalations).toBe(1);
     expect(s.agentsByRole).toEqual({ coordinator: 1, lead: 1, implementer: 2 });
+  });
+
+  it('normalizes legacy public inputs that predate case counts and score blocks', () => {
+    const legacyAgent = {
+      agentId: 'legacy-a',
+      role: 'implementer',
+      provider: 'claude',
+      turnsUsed: 1,
+      wallClockMs: 10,
+      escalations: 0,
+    } satisfies AgentRunMetric;
+
+    const s = summarizeRun(
+      baseInput({
+        artifact: { correct: true, detail: 'legacy binary pass' },
+        agents: [legacyAgent],
+      }),
+    );
+
+    expect(s.pass).toBe(true);
+    expect(s.artifact.casesPassed).toBe(1);
+    expect(s.artifact.casesTotal).toBe(1);
+    expect(s.scores.correctness).toBe(1);
+    expect(s.agents[0]!.tokenEconomy.tokenEconomy).toBeNull();
+    expect(s.agents[0]!.toolEfficiency.contextEfficiency).toBeNull();
+    expect(toJsonl(s)).toContain('"artifactCasesPassed":1');
   });
 
   it('fails when the chain did not complete', () => {

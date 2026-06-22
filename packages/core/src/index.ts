@@ -918,15 +918,17 @@ export {
   calcLibScenario,
   getOrchestrationScenario,
 } from './bench/orchestration-scenarios.js';
-// NOTE: AgentCostRollup / AgentToolUsage are intentionally NOT exported from this barrel. Their canonical
-// @co/core export is owned by the cost/tool-usage read-model PR (PR B); the benchmark keeps an identical
-// bench-local copy (packages/core/src/bench/bench-econ-types.ts) and the @co/mcp driver reads the store
-// via optional chaining, so exporting them here too would be a duplicate-export collision.
+// Shared economy/tool rollup shapes used by the exported benchmark score helpers. These remain bench-local
+// until the cost/tool-usage read-model lands, but the root barrel exports the names because the helper
+// signatures are public.
+export type { AgentCostRollup, AgentToolUsage } from './bench/bench-econ-types.js';
 export type {
   ProviderMode,
   RunFidelity,
   StopReason,
   AgentRunMetric,
+  NormalizedAgentRunMetric,
+  ArtifactCheckWithCases,
   AgentTokenEconomy,
   AgentToolEfficiency,
   MergeOutcome,

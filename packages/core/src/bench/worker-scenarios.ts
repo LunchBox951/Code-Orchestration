@@ -30,10 +30,13 @@ export interface ArtifactCheck {
   readonly correct: boolean;
   /** A concrete, human-legible reason (the failing case, or a pass summary). */
   readonly detail: string;
-  /** Oracle cases that passed (the artifact must exist + import for any case to pass; 0 on a hard miss). */
-  readonly casesPassed: number;
-  /** Total oracle cases the scenario grades (a fixed scenario property, > 0). */
-  readonly casesTotal: number;
+  /**
+   * Oracle cases that passed. Optional for public callers that still return the legacy binary
+   * `{ correct, detail }` shape; score aggregation normalizes that to `1/1` or `0/1`.
+   */
+  readonly casesPassed?: number;
+  /** Total oracle cases the scenario grades. Optional only for the legacy binary shape. */
+  readonly casesTotal?: number;
 }
 
 /** The substitution context for a scenario's prompt text. */

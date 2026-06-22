@@ -22,11 +22,9 @@
 import type { ArtifactCheck } from './orchestration-scenarios.js';
 import type { AgentCostRollup, AgentToolUsage } from './bench-econ-types.js';
 
-// NOTE: AgentCostRollup / AgentToolUsage are deliberately NOT re-exported here (nor from the @co/core
-// barrel). The canonical @co/core export of those read-model shapes is owned by the cost/tool-usage PR
-// (PR B); re-exporting them here too would collide. They stay bench-local (see ./bench-econ-types.ts) —
-// the @co/mcp driver reads the store via optional chaining, so structural compatibility is enough and no
-// import of B's types is required.
+// NOTE: AgentCostRollup / AgentToolUsage live in their declaring bench module and are re-exported from
+// the @co/core barrel for adapter compatibility. The @co/mcp driver still reads the store via optional
+// chaining, so structural compatibility is enough and no concrete store implementation is required.
 
 export type ProviderMode = 'claude-only' | 'codex-only' | 'mixed';
 export type RunFidelity = 'host-live' | 'sandbox-fake';
@@ -90,7 +88,8 @@ export function correctnessScore(input: {
   readonly requiredImplementerMerges: number;
   readonly everyMergeHadReview: boolean;
 }): number {
-  const { artifact, completed, implementerBranchesMergedUp, requiredImplementerMerges } = input;
+  const { completed, implementerBranchesMergedUp, requiredImplementerMerges } = input;
+  const artifact = normalizeArtifactCheck(input.artifact);
   if (artifact.casesTotal <= 0) return 0;
   const caseFraction = clamp01(artifact.casesPassed / artifact.casesTotal);
   const completedFactor = completed ? 1 : 0;
@@ -242,10 +241,27 @@ export interface AgentRunMetric {
   readonly wallClockMs: number;
   /** RL-3 escalations this agent fired (clarify-timeout forwards + watchdog STUCK escalations). */
   readonly escalations: number;
-  /** LIVE-ONLY token economy (raw tokens + economy/cache scores); every field `null` in the sandbox arm. */
+  /**
+   * LIVE-ONLY token economy (raw tokens + economy/cache scores); every field `null` in the sandbox arm.
+   * Optional for public callers that still construct the pre-three-score metric shape; `summarizeRun`
+   * normalizes missing blocks to all-null score blocks.
+   */
+  readonly tokenEconomy?: AgentTokenEconomy;
+  /**
+   * Context/tool efficiency (raw tool rates + the contextEfficiency score); `null` fields with no rollup.
+   * Optional for public callers that still construct the pre-three-score metric shape.
+   */
+  readonly toolEfficiency?: AgentToolEfficiency;
+}
+
+export interface NormalizedAgentRunMetric extends AgentRunMetric {
   readonly tokenEconomy: AgentTokenEconomy;
-  /** Context/tool efficiency (raw tool rates + the contextEfficiency score); `null` fields with no rollup. */
   readonly toolEfficiency: AgentToolEfficiency;
+}
+
+export interface ArtifactCheckWithCases extends ArtifactCheck {
+  readonly casesPassed: number;
+  readonly casesTotal: number;
 }
 
 /** Per-merge review quality over the run. */
@@ -303,7 +319,9 @@ export interface RunScores {
 }
 
 /** The aggregated scorecard: the input plus the hard PASS verdict, the rolled-up totals, and the scores. */
-export interface OrchestrationScorecard extends OrchestrationRunInput {
+export interface OrchestrationScorecard extends Omit<OrchestrationRunInput, 'artifact' | 'agents'> {
+  readonly artifact: ArtifactCheckWithCases;
+  readonly agents: readonly NormalizedAgentRunMetric[];
   /** The STRUCTURAL pass: chain completed, oracle correct, every implementer merged up, every merge reviewed. */
   readonly pass: boolean;
   /** Why the structural pass failed (empty when `pass`). */
@@ -327,12 +345,15 @@ export interface OrchestrationScorecard extends OrchestrationRunInput {
  * their per-role aggregates (the per-provider fine-tuning corpus signal).
  */
 export function summarizeRun(input: OrchestrationRunInput): OrchestrationScorecard {
+  const artifact = normalizeArtifactCheck(input.artifact);
+  const budgetTokens = budgetTokensForScenario(input.scenarioId);
+  const agents = input.agents.map((agent) => normalizeAgentRunMetric(agent, budgetTokens));
   const failures: string[] = [];
   if (input.stopReason !== 'task-complete') {
     failures.push(`run stopped before task completion: ${input.stopReason}`);
   }
   if (!input.completed) failures.push('chain did not complete (no task.completed)');
-  if (!input.artifact.correct) failures.push(`artifact oracle failed: ${input.artifact.detail}`);
+  if (!artifact.correct) failures.push(`artifact oracle failed: ${artifact.detail}`);
   if (input.implementerBranchesMergedUp < input.requiredImplementerMerges) {
     failures.push(
       `only ${input.implementerBranchesMergedUp} of ${input.requiredImplementerMerges} implementer ` +
@@ -351,10 +372,10 @@ export function summarizeRun(input: OrchestrationRunInput): OrchestrationScoreca
   }
 
   const agentsByRole: Record<string, number> = {};
-  for (const a of input.agents) agentsByRole[a.role] = (agentsByRole[a.role] ?? 0) + 1;
+  for (const a of agents) agentsByRole[a.role] = (agentsByRole[a.role] ?? 0) + 1;
 
   const correctness = correctnessScore({
-    artifact: input.artifact,
+    artifact,
     completed: input.completed,
     implementerBranchesMergedUp: input.implementerBranchesMergedUp,
     requiredImplementerMerges: input.requiredImplementerMerges,
@@ -362,23 +383,44 @@ export function summarizeRun(input: OrchestrationRunInput): OrchestrationScoreca
   });
   const scores: RunScores = {
     correctness,
-    tokenEconomy: agentMean(input.agents.map((a) => a.tokenEconomy.tokenEconomy)),
-    contextEfficiency: agentMean(input.agents.map((a) => a.toolEfficiency.contextEfficiency)),
-    tokenEconomyByRole: byRole(input.agents, (a) => a.tokenEconomy.tokenEconomy),
-    contextEfficiencyByRole: byRole(input.agents, (a) => a.toolEfficiency.contextEfficiency),
+    tokenEconomy: agentMean(agents.map((a) => a.tokenEconomy.tokenEconomy)),
+    contextEfficiency: agentMean(agents.map((a) => a.toolEfficiency.contextEfficiency)),
+    tokenEconomyByRole: byRole(agents, (a) => a.tokenEconomy.tokenEconomy),
+    contextEfficiencyByRole: byRole(agents, (a) => a.toolEfficiency.contextEfficiency),
   };
 
   return {
     ...input,
+    artifact,
+    agents,
     pass: failures.length === 0,
     failures,
-    totalTurns: sum(input.agents.map((a) => a.turnsUsed)),
-    totalWallClockMs: sum(input.agents.map((a) => a.wallClockMs)),
+    totalTurns: sum(agents.map((a) => a.turnsUsed)),
+    totalWallClockMs: sum(agents.map((a) => a.wallClockMs)),
     totalReviewRounds: sum(input.merges.map((m) => m.reviewRounds)),
     totalKickbacks: sum(input.merges.map((m) => m.kickbacks)),
-    totalEscalations: sum(input.agents.map((a) => a.escalations)),
+    totalEscalations: sum(agents.map((a) => a.escalations)),
     agentsByRole,
     scores,
+  };
+}
+
+function normalizeArtifactCheck(artifact: ArtifactCheck): ArtifactCheckWithCases {
+  return {
+    ...artifact,
+    casesPassed: artifact.casesPassed ?? (artifact.correct ? 1 : 0),
+    casesTotal: artifact.casesTotal ?? 1,
+  };
+}
+
+function normalizeAgentRunMetric(
+  agent: AgentRunMetric,
+  budgetTokens: number,
+): NormalizedAgentRunMetric {
+  return {
+    ...agent,
+    tokenEconomy: agent.tokenEconomy ?? buildTokenEconomy(null, budgetTokens),
+    toolEfficiency: agent.toolEfficiency ?? buildToolEfficiency(null),
   };
 }
 
@@ -482,8 +524,8 @@ function agentMean(xs: readonly (number | null)[]): number | null {
 
 /** Fold a per-agent score into a per-role aggregate (count of reporters + mean over them). */
 function byRole(
-  agents: readonly AgentRunMetric[],
-  pick: (a: AgentRunMetric) => number | null,
+  agents: readonly NormalizedAgentRunMetric[],
+  pick: (a: NormalizedAgentRunMetric) => number | null,
 ): Readonly<Record<string, RoleScoreAggregate>> {
   const buckets = new Map<string, number[]>();
   for (const a of agents) {

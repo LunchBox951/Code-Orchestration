@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentTokenEconomy, AgentToolEfficiency } from '@co/core';
+import type {
+  AgentCostRollup,
+  AgentTokenEconomy,
+  AgentToolEfficiency,
+  AgentToolUsage,
+} from '@co/core';
 import type { ConductorHostRunnerStopOptions, WorkerScores } from './index.js';
 
 describe('@co/mcp public barrel type exports', () => {
@@ -29,8 +34,27 @@ describe('@co/mcp public barrel type exports', () => {
       tokenEconomy,
       toolEfficiency,
     } satisfies WorkerScores;
+    const cost = {
+      agentId: 'a',
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheReadTokens: 3,
+      cacheCreationTokens: 4,
+      totalTokens: 10,
+      costUsd: null,
+    } satisfies AgentCostRollup;
+    const tool = {
+      agentId: 'a',
+      toolCalls: 1,
+      toolErrors: 0,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: null,
+    } satisfies AgentToolUsage;
 
     expect(stopOptions.waitForInFlight).toBe(false);
     expect(scores.correctness).toBe(0);
+    expect(cost.totalTokens).toBe(10);
+    expect(tool.toolCalls).toBe(1);
   });
 });
