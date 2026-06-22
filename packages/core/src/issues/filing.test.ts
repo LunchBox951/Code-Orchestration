@@ -37,8 +37,8 @@ afterEach(() => {
 
 const ISSUE: IssueRecord = {
   issueId: 'iss-9',
-  summary: 'mail bus drops attachment at /home/skyler/co',
-  detail: 'Repro: send mail from /home/skyler/co; contact someone@example.com for the trace.',
+  summary: 'mail bus drops attachment at /home/alice/co',
+  detail: 'Repro: send mail from /home/alice/co; contact someone@example.com for the trace.',
   destination: 'co',
   capturedBy: 'lead-7',
   state: 'diagnosed',
@@ -60,7 +60,7 @@ describe('issueFilingApprovalKey + buildIssueFilingApproval', () => {
   it('the approval preview is SCRUBBED — what the operator approves is what goes out', () => {
     const envelope = buildIssueFilingApproval({ from: 'coord-1', issue: ISSUE });
     const artifact = envelope.subject + '\n' + envelope.body;
-    expect(artifact).not.toContain('/home/skyler');
+    expect(artifact).not.toContain('/home/alice');
     expect(artifact).not.toContain('someone@example.com');
     expect(artifact).toContain('/home/[redacted]');
     expect(envelope.body).toContain('delivery seam swallows');
@@ -124,7 +124,7 @@ describe('renderIssueBody — the outward artifact', () => {
     const body = renderIssueBody(ISSUE);
     expect(body).toContain('delivery seam swallows the second envelope');
     expect(body).toContain('Repro: send mail');
-    expect(body).not.toContain('/home/skyler');
+    expect(body).not.toContain('/home/alice');
     expect(body).not.toContain('someone@example.com');
   });
 });

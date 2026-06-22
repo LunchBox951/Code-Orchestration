@@ -22,7 +22,7 @@ const FAKE_BRANCHES: readonly BranchInfo[] = [
       sha: 'def5678',
       subject: 'release',
       committedAt: '2026-06-16T00:00:00Z',
-      author: 'LunchBox951',
+      author: 'maintainer',
     },
   },
 ];

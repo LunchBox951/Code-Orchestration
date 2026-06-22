@@ -69,7 +69,7 @@ function makeRepo(): string {
 // Pure guard — checkPublishIdentities
 // ---------------------------------------------------------------------------
 
-const PERSONA = 'LunchBox951 <95397613+LunchBox951@users.noreply.github.com>';
+const PERSONA = 'maintainer <1+maintainer@users.noreply.github.com>';
 const ALLOWLIST = [PERSONA];
 
 const cleanCommit: CommitIdentity = {
@@ -87,13 +87,13 @@ describe('checkPublishIdentities — pure guard', () => {
   it('off-persona author → one violation naming sha+field+identity', () => {
     const commit: CommitIdentity = {
       ...cleanCommit,
-      author: 'LunchBox951 <skyler.clemens@gmail.com>',
+      author: 'maintainer <off@example.com>',
     };
     const violations = checkPublishIdentities([commit], ALLOWLIST);
     expect(violations).toHaveLength(1);
     expect(violations[0]!.field).toBe('author');
     expect(violations[0]!.sha).toBe(commit.sha);
-    expect(violations[0]!.identity).toBe('LunchBox951 <skyler.clemens@gmail.com>');
+    expect(violations[0]!.identity).toBe('maintainer <off@example.com>');
   });
 
   it('off-persona committer → one violation', () => {
@@ -109,12 +109,12 @@ describe('checkPublishIdentities — pure guard', () => {
   it('off-persona Signed-off-by trailer → one violation', () => {
     const commit: CommitIdentity = {
       ...cleanCommit,
-      signoffs: ['LunchBox951 <skyler.clemens@gmail.com>'],
+      signoffs: ['maintainer <off@example.com>'],
     };
     const violations = checkPublishIdentities([commit], ALLOWLIST);
     expect(violations).toHaveLength(1);
     expect(violations[0]!.field).toBe('signed-off-by');
-    expect(violations[0]!.identity).toBe('LunchBox951 <skyler.clemens@gmail.com>');
+    expect(violations[0]!.identity).toBe('maintainer <off@example.com>');
   });
 
   it('missing Signed-off-by trailer → violation even when author and committer are allowlisted', () => {
@@ -162,8 +162,8 @@ describe('checkPublishIdentities — pure guard', () => {
   });
 
   it('email-case normalization: uppercase email in commit matches lowercase allowlist', () => {
-    const id = 'LunchBox951 <persona@noreply.github.com>';
-    const idUpper = 'LunchBox951 <PERSONA@NOREPLY.GITHUB.COM>';
+    const id = 'maintainer <persona@noreply.github.com>';
+    const idUpper = 'maintainer <PERSONA@NOREPLY.GITHUB.COM>';
     const allowlist = [idUpper];
     const commit: CommitIdentity = {
       sha: 'e'.repeat(40),
@@ -186,11 +186,11 @@ describe('checkPublishIdentities — pure guard', () => {
   });
 
   it('whitespace normalization: extra spaces trimmed before comparison', () => {
-    const id = 'LunchBox951 <persona@noreply.github.com>';
+    const id = 'maintainer <persona@noreply.github.com>';
     const allowlist = [id];
     const commit: CommitIdentity = {
       sha: 'f'.repeat(40),
-      author: '  LunchBox951 <persona@noreply.github.com>  ',
+      author: '  maintainer <persona@noreply.github.com>  ',
       committer: id,
       signoffs: [id],
     };
@@ -291,15 +291,15 @@ describe('resolvePersona', () => {
   it('returns the configured persona object', () => {
     const cfg = openCfg();
     cfg.setGlobal(IDENTITY_PERSONA_KEY, {
-      name: 'LunchBox951',
-      email: '95397613+LunchBox951@users.noreply.github.com',
+      name: 'maintainer',
+      email: '1+maintainer@users.noreply.github.com',
     });
     cfg.close();
     configs.pop();
     const persona = resolvePersona('any-project');
     expect(persona).toEqual({
-      name: 'LunchBox951',
-      email: '95397613+LunchBox951@users.noreply.github.com',
+      name: 'maintainer',
+      email: '1+maintainer@users.noreply.github.com',
     });
   });
 

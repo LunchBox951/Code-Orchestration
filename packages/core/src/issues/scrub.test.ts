@@ -7,10 +7,10 @@ import { scrubIssueText } from './scrub.js';
 
 describe('scrubIssueText — redactions', () => {
   it('redacts home-directory usernames (linux and macOS)', () => {
-    expect(scrubIssueText('failed at /home/skyler/dev/co/src/x.ts')).toBe(
+    expect(scrubIssueText('failed at /home/alice/dev/co/src/x.ts')).toBe(
       'failed at /home/[redacted]/dev/co/src/x.ts',
     );
-    expect(scrubIssueText('see /Users/skyler.clemens/repo')).toBe('see /Users/[redacted]/repo');
+    expect(scrubIssueText('see /Users/alice/repo')).toBe('see /Users/[redacted]/repo');
   });
 
   it('redacts email addresses', () => {
@@ -68,7 +68,7 @@ describe('scrubIssueText — redactions', () => {
   });
 
   it('is idempotent — scrubbing twice equals scrubbing once', () => {
-    const dirty = 'at /home/skyler/x by someone@example.com with ghp_0123456789abcdefghijklmnop';
+    const dirty = 'at /home/alice/x by someone@example.com with ghp_0123456789abcdefghijklmnop';
     expect(scrubIssueText(scrubIssueText(dirty))).toBe(scrubIssueText(dirty));
   });
 });

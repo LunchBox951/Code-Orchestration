@@ -83,7 +83,7 @@ function configure(
 function seedDiagnosedIssue(stores: Stores, destination: 'target' | 'co' = 'co'): void {
   stores.issues.recordCapture({
     issueId: 'iss-1',
-    summary: 'mail drops envelope at /home/skyler/co',
+    summary: 'mail drops envelope at /home/alice/co',
     detail: 'repro detail',
     destination,
     capturedBy: 'impl-1',
@@ -173,7 +173,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
 
     const approvals = stores.mail.inbox(OPERATOR).filter((m) => m.type === MAIL_APPROVAL);
     expect(approvals).toHaveLength(1);
-    expect(approvals[0]!.subject + approvals[0]!.body).not.toContain('/home/skyler');
+    expect(approvals[0]!.subject + approvals[0]!.body).not.toContain('/home/alice');
   });
 
   it('BLOCKS while pending (no duplicate approval mail), gh never runs', async () => {
@@ -316,7 +316,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     const [, args] = gh.mock.calls[0]!;
     expect(args).toContain('-R');
     expect(args).toContain('acme/co');
-    expect(args.join(' ')).not.toContain('/home/skyler');
+    expect(args.join(' ')).not.toContain('/home/alice');
 
     expect(stores.issues.getIssue('iss-1')?.state).toBe('filed');
 
@@ -335,7 +335,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/6');
     const ctx = makeCtx(id, stores, gh);
 
-    const req = (await fileWithTitle(ctx, 'approved /home/skyler title')) as Record<
+    const req = (await fileWithTitle(ctx, 'approved /home/alice title')) as Record<
       string,
       unknown
     >;
