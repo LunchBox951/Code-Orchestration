@@ -35,6 +35,7 @@ import {
   readWorkerEcon,
   workerBenchRenderer,
   workerCorrectness,
+  type WorkerBenchmarkResult,
 } from './worker-benchmark.js';
 
 const ORIGINAL_ENV = process.env;
@@ -220,6 +221,23 @@ describe('workerCorrectness — single-agent CORRECTNESS score (hermetic)', () =
 
   it('is fail-closed on a zero-case oracle (no evidence ⇒ 0, never 1)', () => {
     expect(workerCorrectness(artifact(0, 0), true)).toBe(0);
+  });
+});
+
+describe('WorkerBenchmarkResult public type compatibility', () => {
+  it('accepts legacy result literals without a scores block', () => {
+    const legacy = {
+      provider: 'claude',
+      scenarioId: 'add-module',
+      fidelity: 'host-live',
+      completed: true,
+      turnsUsed: 1,
+      artifact: { correct: true, detail: 'legacy pass' },
+      wallClockMs: 10,
+      stopReason: 'done-mail',
+    } satisfies WorkerBenchmarkResult;
+
+    expect(legacy.completed).toBe(true);
   });
 });
 

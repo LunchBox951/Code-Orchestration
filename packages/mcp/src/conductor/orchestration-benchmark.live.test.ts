@@ -688,6 +688,12 @@ describe('live provider pinning + bounded operator gates (hermetic, always runs)
       }),
     ).rejects.toThrow(/operator gate automation tick 1 exceeded/u);
   });
+
+  it('resolves the live bridge to the built co-mcp bin instead of the vitest argv entry', () => {
+    const paths = orchestrationLiveCoMcpPaths();
+    expect(paths.coMcpCommand).toBe(process.execPath);
+    expect(paths.coMcpArgs?.[0]).toBe(join(REPO_ROOT, 'packages', 'mcp', 'dist', 'bin.js'));
+  });
 });
 
 interface LiveRun {
@@ -768,7 +774,7 @@ async function makeLiveAutomation(
 
   const runner = await serveConductor({
     projectId: run.projectId,
-    coMcpPaths: defaultServeCoMcpPaths(),
+    coMcpPaths: orchestrationLiveCoMcpPaths(),
     pty: seams.pty,
     now: seams.now,
     quietWindow: seams.quietWindow,
@@ -897,6 +903,20 @@ async function makeLiveAutomation(
 }
 
 type SpecLockAttempt = () => Promise<void>;
+
+function orchestrationLiveCoMcpPaths(): ReturnType<typeof defaultServeCoMcpPaths> {
+  // defaultServeCoMcpPaths derives the bridge command from process.argv[1] — correct under `co-mcp
+  // serve`, but under vitest argv[1] is the runner, not the bridge. Pin the built co-mcp bin so provider
+  // sessions launch `co-mcp bridge <socket>` and exercise the real co_* surface.
+  const coMcpBin = join(REPO_ROOT, 'packages', 'mcp', 'dist', 'bin.js');
+  if (!existsSync(coMcpBin)) {
+    throw new Error(
+      `orchestration-benchmark.live: built co-mcp bin not found at ${coMcpBin} — run ` +
+        '`pnpm build` first (or use `pnpm test:live`, which builds via pretest:live).',
+    );
+  }
+  return defaultServeCoMcpPaths({ argv: [process.execPath, coMcpBin] });
+}
 
 function pinBenchmarkProvider(projectId: ProjectId, provider: Provider): void {
   const pin = { provider };

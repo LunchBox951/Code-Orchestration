@@ -100,6 +100,7 @@ export {
   buildWorkerSpawnSpec,
   type WorkerBenchmarkOptions,
   type WorkerBenchmarkResult,
+  type ScoredWorkerBenchmarkResult,
   type WorkerBenchmarkStopReason,
   type WorkerScores,
 } from './conductor/worker-benchmark.js';
@@ -128,4 +129,5 @@ export {
   type AutomationDriveResult,
   type AgentTurnSample,
   type OrchestrationStopReason,
+  type OpenBenchEcon,
 } from './conductor/orchestration-benchmark.js';

@@ -5,7 +5,7 @@ import type {
   AgentToolEfficiency,
   AgentToolUsage,
 } from '@co/core';
-import type { ConductorHostRunnerStopOptions, WorkerScores } from './index.js';
+import type { ConductorHostRunnerStopOptions, OpenBenchEcon, WorkerScores } from './index.js';
 
 describe('@co/mcp public barrel type exports', () => {
   it('exports public option/result helper types needed to name returned shapes', () => {
@@ -51,10 +51,16 @@ describe('@co/mcp public barrel type exports', () => {
       permissionAsks: 0,
       turnsToFirstProductiveCoCall: null,
     } satisfies AgentToolUsage;
+    const openBenchEcon: OpenBenchEcon = () => ({
+      getAgentCostRollup: () => cost,
+      getAgentToolUsage: () => tool,
+      close: () => {},
+    });
 
     expect(stopOptions.waitForInFlight).toBe(false);
     expect(scores.correctness).toBe(0);
     expect(cost.totalTokens).toBe(10);
     expect(tool.toolCalls).toBe(1);
+    expect(openBenchEcon('p').getAgentCostRollup?.('a')?.totalTokens).toBe(10);
   });
 });

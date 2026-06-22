@@ -13,6 +13,7 @@ import {
   clamp01,
   CONTEXT_EFFICIENCY_WEIGHTS,
   type OrchestrationRunInput,
+  type OrchestrationScorecard,
   type AgentRunMetric,
   type MergeOutcome,
 } from './orchestration-metrics.js';
@@ -566,6 +567,49 @@ describe('toJsonl + renderScorecard', () => {
       .find((r) => r['type'] === 'agent') as Record<string, unknown>;
     const te = agentRecord['tokenEconomy'] as Record<string, unknown>;
     expect(te['tokenEconomy']).toBeNull();
+  });
+
+  it('normalizes legacy materialized scorecards before JSONL/render output', () => {
+    const legacyAgent = {
+      agentId: 'legacy-a',
+      role: 'implementer',
+      provider: 'claude',
+      turnsUsed: 1,
+      wallClockMs: 10,
+      escalations: 0,
+    } satisfies AgentRunMetric;
+    const legacyScorecard = {
+      ...baseInput({
+        artifact: { correct: true, detail: 'legacy binary pass' },
+        agents: [legacyAgent],
+      }),
+      pass: true,
+      failures: [],
+      totalTurns: 1,
+      totalWallClockMs: 10,
+      totalReviewRounds: 4,
+      totalKickbacks: 1,
+      totalEscalations: 0,
+      agentsByRole: { implementer: 1 },
+    } satisfies OrchestrationScorecard;
+
+    const text = renderScorecard(legacyScorecard);
+    expect(text).toMatch(/legacy binary pass/);
+    expect(text).toMatch(/\(1\/1 cases\)/);
+    expect(text).toMatch(/token-economy=N\/A/);
+
+    const records = toJsonl(legacyScorecard)
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const agentRecord = records.find((r) => r['type'] === 'agent') as
+      | Record<string, unknown>
+      | undefined;
+    const run = records.find((r) => r['type'] === 'run') as Record<string, unknown> | undefined;
+    expect((agentRecord!['tokenEconomy'] as Record<string, unknown>)['tokenEconomy']).toBeNull();
+    expect(run!['artifactCasesPassed']).toBe(1);
+    expect(run!['artifactCasesTotal']).toBe(1);
+    expect((run!['scores'] as Record<string, unknown>)['correctness']).toBe(1);
   });
 
   it('renders a human scorecard with the verdict, totals, and the three scores', () => {

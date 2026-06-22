@@ -318,10 +318,8 @@ export interface RunScores {
   readonly contextEfficiencyByRole: Readonly<Record<string, RoleScoreAggregate>>;
 }
 
-/** The aggregated scorecard: the input plus the hard PASS verdict, the rolled-up totals, and the scores. */
-export interface OrchestrationScorecard extends Omit<OrchestrationRunInput, 'artifact' | 'agents'> {
-  readonly artifact: ArtifactCheckWithCases;
-  readonly agents: readonly NormalizedAgentRunMetric[];
+/** The aggregated scorecard: the input plus the hard PASS verdict, rolled-up totals, and optional scores. */
+export interface OrchestrationScorecard extends OrchestrationRunInput {
   /** The STRUCTURAL pass: chain completed, oracle correct, every implementer merged up, every merge reviewed. */
   readonly pass: boolean;
   /** Why the structural pass failed (empty when `pass`). */
@@ -332,7 +330,19 @@ export interface OrchestrationScorecard extends Omit<OrchestrationRunInput, 'art
   readonly totalKickbacks: number;
   readonly totalEscalations: number;
   readonly agentsByRole: Readonly<Record<string, number>>;
-  /** The three comparable scores + their per-role folds. */
+  /**
+   * The three comparable scores + their per-role folds. Optional for materialized scorecards produced before
+   * the three-score schema; render/JSONL helpers normalize a missing block.
+   */
+  readonly scores?: RunScores;
+}
+
+export interface NormalizedOrchestrationScorecard extends Omit<
+  OrchestrationScorecard,
+  'artifact' | 'agents' | 'scores'
+> {
+  readonly artifact: ArtifactCheckWithCases;
+  readonly agents: readonly NormalizedAgentRunMetric[];
   readonly scores: RunScores;
 }
 
@@ -344,7 +354,7 @@ export interface OrchestrationScorecard extends Omit<OrchestrationRunInput, 'art
  * TOKEN-ECONOMY (live-only — `null` in the sandbox arm), and the agent-mean CONTEXT/TOOL-EFFICIENCY, plus
  * their per-role aggregates (the per-provider fine-tuning corpus signal).
  */
-export function summarizeRun(input: OrchestrationRunInput): OrchestrationScorecard {
+export function summarizeRun(input: OrchestrationRunInput): NormalizedOrchestrationScorecard {
   const artifact = normalizeArtifactCheck(input.artifact);
   const budgetTokens = budgetTokensForScenario(input.scenarioId);
   const agents = input.agents.map((agent) => normalizeAgentRunMetric(agent, budgetTokens));
@@ -374,20 +384,7 @@ export function summarizeRun(input: OrchestrationRunInput): OrchestrationScoreca
   const agentsByRole: Record<string, number> = {};
   for (const a of agents) agentsByRole[a.role] = (agentsByRole[a.role] ?? 0) + 1;
 
-  const correctness = correctnessScore({
-    artifact,
-    completed: input.completed,
-    implementerBranchesMergedUp: input.implementerBranchesMergedUp,
-    requiredImplementerMerges: input.requiredImplementerMerges,
-    everyMergeHadReview,
-  });
-  const scores: RunScores = {
-    correctness,
-    tokenEconomy: agentMean(agents.map((a) => a.tokenEconomy.tokenEconomy)),
-    contextEfficiency: agentMean(agents.map((a) => a.toolEfficiency.contextEfficiency)),
-    tokenEconomyByRole: byRole(agents, (a) => a.tokenEconomy.tokenEconomy),
-    contextEfficiencyByRole: byRole(agents, (a) => a.toolEfficiency.contextEfficiency),
-  };
+  const scores = buildRunScores(input, artifact, agents, everyMergeHadReview);
 
   return {
     ...input,
@@ -402,6 +399,46 @@ export function summarizeRun(input: OrchestrationRunInput): OrchestrationScoreca
     totalEscalations: sum(agents.map((a) => a.escalations)),
     agentsByRole,
     scores,
+  };
+}
+
+function normalizeScorecard(scorecard: OrchestrationScorecard): NormalizedOrchestrationScorecard {
+  const artifact = normalizeArtifactCheck(scorecard.artifact);
+  const agents = scorecard.agents.map((agent) =>
+    normalizeAgentRunMetric(agent, budgetTokensForScenario(scorecard.scenarioId)),
+  );
+  const everyMergeHadReview =
+    scorecard.merges.length > 0 && scorecard.merges.every((m) => m.reviewRounds >= 1);
+  return {
+    ...scorecard,
+    artifact,
+    agents,
+    scores: scorecard.scores ?? buildRunScores(scorecard, artifact, agents, everyMergeHadReview),
+  };
+}
+
+function buildRunScores(
+  input: Pick<
+    OrchestrationRunInput,
+    'completed' | 'implementerBranchesMergedUp' | 'requiredImplementerMerges'
+  >,
+  artifact: ArtifactCheckWithCases,
+  agents: readonly NormalizedAgentRunMetric[],
+  everyMergeHadReview: boolean,
+): RunScores {
+  const correctness = correctnessScore({
+    artifact,
+    completed: input.completed,
+    implementerBranchesMergedUp: input.implementerBranchesMergedUp,
+    requiredImplementerMerges: input.requiredImplementerMerges,
+    everyMergeHadReview,
+  });
+  return {
+    correctness,
+    tokenEconomy: agentMean(agents.map((a) => a.tokenEconomy.tokenEconomy)),
+    contextEfficiency: agentMean(agents.map((a) => a.toolEfficiency.contextEfficiency)),
+    tokenEconomyByRole: byRole(agents, (a) => a.tokenEconomy.tokenEconomy),
+    contextEfficiencyByRole: byRole(agents, (a) => a.toolEfficiency.contextEfficiency),
   };
 }
 
@@ -430,7 +467,8 @@ function normalizeAgentRunMetric(
  * agent record carries all three per-agent scores (correctness is run-level, so it rides the run record),
  * and the run record carries the run-level scores + the per-role aggregates.
  */
-export function toJsonl(scorecard: OrchestrationScorecard): string {
+export function toJsonl(input: OrchestrationScorecard): string {
+  const scorecard = normalizeScorecard(input);
   const lines: string[] = [];
   for (const agent of scorecard.agents) {
     lines.push(
@@ -482,7 +520,8 @@ export function toJsonl(scorecard: OrchestrationScorecard): string {
 }
 
 /** A compact human-legible scorecard for the test/CLI output (the operator reviews this, not a checkbox). */
-export function renderScorecard(scorecard: OrchestrationScorecard): string {
+export function renderScorecard(input: OrchestrationScorecard): string {
+  const scorecard = normalizeScorecard(input);
   const verdict = scorecard.pass ? 'PASS' : 'FAIL';
   const s = scorecard.scores;
   const lines = [

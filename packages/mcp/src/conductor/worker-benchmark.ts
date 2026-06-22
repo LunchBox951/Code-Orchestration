@@ -121,16 +121,10 @@ export interface WorkerBenchmarkResult {
   /** Diagnostic: the turn error, when a turn threw or timed out. */
   readonly turnError?: string;
   /**
-   * The three comparable scores for the single-agent case (mirrors the orchestration scorecard so the
-   * per-provider corpus is uniform):
-   *   - CORRECTNESS (objective; both arms): the artifact's oracle case fraction, gated by `completed`.
-   *     There are no implementer merges in the single-agent case, so the merge-up / review factors are
-   *     vacuously satisfied — correctness reduces to `(casesPassed/casesTotal) × (completed ? 1 : 0)`.
-   *   - TOKEN-ECONOMY (LIVE-ONLY): `null` until a per-agent cost rollup is available (read via optional
-   *     chaining against PR B's store surface) — never a silent zero.
-   *   - CONTEXT/TOOL-EFFICIENCY (both arms): `null` until a per-agent tool-usage rollup is available.
+   * The three comparable scores. Optional for public callers that still construct the pre-three-score
+   * result shape; `runWorkerBenchmark` always populates it.
    */
-  readonly scores: WorkerScores;
+  readonly scores?: WorkerScores;
 }
 
 /** The single-agent three-score block (parallels the orchestration `RunScores`). */
@@ -141,6 +135,10 @@ export interface WorkerScores {
   readonly tokenEconomy: AgentTokenEconomy;
   /** Context/tool efficiency (raw rates + the contextEfficiency score); `null` fields with no rollup. */
   readonly toolEfficiency: AgentToolEfficiency;
+}
+
+export interface ScoredWorkerBenchmarkResult extends WorkerBenchmarkResult {
+  readonly scores: WorkerScores;
 }
 
 /**
@@ -164,7 +162,7 @@ export function buildWorkerSpawnSpec(
 export async function runWorkerBenchmark(
   provider: 'claude' | 'codex',
   opts: WorkerBenchmarkOptions,
-): Promise<WorkerBenchmarkResult> {
+): Promise<ScoredWorkerBenchmarkResult> {
   const { projectId, identity, scenario, nonce } = opts;
   const maxTurns = opts.maxTurns ?? envInt(CO_BENCH_MAX_TURNS_ENV, WORKER_BENCH_DEFAULTS.maxTurns);
   const wallClockBudgetMs =

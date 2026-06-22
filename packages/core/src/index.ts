@@ -934,6 +934,7 @@ export type {
   MergeOutcome,
   OrchestrationRunInput,
   OrchestrationScorecard,
+  NormalizedOrchestrationScorecard,
   RunScores,
   RoleScoreAggregate,
 } from './bench/orchestration-metrics.js';

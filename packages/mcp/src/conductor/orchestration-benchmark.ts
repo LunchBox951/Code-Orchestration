@@ -44,8 +44,8 @@ import {
   type AgentRunMetric,
   type AgentToolUsage,
   type MergeOutcome,
+  type NormalizedOrchestrationScorecard,
   type OrchestrationScenario,
-  type OrchestrationScorecard,
   type ProjectId,
   type ProviderMode,
   type RunFidelity,
@@ -203,7 +203,7 @@ export function deriveRunFidelity(pty: PtyHost): RunFidelity {
  */
 export async function runOrchestrationBenchmark(
   opts: OrchestrationBenchmarkOptions,
-): Promise<OrchestrationScorecard> {
+): Promise<NormalizedOrchestrationScorecard> {
   const { projectId, scenario, nonce, providerMode, repoCwd, integrationBranch, automation } = opts;
   const maxTicks = opts.maxTicks ?? envInt(CO_BENCH_MAX_TICKS_ENV, ORCH_BENCH_DEFAULTS.maxTicks);
   const wallClockBudgetMs =
