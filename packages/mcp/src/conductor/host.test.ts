@@ -44,6 +44,7 @@ import {
   GH_AUTH_TOKEN_TIMEOUT_MS,
   defaultServeCoMcpPaths,
   hostLiveTransportRequired,
+  makeGhCommandResolver,
   makeGhAuthTokenRunner,
   resolveAndApplyDaemonGithubAuth,
   resolveGhToken,
@@ -929,10 +930,42 @@ describe('serveConductor — wires the full stack over injected seams (no real b
       expect(env.PATH?.split(':')[0]).toBe('/usr/local/bin');
     });
 
+    it('resolveAndApplyDaemonGithubAuth: explicit env token still discovers gh for later bare gh calls', () => {
+      let tokenRunnerCalled = false;
+      const env: NodeJS.ProcessEnv = { CO_GH_TOKEN: 'gho_explicit', PATH: '/usr/bin:/bin' };
+      const token = resolveAndApplyDaemonGithubAuth(
+        env,
+        () => {
+          tokenRunnerCalled = true;
+          return { token: 'gho_wrong', command: '/wrong/bin/gh' };
+        },
+        () => '/usr/local/bin/gh',
+      );
+
+      expect(token).toBe('gho_explicit');
+      expect(tokenRunnerCalled).toBe(false);
+      expect(env.PATH?.split(':')[0]).toBe('/usr/local/bin');
+    });
+
     it('resolveAndApplyDaemonGithubAuth: no token → env untouched, returns undefined', () => {
       const env: NodeJS.ProcessEnv = {};
       expect(resolveAndApplyDaemonGithubAuth(env, () => undefined)).toBeUndefined();
       expect(env).toEqual({});
+    });
+
+    describe('makeGhCommandResolver (availability probe for later bare gh seams)', () => {
+      it('falls through to an absolute candidate when `gh` is not on PATH', () => {
+        const calls: Array<{ command: string; args: readonly string[] }> = [];
+        const spawn: GhSpawnSync = (command, args) => {
+          calls.push({ command, args });
+          return command === '/usr/local/bin/gh' ? { status: 0 } : { status: 127 };
+        };
+
+        expect(makeGhCommandResolver(spawn)({})).toBe('/usr/local/bin/gh');
+        expect(calls.find((call) => call.command === '/usr/local/bin/gh')?.args).toEqual([
+          '--version',
+        ]);
+      });
     });
 
     describe('makeGhAuthTokenRunner (real runner over an injectable spawn seam)', () => {

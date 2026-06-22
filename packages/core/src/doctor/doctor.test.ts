@@ -22,6 +22,7 @@ import { openDispatchStore } from '../dispatch/dispatch-store.js';
 import { openReviewStore } from '../review/review-store.js';
 import { ensureReviewTables } from '../review/review-projector.js';
 import {
+  makeGithubAuthProbeCommand,
   defaultProviderProbe,
   defaultGithubAuthProbe,
   runDoctor,
@@ -30,6 +31,7 @@ import {
   type ProviderProbeSeam,
   type ProviderProbeResult,
 } from './doctor.js';
+import { GH_AUTH_TOKEN_TIMEOUT_MS } from '../worktrees/github-auth.js';
 import { queryLiveObservability, queryObservability } from './observability.js';
 
 // ── Test env setup ────────────────────────────────────────────────────────────
@@ -389,6 +391,19 @@ describe('doctor check: github-auth', () => {
 });
 
 describe('defaultGithubAuthProbe', () => {
+  it('real GitHub auth command runner uses the GitHub auth timeout budget', () => {
+    let timeout: number | undefined;
+    const command = makeGithubAuthProbeCommand(
+      (_command: string, _args: readonly string[], options: { readonly timeout?: number }) => {
+        timeout = options.timeout;
+        return { stdout: '', stderr: '', status: 1 };
+      },
+    );
+
+    command('gh', ['auth', 'token']);
+    expect(timeout).toBe(GH_AUTH_TOKEN_TIMEOUT_MS);
+  });
+
   it('authenticated via an explicit token env without invoking gh', () => {
     let ghCalled = false;
     const probe = defaultGithubAuthProbe({

@@ -956,6 +956,9 @@ export interface GhAuthTokenResolution {
 /** Runs `gh auth token`, returning the operator's token or undefined (gh absent / logged out). */
 export type GhAuthTokenRunner = (env: NodeJS.ProcessEnv) => GhAuthTokenResolution | undefined;
 
+/** Resolves a usable `gh` command for later daemon seams that intentionally invoke bare `gh`. */
+export type GhCommandResolver = (env: NodeJS.ProcessEnv) => string | undefined;
+
 /** Sync spawn seam for the gh runner — injectable so the real runner is testable without a real gh. */
 export type GhSpawnSync = (
   command: string,
@@ -972,6 +975,28 @@ const realGhSpawn: GhSpawnSync = (command, args, env) => {
   });
   return { status: res.status, stdout: typeof res.stdout === 'string' ? res.stdout : undefined };
 };
+
+/**
+ * Build a {@link GhCommandResolver} over a spawn seam: try `gh --version` on PATH, then common
+ * absolute locations. This is separate from token resolution so an explicit env token can still make
+ * the selected `gh` binary available to later repo/publish seams.
+ */
+export function makeGhCommandResolver(spawn: GhSpawnSync = realGhSpawn): GhCommandResolver {
+  return (env) => {
+    for (const cmd of GH_AUTH_TOKEN_COMMANDS) {
+      try {
+        const res = spawn(cmd, ['--version'], env);
+        if (res.status === 0) return cmd;
+      } catch {
+        // ENOENT / spawn failure → try the next candidate; a missing gh is "not resolved".
+      }
+    }
+    return undefined;
+  };
+}
+
+/** The real {@link GhCommandResolver} (timeout-bounded real spawnSync). */
+export const defaultGhCommandResolver: GhCommandResolver = makeGhCommandResolver();
 
 /**
  * Build a {@link GhAuthTokenRunner} over a spawn seam: try `gh` on PATH, then common absolute paths
@@ -1008,15 +1033,18 @@ export function resolveGhToken(
   env: NodeJS.ProcessEnv = process.env,
   runner: GhAuthTokenRunner = defaultGhAuthTokenRunner,
 ): string | undefined {
-  return resolveGhAuth(env, runner)?.token;
+  const explicit = resolveGhTokenFromEnv(env);
+  if (explicit != null) return explicit;
+  return runner(env)?.token;
 }
 
 function resolveGhAuth(
   env: NodeJS.ProcessEnv,
   runner: GhAuthTokenRunner,
+  commandResolver: GhCommandResolver,
 ): GhAuthTokenResolution | undefined {
   const explicit = resolveGhTokenFromEnv(env);
-  if (explicit != null) return { token: explicit, command: 'gh' };
+  if (explicit != null) return { token: explicit, command: commandResolver(env) ?? 'gh' };
   return runner(env);
 }
 
@@ -1029,8 +1057,9 @@ function resolveGhAuth(
 export function resolveAndApplyDaemonGithubAuth(
   env: NodeJS.ProcessEnv = process.env,
   runner: GhAuthTokenRunner = defaultGhAuthTokenRunner,
+  commandResolver: GhCommandResolver = defaultGhCommandResolver,
 ): string | undefined {
-  const auth = resolveGhAuth(env, runner);
+  const auth = resolveGhAuth(env, runner, commandResolver);
   if (auth == null) return undefined;
   Object.assign(env, githubHttpsCredentialEnv(auth.token, env));
   Object.assign(env, ghCommandPathEnv(auth.command, env));
