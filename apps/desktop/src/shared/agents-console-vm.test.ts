@@ -691,6 +691,18 @@ describe('AgentsConsoleVM — nonzero transcript offsets and live gaps', () => {
     expect(vm.state.transcript).toBe('base');
     expect(vm.state.transcriptOffset).toBe(100);
   });
+
+  it('keeps the newest contiguous suffix when backfill and live chunks are disjoint', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    vm.appendChunk(push('a1', 'later', 120));
+    vm.setTranscriptTail(tail('a1', 'base', 100));
+
+    expect(vm.state.transcript).toBe('later');
+    expect(vm.state.transcriptOffset).toBe(120);
+  });
 });
 
 describe('AgentsConsoleVM — subscribe / emit / unsubscribe', () => {

@@ -235,6 +235,32 @@ describe('decideTermFeed', () => {
     expect(feed).toEqual({ kind: 'append', data: 'KL' });
   });
 
+  it('resets when transcript offsets rewind even if the new text shares the old prefix', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'hello',
+      lastTranscriptOffset: 100,
+      transcript: 'hello world',
+      transcriptOffset: 0,
+    });
+
+    expect(feed).toEqual({ kind: 'reset', data: 'hello world' });
+  });
+
+  it('resets when absolute overlap bytes do not match', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'ABCDE',
+      lastTranscriptOffset: 100,
+      transcript: 'XY',
+      transcriptOffset: 102,
+    });
+
+    expect(feed).toEqual({ kind: 'reset', data: 'XY' });
+  });
+
   it('resets + rewrites on a non-prefix change (truncation / new generation)', () => {
     const feed = decideTermFeed({
       selectedAgentId: 'a1',

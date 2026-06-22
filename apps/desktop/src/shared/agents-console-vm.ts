@@ -1,4 +1,9 @@
-import { assertNever, retainTranscriptTail, TRANSCRIPT_TAIL_HARD_MAX_CHARS } from '@co/core';
+import {
+  assertNever,
+  retainTranscriptTail,
+  TranscriptTailAccumulator,
+  TRANSCRIPT_TAIL_HARD_MAX_CHARS,
+} from '@co/core';
 import type {
   OperatorObservation,
   AgentLiveView,
@@ -91,6 +96,10 @@ export class AgentsConsoleVM {
     connection: 'degraded',
   };
   private readonly listeners = new Set<(state: AgentsConsoleState) => void>();
+  private readonly transcriptAccumulator = new TranscriptTailAccumulator({
+    softMaxChars: CONSOLE_TRANSCRIPT_MAX_CHARS,
+    hardMaxChars: CONSOLE_TRANSCRIPT_MAX_CHARS,
+  });
   private transcriptSegments: TranscriptSegment[] = [];
 
   get state(): AgentsConsoleState {
@@ -167,12 +176,14 @@ export class AgentsConsoleVM {
       transcriptOffset: 0,
     };
     this.transcriptSegments = [];
+    this.transcriptAccumulator.clear();
     this.emit();
   }
 
   clearSelectedTranscript(): void {
     if (this._state.selectedAgentId == null) return;
     this.transcriptSegments = [];
+    this.transcriptAccumulator.clear();
     this._state = {
       ...this._state,
       transcript: '',
@@ -207,6 +218,8 @@ export class AgentsConsoleVM {
     const resetPrefix = this.resetPrefixForLiveChunk(offset, text);
     if (resetPrefix != null) {
       this.transcriptSegments = resetPrefix.length > 0 ? [{ offset: 0, text: resetPrefix }] : [];
+      if (resetPrefix.length > 0) this.transcriptAccumulator.replace(resetPrefix, 0);
+      else this.transcriptAccumulator.clear();
     }
     this.applyTranscriptSegment(offset, text);
     return 'applied';
@@ -256,6 +269,17 @@ export class AgentsConsoleVM {
 
   private applyTranscriptSegment(offset: number, text: string): void {
     if (text.length === 0) return;
+    const range = this.transcriptRange();
+    if (
+      this.transcriptSegments.length === 1 &&
+      range != null &&
+      offset === range.end &&
+      this.transcriptAccumulator.snapshot().nextOffset === offset
+    ) {
+      this.applyAccumulatorSnapshot(this.transcriptAccumulator.append(text));
+      return;
+    }
+
     const segments = [...this.transcriptSegments, { offset, text }]
       .filter((segment) => segment.text.length > 0)
       .sort((a, b) => a.offset - b.offset);
@@ -277,29 +301,38 @@ export class AgentsConsoleVM {
       }
     }
 
-    // Bound the segment store with the SAME alt-screen-aware policy as the displayed transcript so the
-    // store and `state.transcript` carry the same window AND the leading `ESC[?1049h` survives into the
-    // join. Because the renderer cap ({@link CONSOLE_TRANSCRIPT_MAX_CHARS}) sits ABOVE the engine ceiling,
-    // a ceiling-sized engine tail plus a live append still fits under the cap, so this bound does not slice
-    // the leading enter away at that boundary. A flat front-drop here (the old logic) would strip the early
-    // alt-screen-enter from the store before `boundConsoleTranscript` ever saw it (#66 sub-bug B).
-    const joined = merged.map((segment) => segment.text).join('');
-    const bounded = boundConsoleTranscript(joined);
-    let dropped = joined.length - bounded.length;
-    while (dropped > 0 && merged.length > 0) {
-      const first = merged[0]!;
-      const drop = Math.min(first.text.length, dropped);
-      first.offset += drop;
-      first.text = first.text.slice(drop);
-      dropped -= drop;
-      if (first.text.length === 0) merged.shift();
-    }
+    // Never render discontiguous byte ranges as one transcript. If backfill/live races leave a gap, keep
+    // the newest contiguous suffix so xterm does not parse missing PTY bytes as if they were present.
+    const contiguous = this.newestContiguousSuffix(merged);
+    const start = contiguous[0]?.offset ?? offset;
+    const joined = contiguous.map((segment) => segment.text).join('');
+    this.applyAccumulatorSnapshot(this.transcriptAccumulator.replace(joined, start));
+  }
 
-    this.transcriptSegments = merged;
+  private newestContiguousSuffix(segments: readonly TranscriptSegment[]): TranscriptSegment[] {
+    const last = segments.at(-1);
+    if (last == null) return [];
+    const suffix: TranscriptSegment[] = [{ ...last }];
+    let start = last.offset;
+    for (let i = segments.length - 2; i >= 0; i--) {
+      const segment = segments[i]!;
+      if (segment.offset + segment.text.length !== start) break;
+      suffix.unshift({ ...segment });
+      start = segment.offset;
+    }
+    return suffix;
+  }
+
+  private applyAccumulatorSnapshot(snapshot: {
+    readonly tail: string;
+    readonly offset: number;
+  }): void {
+    this.transcriptSegments =
+      snapshot.tail.length > 0 ? [{ offset: snapshot.offset, text: snapshot.tail }] : [];
     this._state = {
       ...this._state,
-      transcript: bounded,
-      transcriptOffset: merged[0]?.offset ?? 0,
+      transcript: snapshot.tail,
+      transcriptOffset: snapshot.offset,
     };
     this.emit();
   }

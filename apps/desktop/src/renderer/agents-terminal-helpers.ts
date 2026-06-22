@@ -198,20 +198,39 @@ export function decideTermFeed(input: TermFeedInput): TermFeed {
   if (selectedAgentId !== lastAgentId) {
     return { kind: 'reset', data: transcript };
   }
-  if (transcript.startsWith(lastTranscript)) {
-    const delta = transcript.slice(lastTranscript.length);
-    return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
-  }
   if (input.transcriptOffset != null && input.lastTranscriptOffset != null) {
     const transcriptOffset = input.transcriptOffset;
     const lastTranscriptOffset = input.lastTranscriptOffset;
     const transcriptEnd = transcriptOffset + transcript.length;
     const lastTranscriptEnd = lastTranscriptOffset + lastTranscript.length;
-    if (transcriptOffset >= lastTranscriptOffset && transcriptOffset <= lastTranscriptEnd) {
-      if (transcriptEnd <= lastTranscriptEnd) return { kind: 'noop' };
-      const delta = transcript.slice(lastTranscriptEnd - transcriptOffset);
-      return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
+    if (transcriptOffset < lastTranscriptOffset) return { kind: 'reset', data: transcript };
+    if (transcriptOffset > lastTranscriptEnd) return { kind: 'reset', data: transcript };
+    if (transcriptOffset === lastTranscriptEnd) {
+      return transcript.length > 0 ? { kind: 'append', data: transcript } : { kind: 'noop' };
     }
+
+    const overlapLength = Math.min(transcriptEnd, lastTranscriptEnd) - transcriptOffset;
+    if (overlapLength > 0) {
+      const existing = lastTranscript.slice(
+        transcriptOffset - lastTranscriptOffset,
+        transcriptOffset - lastTranscriptOffset + overlapLength,
+      );
+      const incoming = transcript.slice(0, overlapLength);
+      if (existing !== incoming) return { kind: 'reset', data: transcript };
+    }
+
+    if (transcriptEnd <= lastTranscriptEnd) {
+      return transcriptOffset === lastTranscriptOffset && transcript.length < lastTranscript.length
+        ? { kind: 'reset', data: transcript }
+        : { kind: 'noop' };
+    }
+
+    const delta = transcript.slice(lastTranscriptEnd - transcriptOffset);
+    return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
+  }
+  if (transcript.startsWith(lastTranscript)) {
+    const delta = transcript.slice(lastTranscript.length);
+    return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
   }
   return { kind: 'reset', data: transcript };
 }

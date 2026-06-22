@@ -1337,12 +1337,21 @@ export { isMissingBranchDeleteError } from './worktrees/branch-delete.js';
 export type { PrelaunchFile, SpawnSpec, PtyExit, Pane, PtyHost } from './pty/pty-host.js';
 export type { FakePtyPane } from './pty/fake-pty.js';
 export { FakePty } from './pty/fake-pty.js';
-export type { RetainedTail, TranscriptTailRetentionOptions } from './pty/transcript-tail.js';
+export type {
+  RetainedTail,
+  TranscriptReplayBoundary,
+  TranscriptReplayBoundaryKind,
+  TranscriptTailAccumulatorSnapshot,
+  TranscriptTailRetentionOptions,
+} from './pty/transcript-tail.js';
 export {
+  TRANSCRIPT_REPLAY_BOUNDARY_SCAN_OVERLAP,
   TRANSCRIPT_TAIL_MAX_CHARS,
   TRANSCRIPT_TAIL_HARD_MAX_CHARS,
   retainTranscriptTail,
+  scanTranscriptReplayBoundaries,
   transcriptTailFrom,
+  TranscriptTailAccumulator,
 } from './pty/transcript-tail.js';
 
 // L7 B1 — startup interstitial state machine (PURE, provider-aware): classify a freshly-spawned

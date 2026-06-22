@@ -1061,6 +1061,58 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     });
   });
 
+  it('does not concatenate live pushes across a pending gap backfill when bytes are missing', async () => {
+    const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
+    let resolveGapBackfill!: (tail: TranscriptTail) => void;
+    const gapBackfillP = new Promise<TranscriptTail>((resolve) => {
+      resolveGapBackfill = resolve;
+    });
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockImplementation((cb: (t: OperatorIpcTranscript) => void) => {
+        transcriptListeners.push(cb);
+        return () => {};
+      }),
+      transcript: vi
+        .fn()
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'base', 100))
+        .mockReturnValueOnce(gapBackfillP),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    await vi.waitFor(() => {
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        transcript: 'base',
+        transcriptOffset: 100,
+      });
+    });
+
+    transcriptListeners[0]?.(transcriptPush('impl-x', 'later', 120));
+    await vi.waitFor(() => expect(client.transcript).toHaveBeenCalledTimes(2));
+    transcriptListeners[0]?.(transcriptPush('impl-x', 'later', 120));
+    resolveGapBackfill(transcriptTail('impl-x', 'base', 100));
+
+    await vi.waitFor(() => {
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        transcript: 'later',
+        transcriptOffset: 120,
+      });
+    });
+  });
+
   it('selectAgent backfill preserves live chunks that arrive before transcript() resolves', async () => {
     const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
     let resolveTranscript!: (tail: TranscriptTail) => void;

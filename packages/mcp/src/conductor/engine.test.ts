@@ -1627,4 +1627,20 @@ describe('engine transcript tail (#66 sub-bug B) — alt-screen-enter survives a
     // the alt-screen-enter sits immediately after CLAUDE_READY, so the tail starts at CLAUDE_READY.length.
     expect(snap.offset).toBe(CLAUDE_READY.length);
   });
+
+  it('recognizes an alt-screen-enter split across pane chunks', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity);
+
+    pane.emit(ALT_ENTER.slice(0, 4));
+    pane.emit(ALT_ENTER.slice(4));
+    pane.emit('F'.repeat(TRANSCRIPT_TAIL_MAX_CHARS + 1_000));
+
+    const snap = engine.transcriptTailSnapshot(projectId, 'impl-x');
+    expect(snap.tail.startsWith(ALT_ENTER)).toBe(true);
+    expect(snap.offset).toBe(CLAUDE_READY.length);
+  });
 });

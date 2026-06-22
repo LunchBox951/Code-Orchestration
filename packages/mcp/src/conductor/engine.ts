@@ -45,6 +45,7 @@ import {
   type StartupOutcome,
   type Steer,
   type TranscriptTail,
+  TranscriptTailAccumulator,
   TRANSCRIPT_TAIL_HARD_MAX_CHARS,
   TRANSCRIPT_TAIL_MAX_CHARS,
   type ToolSpec,
@@ -376,9 +377,7 @@ export class ConductorEngine {
    * persistent onData subscription below; read by {@link transcriptTail} for the operator's on-demand
    * backfill. Dropped on release.
    */
-  private readonly transcriptTails = new Map<string, string>();
-  private readonly transcriptTailOffsets = new Map<string, number>();
-  private readonly transcriptNextOffsets = new Map<string, number>();
+  private readonly transcriptAccumulators = new Map<string, TranscriptTailAccumulator>();
   /**
    * Per-agent PERSISTENT onData unsubscribers for the transcript stream, keyed `${projectId}:${agent}`
    * (Stage 12 C-P1) — DISTINCT from the per-turn observer in {@link observeTurnEnd}. Torn down on
@@ -488,16 +487,20 @@ export class ConductorEngine {
    * operator's on-demand backfill.
    */
   transcriptTail(projectId: ProjectId, agent: string): string {
-    return this.transcriptTails.get(ConductorEngine.agentKey(projectId, agent)) ?? '';
+    return (
+      this.transcriptAccumulators.get(ConductorEngine.agentKey(projectId, agent))?.snapshot()
+        .tail ?? ''
+    );
   }
 
   /** Stage 12 C-P1 — the current bounded transcript tail plus its absolute start offset. */
   transcriptTailSnapshot(projectId: ProjectId, agent: string): TranscriptTail {
     const agentKey = ConductorEngine.agentKey(projectId, agent);
+    const snapshot = this.transcriptAccumulators.get(agentKey)?.snapshot();
     return {
       agentId: agent,
-      offset: this.transcriptTailOffsets.get(agentKey) ?? 0,
-      tail: this.transcriptTails.get(agentKey) ?? '',
+      offset: snapshot?.offset ?? 0,
+      tail: snapshot?.tail ?? '',
     };
   }
 
@@ -622,9 +625,7 @@ export class ConductorEngine {
     const pane = this.deps.pty.spawn(spec ?? this.spawnSpecFor(identity));
     // Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe before startup driving so the operator tail and live
     // stream include early provider interstitials/login prompts as well as post-ready turn bytes.
-    this.transcriptTails.set(agentKey, '');
-    this.transcriptTailOffsets.set(agentKey, 0);
-    this.transcriptNextOffsets.set(agentKey, 0);
+    this.transcriptAccumulators.set(agentKey, new TranscriptTailAccumulator());
     this.transcriptUnsub.set(
       agentKey,
       pane.onData((chunk) =>
@@ -1257,10 +1258,10 @@ export class ConductorEngine {
    * throws of its own accord (the registered listener — the operator-IPC push — is itself guarded
    * against a vanished client).
    *
-   * #66 sub-bug B — the retained tail is computed by {@link transcriptTailFrom}, which keeps memory
-   * bounded WITHOUT slicing away the early alternate-screen-enter (`ESC[?1049h`) an interactive TUI
-   * needs to replay cleanly into a fresh xterm. The dropped-char count it returns advances the tail's
-   * absolute start offset, so the {@link TranscriptTail} `offset` contract stays correct.
+   * #66 sub-bug B — the retained tail is owned by the core {@link TranscriptTailAccumulator}, which keeps
+   * memory bounded WITHOUT slicing away the early alternate-screen-enter (`ESC[?1049h`) an interactive TUI
+   * needs to replay cleanly into a fresh xterm. The retained start becomes the {@link TranscriptTail}
+   * `offset` contract.
    */
   private appendTranscript(
     agentKey: string,
@@ -1269,13 +1270,9 @@ export class ConductorEngine {
     chunk: string,
   ): void {
     this.lastByteAt.set(agentKey, this.deps.now()); // P6: track last-byte time for liveness probe
-    const chunkOffset = this.transcriptNextOffsets.get(agentKey) ?? 0;
-    const tailOffset = this.transcriptTailOffsets.get(agentKey) ?? chunkOffset;
-    const next = (this.transcriptTails.get(agentKey) ?? '') + chunk;
-    this.transcriptNextOffsets.set(agentKey, chunkOffset + chunk.length);
-    const { tail, dropped } = transcriptTailFrom(next);
-    this.transcriptTails.set(agentKey, tail);
-    this.transcriptTailOffsets.set(agentKey, tailOffset + dropped);
+    const accumulator = this.transcriptAccumulators.get(agentKey);
+    const chunkOffset = accumulator?.snapshot().nextOffset ?? 0;
+    accumulator?.append(chunk);
     for (const listener of [...this.transcriptListeners]) {
       try {
         listener(projectId, agent, chunk, chunkOffset);
@@ -1292,9 +1289,7 @@ export class ConductorEngine {
     this.paneExited.delete(agentKey);
     this.transcriptUnsub.get(agentKey)?.();
     this.transcriptUnsub.delete(agentKey);
-    this.transcriptTails.delete(agentKey);
-    this.transcriptTailOffsets.delete(agentKey);
-    this.transcriptNextOffsets.delete(agentKey);
+    this.transcriptAccumulators.delete(agentKey);
     this.lastByteAt.delete(agentKey); // P6
     this.turnInFlight.delete(agentKey); // P6
     this.turnStartedAt.delete(agentKey); // P6
