@@ -96,6 +96,7 @@ type StatusOut = {
   cwd: string;
   outstanding: number;
   inbox_unread: number;
+  next_action?: { type: string; subject: string; sender: string };
 };
 type OrientOut = { guidance: string };
 
@@ -152,6 +153,31 @@ describe('buildCoreRegistry — the canonical single source of truth', () => {
   it('co_pr_merge public contract names the required pr_merge PASS', () => {
     const prMerge = buildCoreRegistry().get('co_pr_merge');
     expect(prMerge?.description).toMatch(/pr_merge PASS/);
+  });
+
+  // PR D — item 4: the costliest tool descriptions were trimmed ≥30% (rationale moved to JSDoc;
+  // .describe() stays syntax-focused). These are regression GUARDS keyed to the post-trim lengths,
+  // so a future re-bloat past the trimmed budget fails loudly. Baselines (pre-trim → post-trim):
+  //   co_research_finalize 362→164, co_plan_ingest 495→232, co_review_finalize 282→182,
+  //   co_pr_merge 363→231, co_sling 451→256.
+  it('the five costliest tool descriptions stay within their trimmed budgets (≥30% cut held)', () => {
+    const reg = buildCoreRegistry();
+    const budgets: Record<string, { preTrim: number; max: number }> = {
+      co_research_finalize: { preTrim: 362, max: 200 },
+      co_plan_ingest: { preTrim: 495, max: 280 },
+      co_review_finalize: { preTrim: 282, max: 197 },
+      co_pr_merge: { preTrim: 363, max: 254 },
+      co_sling: { preTrim: 451, max: 315 },
+    };
+    for (const [name, { preTrim, max }] of Object.entries(budgets)) {
+      const desc = reg.get(name)?.description ?? '';
+      expect(desc.length, `${name} description should be non-empty`).toBeGreaterThan(0);
+      expect(desc.length, `${name} description within trimmed budget`).toBeLessThanOrEqual(max);
+      // The budget itself is ≥30% below the pre-trim baseline — the cut is real, not cosmetic.
+      expect(max, `${name} budget is ≥30% below baseline`).toBeLessThanOrEqual(
+        Math.floor(preTrim * 0.7),
+      );
+    }
   });
 });
 
@@ -606,6 +632,59 @@ describe('co_status — the honest L2 agent record; counts track the bus', () =>
       await invokeTool(reg, ctx('worker'), 'co_mail_retract', { id: req.seq });
       const afterRetract = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
       expect(afterRetract.outstanding).toBe(0);
+    } finally {
+      close();
+    }
+  });
+
+  it('surfaces next_action: the oldest outstanding ACTIONABLE item (type+subject+sender)', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      // No outstanding mail → no next_action (a quiet inbox tells the agent there is nothing to do).
+      const quiet = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(quiet.next_action).toBeUndefined();
+
+      // Two actionable items arrive in order; FIFO means the FIRST is the one to act on next.
+      await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'first question',
+        body: 'a?',
+      });
+      await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'second question',
+        body: 'b?',
+      });
+
+      const status = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(status.outstanding).toBe(2);
+      expect(status.next_action).toEqual({
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'first question',
+        sender: 'worker',
+      });
+    } finally {
+      close();
+    }
+  });
+
+  it('next_action ignores non-actionable mail (informational notices are not "to do")', async () => {
+    const { reg, ctx, close } = setup();
+    try {
+      // A chat message is informational, not actionable — it lifts inbox_unread but must NOT
+      // become a next_action (outstanding tracks only items that demand a response).
+      await invokeTool(reg, ctx('worker'), 'co_mail_send', {
+        to: 'lead',
+        type: MAIL_CHAT,
+        subject: 'fyi',
+        body: 'heads up',
+      });
+      const status = (await invokeTool(reg, ctx('lead'), 'co_status', {})) as StatusOut;
+      expect(status.inbox_unread).toBe(1);
+      expect(status.outstanding).toBe(0);
+      expect(status.next_action).toBeUndefined();
     } finally {
       close();
     }

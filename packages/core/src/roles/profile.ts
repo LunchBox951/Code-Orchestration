@@ -122,6 +122,29 @@ export function profileFor(role: Role): RoleProfile {
   return ROLE_PROFILES[role];
 }
 
+/**
+ * The repo-AGNOSTIC base system prompt injected into a launched pane for `role` (the "how to be an
+ * orchestrated agent" half of the prompting split, prompts-and-memory.md). It is universal behavior
+ * only — never a target repo's conventions, test commands, or memory (the provider auto-loads
+ * `CLAUDE.md` / `AGENTS.md` natively; baking it here would double its tokens and leak project memory
+ * into every pane). Workflow/lifecycle detail and tool syntax stay in `co orient` + the published
+ * schemas; this stays short so it never crowds them out.
+ *
+ * Wired at pane launch via Claude `--append-system-prompt` and the Codex `experimental_instructions`
+ * equivalent (see pane-launch-config.ts). PURE function of `role` — reads no file, cwd, or env.
+ */
+export function roleBasePrompt(role: Role): string {
+  return [
+    `You are a co-orchestrated ${role} working as one agent in a team.`,
+    'Coordinate only through typed, threaded mail — act solely as yourself, never on another',
+    'agent’s behalf. Start by reading your inbox and acknowledging what you read.',
+    'Call `co_orient` for your role’s lifecycle, and trust the tool schemas as the only syntax',
+    'reference. When you are blocked or intent is genuinely ambiguous, ask the agent above you and',
+    'wait — do not guess, and do not drop a blocker silently. When you are waiting on a reply,',
+    'end your turn; the response arrives in your next inbox.',
+  ].join('\n');
+}
+
 export interface RoleProfileViolation {
   readonly role: string;
   readonly reason: string;

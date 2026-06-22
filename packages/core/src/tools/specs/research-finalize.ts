@@ -48,15 +48,18 @@ type ResearchFinalizeInput = z.infer<typeof researchFinalizeInput>;
  *
  * Research *dispatch* (spawning the researcher) is L7's Conductor — at L6b a researcher is
  * driven headless/by tests, and the record it finalizes is what every later agent reads.
+ *
+ * Description rationale (kept out of the .describe() syntax surface): the map contract is enforced,
+ * so incoherent read orders, duplicate paths, multi-line whys, and citation-free answers are
+ * rejected — the point is that a result later agents read instead of re-searching is structurally
+ * trustworthy.
  */
 export const researchFinalizeTool: ToolSpec<ResearchFinalizeInput, ResearchRecordOutput> = {
   name: 'co_research_finalize',
   title: 'Finalize a research result',
   description:
-    'Durably record your finished research result — a locator map (files + one-line whys + key ' +
-    'symbols + read order) or a cited answer — so the requester and later agents can read it ' +
-    'instead of re-searching. The map contract is enforced: incoherent read orders, duplicate ' +
-    'paths, multi-line whys, and citation-free answers are rejected. Only a researcher may finalize.',
+    'Durably record your finished research result — a locator map or a cited answer — so the ' +
+    'requester and later agents read it instead of re-searching. Researcher-only.',
   inputSchema: researchFinalizeInput,
   outputSchema: researchRecordOutputSchema,
   handler: (ctx, input): ResearchRecordOutput => {

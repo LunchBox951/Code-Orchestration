@@ -186,6 +186,28 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
     // Naming verbs must NOT drift into restating their fields (P5 is asserted separately above).
   });
 
+  it('the lead arc NAMES its workflow verbs (F4 — drive every arc from orient, not just coordinator)', () => {
+    const out = orientContent('lead');
+    for (const verb of ['co_sling', 'co_merge', 'co_kickback', 'co_push', 'co_pr_merge']) {
+      expect(out, `lead orient should name ${verb}`).toContain(verb);
+    }
+  });
+
+  it('the implementer arc NAMES co_finish as the verb that advances the gate (F4)', () => {
+    const out = orientContent('implementer');
+    expect(out).toContain('co_finish');
+  });
+
+  it('the researcher arc NAMES co_research_finalize as its record verb (F4)', () => {
+    const out = orientContent('researcher');
+    expect(out).toContain('co_research_finalize');
+  });
+
+  it('the generic (unknown-role) arc NAMES co_finish for the gate (F4 — generic too)', () => {
+    const out = orientContent();
+    expect(out).toContain('co_finish');
+  });
+
   it('an unknown role gets generic workflow guidance, not an error (lenient input)', () => {
     const out = orientContent('wizard');
     expect(out.length).toBeGreaterThan(0);

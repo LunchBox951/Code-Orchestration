@@ -26,6 +26,7 @@ import {
   openMailStore,
   openRegistry,
   openRosterStore,
+  roleBasePrompt,
   type DeliveredMail,
   type MailStore,
   type NodePtyModule,
@@ -1144,6 +1145,10 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
     expect(spec.command).toBe('codex');
     expect(spec.args).toEqual([
       '--dangerously-bypass-hook-trust',
+      // Role base-prompt config override (PR D item 1): the host-proof pane is threaded its role
+      // too, so the coordinator base prompt rides along as a `-c` override.
+      '-c',
+      `experimental_instructions=${JSON.stringify(roleBasePrompt('coordinator'))}`,
       '--add-dir',
       `${dataDir}/sockets`,
     ]);

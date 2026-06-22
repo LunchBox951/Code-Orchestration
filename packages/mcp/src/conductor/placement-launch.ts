@@ -205,6 +205,9 @@ export function buildHostedLaunchSpec(
   const paneIdentity: PaneIdentity = {
     cwd: identity.cwd,
     isolatedHomeDir,
+    // Thread the base role so buildPaneLaunchConfig injects the repo-agnostic base system prompt
+    // (Claude --append-system-prompt / Codex config override). Without this the prompt is a no-op.
+    role: identity.role,
     ...(provider === 'claude'
       ? {
           coMcpConfig:

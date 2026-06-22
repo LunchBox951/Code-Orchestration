@@ -127,12 +127,9 @@ export const planIngestTool: ToolSpec<PlanIngestInput, PlanRecordOutput> = {
   name: 'co_plan_ingest',
   title: 'Ingest a plan',
   description:
-    'Ingest a plan record (goal, task-level and per-phase acceptance criteria, phase DAG) into ' +
-    'the durable plan store under a task id. Refuses ingestion when: (a) there is no locked spec ' +
-    'or task_criteria drift from that spec; (b) any criterion is missing its wired verification ' +
-    'command (fuzzy criteria are rejected — the E2 validator gate); (c) the phase DAG is empty, ' +
-    'contains dangling deps, duplicate phase ids, or a cycle; (d) the caller is not a coordinator. ' +
-    'Only a coordinator may ingest a plan.',
+    'Ingest a plan record (goal, task-level and per-phase acceptance criteria, phase DAG) under a ' +
+    'task id. Refuses unless: a matching locked spec exists, every criterion has a wired verify ' +
+    'command, and the DAG is valid. Coordinator-only.',
   inputSchema: planIngestInput,
   outputSchema: planRecordOutputSchema,
   handler: (ctx, input): PlanRecordOutput => {

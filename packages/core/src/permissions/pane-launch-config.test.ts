@@ -14,9 +14,10 @@ import { checkBlockListDrift, readEnforcedConfig } from './drift.js';
 import {
   buildPaneLaunchConfig,
   paneMayUseWebTools,
+  CODEX_BASE_PROMPT_CONFIG_KEY,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
-import { ROLE_PROFILES, type Capability } from '../roles/profile.js';
+import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
 import type { SpawnSpec } from '../pty/pty-host.js';
 
 const ISOLATED_HOME = '/tmp/co-pane-isolated-test';
@@ -703,5 +704,53 @@ describe('claude built-in web tools are explicitly decided at launch (#7 §5 #3)
   it('paneMayUseWebTools is grant-all and capability-driven (one-line flip to least-privilege)', () => {
     expect(paneMayUseWebTools(new Set<Capability>())).toBe(true);
     expect(paneMayUseWebTools(ROLE_PROFILES.researcher.capabilities)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Role base-prompt injection (PR D — item 1)
+// ---------------------------------------------------------------------------
+
+describe('role base-prompt injection into builder args', () => {
+  it('claude: appends --append-system-prompt <roleBasePrompt> ONLY when role is set', () => {
+    const withRole = buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, role: 'implementer' });
+    const idx = withRole.args.indexOf('--append-system-prompt');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(withRole.args[idx + 1]).toBe(roleBasePrompt('implementer'));
+
+    // No role → deliberate no-op (the no-op that the prior round shipped to production).
+    const noRole = buildPaneLaunchConfig('claude', BASE_IDENTITY);
+    expect(noRole.args).not.toContain('--append-system-prompt');
+  });
+
+  it('codex: appends -c <key>=<json(roleBasePrompt)> ONLY when role is set', () => {
+    const withRole = buildPaneLaunchConfig('codex', { ...BASE_IDENTITY, role: 'researcher' });
+    const idx = withRole.args.indexOf('-c');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(withRole.args[idx + 1]).toBe(
+      `${CODEX_BASE_PROMPT_CONFIG_KEY}=${JSON.stringify(roleBasePrompt('researcher'))}`,
+    );
+
+    const noRole = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    expect(noRole.args).not.toContain('-c');
+  });
+
+  it('the base prompt is repo-agnostic: no project-memory / CLAUDE.md leakage, and stays short', () => {
+    for (const role of ['coordinator', 'lead', 'implementer', 'reviewer', 'researcher'] as const) {
+      const prompt = roleBasePrompt(role);
+      expect(prompt).toContain(role);
+      // Prompting split (Principle 11): never names a project-memory file or repo conventions.
+      expect(prompt).not.toMatch(/CLAUDE\.md|AGENTS\.md/);
+      // ~5-8 lines — short enough not to crowd out co orient + the schemas.
+      expect(prompt.split('\n').length).toBeLessThanOrEqual(8);
+    }
+  });
+
+  it('the injected base prompt does NOT disturb the block-list drift roundtrip', () => {
+    const config = buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, role: 'implementer' });
+    const enforced = readEnforcedConfig(config);
+    expect(checkBlockListDrift(BLOCK_LIST, enforced)).toEqual([]);
+    const codex = buildPaneLaunchConfig('codex', { ...BASE_IDENTITY, role: 'implementer' });
+    expect(checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(codex))).toEqual([]);
   });
 });

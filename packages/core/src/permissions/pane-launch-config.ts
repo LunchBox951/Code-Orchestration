@@ -28,7 +28,8 @@
 import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
-import { ROLE_PROFILES, type Capability } from '../roles/profile.js';
+import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
+import type { Role } from '../tools/scoping.js';
 import type { BlockRule } from './block-list.js';
 import { BLOCK_LIST } from './block-list.js';
 import { basename, isAbsolute } from 'node:path';
@@ -61,6 +62,12 @@ export interface PaneIdentity {
    * decision below. Absent ⇒ empty set. Threaded from the role profile by the placement launcher.
    */
   readonly capabilities?: ReadonlySet<Capability>;
+  /**
+   * The pane's base role. When set, the repo-agnostic {@link roleBasePrompt} is injected into the
+   * launch args (Claude `--append-system-prompt`, Codex `experimental_instructions` config override).
+   * Absent ⇒ no base prompt is appended — so a PRODUCTION caller MUST set it or the prompt is a no-op.
+   */
+  readonly role?: Role;
 }
 
 /**
@@ -147,6 +154,14 @@ export function claudeDisallowedPatternsForRule(ruleId: string): readonly string
 
 /** The provider built-in web tools gated by the `web-search` capability (#7 §5 #3). */
 export const WEB_SEARCH_TOOLS = ['WebSearch', 'WebFetch'] as const;
+
+/**
+ * Codex config key carrying the repo-agnostic base prompt, emitted as `-c <key>=<json-string>`.
+ * Isolated as a single named constant so flipping to the confirmed additive Codex surface is a
+ * one-line change. The brief flags this as needs-live-verification: confirm against the real codex
+ * binary that this key ADDS to (does not replace) Codex's built-in instructions before relying on it.
+ */
+export const CODEX_BASE_PROMPT_CONFIG_KEY = 'experimental_instructions';
 
 /**
  * Whether a pane with these capabilities may use the built-in web tools (#7 §5 #3).
@@ -402,6 +417,13 @@ function buildClaudeLaunchConfig(
   // Deny rules apply in EVERY mode including bypassPermissions, so the `--disallowedTools` block-list
   // below still hard-denies the dangerous commands pre-exec (the gated-merge invariant is preserved).
   const args: string[] = ['--strict-mcp-config', '--permission-mode', 'bypassPermissions'];
+  // Repo-agnostic base prompt (prompts-and-memory.md): `--append-system-prompt` ADDS to Claude's
+  // built-in system prompt rather than replacing it, so the universal "how to be an orchestrated
+  // agent" guidance rides on top of the native one. Only when the caller set the role — an unset
+  // role makes this a deliberate no-op (the placement/host callers MUST thread `identity.role`).
+  if (identity.role != null) {
+    args.push('--append-system-prompt', roleBasePrompt(identity.role));
+  }
   // Built-in web tools (#7 §5 #3): state the decision EXPLICITLY rather than leaving it undefined
   // under bypassPermissions — allow when the role may browse, hard-deny otherwise.
   const webAllowed = paneMayUseWebTools(identity.capabilities ?? new Set<Capability>());
@@ -484,13 +506,23 @@ function buildCodexLaunchConfig(
   const codexConfigTomlPath = buildCodexConfigTomlPath(identity);
   const codexBlockListRulesJson = buildCodexBlockListRulesJson(blockList);
   const codexBlockListRulesPath = buildCodexBlockListRulesPath(identity);
+  // Each pane gets a fresh, isolated CODEX_HOME with no persisted hook trust, so the
+  // orchestrator-generated PreToolUse block-list hook would otherwise be skipped (a silent
+  // guardrail hole) or deadlock on a trust prompt. The orchestrator vets the hook source (it
+  // writes it), so bypass the trust prompt to guarantee the block-list actually runs.
+  const args: string[] = ['--dangerously-bypass-hook-trust'];
+  // Repo-agnostic base prompt (prompts-and-memory.md), the Codex analogue of Claude's
+  // `--append-system-prompt`: a `-c <key>=<json-string>` config override. Only when the caller set
+  // the role — an unset role is a deliberate no-op (the placement/host callers MUST thread the role).
+  if (identity.role != null) {
+    args.push(
+      '-c',
+      `${CODEX_BASE_PROMPT_CONFIG_KEY}=${JSON.stringify(roleBasePrompt(identity.role))}`,
+    );
+  }
   return {
     provider: 'codex',
-    // Each pane gets a fresh, isolated CODEX_HOME with no persisted hook trust, so the
-    // orchestrator-generated PreToolUse block-list hook would otherwise be skipped (a silent
-    // guardrail hole) or deadlock on a trust prompt. The orchestrator vets the hook source (it
-    // writes it), so bypass the trust prompt to guarantee the block-list actually runs.
-    args: ['--dangerously-bypass-hook-trust'],
+    args,
     env: { CODEX_HOME: identity.isolatedHomeDir },
     codexConfigToml,
     codexConfigTomlPath,
