@@ -3,7 +3,17 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', 'node_modules/**', 'docs/**', 'apps/desktop/dist/**'],
+    // `.co/.claude/.codex/` are retired prototype-footprint runtime dirs (SH-3): not product code,
+    // and kept ignored so `eslint .` stays green on a stale operator checkout that still has them.
+    ignores: [
+      '**/dist/**',
+      'node_modules/**',
+      'docs/**',
+      'apps/desktop/dist/**',
+      '.co/**',
+      '.claude/**',
+      '.codex/**',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

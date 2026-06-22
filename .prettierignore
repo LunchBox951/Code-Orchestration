@@ -22,3 +22,9 @@ docs/
 
 # GitHub config (issue/PR templates, labels — GitHub's domain, kept as authored)
 .github/
+
+# Retired prototype-footprint runtime dirs (SH-3) — never prettier-managed. Kept so `pnpm
+# format:check` stays green on a stale operator checkout that still has the footprint on disk.
+.co/
+.claude/
+.codex/

@@ -8,3 +8,11 @@ coverage/
 # OS / editor
 .DS_Store
 *.log
+
+# Retired prototype-footprint runtime dirs (SH-3). NOT product code — per-host program-data the
+# prototype harness writes. The footprint is gone from the tree, but this ignore is kept so a stale
+# operator checkout can never accidentally commit prototype program-data or secrets (e.g.
+# .co/config.yaml, .co/state.db) after the teardown.
+.co/
+.claude/
+.codex/

@@ -168,6 +168,10 @@ describe('NodePtyHost — prelaunch artifacts', () => {
       expect(readFileSync(rulesPath, 'utf8')).toBe('{"version":1}\n');
       expect(statSync(configPath).mode & 0o777).toBe(0o600);
       expect(statSync(rulesPath).mode & 0o777).toBe(0o600);
+      // #7 §5 #15: the prelaunch parent dirs that hold secret-bearing files (credentials, auth,
+      // co-mcp config) are created 0o700 so the isolated home is not world/group-readable.
+      expect(statSync(join(dir, 'codex')).mode & 0o777).toBe(0o700);
+      expect(statSync(join(dir, 'codex', 'hooks')).mode & 0o777).toBe(0o700);
       expect(mod.calls).toHaveLength(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });

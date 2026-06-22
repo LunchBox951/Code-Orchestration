@@ -1611,11 +1611,12 @@ function renderSource(): void {
     return;
   }
   if (latestSource.kind === 'path-missing') {
-    body.innerHTML = sourceMessage('⎇', 'Repository path unavailable', esc(latestSource.message));
+    // sourceMessage() escapes its args by construction — pass raw text to avoid double-escaping.
+    body.innerHTML = sourceMessage('⎇', 'Repository path unavailable', latestSource.message);
     return;
   }
   if (latestSource.kind === 'error') {
-    body.innerHTML = sourceMessage('⚠', 'Could not read the repository', esc(latestSource.message));
+    body.innerHTML = sourceMessage('⚠', 'Could not read the repository', latestSource.message);
     return;
   }
 
