@@ -34,6 +34,7 @@
  */
 import {
   OPERATOR,
+  openDispatchStore,
   openMailStore,
   openRosterStore,
   openSessionStore,
@@ -42,7 +43,9 @@ import {
   recoverProjectStore,
   type AgentRecord,
   type DeliveredMail,
+  type DispatchStore,
   type MailStore,
+  type Provider,
   type ProjectId,
   type ReconcileLoop,
   type ReconcileTickResult,
@@ -104,6 +107,10 @@ export interface ConductorDaemonDeps {
   readonly openWorktrees?: (projectId: ProjectId) => WorktreeStore;
   /** Opens the mail store to discover cold stopped agents with wake mail. Default: {@link openMailStore}. */
   readonly openMail?: (projectId: ProjectId) => MailStore;
+  /** Opens dispatch placement records so cold-started agents honor their recorded provider. */
+  readonly openDispatch?: (projectId: ProjectId) => DispatchStore;
+  /** Resolve the isolated CODEX_HOME for a cold-started Codex identity. Host-live passes its isolated-home seam. */
+  readonly codexHomeFor?: (agent: string) => string;
   /**
    * Stage 10 P3 (§3c) — the OPERATOR-CONTROL candidate-skip predicate. Consulted when the daemon builds
    * its candidate set; an agent for which this returns `true` is FILTERED OUT (not driven this tick). The
@@ -214,6 +221,8 @@ export class ConductorDaemon {
   private readonly openRoster: (projectId: ProjectId) => RosterStore;
   private readonly openWorktrees: (projectId: ProjectId) => WorktreeStore;
   private readonly openMail: (projectId: ProjectId) => MailStore;
+  private readonly openDispatch: (projectId: ProjectId) => DispatchStore;
+  private readonly codexHomeFor: ((agent: string) => string) | undefined;
   private readonly isSkipped: (projectId: ProjectId, agent: string) => boolean;
   private tickCount = 0;
   private recovered = false;
@@ -244,6 +253,8 @@ export class ConductorDaemon {
     this.openRoster = deps.openRoster ?? openRosterStore;
     this.openWorktrees = deps.openWorktrees ?? openWorktreeStore;
     this.openMail = deps.openMail ?? openMailStore;
+    this.openDispatch = deps.openDispatch ?? openDispatchStore;
+    this.codexHomeFor = deps.codexHomeFor;
     this.isSkipped = deps.isSkipped ?? (() => false);
   }
 
@@ -643,13 +654,15 @@ export class ConductorDaemon {
 
   /**
    * Build a root coordinator's launch {@link HostedIdentity}: cwd = its provisioned worktree path,
-   * `pane = pane-<id>`, provider `claude`, resume `{ provider:'claude', sessionId:<id> }`.
+   * `pane = pane-<id>`, provider from the latest recorded placement when present, else the legacy
+   * Claude default.
    */
   private toRootIdentity(agent: AgentRecord, cwd: string): HostedIdentity {
     return this.toColdAgentIdentity(agent, cwd);
   }
 
   private toColdAgentIdentity(agent: AgentRecord, cwd: string): HostedIdentity {
+    const provider = this.providerForColdAgent(agent.agentId);
     return {
       agent: agent.agentId,
       role: agent.role,
@@ -658,8 +671,40 @@ export class ConductorDaemon {
       pane: `pane-${agent.agentId}`,
       projectId: this.projectId,
       cwd,
-      provider: 'claude',
-      resume: { provider: 'claude', sessionId: agent.agentId },
+      provider,
+      resume:
+        provider === 'codex'
+          ? { provider: 'codex', codexHome: this.codexHomeForColdAgent(agent.agentId) }
+          : { provider: 'claude', sessionId: agent.agentId },
     };
   }
+
+  private providerForColdAgent(agentId: string): Provider {
+    const dispatch = this.openDispatch(this.projectId);
+    try {
+      const placements = dispatch.readPlacements(agentId);
+      for (let i = placements.length - 1; i >= 0; i--) {
+        const placement = placements[i]!;
+        if (placement.kind === 'placed' && isProvider(placement.provider))
+          return placement.provider;
+      }
+      return 'claude';
+    } finally {
+      dispatch.close();
+    }
+  }
+
+  private codexHomeForColdAgent(agentId: string): string {
+    const codexHome = this.codexHomeFor?.(agentId);
+    if (codexHome == null || codexHome.length === 0) {
+      throw new Error(
+        `ConductorDaemon: cold-started Codex agent '${agentId}' has no isolated CODEX_HOME seam.`,
+      );
+    }
+    return codexHome;
+  }
+}
+
+function isProvider(value: unknown): value is Provider {
+  return value === 'claude' || value === 'codex';
 }

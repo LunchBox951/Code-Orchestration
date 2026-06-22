@@ -197,6 +197,11 @@ export interface ConductorHostRunnerDeps {
   readonly control?: ConductorControlSurface;
 }
 
+export interface ConductorHostRunnerStopOptions {
+  /** Wait for any active daemon/watchdog tick before running stop hooks. Default: true. */
+  readonly waitForInFlight?: boolean;
+}
+
 /**
  * Drives {@link ConductorDaemon.tick} on a real cadence. Re-entrancy-guarded: daemon ticks never
  * overlap or stack, but an overlap beat still runs the watchdog reconcile sweep so an active long turn
@@ -253,28 +258,39 @@ export class ConductorHostRunner {
   }
 
   /** Disarm the cadence (idempotent) and invoke the stop hook (e.g. to close owned resources). */
-  async stop(): Promise<void> {
+  async stop(options: ConductorHostRunnerStopOptions = {}): Promise<void> {
     if (this.handle != null) {
       this.scheduler.clearInterval(this.handle);
       this.handle = null;
     }
     if (this.stopped) return;
     this.stopped = true;
-    await this.inFlight;
-    await this.watchdogInFlight;
+    const waitForInFlight = options.waitForInFlight ?? true;
+    if (waitForInFlight) {
+      await this.inFlight;
+      await this.watchdogInFlight;
+    }
     await this.onStop?.();
+  }
+
+  /** Run one cadence beat and resolve only after that beat has completed. */
+  async step(): Promise<void> {
+    if (this.stopped) {
+      throw new Error('ConductorHostRunner.step: runner has already been stopped.');
+    }
+    await this.beat({ rethrowTickErrors: true });
   }
 
   /**
    * One cadence beat: run a daemon tick unless a prior one is still in flight. If a turn is still
    * active, run only the reconcile watchdog so wedged sessions are still detected on cadence.
    */
-  private async beat(): Promise<void> {
+  private async beat(options: { readonly rethrowTickErrors?: boolean } = {}): Promise<void> {
     if (this.inFlight != null) {
       this.runOverlapWatchdogBeat();
       return;
     }
-    const run = this.runBeat();
+    const run = this.runBeat(options.rethrowTickErrors === true);
     this.inFlight = run;
     try {
       await run;
@@ -298,13 +314,14 @@ export class ConductorHostRunner {
     });
   }
 
-  private async runBeat(): Promise<void> {
+  private async runBeat(rethrowTickErrors = false): Promise<void> {
     try {
       const outcome = await this.daemon.tick();
       this.onTick?.(outcome);
     } catch (error) {
       if (this.onError != null) this.onError(error);
       else console.error('[co-mcp serve] tick error:', error);
+      if (rethrowTickErrors) throw error;
     }
   }
 }
@@ -1636,6 +1653,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     projectId,
     now,
     reconcileEvery: opts.reconcileEvery ?? 5,
+    ...(isolatedHomeDirFor != null ? { codexHomeFor: isolatedHomeDirFor } : {}),
     // P3 §3c — honor `pause`/STUCK: filter the router's suppressed agents out of candidate selection.
     isSkipped: (pid, agent) => router.shouldSkip(pid, agent),
   });

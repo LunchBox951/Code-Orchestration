@@ -945,16 +945,42 @@ export {
   calcLibScenario,
   getOrchestrationScenario,
 } from './bench/orchestration-scenarios.js';
+// Shared economy/tool rollup shapes used by the exported benchmark score helpers. These remain bench-local
+// until the cost/tool-usage read-model lands, but the root barrel exports the names because the helper
+// signatures are public.
+export type { AgentCostRollup, AgentToolUsage } from './bench/bench-econ-types.js';
 export type {
   ProviderMode,
   RunFidelity,
   StopReason,
   AgentRunMetric,
+  NormalizedAgentRunMetric,
+  ArtifactCheckWithCases,
+  AgentTokenEconomy,
+  AgentToolEfficiency,
   MergeOutcome,
   OrchestrationRunInput,
   OrchestrationScorecard,
+  NormalizedOrchestrationScorecard,
+  RunScores,
+  RoleScoreAggregate,
 } from './bench/orchestration-metrics.js';
-export { summarizeRun, toJsonl, renderScorecard } from './bench/orchestration-metrics.js';
+export {
+  summarizeRun,
+  toJsonl,
+  renderScorecard,
+  correctnessScore,
+  tokenEconomyScore,
+  cacheEfficiency,
+  contextEfficiencyScore,
+  buildTokenEconomy,
+  buildToolEfficiency,
+  budgetTokensForScenario,
+  clamp01,
+  BUDGET_TOKENS_BY_SCENARIO,
+  DEFAULT_BUDGET_TOKENS,
+  CONTEXT_EFFICIENCY_WEIGHTS,
+} from './bench/orchestration-metrics.js';
 
 // L6a Phase A — authoritative role profiles + durable agent→role→parent projection + spawn rules
 // (AC-L6a-1, AC-L6a-3, AC-L6a-8, AC-L6a-9, AC-L6a-10). Five base roles promoted from a seed

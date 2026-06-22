@@ -47,6 +47,9 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(true);
     expect(result.detail).toMatch(/calc\.mjs correct/);
+    // A clean pass = every oracle case passed; `correct` is exactly `casesPassed === casesTotal`.
+    expect(result.casesTotal).toBe(13); // add(3)+sub(3)+mul(3)+tokenize(4)
+    expect(result.casesPassed).toBe(result.casesTotal);
   });
 
   it('fails when the lead barrel never merged up (calc.mjs missing)', async () => {
@@ -56,6 +59,9 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
     expect(result.detail).toMatch(/calc\.mjs not found/);
+    // A hard structural miss reports zero of the full case total — never a silent partial.
+    expect(result.casesPassed).toBe(0);
+    expect(result.casesTotal).toBe(13);
   });
 
   it('fails when an implementer module did not merge up (barrel imports a missing module)', async () => {
@@ -65,12 +71,17 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
     expect(result.detail).toMatch(/import of calc\.mjs threw/);
+    expect(result.casesPassed).toBe(0);
+    expect(result.casesTotal).toBe(13);
   });
 
-  it('fails when a numeric op is wrong (executes the artifact, names the failing case)', async () => {
+  it('fails when a numeric op is wrong and still counts later passing oracle cases', async () => {
     const files = referenceFiles();
     files['calc-lib/ops.mjs'] = [
-      'export function add(a, b) { return a - b; }', // wrong
+      'export function add(a, b) {',
+      '  if (a === 2 && b === 3) return -1;', // wrong on the FIRST add case only
+      '  return a + b;',
+      '}',
       'export function sub(a, b) { return a - b; }',
       'export function mul(a, b) { return a * b; }',
       '',
@@ -79,6 +90,27 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
     expect(result.detail).toMatch(/add\(2, 3\) = -1, want 5/);
+    // The first add case fails, but the other 12 oracle cases pass. casesPassed is the total passed count,
+    // not a prefix-before-first-failure count.
+    expect(result.casesPassed).toBe(12);
+    expect(result.casesTotal).toBe(13);
+  });
+
+  it('reports a PARTIAL case tally when later cases fail (add+sub pass, mul wrong)', async () => {
+    const files = referenceFiles();
+    files['calc-lib/ops.mjs'] = [
+      'export function add(a, b) { return a + b; }', // 3 add cases pass
+      'export function sub(a, b) { return a - b; }', // 3 sub cases pass
+      'export function mul(a, b) { return a + b; }', // mul wrong → fails its first case
+      '',
+    ].join('\n');
+    writeFiles(files);
+    const result = await calcLibScenario().evaluate(dir);
+    expect(result.correct).toBe(false);
+    // 3 add + 3 sub + 4 tokenize cases pass; all 3 mul cases fail. The tally is total passed cases, not
+    // cases before the first mul failure.
+    expect(result.casesPassed).toBe(10);
+    expect(result.casesTotal).toBe(13);
   });
 
   it('fails when tokenize is wrong', async () => {
@@ -88,6 +120,24 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
     expect(result.detail).toMatch(/tokenize\(.*\).*want/);
+  });
+
+  it('counts later passing tokenize cases after the first tokenize failure', async () => {
+    const files = referenceFiles();
+    files['calc-lib/tokenize.mjs'] = [
+      'export function tokenize(expr) {',
+      '  if (expr === "12+3*4") return [];',
+      '  const matched = String(expr).match(/\\d+|[+\\-*/()]/g);',
+      '  return matched ?? [];',
+      '}',
+      '',
+    ].join('\n');
+    writeFiles(files);
+    const result = await calcLibScenario().evaluate(dir);
+    expect(result.correct).toBe(false);
+    expect(result.detail).toMatch(/tokenize\("12\+3\*4"\)/);
+    expect(result.casesPassed).toBe(12);
+    expect(result.casesTotal).toBe(13);
   });
 });
 
