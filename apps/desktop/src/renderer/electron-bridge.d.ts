@@ -106,6 +106,7 @@ interface AgentsConsoleState {
   selectedAgentId: string | null;
   selectedStatus: AgentStatus | null;
   transcript: string;
+  transcriptOffset: number;
   connection: 'live' | 'degraded';
 }
 
@@ -113,7 +114,7 @@ type Steer = { kind: 'answer' | 'redirect'; text: string } | { kind: 'interrupt'
 
 interface XtermTerminal {
   open(el: HTMLElement): void;
-  write(data: string): void;
+  write(data: string, callback?: () => void): void;
   reset(): void;
   clear(): void;
   dispose(): void;

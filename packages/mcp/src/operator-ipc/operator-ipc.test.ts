@@ -949,6 +949,52 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
     });
   });
 
+  it('bounds an over-cap direct transcript push before sending it over IPC', () => {
+    const { projectId } = makeProject();
+    const sent: Array<{
+      method?: string;
+      params?: { agentId?: string; offset?: number; chunk?: string };
+    }> = [];
+    const fakeTransport = {
+      connected: true,
+      send: vi.fn((message: { method?: string; params?: unknown }) => {
+        sent.push(message as (typeof sent)[number]);
+        return Promise.resolve();
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    const staticSnapshot = { agents: [], plans: [], reviews: [], costRollups: [] };
+    const fakeControl = {
+      router: {} as DaemonBackedAgentRouter,
+      observe: () => ({ snapshot: staticSnapshot, agents: [] }),
+      transcriptTail: (agentId: string) => ({ agentId, offset: 0, tail: '' }),
+      onTranscript: () => () => {},
+      reviewContext: (reviewId: string) =>
+        Promise.resolve({ kind: 'not-found' as const, reviewId }),
+      deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      listArchive: () => Promise.resolve([]),
+      restoreArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
+      purgeArchive: () =>
+        Promise.reject(new Error('operator-ipc-test: purgeArchive not wired here')),
+    } satisfies ConductorControlSurface;
+    const server = new OperatorIpcServer({
+      control: fakeControl,
+      projectId,
+      socketPath: '/tmp/not-used.sock',
+    });
+    Object.defineProperty(server, 'transport', { value: fakeTransport });
+
+    const cap = 64 * 1024;
+    server.pushTranscript('impl-x', 'A'.repeat(cap + 10), 5);
+
+    expect(sent[0]).toMatchObject({
+      method: 'transcript:push',
+      params: { agentId: 'impl-x', offset: 15, chunk: 'A'.repeat(cap) },
+    });
+  });
+
   it('push: a hosted pane chunk (ANSI/ESC bytes intact) reaches the SEPARATE client EXACTLY', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);

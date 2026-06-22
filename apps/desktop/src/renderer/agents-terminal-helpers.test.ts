@@ -24,6 +24,8 @@ class FakeTerminal implements FitTerminalLike, TermWriter {
   cols = 80;
   rows = 24;
   dataCb: ((data: string) => void) | null = null;
+  dataOnWrite: string | null = null;
+  pendingWriteCallback: (() => void) | null = null;
   constructor(private readonly order: string[]) {}
   loadAddon(addon: FitAddonLike): void {
     this.loadedAddons.push(addon);
@@ -37,9 +39,11 @@ class FakeTerminal implements FitTerminalLike, TermWriter {
     this.dataCb = cb;
     this.order.push('onData');
   }
-  write(data: string): void {
+  write(data: string, callback?: () => void): void {
     this.writes.push(data);
     this.order.push('write');
+    if (this.dataOnWrite != null) this.dataCb?.(this.dataOnWrite);
+    this.pendingWriteCallback = callback ?? null;
   }
   reset(): void {
     this.resets++;
@@ -218,6 +222,19 @@ describe('decideTermFeed', () => {
     expect(feed).toEqual({ kind: 'noop' });
   });
 
+  it('appends only new bytes when the retained transcript window front-trimmed', () => {
+    const feed = decideTermFeed({
+      selectedAgentId: 'a1',
+      lastAgentId: 'a1',
+      lastTranscript: 'abcdefghij',
+      lastTranscriptOffset: 100,
+      transcript: 'efghijKL',
+      transcriptOffset: 104,
+    });
+
+    expect(feed).toEqual({ kind: 'append', data: 'KL' });
+  });
+
   it('resets + rewrites on a non-prefix change (truncation / new generation)', () => {
     const feed = decideTermFeed({
       selectedAgentId: 'a1',
@@ -259,6 +276,22 @@ describe('applyTermFeed — raw bytes are written VERBATIM', () => {
     applyTermFeed(term, { kind: 'reset', data: '' });
     expect(term.resets).toBe(1);
     expect(term.writes).toEqual([]);
+  });
+
+  it('suppresses xterm-generated onData while replay writes are being parsed', () => {
+    const typed: string[] = [];
+    const s = setup({ onInput: (d) => typed.push(d) });
+    s.term.dataOnWrite = ESC + '[1;1R';
+
+    applyTermFeed(s.term, { kind: 'reset', data: ESC + '[6n' }, s.result.inputGuard);
+
+    expect(typed).toEqual([]);
+    s.term.dataCb?.('k');
+    expect(typed).toEqual([]);
+
+    s.term.pendingWriteCallback?.();
+    s.term.dataCb?.('k');
+    expect(typed).toEqual(['k']);
   });
 
   it('noop feed: neither resets nor writes', () => {

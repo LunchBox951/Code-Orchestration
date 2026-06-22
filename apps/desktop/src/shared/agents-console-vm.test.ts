@@ -4,6 +4,7 @@ import {
   CONSOLE_TRANSCRIPT_MAX_CHARS,
   boundConsoleTranscript,
 } from './agents-console-vm.js';
+import { TRANSCRIPT_TAIL_HARD_MAX_CHARS } from '@co/core';
 import type {
   OperatorObservation,
   ObservabilitySnapshot,
@@ -494,7 +495,9 @@ describe('AgentsConsoleVM — appendChunk', () => {
 // alt-screen cases would FAIL under the old flat slice.
 // ESC authored as a `\u` escape so the SOURCE holds no raw control byte (the C2 pristine-repo rule).
 const ESC = '\u001B';
+const CSI = '\u009B';
 const ALT_ENTER = ESC + '[?1049h'; // DEC private mode 1049 set — switch to the alternate screen
+const C1_ALT_ENTER = CSI + '?1049h';
 describe('boundConsoleTranscript (#66 sub-bug B) — never slices away the alternate-screen setup', () => {
   it('keeps the FULL text verbatim when at/under the cap (common case, unchanged)', () => {
     const under = ALT_ENTER + 'a small frame';
@@ -557,13 +560,28 @@ describe('boundConsoleTranscript (#66 sub-bug B) — never slices away the alter
     expect(bounded).toBe(buf.slice(buf.length - CONSOLE_TRANSCRIPT_MAX_CHARS));
     expect(bounded.endsWith('B'.repeat(1_000))).toBe(true);
   });
+
+  it('recognizes C1 CSI alt-screen enter as the same replay boundary', () => {
+    const head = 'H'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS);
+    const frames = 'F'.repeat(Math.floor(CONSOLE_TRANSCRIPT_MAX_CHARS / 2));
+    const bounded = boundConsoleTranscript(head + C1_ALT_ENTER + frames);
+
+    expect(bounded.startsWith(C1_ALT_ENTER)).toBe(true);
+  });
+
+  it('snaps to a full-screen clear when no alt-screen enter is reachable', () => {
+    const head = 'H'.repeat(CONSOLE_TRANSCRIPT_MAX_CHARS);
+    const clearFrame = ESC + '[2J' + ESC + '[Hfresh frame';
+    const bounded = boundConsoleTranscript(head + clearFrame);
+
+    expect(bounded).toBe(clearFrame);
+  });
 });
 
 // The engine's HARD ceiling on the retained tail (`TRANSCRIPT_TAIL_HARD_MAX_CHARS` in `@co/mcp` — 4 × 64
-// KiB). Mirrored as a literal here for the same reason the source mirrors it (desktop's test must not reach
-// into a deep `@co/mcp` build subpath, and the package index does not re-export it). The renderer cap MUST
-// stay strictly GREATER than this; the boundary test below proves what happens at exactly this size.
-const ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS = 4 * 64 * 1024;
+// KiB). Imported from the shared core contract so the test fails if the engine ceiling changes without
+// preserving renderer headroom.
+const ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS = TRANSCRIPT_TAIL_HARD_MAX_CHARS;
 
 describe('AgentsConsoleVM — renderer cap has STRICT headroom over the engine ceiling (#66 round-2)', () => {
   it('a ceiling-sized engine tail leading with ESC[?1049h + a live append STILL leads with ESC[?1049h', () => {
@@ -620,6 +638,58 @@ describe('AgentsConsoleVM — alt-screen-aware bound over the reconstructed tran
     expect(vm.state.transcript.includes(ALT_ENTER)).toBe(true);
     expect(vm.state.transcript.startsWith(ALT_ENTER)).toBe(true);
     expect(vm.state.transcript.length).toBeLessThanOrEqual(CONSOLE_TRANSCRIPT_MAX_CHARS);
+  });
+});
+
+describe('AgentsConsoleVM — nonzero transcript offsets and live gaps', () => {
+  it('tracks the retained transcript offset in state', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    vm.setTranscriptTail(tail('a1', 'retained', 100));
+
+    expect(vm.state.transcript).toBe('retained');
+    expect(vm.state.transcriptOffset).toBe(100);
+  });
+
+  it('ignores stale live chunks wholly before a nonzero retained tail', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'retained-tail', 100));
+
+    const result = vm.appendChunk(push('a1', 'old-', 50));
+
+    expect(result).toBe('ignored');
+    expect(vm.state.transcript).toBe('retained-tail');
+    expect(vm.state.transcriptOffset).toBe(100);
+  });
+
+  it('does not let an older conflicting overlap replace a nonzero retained tail', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'CDE', 100));
+
+    const result = vm.appendChunk(push('a1', 'ABXY', 98));
+
+    expect(result).toBe('ignored');
+    expect(vm.state.transcript).toBe('CDE');
+    expect(vm.state.transcriptOffset).toBe(100);
+  });
+
+  it('reports a forward live gap instead of silently concatenating missing bytes', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'base', 100));
+
+    const result = vm.appendChunk(push('a1', 'later', 120));
+
+    expect(result).toBe('gap');
+    expect(vm.state.transcript).toBe('base');
+    expect(vm.state.transcriptOffset).toBe(100);
   });
 });
 

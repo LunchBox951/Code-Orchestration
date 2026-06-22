@@ -83,6 +83,34 @@ export interface FitTerminalLike {
 }
 
 /**
+ * xterm can synchronously emit device/status replies through `onData` while replay bytes are being parsed
+ * (for example, `ESC[6n` can produce a cursor-position response). Replay bytes are historical output, not
+ * operator input, so those generated replies must not be forwarded back into the live PTY.
+ */
+export interface TerminalInputGuard {
+  isSuppressed(): boolean;
+  suppressUntilDone(write: (done: () => void) => void): void;
+}
+
+export function createTerminalInputGuard(): TerminalInputGuard {
+  let suppressDepth = 0;
+
+  return {
+    isSuppressed: () => suppressDepth > 0,
+    suppressUntilDone: (write) => {
+      suppressDepth += 1;
+      let released = false;
+      const done = (): void => {
+        if (released) return;
+        released = true;
+        suppressDepth = Math.max(0, suppressDepth - 1);
+      };
+      write(done);
+    },
+  };
+}
+
+/**
  * Injected construction seams — the renderer wires these to `window.Terminal` / `window.FitAddon` /
  * `ResizeObserver` and the operator-IPC bridge; tests pass fakes (no DOM required).
  */
@@ -107,15 +135,18 @@ export interface AgentsTerminalDeps<T extends FitTerminalLike> {
 export function createAgentsTerminal<T extends FitTerminalLike>(
   el: HTMLElement,
   deps: AgentsTerminalDeps<T>,
-): { term: T; fit: FitAddonLike } {
+): { term: T; fit: FitAddonLike; inputGuard: TerminalInputGuard } {
   const term = deps.createTerminal({ ...AGENTS_TERMINAL_OPTIONS });
   const fit = deps.createFitAddon();
+  const inputGuard = createTerminalInputGuard();
   term.loadAddon(fit);
   term.open(el);
   fit.fit();
   if (deps.onInput) {
     const onInput = deps.onInput;
-    term.onData((data) => onInput(data));
+    term.onData((data) => {
+      if (!inputGuard.isSuppressed()) onInput(data);
+    });
   }
   const reportResize = (): void => deps.onResize?.(term.cols, term.rows);
   reportResize();
@@ -123,14 +154,14 @@ export function createAgentsTerminal<T extends FitTerminalLike>(
     fit.fit();
     reportResize();
   });
-  return { term, fit };
+  return { term, fit, inputGuard };
 }
 
 // ── Raw-stream feed decision ───────────────────────────────────────────────────
 
 /** Minimal structural view of the terminal write surface (raw bytes in, verbatim). */
 export interface TermWriter {
-  write(data: string): void;
+  write(data: string, callback?: () => void): void;
   reset(): void;
 }
 
@@ -150,7 +181,9 @@ export interface TermFeedInput {
   readonly selectedAgentId: string | null;
   readonly lastAgentId: string | null;
   readonly transcript: string;
+  readonly transcriptOffset?: number;
   readonly lastTranscript: string;
+  readonly lastTranscriptOffset?: number;
 }
 
 /**
@@ -169,18 +202,41 @@ export function decideTermFeed(input: TermFeedInput): TermFeed {
     const delta = transcript.slice(lastTranscript.length);
     return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
   }
+  if (input.transcriptOffset != null && input.lastTranscriptOffset != null) {
+    const transcriptOffset = input.transcriptOffset;
+    const lastTranscriptOffset = input.lastTranscriptOffset;
+    const transcriptEnd = transcriptOffset + transcript.length;
+    const lastTranscriptEnd = lastTranscriptOffset + lastTranscript.length;
+    if (transcriptOffset >= lastTranscriptOffset && transcriptOffset <= lastTranscriptEnd) {
+      if (transcriptEnd <= lastTranscriptEnd) return { kind: 'noop' };
+      const delta = transcript.slice(lastTranscriptEnd - transcriptOffset);
+      return delta.length > 0 ? { kind: 'append', data: delta } : { kind: 'noop' };
+    }
+  }
   return { kind: 'reset', data: transcript };
 }
 
 /** Apply a feed decision to a terminal, writing raw bytes VERBATIM (no conversion, no sanitization). */
-export function applyTermFeed(term: TermWriter, feed: TermFeed): void {
+export function applyTermFeed(
+  term: TermWriter,
+  feed: TermFeed,
+  inputGuard?: TerminalInputGuard,
+): void {
+  const writeReplay = (data: string): void => {
+    if (inputGuard == null) {
+      term.write(data);
+      return;
+    }
+    inputGuard.suppressUntilDone((done) => term.write(data, done));
+  };
+
   if (feed.kind === 'reset') {
     term.reset();
-    if (feed.data.length > 0) term.write(feed.data);
+    if (feed.data.length > 0) writeReplay(feed.data);
     return;
   }
   if (feed.kind === 'append') {
-    if (feed.data.length > 0) term.write(feed.data);
+    if (feed.data.length > 0) writeReplay(feed.data);
   }
   // kind === 'noop' → nothing to write.
 }

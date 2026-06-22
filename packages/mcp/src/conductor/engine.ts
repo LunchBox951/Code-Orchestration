@@ -45,6 +45,8 @@ import {
   type StartupOutcome,
   type Steer,
   type TranscriptTail,
+  TRANSCRIPT_TAIL_HARD_MAX_CHARS,
+  TRANSCRIPT_TAIL_MAX_CHARS,
   type ToolSpec,
   type TurnEndConfig,
   type TurnEndResult,
@@ -76,6 +78,7 @@ import {
   WEDGE_MS,
   COMPLETION_VERBS,
   type ReviewerSpawnGate,
+  transcriptTailFrom,
 } from '@co/core';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -94,6 +97,9 @@ import type { ToolActivityEvent } from '../server.js';
  */
 export type TransportPair = readonly [client: Transport, server: Transport];
 
+export { TRANSCRIPT_TAIL_HARD_MAX_CHARS, TRANSCRIPT_TAIL_MAX_CHARS, transcriptTailFrom };
+export type { RetainedTail } from '@co/core';
+
 /**
  * Stage 12 C-P1 (TRANSCRIPT-SEAM) — the SOFT character bound on a hosted agent's in-memory transcript
  * tail. The engine keeps roughly the MOST-RECENT `TRANSCRIPT_TAIL_MAX_CHARS` characters of each pane's
@@ -109,41 +115,6 @@ export type TransportPair = readonly [client: Transport, server: Transport];
  * therefore extends the retained tail BACK to the last alt-screen-enter (up to {@link
  * TRANSCRIPT_TAIL_HARD_MAX_CHARS}) so the alt-screen setup is never sliced away.
  */
-export const TRANSCRIPT_TAIL_MAX_CHARS = 64 * 1024;
-
-/**
- * #66 sub-bug B — the HARD character ceiling on the retained tail. The alt-screen-boundary extension
- * ({@link transcriptTailFrom}) may keep MORE than {@link TRANSCRIPT_TAIL_MAX_CHARS} so the early
- * `ESC[?1049h` survives, but never more than this ceiling — memory stays bounded even if a session
- * somehow never re-enters the alt screen. 4× the soft bound (256 KiB) leaves generous headroom for the
- * alt-screen setup plus a full scrollback frame while keeping the per-agent footprint capped.
- */
-export const TRANSCRIPT_TAIL_HARD_MAX_CHARS = 4 * TRANSCRIPT_TAIL_MAX_CHARS;
-
-/**
- * The alternate-screen-ENTER control sequence — DEC private mode SET for 1049 (and the legacy 1047 / 47
- * curses variants): `ESC[?1049h`, `ESC[?1047h`, `ESC[?47h`. Built via `new RegExp` with `\u` escapes so
- * the SOURCE holds no raw control byte (C2 — pristine-repo; the control char only exists at runtime). An
- * interactive TUI emits this ONCE early to switch xterm into its own buffer; it is the load-bearing frame
- * boundary the replay tail must retain. `g` flag — {@link transcriptTailFrom} scans for the LAST match.
- */
-const ALT_SCREEN_ENTER = new RegExp(
-  // eslint-disable-next-line no-control-regex
-  '[\\u001B\\u009B]\\[\\?(?:1049|1047|47)h',
-  'g',
-);
-
-/**
- * The full-screen-CLEAR control sequence — `ESC[2J` (erase entire display) and `ESC[3J` (erase display +
- * scrollback). A non-alt-screen TUI repaints by clearing the whole screen each frame, so the LAST such
- * clear is a clean frame boundary to begin a replay on. Built with `\u` escapes (no raw control byte in
- * source). `g` flag — {@link transcriptTailFrom} scans for the LAST clear at-or-after the soft window.
- */
-const FULL_SCREEN_CLEAR = new RegExp(
-  // eslint-disable-next-line no-control-regex
-  '[\\u001B\\u009B]\\[[23]J',
-  'g',
-);
 
 /**
  * The engine's constructor seams. Required seams have no default so the determinism / host-live
@@ -1365,80 +1336,6 @@ function boundedAppend(current: string, chunk: string): string {
   const next = current + chunk;
   if (next.length <= TRANSCRIPT_TAIL_MAX_CHARS) return next;
   return next.slice(next.length - TRANSCRIPT_TAIL_MAX_CHARS);
-}
-
-/** The retained transcript tail plus how many leading chars of `buffer` were dropped to produce it. */
-export interface RetainedTail {
-  /** The retained suffix of `buffer` — what an operator replays into a fresh xterm. */
-  readonly tail: string;
-  /** Count of leading characters dropped from `buffer` (added to the tail's absolute start offset). */
-  readonly dropped: number;
-}
-
-/**
- * Find the byte index of the LAST match of `pattern` in `buffer` that starts at-or-after `minStart`, or
- * `-1` when there is none. `pattern` MUST carry the `g` flag (so `exec` advances); `lastIndex` is reset
- * on entry and left clean on exit so the shared module-level regex is reusable and race-free.
- */
-function lastBoundaryAtOrAfter(buffer: string, pattern: RegExp, minStart: number): number {
-  pattern.lastIndex = minStart > 0 ? minStart : 0;
-  let found = -1;
-  let m: RegExpExecArray | null;
-  while ((m = pattern.exec(buffer)) !== null) {
-    found = m.index;
-    // Guard against a zero-width match wedging the loop (defensive — these patterns are non-empty).
-    if (m.index === pattern.lastIndex) pattern.lastIndex += 1;
-  }
-  pattern.lastIndex = 0;
-  return found;
-}
-
-/**
- * #66 sub-bug B (transcript garble) — compute the retained transcript tail for a pane's accumulated
- * `buffer`, keeping memory bounded WITHOUT slicing away the alternate-screen setup an interactive TUI
- * needs to replay cleanly. PURE (no I/O, no mutation of `buffer`, deterministic) so it is unit-testable.
- *
- * Policy, applied only when `buffer` exceeds {@link TRANSCRIPT_TAIL_MAX_CHARS} (under the soft bound the
- * whole buffer is kept verbatim — the common case, byte-for-byte unchanged from the old logic):
- *
- *  1. ALT-SCREEN ANCHOR (the fix): if an alt-screen-ENTER (`ESC[?1049h`) lives anywhere within the HARD
- *     window `[buffer.length - TRANSCRIPT_TAIL_HARD_MAX_CHARS, buffer.length)`, begin the tail at the
- *     LAST such enter so the alt-screen setup is NEVER sliced away and the replay opens exactly on it.
- *     This EXTENDS retention back past the soft most-recent-N window when the enter is older (an early
- *     one emitted ONCE), and SNAPS forward to it when a re-enter is newer — either way the alt-screen
- *     setup leads the tail. The hard ceiling keeps the footprint bounded if a session never re-enters.
- *     NOTE — bounded step-down, not a bug: once the anchored enter ages PAST the hard ceiling (a session
- *     that entered the alt screen ONCE, then ran for >256 KiB of redraws without re-entering), the anchor
- *     no longer matches and the policy falls through to (2)/(3). The retained tail therefore collapses in
- *     ONE step from up to ~256 KiB (the anchored hard window) to ~64 KiB (the soft most-recent-N window).
- *     This is intended: it caps the per-agent footprint. The stale enter is genuinely unreachable, so the
- *     replayed tail can no longer reconstruct the alt screen — the renderer mirror (`boundConsoleTranscript`
- *     in `apps/desktop`) makes the same bounded trade-off so the two stay in lockstep.
- *  2. FRAME SNAP (no alt-screen in range): begin replay on a clean frame by moving the start FORWARD to
- *     the LAST full-screen-clear (`ESC[2J`/`ESC[3J`) at-or-after the most-recent-N window — this only
- *     ever keeps LESS, so it can neither break the bound nor stack a half-painted frame.
- *  3. FALLBACK: no alt-screen and no clear in range — keep the flat most-recent-N window (legacy).
- *
- * Returns the retained `tail` and the `dropped` leading-char count so the caller can advance the tail's
- * absolute start offset (the {@link TranscriptTail} `offset` contract — "where the tail starts").
- */
-export function transcriptTailFrom(buffer: string): RetainedTail {
-  if (buffer.length <= TRANSCRIPT_TAIL_MAX_CHARS) return { tail: buffer, dropped: 0 };
-
-  const softStart = buffer.length - TRANSCRIPT_TAIL_MAX_CHARS;
-  const hardStart = Math.max(0, buffer.length - TRANSCRIPT_TAIL_HARD_MAX_CHARS);
-
-  // (1) Alt-screen anchor — begin at the last alt-screen-enter within the hard window, wherever it sits.
-  const altEnter = lastBoundaryAtOrAfter(buffer, ALT_SCREEN_ENTER, hardStart);
-  if (altEnter !== -1) {
-    return { tail: buffer.slice(altEnter), dropped: altEnter };
-  }
-
-  // (2) No alt-screen to preserve — snap forward to the last full-screen-clear in the soft window so the
-  // replay opens on a clean frame; (3) falls back to the flat most-recent-N start when there is no clear.
-  const clear = lastBoundaryAtOrAfter(buffer, FULL_SCREEN_CLEAR, softStart);
-  const start = clear !== -1 ? clear : softStart;
-  return { tail: buffer.slice(start), dropped: start };
 }
 
 function latestByteAt(trace: readonly DetectorEvent[]): number | undefined {

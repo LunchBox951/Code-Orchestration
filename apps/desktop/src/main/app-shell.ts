@@ -306,7 +306,10 @@ export function createAppShell(deps: AppShellDeps): AppShell {
 
   shellSubscriptions.push(
     client.onTranscript((t) => {
-      if (!closed) agentsConsoleVm.appendChunk(t);
+      if (closed) return;
+      if (agentsConsoleVm.appendChunk(t) === 'gap') {
+        refreshSelectedTranscript({ resetGeneration: true });
+      }
     }),
   );
 

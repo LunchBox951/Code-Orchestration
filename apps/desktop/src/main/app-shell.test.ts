@@ -1015,6 +1015,52 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     expect(onAgentsConsoleState).not.toHaveBeenCalled();
   });
 
+  it('live append: a forward transcript gap triggers a fresh selected-agent backfill', async () => {
+    const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockImplementation((cb: (t: OperatorIpcTranscript) => void) => {
+        transcriptListeners.push(cb);
+        return () => {};
+      }),
+      transcript: vi
+        .fn()
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'base', 100))
+        .mockResolvedValueOnce(transcriptTail('impl-x', 'fresh tail', 150)),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('impl-x');
+    await vi.waitFor(() => {
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        transcript: 'base',
+        transcriptOffset: 100,
+      });
+    });
+
+    transcriptListeners[0]?.(transcriptPush('impl-x', 'later', 120));
+
+    await vi.waitFor(() => {
+      expect(client.transcript).toHaveBeenCalledTimes(2);
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        transcript: 'fresh tail',
+        transcriptOffset: 150,
+      });
+    });
+  });
+
   it('selectAgent backfill preserves live chunks that arrive before transcript() resolves', async () => {
     const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
     let resolveTranscript!: (tail: TranscriptTail) => void;

@@ -107,6 +107,15 @@ const OPERATOR_IPC_METHOD_SET = new Set<string>(Object.values(OPERATOR_IPC_METHO
 const TRANSCRIPT_PENDING_MAX_CHARS = 64 * 1024;
 const TRANSCRIPT_PENDING_MAX_AGENTS = 256;
 
+function boundTranscriptPush(
+  chunk: string,
+  offset: number,
+): { readonly offset: number; readonly chunk: string } {
+  if (chunk.length <= TRANSCRIPT_PENDING_MAX_CHARS) return { offset, chunk };
+  const dropped = chunk.length - TRANSCRIPT_PENDING_MAX_CHARS;
+  return { offset: offset + dropped, chunk: chunk.slice(dropped) };
+}
+
 function isOperatorIpcMethod(method: string): method is OperatorIpcMethod {
   return OPERATOR_IPC_METHOD_SET.has(method);
 }
@@ -795,15 +804,7 @@ export class OperatorIpcServer {
     const canCoalesce = pending != null && offset === pending.offset + pending.chunk.length;
     const nextOffset = canCoalesce ? pending.offset : offset;
     const next = canCoalesce ? pending.chunk + chunk : chunk;
-    if (next.length > TRANSCRIPT_PENDING_MAX_CHARS) {
-      const dropped = next.length - TRANSCRIPT_PENDING_MAX_CHARS;
-      this.pendingTranscriptPushes.set(agentId, {
-        offset: nextOffset + dropped,
-        chunk: next.slice(dropped),
-      });
-    } else {
-      this.pendingTranscriptPushes.set(agentId, { offset: nextOffset, chunk: next });
-    }
+    this.pendingTranscriptPushes.set(agentId, boundTranscriptPush(next, nextOffset));
 
     while (this.pendingTranscriptPushes.size > TRANSCRIPT_PENDING_MAX_AGENTS) {
       const drop =
@@ -815,13 +816,14 @@ export class OperatorIpcServer {
   }
 
   private sendTranscriptPush(agentId: string, chunk: string, offset: number): void {
+    const bounded = boundTranscriptPush(chunk, offset);
     this.transcriptPushInFlight = true;
     this.transport
       .send(
         makeNotification(OPERATOR_IPC_TRANSCRIPT, {
           agentId,
-          offset,
-          chunk,
+          offset: bounded.offset,
+          chunk: bounded.chunk,
         } as unknown as WirePayload),
       )
       .then(

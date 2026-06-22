@@ -1,4 +1,4 @@
-import { assertNever } from '@co/core';
+import { assertNever, retainTranscriptTail, TRANSCRIPT_TAIL_HARD_MAX_CHARS } from '@co/core';
 import type {
   OperatorObservation,
   AgentLiveView,
@@ -10,7 +10,7 @@ import type { AgentStatus } from './dashboard-vm.js';
 
 /**
  * #66 sub-bug B — the renderer-side bound on the reconstructed transcript. Must sit with STRICT headroom
- * ABOVE the engine's HARD ceiling (`TRANSCRIPT_TAIL_HARD_MAX_CHARS` in `@co/mcp` — 4 × 64 KiB = 256 KiB),
+ * ABOVE the engine's HARD ceiling (`TRANSCRIPT_TAIL_HARD_MAX_CHARS` in `@co/core` — 4 × 64 KiB = 256 KiB),
  * NOT equal to it. The engine retains its tail back to the last alternate-screen-enter (`ESC[?1049h`) — up
  * to a 256 KiB ceiling-sized tail that LEADS with that enter. The renderer then APPENDS live chunks on top
  * of that tail before re-bounding. If the renderer cap equalled the 256 KiB engine ceiling (the round-1
@@ -19,71 +19,33 @@ import type { AgentStatus } from './dashboard-vm.js';
  * the stacked-frame garble exactly where the engine had carefully preserved it. Sizing the renderer cap to
  * 512 KiB (2× the engine ceiling) gives room for a full ceiling-sized engine tail PLUS a generous live
  * append, so the alt-screen-aware bound holds: the leading enter is never re-sliced at the boundary.
- * Mirrored as a literal — desktop imports `@co/core`/`@co/mcp` but this stays the single renderer knob; it
- * must remain strictly GREATER than the engine ceiling, so if that ceiling changes, keep the slack here.
+ * Derived from the shared core ceiling so the headroom invariant fails loudly if the engine cap changes.
  *
  * Caveat — this is a string-boundary invariant (the leading `ESC[?1049h` survives the bound), proven by
  * the unit tests. That the surviving bytes actually replay into a clean, un-garbled frame in a real xterm
  * still needs live verification against an interactive TUI; the unit tests do not exercise the terminal.
  */
-export const CONSOLE_TRANSCRIPT_MAX_CHARS = 8 * 64 * 1024;
-
-/**
- * The alternate-screen-ENTER control sequence — DEC private mode SET for 1049 (and the legacy 1047 / 47
- * curses variants): `ESC[?1049h`, `ESC[?1047h`, `ESC[?47h`. Mirrors `ALT_SCREEN_ENTER` in the engine
- * (`@co/mcp` `transcriptTailFrom`). Built via `new RegExp` with `\u` escapes so the SOURCE holds no raw
- * control byte (C2 — pristine-repo; the control char only exists at runtime). An interactive TUI emits
- * this ONCE early to switch xterm into its own buffer; it is the load-bearing frame boundary the
- * reconstructed transcript must retain. `g` flag — {@link boundConsoleTranscript} scans for the LAST match.
- */
-const CONSOLE_ALT_SCREEN_ENTER = new RegExp(
-  // eslint-disable-next-line no-control-regex
-  '[\\u001B\\u009B]\\[\\?(?:1049|1047|47)h',
-  'g',
-);
-
-/**
- * Index of the LAST match of `pattern` at-or-after `minStart` in `buffer`, or `-1` when there is none.
- * Mirrors `lastBoundaryAtOrAfter` in the engine. `pattern` MUST carry the `g` flag (so `exec` advances);
- * `lastIndex` is reset on entry and left clean on exit so the shared module-level regex is reusable.
- */
-function lastConsoleBoundaryAtOrAfter(buffer: string, pattern: RegExp, minStart: number): number {
-  pattern.lastIndex = minStart > 0 ? minStart : 0;
-  let found = -1;
-  let m: RegExpExecArray | null;
-  while ((m = pattern.exec(buffer)) !== null) {
-    found = m.index;
-    // Guard against a zero-width match wedging the loop (defensive — these patterns are non-empty).
-    if (m.index === pattern.lastIndex) pattern.lastIndex += 1;
-  }
-  pattern.lastIndex = 0;
-  return found;
-}
+export const CONSOLE_TRANSCRIPT_MAX_CHARS = 2 * TRANSCRIPT_TAIL_HARD_MAX_CHARS;
 
 /**
  * #66 sub-bug B — bound the renderer-side reconstructed transcript WITHOUT slicing away the early
  * alternate-screen-enter (`ESC[?1049h`) that an interactive TUI emits ONCE to switch xterm into its own
  * buffer. PURE (no I/O, no mutation, deterministic) and exported so it is unit-testable WITHOUT loading
- * electron. Mirrors the engine's `transcriptTailFrom` anchoring policy (`@co/mcp`), bounded to the single
+ * electron. Uses the same core boundary policy as the engine, bounded to the single
  * {@link CONSOLE_TRANSCRIPT_MAX_CHARS} ceiling the renderer keeps:
  *
  *  - Under the cap: the whole `text` is kept verbatim (the common case — byte-for-byte unchanged).
- *  - Over the cap: the kept window is the most-recent {@link CONSOLE_TRANSCRIPT_MAX_CHARS} chars, but the
- *    front-drop is anchored so it NEVER cuts past the LAST `ESC[?1049h` inside that window — the start is
- *    moved BACK to that enter so the alt-screen setup leads the kept transcript. Anchoring only ever keeps
- *    the same or LESS than the flat window (the enter sits at-or-after the flat start), so the footprint
- *    stays ≤ the cap. If no enter lives in the window, this is exactly the old flat most-recent-N drop.
+ *  - Over the cap: anchor at the last reachable alt-screen enter, else at the last reachable full-screen
+ *    clear, else fall back to the flat most-recent-N drop.
  *
  * Without this, the old alt-screen-UNAWARE flat front-drop slices off the leading `ESC[?1049h` on any long
  * session; `decideTermFeed` then `reset()`s and rewrites the alt-stripped transcript → the #66 garble.
  */
 export function boundConsoleTranscript(text: string): string {
-  if (text.length <= CONSOLE_TRANSCRIPT_MAX_CHARS) return text;
-  const flatStart = text.length - CONSOLE_TRANSCRIPT_MAX_CHARS;
-  // Anchor at the last alt-screen-enter within the kept window so the setup is never sliced away.
-  const altEnter = lastConsoleBoundaryAtOrAfter(text, CONSOLE_ALT_SCREEN_ENTER, flatStart);
-  const start = altEnter !== -1 ? altEnter : flatStart;
-  return text.slice(start);
+  return retainTranscriptTail(text, {
+    softMaxChars: CONSOLE_TRANSCRIPT_MAX_CHARS,
+    hardMaxChars: CONSOLE_TRANSCRIPT_MAX_CHARS,
+  }).tail;
 }
 
 export interface AgentConsoleRow {
@@ -99,6 +61,7 @@ export interface AgentsConsoleState {
   readonly selectedAgentId: string | null;
   readonly selectedStatus: AgentStatus | null;
   readonly transcript: string;
+  readonly transcriptOffset: number;
   readonly connection: 'live' | 'degraded';
 }
 
@@ -116,12 +79,15 @@ interface TranscriptSegment {
   text: string;
 }
 
+export type TranscriptApplyResult = 'applied' | 'ignored' | 'gap';
+
 export class AgentsConsoleVM {
   private _state: AgentsConsoleState = {
     roster: [],
     selectedAgentId: null,
     selectedStatus: null,
     transcript: '',
+    transcriptOffset: 0,
     connection: 'degraded',
   };
   private readonly listeners = new Set<(state: AgentsConsoleState) => void>();
@@ -198,6 +164,7 @@ export class AgentsConsoleVM {
       selectedAgentId: agentId,
       selectedStatus,
       transcript: '',
+      transcriptOffset: 0,
     };
     this.transcriptSegments = [];
     this.emit();
@@ -209,6 +176,7 @@ export class AgentsConsoleVM {
     this._state = {
       ...this._state,
       transcript: '',
+      transcriptOffset: 0,
     };
     this.emit();
   }
@@ -218,13 +186,37 @@ export class AgentsConsoleVM {
     this.applyTranscriptSegment(tail.offset, tail.tail);
   }
 
-  appendChunk(chunk: OperatorIpcTranscript): void {
-    if (chunk.agentId !== this._state.selectedAgentId) return;
-    const resetPrefix = this.resetPrefixForLiveChunk(chunk.offset, chunk.chunk);
+  appendChunk(chunk: OperatorIpcTranscript): TranscriptApplyResult {
+    if (chunk.agentId !== this._state.selectedAgentId) return 'ignored';
+    let offset = chunk.offset;
+    let text = chunk.chunk;
+    if (text.length === 0) return 'ignored';
+
+    const range = this.transcriptRange();
+    if (range != null) {
+      const chunkEnd = offset + text.length;
+      if (offset < range.start) {
+        if (chunkEnd <= range.end) return 'ignored';
+        const drop = range.start - offset;
+        offset = range.start;
+        text = text.slice(drop);
+      }
+      if (offset > range.end) return 'gap';
+    }
+
+    const resetPrefix = this.resetPrefixForLiveChunk(offset, text);
     if (resetPrefix != null) {
       this.transcriptSegments = resetPrefix.length > 0 ? [{ offset: 0, text: resetPrefix }] : [];
     }
-    this.applyTranscriptSegment(chunk.offset, chunk.chunk);
+    this.applyTranscriptSegment(offset, text);
+    return 'applied';
+  }
+
+  private transcriptRange(): { readonly start: number; readonly end: number } | undefined {
+    const first = this.transcriptSegments[0];
+    const last = this.transcriptSegments.at(-1);
+    if (first == null || last == null) return undefined;
+    return { start: first.offset, end: last.offset + last.text.length };
   }
 
   private resetPrefixForLiveChunk(offset: number, text: string): string | null {
@@ -307,6 +299,7 @@ export class AgentsConsoleVM {
     this._state = {
       ...this._state,
       transcript: bounded,
+      transcriptOffset: merged[0]?.offset ?? 0,
     };
     this.emit();
   }

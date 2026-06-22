@@ -9,6 +9,7 @@
 
 import { mailDetailNeedsRebuild, mailDetailSignature } from './mail-render-helpers.js';
 import { applyTermFeed, createAgentsTerminal, decideTermFeed } from './agents-terminal-helpers.js';
+import type { TerminalInputGuard } from './agents-terminal-helpers.js';
 import { reviewDetailNeedsRebuild, reviewDetailSignature } from './review-render-helpers.js';
 
 const NAV_VIEWS = ['dashboard', 'agents', 'mail', 'review', 'source', 'usage', 'settings'] as const;
@@ -145,6 +146,7 @@ const EMPTY_AGENTS_STATE: AgentsConsoleState = {
   selectedAgentId: null,
   selectedStatus: null,
   transcript: '',
+  transcriptOffset: 0,
   connection: 'degraded',
 };
 const EMPTY_REVIEW_STATE: ReviewState = {
@@ -908,9 +910,11 @@ function renderSessionStartForm(): void {
 // ── Agents console ──────────────────────────────────────────────────────────────
 
 let agentsTerm: XtermTerminal | null = null;
+let agentsInputGuard: TerminalInputGuard | null = null;
 let agentsResizeObserver: ResizeObserver | null = null;
 let lastAgentId: string | null = null;
 let lastTranscript = '';
+let lastTranscriptOffset = 0;
 // Gate xterm construction on the bundled IBM Plex Mono being loaded — a mismeasured fallback font is a
 // classic warp source, so we only build the terminal once the fixed monospace metric is available.
 let fontsReady = false;
@@ -964,7 +968,7 @@ function getOrCreateTerm(): XtermTerminal | null {
   if (!fontsReady) return null;
   const el = document.getElementById('agents-transcript');
   if (el == null) return null;
-  const { term } = createAgentsTerminal<XtermTerminal>(el, {
+  const { term, inputGuard } = createAgentsTerminal<XtermTerminal>(el, {
     createTerminal: (options) => new window.Terminal(options),
     createFitAddon: () => new window.FitAddon.FitAddon(),
     observeResize: (target, onResize) => {
@@ -978,6 +982,7 @@ function getOrCreateTerm(): XtermTerminal | null {
     onResize: scheduleTerminalResize,
   });
   agentsTerm = term;
+  agentsInputGuard = inputGuard;
   return term;
 }
 
@@ -1158,11 +1163,15 @@ function renderAgentsTranscript(state: AgentsConsoleState): void {
       selectedAgentId: state.selectedAgentId,
       lastAgentId,
       transcript: state.transcript,
+      transcriptOffset: state.transcriptOffset,
       lastTranscript,
+      lastTranscriptOffset,
     }),
+    agentsInputGuard ?? undefined,
   );
   lastAgentId = state.selectedAgentId;
   lastTranscript = state.transcript;
+  lastTranscriptOffset = state.transcriptOffset;
   // On agent-switch, the newly-selected agent's pty must be told the current xterm grid (its width may
   // differ from the previous agent's). Force a resend past the de-dupe.
   if (switched) {
@@ -2212,6 +2221,7 @@ document.addEventListener('DOMContentLoaded', () => {
       knownMailBuses.add(OPERATOR_BUS);
       lastAgentId = null;
       lastTranscript = '';
+      lastTranscriptOffset = 0;
       archiveRefreshGeneration += 1;
       renderDashboard();
       renderAgents(EMPTY_AGENTS_STATE);

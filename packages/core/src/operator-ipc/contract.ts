@@ -291,11 +291,11 @@ export interface OperatorIpcTranscript {
  * the agent is not hosted or has produced no output yet (the read DEGRADES cleanly — never a hang/throw).
  * PINNED public shape — Console phases C-P2/C-P3 and the renderer consume it; do not rename.
  *
- * #66 sub-bug B — the engine begins `tail` at a FRAME BOUNDARY (the last alternate-screen-enter
- * `ESC[?1049h`, else a full-screen clear) rather than a flat most-recent-N cut, so replaying it into a
- * fresh xterm reproduces the alt-screen setup instead of stacking mid-stream frames. `offset` always
- * names that start position, so a consumer stitching live `transcript:push` chunks onto this tail keeps a
- * correct absolute coordinate even though the tail may begin earlier than the soft bound (and exceed it).
+ * #66 sub-bug B — the engine prefers replay boundaries within bounded windows: the last reachable
+ * alternate-screen enter (`ESC[?1049h`) inside the hard cap, else a full-screen clear inside the soft cap,
+ * else a flat recent suffix. `offset` always names the retained start position, so a consumer stitching
+ * live `transcript:push` chunks onto this tail keeps a correct absolute coordinate even when the chosen
+ * boundary begins earlier than the soft bound.
  */
 export interface TranscriptTail {
   readonly agentId: string;
