@@ -20,6 +20,7 @@ import {
   type Role,
   type SessionStore,
   type ToolSpec,
+  type UsageSourceFactory,
 } from '@co/core';
 import { createCoMcpServer, type ToolActivityEvent } from './server.js';
 import { openContextStores } from './context.js';
@@ -90,6 +91,8 @@ export interface HostSessionOptions {
   readonly tools?: readonly ToolSpec[];
   /** Optional per-session tool-call activity hook used by the conductor liveness observer. */
   readonly onToolActivity?: (event: ToolActivityEvent) => void;
+  /** Optional per-session passive provider usage reader factory. */
+  readonly usageSourceFactory?: UsageSourceFactory;
 }
 
 /**
@@ -204,6 +207,9 @@ export class LiveSessionHostImpl implements LiveSessionHost {
         {
           ...(opts?.deliveryFactory != null ? { deliveryFactory: opts.deliveryFactory } : {}),
           ...(opts?.reviewerSpawnGate != null ? { reviewerSpawnGate: opts.reviewerSpawnGate } : {}),
+          ...(opts?.usageSourceFactory != null
+            ? { usageSourceFactory: opts.usageSourceFactory }
+            : {}),
         },
       );
       const existingRosterAgent = opened.ctx.roster!.getAgent(agent);

@@ -19,7 +19,9 @@
  */
 import { performance } from 'node:perf_hooks';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { open as openFile, readFile, readdir, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import {
   GH_AUTH_TOKEN_COMMANDS,
   GH_AUTH_TOKEN_TIMEOUT_MS,
@@ -35,6 +37,7 @@ import {
   descendantsLeafFirst,
   isMissingBranchDeleteError,
   openArchiveStore,
+  openDispatchStore,
   openMailStore,
   openRegistry,
   openReviewStore,
@@ -42,12 +45,25 @@ import {
   openSessionStore,
   openSpecStore,
   openWorktreeStore,
+  createProviderUsageSource,
+  defaultUsageSourceFactory,
+  hasMeasuredCostField,
+  parseClaudeTranscriptTurnCost,
+  parseCodexTokenCount,
   queryLiveObservability,
+  readLatestCodexTokenCountReadout,
+  readLatestCodexRateLimits,
   reapExpiredArchives,
   waitingItems,
+  openCodexLogsDb,
+  resolveBudgetCap,
   QUIET_WINDOW_MS,
   type ArchiveEntry,
   type BreakSignal,
+  type CodexTurnCost,
+  type CodexTokenCountReadout,
+  type CostRecorded,
+  type DispatchStore,
   type InjectNudgeFn,
   type LiveObservabilitySnapshot,
   type MarkStuck,
@@ -57,9 +73,17 @@ import {
   type RunningAgent,
   type TranscriptTail,
   type GitExec,
+  type Provider,
+  type UsageSourceFactory,
 } from '@co/core';
 import { ReconcileLoop } from '@co/core';
-import { ConductorEngine, type TransportPair } from './engine.js';
+import {
+  ConductorEngine,
+  type CollectionDiagnostic,
+  type TransportPair,
+  type TurnCostCapture,
+  type ToolActivityCapture,
+} from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
 import { DaemonBackedAgentRouter } from './agent-router.js';
 import { EngineLiveStateProvider } from './live-observe.js';
@@ -327,6 +351,744 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// ── PR-B COLLECTION — cost + tool-usage capture seams wired onto the real engine ───────────────────
+//
+// These are the PRODUCTION emitters the prior round left UNWIRED. `makeTurnCostCapture` is bound to the
+// engine's `captureTurnCost`; `makeToolActivityRecorder` to its `onToolActivity`. Both open the project
+// {@link DispatchStore} per call and record over L0 (program-data only — AC9/P12), and both are
+// FAIL-SOFT: a thrown reader/record is swallowed (the engine also guards), so collection can never fail
+// a live turn or MCP call. The provider readers are INJECTABLE seams so the wiring is hermetically
+// testable (the integration test injects fixture readers + a temp store); the defaults are the real ones.
+
+/** Per-turn provider usage readers (Claude transcript JSONL / Codex token_count) — injectable for tests. */
+interface ClaudeTranscriptReadout {
+  readonly jsonl: string;
+  readonly path?: string;
+  readonly sourceId?: string;
+}
+
+type ClaudeTranscriptRead = string | ClaudeTranscriptReadout;
+
+type CodexTokenCountRead = unknown | CodexTokenCountReadout;
+
+export interface TurnCostReaderDeps {
+  /** Read the agent's isolated Claude transcript JSONL (the `usage` source). Default: read under isolated home. */
+  readonly readClaudeTranscript?: (
+    identity: HostedIdentity,
+    latestSourceId?: string,
+  ) => Promise<ClaudeTranscriptRead | undefined>;
+  /** Read the agent's Codex `token_count` payload from `logs_2.sqlite`. Default: open it read-only. */
+  readonly readCodexTokenCount?: (
+    identity: HostedIdentity,
+    latestSourceId?: string,
+  ) => Promise<CodexTokenCountRead | undefined>;
+  /** Open the project dispatch store. Default: {@link openDispatchStore}. */
+  readonly openDispatch?: (projectId: ProjectId) => DispatchStore;
+  /** Resolve the agent's task id from its identity. Default: the agent id (one task per agent in v1). */
+  readonly taskFor?: (identity: HostedIdentity) => string;
+}
+
+/** Default task resolver — v1 files cost under the agent's own id (one logical task per agent). */
+function defaultTaskFor(identity: HostedIdentity): string {
+  return identity.agent;
+}
+
+/**
+ * Lower a parsed provider per-turn usage onto a {@link CostRecorded}, or undefined when there is nothing
+ * to record (so the caller records NOTHING — never a vacuous all-zero observation). PURE + exported so
+ * the field mapping is unit-testable in isolation (the exact transcript/sqlite field names are the
+ * `needsLiveVerification` contract).
+ */
+export function claudeTurnCostToObservation(
+  identity: HostedIdentity,
+  task: string,
+  turn: number,
+  cost: {
+    readonly inputTokens?: number;
+    readonly outputTokens?: number;
+    readonly cacheReadInputTokens?: number;
+    readonly cacheCreationInputTokens?: number;
+    readonly costUsd?: number;
+  },
+  sourceId?: string,
+): CostRecorded | undefined {
+  const obs: CostRecorded = {
+    provider: 'claude',
+    agent: identity.agent,
+    task,
+    turn,
+    ...(sourceId !== undefined ? { source_id: sourceId } : {}),
+    ...(cost.inputTokens !== undefined ? { input_tokens: cost.inputTokens } : {}),
+    ...(cost.outputTokens !== undefined ? { output_tokens: cost.outputTokens } : {}),
+    ...(cost.cacheReadInputTokens !== undefined
+      ? { cache_read_input_tokens: cost.cacheReadInputTokens }
+      : {}),
+    ...(cost.cacheCreationInputTokens !== undefined
+      ? { cache_creation_input_tokens: cost.cacheCreationInputTokens }
+      : {}),
+    ...(cost.costUsd !== undefined ? { cost_usd: cost.costUsd } : {}),
+  };
+  return hasMeasuredCostField(obs) ? obs : undefined;
+}
+
+/** Lower a parsed Codex per-turn usage onto a {@link CostRecorded} (tokens / usage-% — no dollars). */
+export function codexTurnCostToObservation(
+  identity: HostedIdentity,
+  task: string,
+  turn: number,
+  cost: {
+    readonly inputTokens?: number;
+    readonly outputTokens?: number;
+    readonly totalTokens?: number;
+    readonly usedPct?: number;
+  },
+  sourceId?: string,
+): CostRecorded | undefined {
+  const obs: CostRecorded = {
+    provider: 'codex',
+    agent: identity.agent,
+    task,
+    turn,
+    ...(sourceId !== undefined ? { source_id: sourceId } : {}),
+    ...(cost.inputTokens !== undefined ? { input_tokens: cost.inputTokens } : {}),
+    ...(cost.outputTokens !== undefined ? { output_tokens: cost.outputTokens } : {}),
+    ...(cost.totalTokens !== undefined ? { total_tokens: cost.totalTokens } : {}),
+    ...(cost.usedPct !== undefined ? { used_pct: cost.usedPct } : {}),
+  };
+  return hasMeasuredCostField(obs) ? obs : undefined;
+}
+
+/**
+ * The per-agent last SESSION-CUMULATIVE Codex token reading, kept so a cumulative `total_token_usage`
+ * payload can be recorded as the PER-TURN DELTA (this turn's cumulative minus the previous one). Codex's
+ * `total_token_usage` is a running session total; recording it verbatim per turn would over-count
+ * massively once {@link CostProjector} sums the observations. `usedPct` is a point-in-time gauge (not
+ * additive) and is NOT delta-d.
+ */
+interface CodexCumulativeReading {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly totalTokens?: number;
+}
+
+/**
+ * Resolve a parsed Codex {@link CodexTurnCost} into the PER-TURN delta to record, updating `lastByAgent`.
+ * For a per-turn (`cumulative: false`) reading the counts are already the delta — pass them through. For
+ * a session-cumulative (`cumulative: true`) reading, subtract the previous cumulative for this agent and
+ * store the new cumulative; a non-positive delta (no new tokens since last turn, or a session reset that
+ * lowered the total) records nothing for those fields. `usedPct` is passed through untouched (it is a
+ * gauge, not a sum).
+ */
+function codexPerTurnDelta(
+  agent: string,
+  parsed: CodexTurnCost,
+  lastByAgent: Map<string, CodexCumulativeReading>,
+  priorCumulative: CodexCumulativeReading | undefined,
+): {
+  readonly cost: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    usedPct?: number;
+  };
+  readonly cumulative?: CodexCumulativeReading;
+} {
+  if (!parsed.cumulative) {
+    const cost = {
+      ...(parsed.inputTokens !== undefined ? { inputTokens: parsed.inputTokens } : {}),
+      ...(parsed.outputTokens !== undefined ? { outputTokens: parsed.outputTokens } : {}),
+      ...(parsed.totalTokens !== undefined ? { totalTokens: parsed.totalTokens } : {}),
+      ...(parsed.usedPct !== undefined ? { usedPct: parsed.usedPct } : {}),
+    };
+    const cumulative = advanceCumulativeReading(lastByAgent.get(agent) ?? priorCumulative, cost);
+    if (cumulative !== undefined) lastByAgent.set(agent, cumulative);
+    return { cost, ...(cumulative !== undefined ? { cumulative } : {}) };
+  }
+  const prev = lastByAgent.get(agent) ?? priorCumulative;
+  const current: CodexCumulativeReading = {
+    ...(parsed.inputTokens !== undefined ? { inputTokens: parsed.inputTokens } : {}),
+    ...(parsed.outputTokens !== undefined ? { outputTokens: parsed.outputTokens } : {}),
+    ...(parsed.totalTokens !== undefined ? { totalTokens: parsed.totalTokens } : {}),
+  };
+  lastByAgent.set(agent, current);
+  if (prev != null && cumulativeReadingReset(current, prev)) {
+    return {
+      cost: {
+        ...(current.inputTokens !== undefined ? { inputTokens: current.inputTokens } : {}),
+        ...(current.outputTokens !== undefined ? { outputTokens: current.outputTokens } : {}),
+        ...(current.totalTokens !== undefined ? { totalTokens: current.totalTokens } : {}),
+        ...(parsed.usedPct !== undefined ? { usedPct: parsed.usedPct } : {}),
+      },
+      cumulative: current,
+    };
+  }
+  return {
+    cost: {
+      ...positiveDelta('inputTokens', current.inputTokens, prev?.inputTokens),
+      ...positiveDelta('outputTokens', current.outputTokens, prev?.outputTokens),
+      ...positiveDelta('totalTokens', current.totalTokens, prev?.totalTokens),
+      ...(parsed.usedPct !== undefined ? { usedPct: parsed.usedPct } : {}),
+    },
+    cumulative: current,
+  };
+}
+
+function advanceCumulativeReading(
+  previous: CodexCumulativeReading | undefined,
+  delta: {
+    readonly inputTokens?: number;
+    readonly outputTokens?: number;
+    readonly totalTokens?: number;
+  },
+): CodexCumulativeReading | undefined {
+  const next: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  } = {
+    ...(previous?.inputTokens !== undefined ? { inputTokens: previous.inputTokens } : {}),
+    ...(previous?.outputTokens !== undefined ? { outputTokens: previous.outputTokens } : {}),
+    ...(previous?.totalTokens !== undefined ? { totalTokens: previous.totalTokens } : {}),
+  };
+  if (delta.inputTokens !== undefined)
+    next.inputTokens = (next.inputTokens ?? 0) + delta.inputTokens;
+  if (delta.outputTokens !== undefined) {
+    next.outputTokens = (next.outputTokens ?? 0) + delta.outputTokens;
+  }
+  if (delta.totalTokens !== undefined)
+    next.totalTokens = (next.totalTokens ?? 0) + delta.totalTokens;
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function cumulativeReadingReset(
+  current: CodexCumulativeReading,
+  previous: CodexCumulativeReading,
+): boolean {
+  return (
+    lowerThanPrevious(current.inputTokens, previous.inputTokens) ||
+    lowerThanPrevious(current.outputTokens, previous.outputTokens) ||
+    lowerThanPrevious(current.totalTokens, previous.totalTokens)
+  );
+}
+
+function lowerThanPrevious(current: number | undefined, previous: number | undefined): boolean {
+  return current !== undefined && previous !== undefined && current < previous;
+}
+
+/** The positive per-turn delta for one cumulative field, or `{}` when there is no new usage to record. */
+function positiveDelta(
+  key: 'inputTokens' | 'outputTokens' | 'totalTokens',
+  current: number | undefined,
+  previous: number | undefined,
+): { inputTokens?: number; outputTokens?: number; totalTokens?: number } {
+  if (current === undefined) return {};
+  const delta = current - (previous ?? 0);
+  return delta > 0 ? { [key]: delta } : {};
+}
+
+/**
+ * Default Claude transcript reader. Claude Code, run with CLAUDE_CONFIG_DIR = the agent's isolated home,
+ * writes its session transcript under `${isolatedHome}/projects/<slugified-cwd>/<session-uuid>.jsonl`
+ * — each assistant message line carrying `message.usage` ({ input_tokens, output_tokens,
+ * cache_read_input_tokens, cache_creation_input_tokens }). NOTHING in co writes a
+ * `co-transcript-<agent>.jsonl`, so the prior reader targeted a path that never existed (a dead seam).
+ *
+ * This globs every `projects/**\/*.jsonl` under the isolated home, picks the NEWEST by mtime (the file
+ * the most-recent turn appended to), and returns its contents for {@link parseClaudeTranscriptTurnCost}.
+ * FAIL-SOFT: a missing tree / unreadable file / no transcript resolves `undefined` (record nothing) and
+ * never throws the turn.
+ *
+ * needsLiveVerification: this now targets the REAL `projects/**\/*.jsonl` tree Claude Code writes; the
+ * exact per-line `message.usage` field mapping still needs a real `claude` run to confirm end-to-end.
+ */
+const defaultReadClaudeTranscript = (
+  isolatedHomeDirFor: ((agent: string) => string) | undefined,
+): ((
+  identity: HostedIdentity,
+  latestSourceId?: string,
+) => Promise<ClaudeTranscriptReadout | undefined>) => {
+  return async (identity, latestSourceId) => {
+    if (isolatedHomeDirFor == null) return undefined;
+    const previous = parseClaudeJsonlSourceId(latestSourceId);
+    if (previous !== undefined) {
+      const read = await readClaudeTranscriptFromCursor(previous);
+      if (read !== undefined) return read ?? undefined;
+    }
+    const home = isolatedHomeDirFor(identity.agent).replace(/\/+$/u, '');
+    const newest = await newestClaudeTranscriptPath(join(home, 'projects'));
+    if (newest == null) return undefined;
+    return readWholeClaudeTranscript(newest);
+  };
+};
+
+async function readClaudeTranscriptFromCursor(previous: {
+  readonly path: string;
+  readonly offset: number;
+}): Promise<ClaudeTranscriptReadout | null | undefined> {
+  let info: { readonly size: number };
+  try {
+    info = await stat(previous.path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined; // cursor file gone (benign)
+    throw err; // real failure → captureTurnCost's caller routes it through onCollectionError (Principle 9)
+  }
+  if (info.size > previous.offset) {
+    const text = await readFileRange(previous.path, previous.offset, info.size);
+    const complete = completeJsonlPrefix(text);
+    if (complete.byteLength <= 0) return null;
+    const offset = previous.offset + complete.byteLength;
+    return {
+      path: previous.path,
+      jsonl: complete.jsonl,
+      sourceId: claudeJsonlSourceId(previous.path, offset),
+    };
+  }
+  if (info.size < previous.offset) return readWholeClaudeTranscript(previous.path);
+  const newestPeer = await newestClaudeTranscriptPath(dirname(previous.path), { recursive: false });
+  return newestPeer !== undefined && newestPeer !== previous.path
+    ? readWholeClaudeTranscript(newestPeer)
+    : null;
+}
+
+async function readWholeClaudeTranscript(
+  path: string,
+): Promise<ClaudeTranscriptReadout | undefined> {
+  try {
+    const text = await readFile(path, 'utf8');
+    const complete = completeJsonlPrefix(text);
+    return {
+      path,
+      jsonl: complete.jsonl,
+      sourceId: claudeJsonlSourceId(path, complete.byteLength),
+    };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined; // file vanished (benign)
+    throw err; // real failure → captureTurnCost's caller routes it through onCollectionError (Principle 9)
+  }
+}
+
+async function readFileRange(path: string, start: number, end: number): Promise<string> {
+  const handle = await openFile(path, 'r');
+  try {
+    const buffer = Buffer.alloc(Math.max(0, end - start));
+    let totalRead = 0;
+    while (totalRead < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        totalRead,
+        buffer.length - totalRead,
+        start + totalRead,
+      );
+      if (bytesRead === 0) break;
+      totalRead += bytesRead;
+    }
+    if (totalRead < buffer.length) return buffer.subarray(0, totalRead).toString('utf8');
+    return buffer.toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
+function completeJsonlPrefix(text: string): {
+  readonly jsonl: string;
+  readonly byteLength: number;
+} {
+  let jsonl = '';
+  let byteLength = 0;
+  const segments = text.match(/[^\n]*(?:\n|$)/gu) ?? [];
+  for (const segment of segments) {
+    if (segment.length === 0) continue;
+    const endsWithNewline = segment.endsWith('\n');
+    const line = segment.replace(/\r?\n$/u, '');
+    if (!endsWithNewline && line.trim().length > 0) {
+      try {
+        JSON.parse(line);
+      } catch {
+        break;
+      }
+    }
+    jsonl += segment;
+    byteLength += Buffer.byteLength(segment, 'utf8');
+  }
+  return { jsonl, byteLength };
+}
+
+/**
+ * Recursively find the newest-by-mtime `*.jsonl` under `projectsDir` (Claude Code's per-cwd transcript
+ * tree). Tolerates a missing/vanished entry (ENOENT — the benign "no usage yet" case) but rethrows any
+ * other readdir/stat failure so a persistent real fault (perms/IO) reaches the onCollectionError seam
+ * (Principle 9 — no silent failures).
+ */
+async function newestClaudeTranscriptPath(
+  projectsDir: string,
+  opts: { readonly recursive?: boolean } = {},
+): Promise<string | undefined> {
+  const recursive = opts.recursive ?? true;
+  let newest: { path: string; mtimeMs: number } | undefined;
+  const walk = async (current: string): Promise<void> => {
+    let entries: Array<{ name: string; isDirectory: () => boolean; isFile: () => boolean }>;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return; // dir not created yet (benign)
+      throw err; // real failure → captureTurnCost's caller routes it through onCollectionError (Principle 9)
+    }
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (recursive) await walk(full);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        try {
+          const info = await stat(full);
+          if (newest == null || info.mtimeMs > newest.mtimeMs) {
+            newest = { path: full, mtimeMs: info.mtimeMs };
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue; // entry vanished (benign)
+          throw err; // real failure → captureTurnCost's caller routes it through onCollectionError (Principle 9)
+        }
+      }
+    }
+  };
+  await walk(projectsDir);
+  return newest?.path;
+}
+
+/** Default Codex token_count reader: open the per-agent isolated `logs_2.sqlite` read-only. */
+const defaultReadCodexTokenCount = (
+  isolatedHomeDirFor: ((agent: string) => string) | undefined,
+): ((
+  identity: HostedIdentity,
+  latestSourceId?: string,
+) => Promise<CodexTokenCountRead | undefined>) => {
+  return async (identity, latestSourceId) => {
+    if (isolatedHomeDirFor == null) return undefined;
+    const home = isolatedHomeDirFor(identity.agent).replace(/\/+$/u, '');
+    const path = `${home}/logs_2.sqlite`;
+    try {
+      const db = openCodexLogsDb(path);
+      try {
+        const afterSourceId = codexLogSourceIdFromCostSourceId(latestSourceId);
+        return readLatestCodexTokenCountReadout(
+          db,
+          afterSourceId !== undefined ? { afterSourceId } : {},
+        );
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      // node:sqlite throws ERR_SQLITE_ERROR (not an ENOENT ErrnoException) for a read-only open of a
+      // missing db — errcode 14 (SQLITE_CANTOPEN) is the benign "logs_2.sqlite not created yet" case.
+      if ((err as { readonly errcode?: number })?.errcode === 14) return undefined;
+      throw err; // corrupt/locked/perms db → captureTurnCost's caller routes it through onCollectionError (Principle 9)
+    }
+  };
+};
+
+/**
+ * Build a hosted-session usage source factory scoped to the pane's isolated home. Claude statusLine
+ * collection writes `${isolatedHome}/co-statusline.json`; reading it here keeps passive usage refreshes
+ * identity-scoped instead of depending on daemon-global `CO_CLAUDE_STATUSLINE_PATH`.
+ */
+export function makeHostedUsageSourceFactory(
+  identity: HostedIdentity,
+  isolatedHomeDirFor: (agent: string) => string,
+): UsageSourceFactory {
+  return (account) => {
+    if (identity.provider === 'claude' && account.provider === 'claude') {
+      const statusLinePath = join(
+        isolatedHomeDirFor(identity.agent).replace(/\/+$/u, ''),
+        'co-statusline.json',
+      );
+      return createProviderUsageSource('claude', {
+        account: account.account,
+        cli: async () => {
+          throw new Error('hosted Claude usage source skips daemon-global auth preflight');
+        },
+        readStatusLine: async () => JSON.parse(await readFile(statusLinePath, 'utf8')),
+      });
+    }
+    if (identity.provider === 'codex' && account.provider === 'codex') {
+      const logsPath = join(
+        isolatedHomeDirFor(identity.agent).replace(/\/+$/u, ''),
+        'logs_2.sqlite',
+      );
+      return createProviderUsageSource('codex', {
+        account: account.account,
+        cli: async () => {
+          throw new Error('hosted Codex usage source skips daemon-global doctor preflight');
+        },
+        readRateLimits: async () => {
+          const db = openCodexLogsDb(logsPath);
+          try {
+            return readLatestCodexRateLimits(db);
+          } finally {
+            db.close();
+          }
+        },
+        sessionRollout: async () => undefined,
+      });
+    }
+    return defaultUsageSourceFactory(account);
+  };
+}
+
+/**
+ * Build the engine's `captureTurnCost` closure for `projectId`. On each non-errored turn it reads the
+ * provider's per-turn usage, lowers it onto a {@link CostRecorded}, and records it (with any configured
+ * budget cap so the near-budget observability signal still fires). Missing usage ⇒ records nothing.
+ * FAIL-SOFT: any throw is swallowed (the engine guards too). Exported + seam-injectable so the
+ * production wiring is hermetically testable.
+ */
+export function makeTurnCostCapture(
+  projectId: ProjectId,
+  deps: TurnCostReaderDeps & { readonly isolatedHomeDirFor?: (agent: string) => string } = {},
+): (capture: TurnCostCapture) => Promise<void> {
+  const openDispatch = deps.openDispatch ?? openDispatchStore;
+  const taskFor = deps.taskFor ?? defaultTaskFor;
+  const readClaude =
+    deps.readClaudeTranscript ?? defaultReadClaudeTranscript(deps.isolatedHomeDirFor);
+  const readCodex = deps.readCodexTokenCount ?? defaultReadCodexTokenCount(deps.isolatedHomeDirFor);
+  // Per-agent cumulative-token memory, lives for the lifetime of this capture closure (one per project,
+  // built once in serveConductor) so Codex's session-cumulative `total_token_usage` is delta-d per turn.
+  const codexLastCumulative = new Map<string, CodexCumulativeReading>();
+  return async ({ identity, turn }: TurnCostCapture): Promise<void> => {
+    const task = taskFor(identity);
+    const latestSourceId = latestCostSourceId(
+      openDispatch,
+      projectId,
+      identity.provider,
+      identity.agent,
+      task,
+    );
+    const obs = await readTurnCostObservation(
+      identity,
+      task,
+      turn,
+      readClaude,
+      readCodex,
+      codexLastCumulative,
+      latestSourceId,
+    );
+    if (obs == null) return; // no usage observed — record nothing (never a fabricated zero).
+    const store = openDispatch(projectId);
+    try {
+      const budget = resolveBudgetCap(projectId);
+      const durableTurn = store.nextCostTurn(obs.provider, obs.agent, obs.task, obs.turn);
+      store.recordCost(durableTurn === obs.turn ? obs : { ...obs, turn: durableTurn }, budget);
+    } finally {
+      store.close();
+    }
+  };
+}
+
+function latestCostSourceId(
+  openDispatch: (projectId: ProjectId) => DispatchStore,
+  projectId: ProjectId,
+  provider: Provider,
+  agent: string,
+  task: string,
+): string | undefined {
+  const store = openDispatch(projectId);
+  try {
+    return store.latestCostSourceId(provider, agent, task);
+  } finally {
+    store.close();
+  }
+}
+
+function normalizeClaudeTranscriptRead(
+  readout: ClaudeTranscriptRead | undefined,
+): ClaudeTranscriptReadout | undefined {
+  if (readout === undefined) return undefined;
+  return typeof readout === 'string' ? { jsonl: readout } : readout;
+}
+
+function unreadClaudeTranscriptSlice(
+  readout: ClaudeTranscriptReadout,
+  latestSourceId: string | undefined,
+): { readonly jsonl: string; readonly sourceId: string } {
+  if (readout.sourceId !== undefined) {
+    return { jsonl: readout.jsonl, sourceId: readout.sourceId };
+  }
+  if (readout.path === undefined) {
+    return {
+      jsonl: readout.jsonl,
+      sourceId: `claude-hash:v1:${hashText(readout.jsonl)}`,
+    };
+  }
+  const previous = parseClaudeJsonlSourceId(latestSourceId);
+  const allBytes = Buffer.from(readout.jsonl, 'utf8');
+  const startOffset =
+    previous !== undefined && previous.path === readout.path
+      ? Math.min(previous.offset, allBytes.length)
+      : 0;
+  const complete = completeJsonlPrefix(allBytes.subarray(startOffset).toString('utf8'));
+  return {
+    jsonl: complete.jsonl,
+    sourceId: claudeJsonlSourceId(readout.path, startOffset + complete.byteLength),
+  };
+}
+
+function claudeJsonlSourceId(path: string, line: number): string {
+  return `claude-jsonl:v1:${Buffer.from(path).toString('base64url')}:${line}`;
+}
+
+function parseClaudeJsonlSourceId(
+  sourceId: string | undefined,
+): { readonly path: string; readonly offset: number } | undefined {
+  if (sourceId === undefined) return undefined;
+  const match = /^claude-jsonl:v1:([^:]+):(\d+)$/u.exec(sourceId);
+  if (!match) return undefined;
+  return {
+    path: Buffer.from(match[1]!, 'base64url').toString('utf8'),
+    offset: Number(match[2]),
+  };
+}
+
+function normalizeCodexTokenRead(
+  readout: CodexTokenCountRead | undefined,
+): CodexTokenCountReadout | undefined {
+  if (readout === undefined) return undefined;
+  if (isCodexTokenCountReadout(readout)) return readout;
+  return {
+    payload: readout,
+    sourceId: `codex-hash:v1:${hashText(JSON.stringify(readout))}`,
+  };
+}
+
+function isCodexTokenCountReadout(value: unknown): value is CodexTokenCountReadout {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'payload' in value &&
+    typeof (value as { readonly sourceId?: unknown }).sourceId === 'string'
+  );
+}
+
+function codexCostSourceId(
+  baseSourceId: string,
+  cumulative: CodexCumulativeReading | undefined,
+): string {
+  return (
+    `codex-source:v1:${baseSourceId}:` +
+    `${cumulative?.inputTokens ?? ''}:${cumulative?.outputTokens ?? ''}:${cumulative?.totalTokens ?? ''}`
+  );
+}
+
+function codexLogSourceIdFromCostSourceId(sourceId: string | undefined): string | undefined {
+  if (sourceId === undefined) return undefined;
+  const match = /^codex-source:v1:(.*):[^:]*:[^:]*:[^:]*$/u.exec(sourceId);
+  if (match) return match[1];
+  const old = /^codex-cumulative:v1:(.*):[^:]*:[^:]*:[^:]*$/u.exec(sourceId);
+  if (old) return old[1];
+  const turn = /^codex-turn:v1:(.*)$/u.exec(sourceId);
+  return turn?.[1];
+}
+
+function parseCodexCumulativeSourceId(
+  sourceId: string | undefined,
+): CodexCumulativeReading | undefined {
+  if (sourceId === undefined) return undefined;
+  const match =
+    /^codex-source:v1:.*:([^:]*):([^:]*):([^:]*)$/u.exec(sourceId) ??
+    /^codex-cumulative:v1:.*:([^:]*):([^:]*):([^:]*)$/u.exec(sourceId);
+  if (!match) return undefined;
+  return {
+    ...sourceNumber('inputTokens', match[1]!),
+    ...sourceNumber('outputTokens', match[2]!),
+    ...sourceNumber('totalTokens', match[3]!),
+  };
+}
+
+function sourceNumber(
+  key: 'inputTokens' | 'outputTokens' | 'totalTokens',
+  raw: string,
+): CodexCumulativeReading {
+  if (raw.length === 0) return {};
+  const value = Number(raw);
+  return Number.isFinite(value) ? { [key]: value } : {};
+}
+
+function hashText(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+async function readTurnCostObservation(
+  identity: HostedIdentity,
+  task: string,
+  turn: number,
+  readClaude: (
+    identity: HostedIdentity,
+    latestSourceId?: string,
+  ) => Promise<ClaudeTranscriptRead | undefined>,
+  readCodex: (
+    identity: HostedIdentity,
+    latestSourceId?: string,
+  ) => Promise<CodexTokenCountRead | undefined>,
+  codexLastCumulative: Map<string, CodexCumulativeReading>,
+  latestSourceId: string | undefined,
+): Promise<CostRecorded | undefined> {
+  const provider: Provider = identity.provider;
+  if (provider === 'claude') {
+    const readout = normalizeClaudeTranscriptRead(await readClaude(identity, latestSourceId));
+    if (readout == null) return undefined;
+    const sliced = unreadClaudeTranscriptSlice(readout, latestSourceId);
+    if (sliced.jsonl.trim().length === 0) return undefined;
+    const parsed = parseClaudeTranscriptTurnCost(sliced.jsonl);
+    return parsed
+      ? claudeTurnCostToObservation(identity, task, turn, parsed, sliced.sourceId)
+      : undefined;
+  }
+  const readout = normalizeCodexTokenRead(await readCodex(identity, latestSourceId));
+  if (readout == null) return undefined;
+  const parsed = parseCodexTokenCount(readout.payload);
+  if (!parsed) return undefined;
+  // Codex `total_token_usage` is session-cumulative — record only the per-turn DELTA so cost_rollup's
+  // SUM across turns reflects real per-turn spend, not a cumulative-of-cumulatives over-count.
+  const priorCumulative = parseCodexCumulativeSourceId(latestSourceId);
+  const perTurn = codexPerTurnDelta(identity.agent, parsed, codexLastCumulative, priorCumulative);
+  const sourceId = codexCostSourceId(readout.sourceId, perTurn.cumulative);
+  return codexTurnCostToObservation(identity, task, turn, perTurn.cost, sourceId);
+}
+
+/**
+ * Build the engine's `onToolActivity` closure for `projectId`: record one durable `tool.invoked` per
+ * completed (`end`) tool call into the per-agent tool-usage projection. Only `end` events are recorded
+ * (a `start`/`end` pair is one call). A non-`ok` end is a tool error; an `ok` `co_*` end is a productive
+ * call. FAIL-SOFT — a thrown record never breaks the live MCP call path.
+ */
+export function makeToolActivityRecorder(
+  projectId: ProjectId,
+  deps: {
+    readonly openDispatch?: (projectId: ProjectId) => DispatchStore;
+    readonly taskFor?: (i: HostedIdentity) => string;
+  } = {},
+): (capture: ToolActivityCapture) => void {
+  const openDispatch = deps.openDispatch ?? openDispatchStore;
+  const taskFor = deps.taskFor ?? defaultTaskFor;
+  return ({ identity, turn, activity }: ToolActivityCapture): void => {
+    if (activity.phase !== 'end') return; // one record per completed call (start/end is one call).
+    const store = openDispatch(projectId);
+    try {
+      // NOT-YET-DERIVED: `redundant_read` / `permission_ask` are deliberately left unset — the
+      // ToolActivityEvent seam carries no such signal yet (only phase/tool/ok/durationMs), so both
+      // rollup columns stay 0 ("no signal yet observed", NOT "zero friction confirmed"). See
+      // tool-usage-projector.ts. (stillNeedsLive.)
+      store.recordToolInvoked({
+        agent: identity.agent,
+        task: taskFor(identity),
+        tool: activity.tool,
+        turn,
+        ok: activity.ok === true,
+        ...(activity.durationMs !== undefined ? { duration_ms: activity.durationMs } : {}),
+      });
+    } finally {
+      store.close();
+    }
+  };
+}
+
 function reportServeControlDiagnostic(
   onError: ((error: unknown) => void) | undefined,
   error: Error,
@@ -336,6 +1098,15 @@ function reportServeControlDiagnostic(
   } else {
     console.error('[co-mcp serve] control error:', error);
   }
+}
+
+function collectionDiagnosticError(diagnostic: CollectionDiagnostic): Error {
+  const tool = diagnostic.kind === 'tool' ? `/${diagnostic.activity?.tool ?? 'unknown-tool'}` : '';
+  return new Error(
+    `co-mcp serve: ${diagnostic.kind}${tool} collection failed for ` +
+      `'${diagnostic.identity.agent}' turn ${diagnostic.turn}: ${errorMessage(diagnostic.error)}`,
+    { cause: diagnostic.error },
+  );
 }
 
 function reportServeControlInfo(message: string): void {
@@ -543,12 +1314,29 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
             buildHostedLaunchSpec(identity, homeFor(identity.agent), coMcpPaths);
         })()
       : undefined;
+  // PR-B COLLECTION — bind the production cost + tool-usage emitters onto the engine. Both record into
+  // the project DispatchStore (program-data only); both are fail-soft. Bound here, on the real engine,
+  // so a live `co-mcp serve` run actually records (the prior round left these seams DEAD).
+  const captureTurnCost = makeTurnCostCapture(projectId, {
+    ...(isolatedHomeDirFor != null ? { isolatedHomeDirFor } : {}),
+  });
+  const recordToolActivity = makeToolActivityRecorder(projectId);
+  const usageSourceFactoryFor =
+    isolatedHomeDirFor != null
+      ? (identity: HostedIdentity): UsageSourceFactory =>
+          makeHostedUsageSourceFactory(identity, isolatedHomeDirFor)
+      : undefined;
   const engine = new ConductorEngine({
     pty,
     makeTransport,
     now,
     quietWindow: opts.quietWindow ?? realQuietWindow,
     reviewerSpawnGate: () => spawnGate,
+    captureTurnCost,
+    onToolActivity: recordToolActivity,
+    ...(usageSourceFactoryFor != null ? { usageSourceFactoryFor } : {}),
+    onCollectionError: (diagnostic) =>
+      reportServeControlDiagnostic(opts.onError, collectionDiagnosticError(diagnostic)),
     ...(spawnSpecFor != null ? { spawnSpecFor } : {}),
   });
   if (opts.coMcpPaths != null) {

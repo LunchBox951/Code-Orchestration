@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { isBranchMerged, isWorktreeDirty, snapshotDirtyWorktree } from './branch-state.js';
+import {
+  isBranchMerged,
+  isWorktreeDirty,
+  probeWorktreeDirty,
+  snapshotDirtyWorktree,
+} from './branch-state.js';
 import type { GitReader } from './detect-base.js';
 import type { GitExec } from './sling.js';
 
@@ -64,6 +69,36 @@ describe('branch-state git helpers', () => {
       const fakeGitReader: GitReader = () => null;
 
       expect(() => isWorktreeDirty('/sbx', fakeGitReader)).toThrow(
+        "unable to read git status for worktree '/sbx'",
+      );
+    });
+  });
+
+  describe('probeWorktreeDirty', () => {
+    it('treats an absent sandbox path as clean without reading git status', () => {
+      const fakeGitReader: GitReader = () => {
+        throw new Error('git status should not run for an absent path');
+      };
+
+      expect(probeWorktreeDirty('/sbx', fakeGitReader, () => false)).toBe(false);
+    });
+
+    it('treats a raced-away sandbox ENOENT as clean', () => {
+      // Model the PRODUCTION path: defaultGitRawReader swallows the missing-cwd ENOENT into `null`,
+      // so isWorktreeDirty throws a plain "unable to read git status" Error (no code). The probe must
+      // self-heal by re-checking existence — here pathExists is true on the pre-check, false on the
+      // post-check, mirroring the tree disappearing mid-probe.
+      const fakeGitReader: GitReader = () => null;
+      let calls = 0;
+      const pathExists = (): boolean => calls++ === 0;
+
+      expect(probeWorktreeDirty('/sbx', fakeGitReader, pathExists)).toBe(false);
+    });
+
+    it('propagates present-sandbox status failures', () => {
+      const fakeGitReader: GitReader = () => null;
+
+      expect(() => probeWorktreeDirty('/sbx', fakeGitReader, () => true)).toThrow(
         "unable to read git status for worktree '/sbx'",
       );
     });

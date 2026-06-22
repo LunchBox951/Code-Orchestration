@@ -11,6 +11,10 @@ This repo is a TypeScript pnpm-workspace monorepo:
 - `apps/desktop` is the Electron operator app surface.
 - `docs/` is the canonical design corpus and should carry rationale, not this file.
 
+This file is **project memory** — what this repo is, and how to build and verify it. How to _be_ an
+orchestrated agent (mail, review, dispatch, recovery) ships in `co`'s role prompts and `co orient`,
+never here ([`docs/architecture/prompts-and-memory.md`](docs/architecture/prompts-and-memory.md)).
+
 ## Read These First
 
 - [`README.md`](README.md) — the shortest product and repository overview.
@@ -23,7 +27,7 @@ This repo is a TypeScript pnpm-workspace monorepo:
 - [`docs/principles.md`](docs/principles.md) — the 16 invariants, preferably cited as
   `Principle N — handle`.
 - [`docs/v1-acceptance-criteria.md`](docs/v1-acceptance-criteria.md) — the project-wide definition
-  of v1; every spec's acceptance criteria must ladder up to IDs here.
+  of v1 (`co` self-hosts; the prototype retires).
 - [`docs/architecture/review-gates.md`](docs/architecture/review-gates.md) — the merge/push/PR gate
   model; read before any outward publishing path.
 
@@ -33,5 +37,3 @@ This repo is a TypeScript pnpm-workspace monorepo:
   only if every agent truly needs the pointer.
 - Follow the check and contribution flow in [`CONTRIBUTING.md`](CONTRIBUTING.md) before considering a
   diff done.
-- Keep orchestration state out of the repo (Principle 12 — pristine-repo); the only sanctioned repo
-  files are the memory files.

@@ -21,13 +21,16 @@ import {
   makeCostNearBudgetEvent,
   makeCostRecordedEvent,
   makePlacementDecidedEvent,
+  makeToolInvokedEvent,
   makeUsageObservedEvent,
+  type AgentToolUsage,
   type CostRecorded,
   type CostRollup,
   type CostRollupKind,
   type NearBudgetRecord,
   type PlacementDecided,
   type PlacementRecord,
+  type ToolInvoked,
   type UsageAccountStatus,
   type UsageBucket,
   type UsageObserved,
@@ -37,9 +40,16 @@ import {
   ensureCostTables,
   selectAllCostRollups,
   selectCostRollup,
+  selectLatestCostSourceId,
+  selectMaxCostTurn,
   selectNearBudgetBySeq,
   selectNearBudgetEvents,
 } from './cost-projector.js';
+import {
+  ToolUsageProjector,
+  ensureToolUsageTables,
+  selectAgentToolUsage,
+} from './tool-usage-projector.js';
 import {
   PlacementProjector,
   ensurePlacementTable,
@@ -87,6 +97,23 @@ export interface CostRecordResult {
   readonly task: CostRollup;
   /** Present iff this cost CROSSED into the near-budget band (the observability event was recorded). */
   readonly nearBudget?: NearBudgetRecord;
+}
+
+/**
+ * The canonical per-agent cost read-model {@link DispatchStore.getAgentCostRollup} returns — the agent's
+ * `cost.recorded` totals projected onto the operator-facing shape: summed token counts (input / output /
+ * the two prompt-cache buckets / total) and `costUsd` (the summed dollar cost where any was reported,
+ * else null — Codex reports no dollars). Derived from the agent-side {@link CostRollup}. The method
+ * returns this or undefined when no cost has been recorded for the agent.
+ */
+export interface AgentCostRollup {
+  readonly agentId: string;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheCreationTokens: number;
+  readonly totalTokens: number;
+  readonly costUsd: number | null;
 }
 
 /** What {@link DispatchStore.recordUsageObserved} returns: the account status + the window bucket iff one was written. */
@@ -148,12 +175,33 @@ export interface DispatchStore {
    * `cost.near_budget` observability event (never a gate). Returns both rollups + any near-budget event.
    */
   recordCost(obs: CostRecorded, budget?: BudgetCap): CostRecordResult;
+  /**
+   * Resolve a durable cost-observation turn id for `(provider, agent, task)`. The engine supplies a
+   * proposed in-memory turn ordinal, but hosted panes can be released or the daemon can restart; this
+   * read keeps the persisted `(provider, agent, task, turn)` identity monotonic across those lifetimes.
+   */
+  nextCostTurn(provider: Provider, agent: string, task: string, proposedTurn: number): number;
+  /** Latest provider-reader source id recorded for `(provider, agent, task)`, if any. */
+  latestCostSourceId(provider: Provider, agent: string, task: string): string | undefined;
   /** The rollup total for `(kind, id)`, or undefined. */
   getRollup(kind: CostRollupKind, id: string): CostRollup | undefined;
   /** Every rollup total, in (kind, id) order. */
   readRollups(): readonly CostRollup[];
   /** Every recorded near-budget crossing in seq order; optionally filtered to one task. */
   readNearBudget(task?: string): readonly NearBudgetRecord[];
+  /**
+   * The canonical per-agent cost read-model for `agentId` — the agent's `cost.recorded` totals projected
+   * onto {@link AgentCostRollup}, or undefined when no cost has been recorded for it. `costUsd` is null when
+   * no observation reported a dollar cost (Codex), the summed dollars otherwise.
+   */
+  getAgentCostRollup(agentId: string): AgentCostRollup | undefined;
+  /**
+   * Record one agent tool call (append `tool.invoked` + fold into the durable per-agent tool-usage
+   * projection). Returns the updated {@link AgentToolUsage} rollup.
+   */
+  recordToolInvoked(inv: ToolInvoked): AgentToolUsage;
+  /** The canonical per-agent tool-usage read-model for `agentId`, or undefined when no tool call recorded. */
+  getAgentToolUsage(agentId: string): AgentToolUsage | undefined;
   /** Record a placement decision (append `placement.decided` + fold); returns the stored record. */
   recordPlacement(agent: string, payload: PlacementDecided): PlacementRecord;
   /** Record a placement decision and its review request atomically. */
@@ -178,6 +226,7 @@ export function openDispatchStore(projectId: string): DispatchStore {
     new UsageProjector(),
     new CostProjector(),
     new PlacementProjector(),
+    new ToolUsageProjector(),
   ];
   const reviewProjectors: readonly Projector[] = [new ReviewProjector()];
 
@@ -186,6 +235,7 @@ export function openDispatchStore(projectId: string): DispatchStore {
     ensureUsageTables(db);
     ensureCostTables(db);
     ensurePlacementTable(db);
+    ensureToolUsageTables(db);
   };
 
   const applyStored = (
@@ -393,6 +443,19 @@ export function openDispatchStore(projectId: string): DispatchStore {
       });
     },
 
+    nextCostTurn(provider: Provider, agent: string, task: string, proposedTurn: number): number {
+      return store.transaction((tx) => {
+        const maxTurn = selectMaxCostTurn(tx.raw as DatabaseSync, provider, agent, task);
+        return Math.max(proposedTurn, maxTurn === undefined ? proposedTurn : maxTurn + 1);
+      });
+    },
+
+    latestCostSourceId(provider: Provider, agent: string, task: string): string | undefined {
+      return store.transaction((tx) =>
+        selectLatestCostSourceId(tx.raw as DatabaseSync, provider, agent, task),
+      );
+    },
+
     getRollup(kind: CostRollupKind, id: string): CostRollup | undefined {
       return store.transaction((tx) => selectCostRollup(tx.raw as DatabaseSync, kind, id));
     },
@@ -403,6 +466,34 @@ export function openDispatchStore(projectId: string): DispatchStore {
 
     readNearBudget(task?: string): readonly NearBudgetRecord[] {
       return store.transaction((tx) => selectNearBudgetEvents(tx.raw as DatabaseSync, task));
+    },
+
+    getAgentCostRollup(agentId: string): AgentCostRollup | undefined {
+      return store.transaction((tx) => {
+        const rollup = selectCostRollup(tx.raw as DatabaseSync, 'agent', agentId);
+        return rollup ? toAgentCostRollup(rollup) : undefined;
+      });
+    },
+
+    recordToolInvoked(inv: ToolInvoked): AgentToolUsage {
+      return store.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        ensureTables(db);
+        const [stored] = tx.append([makeToolInvokedEvent(projectId, inv)]);
+        applyEvent(tx, decode(stored!, dispatchUpcasters, dispatchSchemas), projectors);
+        const usage = selectAgentToolUsage(db, inv.agent);
+        if (!usage) {
+          throw new Error(
+            `openDispatchStore.recordToolInvoked: tool-usage row missing after projection ` +
+              `(agent='${inv.agent}', tool='${inv.tool}')`,
+          );
+        }
+        return usage;
+      });
+    },
+
+    getAgentToolUsage(agentId: string): AgentToolUsage | undefined {
+      return store.transaction((tx) => selectAgentToolUsage(tx.raw as DatabaseSync, agentId));
     },
 
     recordPlacement(agent: string, payload: PlacementDecided): PlacementRecord {
@@ -464,6 +555,24 @@ export function openDispatchStore(projectId: string): DispatchStore {
     close(): void {
       store.close();
     },
+  };
+}
+
+/**
+ * Project an agent-side {@link CostRollup} onto the canonical {@link AgentCostRollup}. `costUsd` is null
+ * when NO observation reported a dollar cost (`costUsdObservations === 0` — Codex never does), the summed
+ * dollars otherwise, so a genuine $0 (a dollar-reporting provider that happened to bill nothing) is
+ * distinguishable from "no dollar cost reported".
+ */
+function toAgentCostRollup(rollup: CostRollup): AgentCostRollup {
+  return {
+    agentId: rollup.id,
+    inputTokens: rollup.inputTokens,
+    outputTokens: rollup.outputTokens,
+    cacheReadTokens: rollup.cacheReadTokens,
+    cacheCreationTokens: rollup.cacheCreationTokens,
+    totalTokens: rollup.totalTokens,
+    costUsd: rollup.costUsdObservations > 0 ? rollup.totalCostUsd : null,
   };
 }
 
