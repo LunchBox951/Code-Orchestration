@@ -41,8 +41,21 @@ export function issueFilingApprovalKey(issueId: string): string {
 }
 
 /**
+ * A stable, machine-matchable marker embedded in every posted issue body, keyed by issueId. It is
+ * the search-before-create idempotency signal (#7 §5 #9): on a retry after a crash between
+ * `gh issue create` and the durable `issue.filed` record, the filer finds the already-posted issue
+ * by this marker and reuses it instead of double-posting. Carries no secret (the issueId is a
+ * co-internal slug), so it is appended after the scrub pass.
+ */
+export function issueBodyMarker(issueId: string): string {
+  return `<!-- co-issue-id: ${issueId} -->`;
+}
+
+/**
  * Render the outward issue body from the record: the captured detail plus the probable-cause
- * report, scrubbed. This is both the approval preview and the posted body — one artifact.
+ * report, scrubbed, with the {@link issueBodyMarker} appended. This is both the approval preview
+ * and the posted body — one artifact (the operator approves byte-for-byte what is posted, marker
+ * included).
  */
 export function renderIssueBody(issue: IssueRecord): string {
   const sections = [issue.detail.trim()];
@@ -50,7 +63,7 @@ export function renderIssueBody(issue: IssueRecord): string {
     sections.push(`## Probable cause\n\n${issue.probableCause.trim()}`);
   }
   sections.push(`---\n_Filed via co (issue ${issue.issueId}, captured by an agent)._`);
-  return scrubIssueText(sections.join('\n\n'));
+  return `${scrubIssueText(sections.join('\n\n'))}\n\n${issueBodyMarker(issue.issueId)}`;
 }
 
 /**
@@ -126,10 +139,71 @@ export function ghIssueCreateArgs(opts: {
   return ['issue', 'create', ...repoFlag, '--title', opts.title, '--body', opts.body];
 }
 
+/** The `-R owner/repo` flag for a `co`-destination filing, or `[]` for the target repo. */
+function destinationRepoFlag(destination: IssueDestination, coRepoSlug?: string): string[] {
+  return destination === 'co' && coRepoSlug != null && coRepoSlug.trim().length > 0
+    ? ['-R', coRepoSlug]
+    : [];
+}
+
+/**
+ * Search-before-create (#7 §5 #9): list recent issues in the destination and return the URL of one
+ * already carrying this issue's {@link issueBodyMarker}, or undefined. Best-effort and read-only —
+ * a list failure or unparseable output returns undefined (we fall through to create rather than
+ * fail the filing). The recent-issue listing (not GitHub search) avoids search-index lag, so a
+ * just-posted issue is found on an immediate crash-retry.
+ */
+function findAlreadyPostedIssue(opts: {
+  readonly ghExec: GhExec;
+  readonly cwd: string;
+  readonly destination: IssueDestination;
+  readonly coRepoSlug?: string;
+  readonly issueId: string;
+}): string | undefined {
+  const args = [
+    'issue',
+    'list',
+    ...destinationRepoFlag(opts.destination, opts.coRepoSlug),
+    '--state',
+    'all',
+    '--limit',
+    '100',
+    '--json',
+    'url,body',
+  ];
+  let raw: string;
+  try {
+    raw = opts.ghExec(opts.cwd, args).trim();
+  } catch {
+    return undefined;
+  }
+  if (raw.length === 0) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) return undefined;
+  const marker = issueBodyMarker(opts.issueId);
+  for (const entry of parsed) {
+    if (entry != null && typeof entry === 'object') {
+      const { url, body } = entry as { url?: unknown; body?: unknown };
+      if (typeof body === 'string' && body.includes(marker) && typeof url === 'string') {
+        return url;
+      }
+    }
+  }
+  return undefined;
+}
+
 /**
  * Enact the outward filing through the approval gate: {@link gateOutwardAction} BLOCKS a pending
- * approval, REFUSES a declined one, and runs `gh issue create` on approve. Returns the posted issue
- * ref (the URL `gh` prints); the caller records that ref as the durable idempotency marker.
+ * approval, REFUSES a declined one, and runs the posting on approve. To stay idempotent across a
+ * crash between the post and the durable `issue.filed` record (#7 §5 #9), it SEARCHES for an
+ * already-posted issue (by {@link issueBodyMarker}) before creating, and reuses it if found.
+ * Returns the posted issue ref (the URL `gh` prints); the caller records that ref as the durable
+ * idempotency marker.
  */
 export function fileIssueOutward(opts: {
   readonly outcome: ApprovalOutcome;
@@ -137,9 +211,14 @@ export function fileIssueOutward(opts: {
   readonly cwd: string;
   readonly destination: IssueDestination;
   readonly coRepoSlug?: string;
+  readonly issueId: string;
   readonly title: string;
   readonly body: string;
 }): string {
   const args = ghIssueCreateArgs(opts);
-  return gateOutwardAction(opts.outcome, () => opts.ghExec(opts.cwd, args).trim());
+  return gateOutwardAction(opts.outcome, () => {
+    const existingUrl = findAlreadyPostedIssue(opts);
+    if (existingUrl != null) return existingUrl;
+    return opts.ghExec(opts.cwd, args).trim();
+  });
 }

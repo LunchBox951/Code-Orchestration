@@ -159,6 +159,7 @@ export const issueFileTool: ToolSpec<IssueFileInput, IssueFileOutput> = {
       cwd: ctx.cwd,
       destination: issue.destination,
       ...(coRepoSlug != null ? { coRepoSlug } : {}),
+      issueId: issue.issueId,
       title: existing.subject,
       body: existing.body,
     });

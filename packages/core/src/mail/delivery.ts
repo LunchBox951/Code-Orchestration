@@ -151,12 +151,20 @@ export class InProcessDelivery implements Delivery {
       applyEvent(tx, decode(stored!, mailUpcasters, mailSchemas), this.projectors);
 
       const delivered = selectMailBySeq(db, stored!.seq);
-      if (!delivered) {
-        throw new Error(
-          `InProcessDelivery: inbox row missing after projection (seq=${stored!.seq})`,
-        );
+      if (delivered) return { mail: delivered, created: true };
+
+      // The fold inserted no row for our seq: a concurrent process committed the same
+      // idempotency_key between our dedup read and our fold, so the partial UNIQUE index made
+      // the projector collapse our duplicate (#7 §5 #8). Return that canonical row — never a dup.
+      if (envelope.idempotencyKey != null) {
+        const existing = selectMailByIdempotencyKey(db, envelope.idempotencyKey, {
+          recipient: envelope.to,
+          sender: envelope.from,
+          type: envelope.type,
+        });
+        if (existing) return { mail: existing, created: false };
       }
-      return { mail: delivered, created: true };
+      throw new Error(`InProcessDelivery: inbox row missing after projection (seq=${stored!.seq})`);
     });
   }
 

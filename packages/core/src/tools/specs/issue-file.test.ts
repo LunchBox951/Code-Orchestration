@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -108,6 +108,27 @@ function makeCtx(id: string, stores: Stores, gh: GhExec): ToolContext {
   };
 }
 
+/**
+ * A gh mock for the filing path: answers the search-before-create `gh issue list` with an empty
+ * set (so the search finds nothing and the create runs) and every other call (`gh issue create`)
+ * with `url`. Lets the post-`#9` two-call flow (list → create) run under a stubbed gh.
+ */
+function fakeGh(url: string): Mock<GhExec> {
+  return vi.fn<GhExec>((_, args) => (args[0] === 'issue' && args[1] === 'list' ? '[]' : url));
+}
+
+/** The args of the single `gh issue create` call (search-before-create lists first). */
+function createArgs(gh: Mock<GhExec>): readonly string[] {
+  const call = gh.mock.calls.find((c) => c[1][0] === 'issue' && c[1][1] === 'create');
+  if (call == null) throw new Error('expected a `gh issue create` call');
+  return call[1];
+}
+
+/** How many `gh issue create` calls ran — the no-double-post invariant counts this, not list calls. */
+function createCallCount(gh: Mock<GhExec>): number {
+  return gh.mock.calls.filter((c) => c[1][0] === 'issue' && c[1][1] === 'create').length;
+}
+
 const file = (ctx: ToolContext) =>
   invokeTool(buildCoreRegistry(), ctx, 'co_issue_file', { issue_id: 'iss-1' });
 
@@ -195,7 +216,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     configure(id);
     const stores = openStores(id);
     seedDiagnosedIssue(stores);
-    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/7');
+    const gh = fakeGh('https://github.com/acme/co/issues/7');
     const coordCtx = makeCtx(id, stores, gh);
     const leadCtx = { ...coordCtx, agent: 'lead-1' };
 
@@ -217,7 +238,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     const filed = (await file(leadCtx)) as Record<string, unknown>;
     expect(filed['status']).toBe('filed');
     expect(stores.mail.inbox(OPERATOR).filter((m) => m.type === MAIL_APPROVAL)).toHaveLength(1);
-    expect(gh).toHaveBeenCalledTimes(1);
+    expect(createCallCount(gh)).toBe(1);
     expect(stores.issues.getIssue('iss-1')?.filedBy).toBe('lead-1');
   });
 
@@ -226,7 +247,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     configure(id);
     const stores = openStores(id);
     seedDiagnosedIssue(stores);
-    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/9');
+    const gh = fakeGh('https://github.com/acme/co/issues/9');
     const ctx = makeCtx(id, stores, gh);
 
     const spoof = stores.mail.send({
@@ -260,7 +281,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
 
     await file(ctx);
 
-    const [, args] = gh.mock.calls[0]!;
+    const args = createArgs(gh);
     expect(args[args.indexOf('--title') + 1]).toBe(authorized.subject);
     expect(args[args.indexOf('--title') + 1]).not.toBe('spoofed title');
     expect(args[args.indexOf('--body') + 1]).toBe(authorized.body);
@@ -295,7 +316,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     configure(id);
     const stores = openStores(id);
     seedDiagnosedIssue(stores);
-    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/5');
+    const gh = fakeGh('https://github.com/acme/co/issues/5');
     const ctx = makeCtx(id, stores, gh);
 
     const req = (await file(ctx)) as Record<string, unknown>;
@@ -312,8 +333,8 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     const filed = (await file(ctx)) as Record<string, unknown>;
     expect(filed['status']).toBe('filed');
     expect(filed['posted_ref']).toBe('https://github.com/acme/co/issues/5');
-    expect(gh).toHaveBeenCalledTimes(1);
-    const [, args] = gh.mock.calls[0]!;
+    expect(createCallCount(gh)).toBe(1);
+    const args = createArgs(gh);
     expect(args).toContain('-R');
     expect(args).toContain('acme/co');
     expect(args.join(' ')).not.toContain('/home/alice');
@@ -324,7 +345,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     const again = (await file(ctx)) as Record<string, unknown>;
     expect(again['status']).toBe('filed');
     expect(again['posted_ref']).toBe('https://github.com/acme/co/issues/5');
-    expect(gh).toHaveBeenCalledTimes(1);
+    expect(createCallCount(gh)).toBe(1);
   });
 
   it('posts the approved title even if a later retry supplies a different title', async () => {
@@ -332,7 +353,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     configure(id);
     const stores = openStores(id);
     seedDiagnosedIssue(stores);
-    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/6');
+    const gh = fakeGh('https://github.com/acme/co/issues/6');
     const ctx = makeCtx(id, stores, gh);
 
     const req = (await fileWithTitle(ctx, 'approved /home/alice title')) as Record<
@@ -351,7 +372,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
 
     await fileWithTitle(ctx, 'changed title after approval');
 
-    const [, args] = gh.mock.calls[0]!;
+    const args = createArgs(gh);
     const title = args[args.indexOf('--title') + 1];
     expect(title).toBe(held.subject);
     expect(title).not.toBe('changed title after approval');
@@ -362,7 +383,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     configure(id);
     const stores = openStores(id);
     seedDiagnosedIssue(stores);
-    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/8');
+    const gh = fakeGh('https://github.com/acme/co/issues/8');
     const ctx = makeCtx(id, stores, gh);
     const approvedBody = 'approved body from an older renderer';
 
@@ -383,8 +404,49 @@ describe('co_issue_file — the per-post approval round-trip', () => {
 
     await fileWithTitle(ctx, 'changed title after approval');
 
-    const [, args] = gh.mock.calls[0]!;
+    const args = createArgs(gh);
     const body = args[args.indexOf('--body') + 1];
     expect(body).toBe(approvedBody);
+  });
+
+  it('search-before-create reuses an already-posted issue instead of double-posting (#7 §5 #9)', async () => {
+    // Simulates a crash-retry: a prior approved filing posted the issue but crashed before the
+    // durable issue.filed record, so the issue is still 'diagnosed'. On retry, the search finds
+    // the already-posted issue by its body marker and reuses it — gh issue create never runs.
+    const id = 'p-if-search-before-create';
+    configure(id);
+    const stores = openStores(id);
+    seedDiagnosedIssue(stores);
+    const alreadyPosted = 'https://github.com/acme/co/issues/42';
+    const gh = vi.fn<GhExec>((_, args) => {
+      if (args[0] === 'issue' && args[1] === 'list') {
+        return JSON.stringify([
+          { url: 'https://github.com/acme/co/issues/1', body: 'unrelated issue' },
+          {
+            url: alreadyPosted,
+            body: `crash-survivor body\n\n<!-- co-issue-id: iss-1 -->`,
+          },
+        ]);
+      }
+      return 'https://github.com/acme/co/issues/99'; // a create here would be the double-post
+    });
+    const ctx = makeCtx(id, stores, gh);
+
+    const req = (await file(ctx)) as Record<string, unknown>;
+    const held = stores.mail
+      .inbox(OPERATOR)
+      .find((m) => m.seq === (req['approval_seq'] as number))!;
+    stores.mail.reply(held, {
+      type: MAIL_APPROVAL_RESPONSE,
+      subject: 're',
+      body: 'approved',
+      decision: 'approve',
+    });
+
+    const filed = (await file(ctx)) as Record<string, unknown>;
+    expect(filed['status']).toBe('filed');
+    expect(filed['posted_ref']).toBe(alreadyPosted); // reused, not re-posted
+    expect(createCallCount(gh)).toBe(0); // gh issue create never ran — no double-post
+    expect(stores.issues.getIssue('iss-1')?.postedRef).toBe(alreadyPosted);
   });
 });

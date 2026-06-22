@@ -122,6 +122,37 @@ export function ensureInboxTable(db: DatabaseSync): void {
   db.exec(CREATE_INBOX_TABLE);
   addMissingInboxColumn(db, 'retracted', 'INTEGER NOT NULL DEFAULT 0');
   addMissingInboxColumn(db, 'review_verdict', 'TEXT');
+  ensureInboxIdempotencyIndex(db);
+}
+
+/**
+ * Enforce mail idempotency at the read-model with a PARTIAL UNIQUE index over the dedup scope
+ * (#7 §5 #8). Without it, two processes (the daemon and a `co mail send` CLI) can BOTH pass the
+ * read-then-append dedup check and append the same `idempotency_key`, yielding duplicate inbox
+ * rows. With it, the loser's fold collapses (the projector's `ON CONFLICT … DO NOTHING`) instead
+ * of inserting a duplicate. The index is partial (`WHERE idempotency_key IS NOT NULL`) — null-key
+ * mail is never deduped. Created lazily and once (guarded on existence); any legacy duplicate-key
+ * rows that pre-date the index are collapsed to their lowest seq first so creation can't fail.
+ */
+function ensureInboxIdempotencyIndex(db: DatabaseSync): void {
+  const exists = db
+    .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?`)
+    .get('idx_inbox_idempotency_unique');
+  if (exists != null) return;
+  db.exec(
+    `DELETE FROM inbox
+       WHERE idempotency_key IS NOT NULL
+         AND seq NOT IN (
+           SELECT MIN(seq) FROM inbox
+            WHERE idempotency_key IS NOT NULL
+            GROUP BY idempotency_key, recipient, sender, type
+         )`,
+  );
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_idempotency_unique
+       ON inbox (idempotency_key, recipient, sender, type)
+       WHERE idempotency_key IS NOT NULL`,
+  );
 }
 
 function addMissingInboxColumn(db: DatabaseSync, column: string, definition: string): void {
@@ -497,12 +528,16 @@ export class MailProjector implements Projector {
     // the human-review gate reads it replay-safely (AC-L5-5). NULL for every other type.
     const reviewVerdict: Verdict | null =
       type === MAIL_REVIEW_RESPONSE ? (event.payload as ReviewResponse).reviewVerdict : null;
-    db.prepare(
-      `INSERT INTO inbox
+    const insertResult = db
+      .prepare(
+        `INSERT INTO inbox
          (seq, recipient, sender, type, subject, body, correlation_id, causation_id,
           idempotency_key, ts, kind, read, resolved, thread_id, decision, review_verdict)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
-    ).run(
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+       ON CONFLICT (idempotency_key, recipient, sender, type)
+         WHERE idempotency_key IS NOT NULL DO NOTHING`,
+      )
+      .run(
       event.seq,
       recipient,
       event.actor,
@@ -518,6 +553,11 @@ export class MailProjector implements Projector {
       decision,
       reviewVerdict,
     );
+
+    // A duplicate idempotency_key collapsed onto an existing inbox row (#7 §5 #8): the INSERT
+    // affected no rows. This event is a read-model no-op — the canonical earlier mail already
+    // drove thread resolution — so skip the closer logic rather than fail on the missing row.
+    if (insertResult.changes === 0) return;
 
     // Generic resolution: this freshly-folded mail is a potential closer. For each
     // open actionable item in its thread, ask that item's registered predicate

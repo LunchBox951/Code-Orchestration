@@ -338,6 +338,43 @@ describe('AC-L1-1 — idempotent send (dedupe on idempotencyKey)', () => {
       mail.close();
     }
   });
+
+  it('partial UNIQUE index collapses a duplicate-key event that slipped past the in-tx dedup (#7 §5 #8)', () => {
+    // The read-then-append dedup is per-transaction; two PROCESSES can both pass it and append the
+    // same idempotency_key. Simulate that by folding two same-key events in separate transactions
+    // (bypassing deliver's dedup). The partial UNIQUE index + ON CONFLICT must collapse to one row.
+    const store = openProjectStore('p-idem-race');
+    try {
+      const projectors = [new MailProjector()];
+      const fold = (body: string): void => {
+        store.transaction((tx) => {
+          const [stored] = tx.append([
+            makeMailEvent('p-idem-race', {
+              type: MAIL_CHAT,
+              to: 'bob',
+              from: 'alice',
+              subject: 's',
+              body,
+              idempotencyKey: 'race-key',
+            }),
+          ]);
+          applyEvent(tx, decode(stored!, mailUpcasters, mailSchemas), projectors);
+        });
+      };
+      fold('first');
+      fold('second');
+      const rows = store.transaction(
+        (tx) =>
+          (tx.raw as DatabaseSync)
+            .prepare(`SELECT body FROM inbox WHERE recipient = 'bob'`)
+            .all() as Array<{ body: string }>,
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.body).toBe('first'); // lowest seq wins; the duplicate collapsed
+    } finally {
+      store.close();
+    }
+  });
 });
 
 describe('AC-L1-2 — in-process delivery; headless; L7 stub fails loud', () => {

@@ -137,6 +137,7 @@ describe('fileIssueOutward — gateOutwardAction is the gate', () => {
       cwd: '/tmp/repo',
       destination: 'co',
       coRepoSlug: 'acme/co',
+      issueId: 'iss-12',
       title: 'T',
       body: 'B',
     });
@@ -153,11 +154,15 @@ describe('fileIssueOutward — gateOutwardAction is the gate', () => {
     expect(gh).not.toHaveBeenCalled();
   });
 
-  it('runs gh on approval and returns the posted ref', () => {
-    const gh = vi.fn<GhExec>().mockReturnValue('https://github.com/acme/co/issues/12');
+  it('runs gh on approval and returns the posted ref (after a search-before-create list)', () => {
+    // The search-before-create `issue list` returns an empty set, so the create runs (#7 §5 #9).
+    const gh = vi.fn<GhExec>((_, args) =>
+      args[1] === 'list' ? '[]' : 'https://github.com/acme/co/issues/12',
+    );
     const ref = fileViaGh(gh, 'approved');
     expect(ref).toBe('https://github.com/acme/co/issues/12');
-    expect(gh).toHaveBeenCalledTimes(1);
+    const createCalls = gh.mock.calls.filter((c) => c[1][0] === 'issue' && c[1][1] === 'create');
+    expect(createCalls).toHaveLength(1); // exactly one create — no double-post
     expect(gh).toHaveBeenCalledWith('/tmp/repo', [
       'issue',
       'create',
@@ -195,6 +200,7 @@ describe('end-to-end approval thread → outcome → gated filing', () => {
         cwd: '/tmp/repo',
         destination: 'co',
         coRepoSlug: 'acme/co',
+        issueId: ISSUE.issueId,
         title: 'T',
         body: renderIssueBody(ISSUE),
       });

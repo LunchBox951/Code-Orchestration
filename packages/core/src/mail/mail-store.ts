@@ -392,13 +392,21 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
           );
         }
         const delivered = selectMailBySeq(db, stored.at(-1)!.seq);
-        if (!delivered) {
-          throw new Error(
-            `mail human review request: inbox row missing after projection ` +
-              `(seq=${stored.at(-1)!.seq})`,
-          );
+        if (delivered) return { mail: delivered, request: record };
+        // A concurrent request committed the same idempotency_key first; our duplicate mail row
+        // collapsed under the partial UNIQUE index (#7 §5 #8). Return the canonical existing mail.
+        if (envelope.idempotencyKey != null) {
+          const existing = selectMailByIdempotencyKey(db, envelope.idempotencyKey, {
+            recipient: envelope.to,
+            sender: envelope.from,
+            type: envelope.type,
+          });
+          if (existing) return { mail: existing, request: record };
         }
-        return { mail: delivered, request: record };
+        throw new Error(
+          `mail human review request: inbox row missing after projection ` +
+            `(seq=${stored.at(-1)!.seq})`,
+        );
       });
     },
 
@@ -537,12 +545,20 @@ export function openMailStore(projectId: string, opts?: MailStoreOptions): MailS
         for (const event of stored) applyStored(tx, event);
 
         const delivered = selectMailBySeq(db, stored.at(-1)!.seq);
-        if (!delivered) {
-          throw new Error(
-            `mail review reply: inbox row missing after projection (seq=${stored.at(-1)!.seq})`,
-          );
+        if (delivered) return delivered;
+        // A concurrent reply committed the same idempotency_key first; our duplicate mail row
+        // collapsed under the partial UNIQUE index (#7 §5 #8). Return the canonical existing mail.
+        if (envelope.idempotencyKey != null) {
+          const existing = selectMailByIdempotencyKey(db, envelope.idempotencyKey, {
+            recipient: envelope.to,
+            sender: envelope.from,
+            type: envelope.type,
+          });
+          if (existing) return existing;
         }
-        return delivered;
+        throw new Error(
+          `mail review reply: inbox row missing after projection (seq=${stored.at(-1)!.seq})`,
+        );
       });
     },
 
