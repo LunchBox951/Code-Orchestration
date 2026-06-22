@@ -264,6 +264,60 @@ describe('createSocketBridgeTransportPair — live provider bridge transport', (
     expect(log).toContain('connect_error');
   });
 
+  it('the co MCP surface is reachable DURING pane startup, before ready (real provider timing, F1)', async () => {
+    // A real provider connects its configured MCP server during its OWN startup handshake — i.e.
+    // BEFORE it reaches the ready composer. This proves the socket is bound + the surface answers in
+    // that window (the engine binds via hostSession before awaiting driveToReady), so co_* tools come
+    // online for a cold-starting coordinator instead of "still connecting".
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const identity = makeIdentity({ agent: 'impl-early-connect', projectId, cwd });
+    const isolatedHomeDir = join(cwd, 'isolated', 'impl-early-connect');
+    const socketPath = defaultBridgeSocketPath(isolatedHomeDir, 'impl-early-connect');
+    if (!(await unixSocketsAvailable(socketPath))) return;
+    const bridgeLogPath = join(cwd, 'bridge-early.log');
+
+    const pty = new FakePty();
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => createSocketBridgeTransportPair(socketPath, bridgeLogPath),
+      now: () => 0,
+      quietWindow: neverResolve,
+      injectOptions: { retryDelay: neverResolve },
+    });
+    engines.push(engine);
+
+    // Start hosting but DO NOT drive to ready yet — the pane is still "starting".
+    const ensureP = engine.ensureHosted(identity);
+
+    // The provider's bridge connects + a client completes a co_status round-trip while the pane is
+    // still pre-ready. runSocketBridge retries (CO_MCP_BRIDGE_CONNECT_TIMEOUT_MS) until the socket
+    // binds, so this does not depend on winning a race with the bind.
+    const bridgeInput = new PassThrough();
+    const bridgeOutput = new PassThrough();
+    const bridgeP = runSocketBridge(socketPath, {
+      stdin: bridgeInput,
+      stdout: bridgeOutput,
+      diagnosticLogPath: bridgeLogPath,
+    });
+    const client = new Client({ name: 'co-early-connect-test', version: '0.0.0' });
+    clients.push(client);
+    await client.connect(new StdioServerTransport(bridgeOutput, bridgeInput));
+    const status = await client.callTool({ name: 'co_status', arguments: {} });
+    expect((status.structuredContent as Record<string, unknown>).agent).toBe('impl-early-connect');
+
+    // Only NOW does the pane reach ready — the surface was live the whole startup window.
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await ensureP;
+
+    await client.close();
+    bridgeInput.end();
+    await bridgeP;
+    const log = readFileSync(bridgeLogPath, 'utf8');
+    expect(log).toContain('connect_ok socketPath=');
+    expect(log).toContain('server_listening socketPath=');
+  });
+
   it('bridges stdio JSON-RPC through the Unix socket to the engine-hosted MCP server', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
