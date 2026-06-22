@@ -559,6 +559,47 @@ describe('boundConsoleTranscript (#66 sub-bug B) — never slices away the alter
   });
 });
 
+// The engine's HARD ceiling on the retained tail (`TRANSCRIPT_TAIL_HARD_MAX_CHARS` in `@co/mcp` — 4 × 64
+// KiB). Mirrored as a literal here for the same reason the source mirrors it (desktop's test must not reach
+// into a deep `@co/mcp` build subpath, and the package index does not re-export it). The renderer cap MUST
+// stay strictly GREATER than this; the boundary test below proves what happens at exactly this size.
+const ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS = 4 * 64 * 1024;
+
+describe('AgentsConsoleVM — renderer cap has STRICT headroom over the engine ceiling (#66 round-2)', () => {
+  it('a ceiling-sized engine tail leading with ESC[?1049h + a live append STILL leads with ESC[?1049h', () => {
+    // Round-2 regression: the engine hands the renderer a tail up to its HARD ceiling that LEADS with the
+    // alt-screen-enter. The renderer then appends live chunks on top before re-bounding. If the renderer cap
+    // EQUALLED the engine ceiling (the round-1 bug), `ceiling-sized tail + append` would exceed the cap and
+    // the alt-screen-aware front-drop would re-slice the leading enter away at that boundary — re-introducing
+    // the garble. With the renderer cap sitting strictly ABOVE the engine ceiling, the join fits and the
+    // leading enter survives. This assertion FAILS when the cap == the engine ceiling, PASSES with headroom.
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('a1', '@operator')]));
+    vm.selectAgent('a1');
+
+    // A ceiling-sized engine tail: exactly TRANSCRIPT_TAIL_HARD_MAX_CHARS chars that LEAD with the enter,
+    // just as `transcriptTailFrom` produces when it anchors back to the alt-screen-enter at the ceiling.
+    const engineTail =
+      ALT_ENTER + 'E'.repeat(ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS - ALT_ENTER.length);
+    expect(engineTail.length).toBe(ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS);
+    vm.setTranscriptTail(tail('a1', engineTail));
+    // Sanity: the ceiling-sized backfill alone still leads with the enter (it is < the renderer cap).
+    expect(vm.state.transcript.startsWith(ALT_ENTER)).toBe(true);
+
+    // A live append on top of the ceiling-sized tail — this is what re-slices the front under the old cap.
+    const liveAppend = 'L'.repeat(4_096);
+    vm.appendChunk(push('a1', liveAppend, engineTail.length));
+
+    // The load-bearing invariant: the reconstructed transcript STILL leads with the alt-screen-enter, so a
+    // real TUI redraw replays cleanly. The renderer's headroom over the engine ceiling is what guarantees it.
+    expect(vm.state.transcript.startsWith(ALT_ENTER)).toBe(true);
+    expect(vm.state.transcript.includes(ALT_ENTER)).toBe(true);
+    expect(vm.state.transcript.endsWith(liveAppend)).toBe(true);
+    // The renderer cap must be strictly above the engine ceiling for the headroom invariant to hold at all.
+    expect(CONSOLE_TRANSCRIPT_MAX_CHARS).toBeGreaterThan(ENGINE_TRANSCRIPT_TAIL_HARD_MAX_CHARS);
+  });
+});
+
 describe('AgentsConsoleVM — alt-screen-aware bound over the reconstructed transcript (#66 sub-bug B)', () => {
   it('keeps the early ESC[?1049h after a >cap stream (FAILS under the old flat segment-store drop)', () => {
     const vm = new AgentsConsoleVM();

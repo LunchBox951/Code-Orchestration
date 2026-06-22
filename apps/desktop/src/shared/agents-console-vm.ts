@@ -9,16 +9,24 @@ import type {
 import type { AgentStatus } from './dashboard-vm.js';
 
 /**
- * #66 sub-bug B — the renderer-side bound on the reconstructed transcript. Kept in lockstep with the
- * engine's HARD ceiling (`TRANSCRIPT_TAIL_HARD_MAX_CHARS` in `@co/mcp` — 4 × 64 KiB = 256 KiB), NOT the
- * old flat 64 KiB. The engine now retains its tail back to the last alternate-screen-enter (`ESC[?1049h`)
- * so the alt-screen setup an interactive TUI needs to replay cleanly is never sliced away — up to that
- * 256 KiB ceiling. Bounding the renderer to the SAME ceiling means this VM never re-slices below what the
- * engine carefully preserved (which would re-drop the `ESC[?1049h` and re-introduce the stacked-frame
- * garble). Mirrored as a literal — desktop imports `@co/core`/`@co/mcp` but this stays the single
- * renderer knob; if the engine ceiling changes, change this with it.
+ * #66 sub-bug B — the renderer-side bound on the reconstructed transcript. Must sit with STRICT headroom
+ * ABOVE the engine's HARD ceiling (`TRANSCRIPT_TAIL_HARD_MAX_CHARS` in `@co/mcp` — 4 × 64 KiB = 256 KiB),
+ * NOT equal to it. The engine retains its tail back to the last alternate-screen-enter (`ESC[?1049h`) — up
+ * to a 256 KiB ceiling-sized tail that LEADS with that enter. The renderer then APPENDS live chunks on top
+ * of that tail before re-bounding. If the renderer cap equalled the 256 KiB engine ceiling (the round-1
+ * bug), a ceiling-sized engine tail plus even one live append would push the join past the cap, and the
+ * alt-screen-aware front-drop would re-slice the leading `ESC[?1049h` away at that boundary — re-introducing
+ * the stacked-frame garble exactly where the engine had carefully preserved it. Sizing the renderer cap to
+ * 512 KiB (2× the engine ceiling) gives room for a full ceiling-sized engine tail PLUS a generous live
+ * append, so the alt-screen-aware bound holds: the leading enter is never re-sliced at the boundary.
+ * Mirrored as a literal — desktop imports `@co/core`/`@co/mcp` but this stays the single renderer knob; it
+ * must remain strictly GREATER than the engine ceiling, so if that ceiling changes, keep the slack here.
+ *
+ * Caveat — this is a string-boundary invariant (the leading `ESC[?1049h` survives the bound), proven by
+ * the unit tests. That the surviving bytes actually replay into a clean, un-garbled frame in a real xterm
+ * still needs live verification against an interactive TUI; the unit tests do not exercise the terminal.
  */
-export const CONSOLE_TRANSCRIPT_MAX_CHARS = 4 * 64 * 1024;
+export const CONSOLE_TRANSCRIPT_MAX_CHARS = 8 * 64 * 1024;
 
 /**
  * The alternate-screen-ENTER control sequence — DEC private mode SET for 1049 (and the legacy 1047 / 47
@@ -278,9 +286,11 @@ export class AgentsConsoleVM {
     }
 
     // Bound the segment store with the SAME alt-screen-aware policy as the displayed transcript so the
-    // store and `state.transcript` stay in lockstep AND the leading `ESC[?1049h` survives into the join.
-    // A flat front-drop here (the old logic) would strip the early alt-screen-enter from the store before
-    // `boundConsoleTranscript` ever saw it, so the displayed bound could not recover it (#66 sub-bug B).
+    // store and `state.transcript` carry the same window AND the leading `ESC[?1049h` survives into the
+    // join. Because the renderer cap ({@link CONSOLE_TRANSCRIPT_MAX_CHARS}) sits ABOVE the engine ceiling,
+    // a ceiling-sized engine tail plus a live append still fits under the cap, so this bound does not slice
+    // the leading enter away at that boundary. A flat front-drop here (the old logic) would strip the early
+    // alt-screen-enter from the store before `boundConsoleTranscript` ever saw it (#66 sub-bug B).
     const joined = merged.map((segment) => segment.text).join('');
     const bounded = boundConsoleTranscript(joined);
     let dropped = joined.length - bounded.length;
