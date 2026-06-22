@@ -25,7 +25,7 @@
  * back from the store, never asserted as a literal). Git fixtures are init'd with `commit.gpgsign=false`
  * and a Signed-off-by (mirrors sh1-dry-run's `git()` setup).
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -58,6 +58,7 @@ import {
   openSpecStore,
   openWorktreeStore,
   parseSubRoleId,
+  renderScorecard,
   reviewRequestEnvelope,
   reviewReviewerKey,
   startCoordinatorSession,
@@ -987,6 +988,19 @@ describe('orchestration benchmark — sandbox harness drives the FULL coordinato
 
     // (8) NO orchestration footprint left in the repo tree (Principle 12).
     expect(existsSync(join(repo, '.co'))).toBe(false);
+
+    // (9) THE THREE SCORES — correctness is a real number (the oracle case fraction, gated); token-economy
+    //     is NULL in the sandbox arm (N/A, never a silent zero — no real tokens are spent); context/tool
+    //     efficiency is also null until the per-agent tool-usage rollup surface lands (read via optional
+    //     chaining — an absent rollup is an honest N/A, not a 0).
+    expect(scorecard.scores.correctness).toBe(1);
+    expect(scorecard.scores.tokenEconomy).toBeNull();
+    for (const a of scorecard.agents) {
+      expect(a.tokenEconomy.tokenEconomy).toBeNull();
+      expect(a.tokenEconomy.totalTokens).toBeNull();
+    }
+    // The rendered scorecard shows N/A (not 0) for the sandbox-arm token economy.
+    expect(renderScorecard(scorecard)).toMatch(/token-economy=N\/A/u);
   });
 });
 
@@ -1051,12 +1065,25 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
       body: 'wedged',
     });
 
-    const agents = aggregateAgentMetrics(projectId, {
-      'coord-a': { turnsUsed: 3, wallClockMs: 3000 },
-      'lead-a': { turnsUsed: 2, wallClockMs: 2000 },
-    });
+    const agents = aggregateAgentMetrics(
+      projectId,
+      {
+        'coord-a': { turnsUsed: 3, wallClockMs: 3000 },
+        'lead-a': { turnsUsed: 2, wallClockMs: 2000 },
+      },
+      'calc-lib',
+      'sandbox-fake',
+      1,
+    );
     // @operator is excluded; every roster agent appears (impl-a with zeroed samples).
     expect(agents.map((a) => a.agentId).sort()).toEqual(['coord-a', 'impl-a', 'lead-a']);
+    // The sandbox arm SKIPS the cost read entirely (fidelity-enforced), so the live-only economy score is
+    // GUARANTEED null (N/A) — not a silent zero, not an accident of B's store being absent. Without PR B's
+    // tool-usage rollup the tool-efficiency score is null too.
+    expect(agents.find((a) => a.agentId === 'coord-a')?.tokenEconomy?.tokenEconomy).toBeNull();
+    expect(
+      agents.find((a) => a.agentId === 'coord-a')?.toolEfficiency?.contextEfficiency,
+    ).toBeNull();
     const summary = summarizeRun({
       runId: 'r',
       scenarioId: 's',
@@ -1064,7 +1091,7 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
       providerMode: 'claude-only',
       fidelity: 'sandbox-fake',
       completed: true,
-      artifact: { correct: true, detail: 'ok' },
+      artifact: { correct: true, detail: 'ok', casesPassed: 1, casesTotal: 1 },
       agents,
       merges: [
         {
@@ -1085,6 +1112,125 @@ describe('orchestration-benchmark pure helpers — unit-tested with no pty (the 
     expect(summary.totalEscalations).toBe(1);
     expect(agents.find((a) => a.agentId === 'lead-a')?.escalations).toBe(1);
     expect(agents.find((a) => a.agentId === 'impl-a')?.turnsUsed).toBe(0);
+  });
+
+  it('aggregateAgentMetrics keeps the legacy two-argument public form with null score blocks', () => {
+    const { projectId } = makeProject();
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-a', role: 'coordinator', parent: OPERATOR });
+
+    const agents = aggregateAgentMetrics(projectId, {
+      'coord-a': { turnsUsed: 3, wallClockMs: 3000 },
+    });
+
+    expect(agents).toHaveLength(1);
+    expect(agents[0]!.turnsUsed).toBe(3);
+    expect(agents[0]!.tokenEconomy?.tokenEconomy).toBeNull();
+    expect(agents[0]!.toolEfficiency?.contextEfficiency).toBeNull();
+  });
+
+  it('aggregateAgentMetrics FORCES tokenEconomy=null in sandbox even when the store has a non-null cost rollup (fidelity short-circuit; non-vacuous)', () => {
+    const { projectId } = makeProject();
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-a', role: 'coordinator', parent: OPERATOR });
+
+    // An injected econ store whose getAgentCostRollup returns NON-null token data (it does NOT depend on
+    // PR B being absent — the store is present and answers). If the sandbox-fake cost-skip in readAgentEcon
+    // is removed, the sandbox arm below would READ this rollup and compute a non-null tokenEconomy, failing
+    // the `toBeNull()` assertions — that is what makes this test non-vacuous.
+    const ECON_ROLLUP = {
+      agentId: 'coord-a',
+      inputTokens: 1000,
+      outputTokens: 2000,
+      cacheReadTokens: 500,
+      cacheCreationTokens: 100,
+      totalTokens: 3100,
+      costUsd: 0.42,
+    };
+    // A non-null tool rollup so the live arm exercises the live tool-usage read + the driver-DERIVED
+    // toolCallsPerCompletedTask (toolCalls / completedTaskCount) and its divide-by-zero guard.
+    const TOOL_ROLLUP = {
+      agentId: 'coord-a',
+      toolCalls: 6,
+      toolErrors: 0,
+      redundantReads: 0,
+      permissionAsks: 0,
+      turnsToFirstProductiveCoCall: 0,
+    };
+    const openEconWithCost = (): {
+      getAgentCostRollup: () => typeof ECON_ROLLUP;
+      getAgentToolUsage: () => typeof TOOL_ROLLUP;
+      close: () => void;
+    } => ({
+      getAgentCostRollup: () => ECON_ROLLUP,
+      getAgentToolUsage: () => TOOL_ROLLUP,
+      close: () => {},
+    });
+
+    // SANDBOX arm: the cost read is SKIPPED entirely (fidelity-enforced) — tokenEconomy is GUARANTEED null
+    // even though the store would have returned a non-null rollup.
+    const sandbox = aggregateAgentMetrics(
+      projectId,
+      {},
+      'calc-lib',
+      'sandbox-fake',
+      1,
+      openEconWithCost,
+    );
+    const sandboxCoord = sandbox.find((a) => a.agentId === 'coord-a');
+    expect(sandboxCoord?.tokenEconomy?.tokenEconomy).toBeNull();
+    expect(sandboxCoord?.tokenEconomy?.totalTokens).toBeNull();
+    expect(sandboxCoord?.tokenEconomy?.costUsd).toBeNull();
+
+    // HOST-LIVE arm: the SAME injected rollup IS read — tokenEconomy is computed (non-null), proving the
+    // short-circuit is the only thing nulling the sandbox arm (not a missing store).
+    const live = aggregateAgentMetrics(projectId, {}, 'calc-lib', 'host-live', 1, openEconWithCost);
+    const liveCoord = live.find((a) => a.agentId === 'coord-a');
+    expect(liveCoord?.tokenEconomy?.totalTokens).toBe(3100);
+    expect(liveCoord?.tokenEconomy?.costUsd).toBe(0.42);
+    expect(liveCoord?.tokenEconomy?.tokenEconomy).not.toBeNull();
+    // The live tool rollup is read + folded: contextEfficiency is non-null and the DERIVED diagnostic is
+    // toolCalls / completedTaskCount = 6 / 1 = 6.
+    expect(liveCoord?.toolEfficiency?.contextEfficiency).not.toBeNull();
+    expect(liveCoord?.toolEfficiency?.toolCallsPerCompletedTask).toBe(6);
+
+    // The divide-by-zero guard: with completedTaskCount 0 the derived diagnostic is null (no Infinity),
+    // even though the tool rollup is present.
+    const liveNoTasks = aggregateAgentMetrics(
+      projectId,
+      {},
+      'calc-lib',
+      'host-live',
+      0,
+      openEconWithCost,
+    );
+    const liveNoTasksCoord = liveNoTasks.find((a) => a.agentId === 'coord-a');
+    expect(liveNoTasksCoord?.toolEfficiency?.toolCallsPerCompletedTask).toBeNull();
+  });
+
+  it('aggregateAgentMetrics LOGS (does not silently swallow) when the econ store open throws, still degrading to null scores', () => {
+    const { projectId } = makeProject();
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-a', role: 'coordinator', parent: OPERATOR });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const throwingOpen = (): never => {
+        throw new Error('boom: dispatch store unavailable');
+      };
+      // host-live (NOT sandbox-fake) so the cost read is attempted and openEcon is actually called.
+      const agents = aggregateAgentMetrics(projectId, {}, 'calc-lib', 'host-live', 1, throwingOpen);
+      const coord = agents.find((a) => a.agentId === 'coord-a');
+      // Degrades to null scores (the run is still graded) AND the failure is surfaced on stderr (Principle 9).
+      expect(coord?.tokenEconomy?.tokenEconomy).toBeNull();
+      expect(coord?.toolEfficiency?.contextEfficiency).toBeNull();
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]?.[0]).toMatch(/econ read failed/u);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('aggregateMergeOutcomes + countImplementerBranchesMergedUp read review rounds/kickbacks/merge-up from the stores', () => {

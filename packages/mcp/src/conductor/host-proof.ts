@@ -696,6 +696,10 @@ export function buildHostProofSpawnSpec(
   const paneLaunchConfig = buildPaneLaunchConfig(identity.provider, {
     cwd: identity.cwd,
     isolatedHomeDir: paths.isolatedHomeDir,
+    // Thread the role/sub-role so buildPaneLaunchConfig injects the repo-agnostic base system prompt
+    // plus shipped approach focus (Claude --append-system-prompt / Codex config override).
+    role: identity.role,
+    ...(identity.subRole != null ? { subRole: identity.subRole } : {}),
     ...(identity.provider === 'claude'
       ? { coMcpConfig: `${paths.isolatedHomeDir.replace(/\/+$/u, '')}/mcp/co-mcp.json` }
       : {}),

@@ -155,6 +155,9 @@ const slingOutput = z
         message: z
           .string()
           .describe('Loud agent-facing pacing message (spec §3 — never silent, P9).'),
+        next_step: z
+          .string()
+          .describe('One-line directive for what to do next while WAITING (e.g. when to retry).'),
         eta_reset_at: z
           .string()
           .optional()
@@ -263,11 +266,9 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
   name: 'co_sling',
   title: 'Sling a worktree',
   description:
-    'Create an isolated worktree + branch sandbox from an auto-detected base ref (origin/HEAD → ' +
-    'main → master → local HEAD, unless you override it), record it, and capture a test baseline ' +
-    'at branch-off. The default dispatch policy is resolved before sandbox creation and recorded after success; ' +
-    'a WAITING result means provider capacity or usage-source health blocks placement and no sandbox ' +
-    'is created. The sandbox lives in program-data, never in the repo.',
+    'Create + record an isolated worktree + branch sandbox from an auto-detected base ref (override ' +
+    'with base), capture a branch-off test baseline, and resolve the dispatch policy. A WAITING ' +
+    'result means provider capacity or usage-source health blocked placement and no sandbox was made.',
   inputSchema: slingInput,
   outputSchema: slingOutput,
   handler: async (ctx, input): Promise<SlingOutput> => {
@@ -345,6 +346,8 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
             message:
               `dispatch queued: parent '${ctx.agent}' already has ${disposition.activeCount} active ` +
               `child(ren) at the cap of ${cap}. Wait for a child branch to merge before slinging another.`,
+            next_step:
+              'Integrate or land an active child branch to free a slot, then re-issue this co_sling.',
             reason: `max active children reached (${disposition.activeCount}/${cap})`,
             maxed_providers: [],
             unavailable_providers: [],
@@ -426,6 +429,7 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
         status: 'waiting',
         waiting: {
           message: agentWaitingMessage(resolution),
+          next_step: agentWaitingNextStep(resolution),
           ...(resolution.etaResetAt !== undefined ? { eta_reset_at: resolution.etaResetAt } : {}),
           reason: agentWaitingReason(resolution),
           maxed_providers: [...resolution.maxedProviders],
@@ -670,6 +674,14 @@ function agentWaitingMessage(
     return `${eta} — usage source unavailable`;
   }
   return sanitizeAgentText(resolution.message);
+}
+
+function agentWaitingNextStep(
+  resolution: Extract<DispatchResolution, { readonly kind: 'waiting' }>,
+): string {
+  return resolution.etaResetAt !== undefined
+    ? `End your turn and re-issue this co_sling after ${resolution.etaResetAt}, when capacity refreshes.`
+    : 'End your turn and re-issue this co_sling later, once provider capacity or usage-source health recovers.';
 }
 
 function agentWaitingReason(

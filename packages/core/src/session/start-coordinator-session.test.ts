@@ -15,6 +15,10 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { openConfigStore } from '../config/config-store.js';
+import { DISPATCH_ENABLED_PROVIDERS_KEY } from '../dispatch/dispatch-config.js';
+import { openDispatchStore } from '../dispatch/dispatch-store.js';
+import { accountForProvider } from '../dispatch/provider-source.js';
 import { OPERATOR, mailKind } from '../mail/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { openRosterStore, type RosterStore } from '../roles/roster-store.js';
@@ -122,7 +126,21 @@ describe('startCoordinatorSession — provisions worktree, registers the root, s
       roster.close();
     }
 
-    // (3) KICKOFF: an ACTIONABLE clarify_request from @operator to the root, carrying the prompt.
+    // (3) PLACEMENT: the daemon cold-start path has a durable provider decision for the root.
+    const dispatch = openDispatchStore(projectId);
+    try {
+      expect(dispatch.readPlacements(result.coordinator).at(-1)).toMatchObject({
+        agent: result.coordinator,
+        kind: 'placed',
+        role: 'coordinator',
+        provider: 'claude',
+        account: accountForProvider('claude'),
+      });
+    } finally {
+      dispatch.close();
+    }
+
+    // (4) KICKOFF: an ACTIONABLE clarify_request from @operator to the root, carrying the prompt.
     const mail = openMailStore(projectId);
     try {
       const outstanding = mail.outstanding(result.coordinator);
@@ -137,13 +155,41 @@ describe('startCoordinatorSession — provisions worktree, registers the root, s
       mail.close();
     }
 
-    // (4) NO SESSION minted by the primitive — the daemon mints it on cold start.
+    // (5) NO SESSION minted by the primitive — the daemon mints it on cold start.
     const sessions = openSessionStore(projectId);
     try {
       expect(sessions.listSessions()).toHaveLength(0);
       expect(sessions.getSession(result.coordinator)).toBeUndefined();
     } finally {
       sessions.close();
+    }
+  });
+
+  it('records the root placement from provider-only dispatch config', () => {
+    const { projectId, repo } = makeProject();
+    const config = openConfigStore();
+    try {
+      config.setProjectOverride(projectId, DISPATCH_ENABLED_PROVIDERS_KEY, ['codex']);
+    } finally {
+      config.close();
+    }
+
+    const result = startCoordinatorSession(
+      { projectId, repoCwd: repo, prompt: 'codex root', base: 'main' },
+      { slingDeps: SLING_DEPS },
+    );
+
+    const dispatch = openDispatchStore(projectId);
+    try {
+      expect(dispatch.readPlacements(result.coordinator).at(-1)).toMatchObject({
+        agent: result.coordinator,
+        kind: 'placed',
+        role: 'coordinator',
+        provider: 'codex',
+        account: accountForProvider('codex'),
+      });
+    } finally {
+      dispatch.close();
     }
   });
 

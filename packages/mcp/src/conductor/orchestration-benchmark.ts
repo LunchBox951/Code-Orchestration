@@ -29,6 +29,10 @@
  */
 import {
   OPERATOR,
+  DEFAULT_BUDGET_TOKENS,
+  budgetTokensForScenario,
+  buildTokenEconomy,
+  buildToolEfficiency,
   openDispatchStore,
   openMailStore,
   openPlanStore,
@@ -36,10 +40,12 @@ import {
   openRosterStore,
   openWorktreeStore,
   summarizeRun,
+  type AgentCostRollup,
   type AgentRunMetric,
+  type AgentToolUsage,
   type MergeOutcome,
+  type NormalizedOrchestrationScorecard,
   type OrchestrationScenario,
-  type OrchestrationScorecard,
   type ProjectId,
   type ProviderMode,
   type RunFidelity,
@@ -197,7 +203,7 @@ export function deriveRunFidelity(pty: PtyHost): RunFidelity {
  */
 export async function runOrchestrationBenchmark(
   opts: OrchestrationBenchmarkOptions,
-): Promise<OrchestrationScorecard> {
+): Promise<NormalizedOrchestrationScorecard> {
   const { projectId, scenario, nonce, providerMode, repoCwd, integrationBranch, automation } = opts;
   const maxTicks = opts.maxTicks ?? envInt(CO_BENCH_MAX_TICKS_ENV, ORCH_BENCH_DEFAULTS.maxTicks);
   const wallClockBudgetMs =
@@ -233,13 +239,23 @@ export async function runOrchestrationBenchmark(
   }
 
   // ── Aggregate the OBJECTIVE record from the stores + git (never the automation's claims). ──────────
-  const agents = aggregateAgentMetrics(projectId, driveResult?.agentTurns ?? {});
+  // The chain-completion verdict is read FIRST: it both gates the structural PASS and seeds the per-agent
+  // `toolCallsPerCompletedTask` diagnostic (a run that completed the task divides tool calls by 1 completed
+  // task; an incomplete run divides by 0 ⇒ the diagnostic is `null`, never a divide-by-zero Infinity).
+  const completed = detectChainCompletion(projectId, ORCH_BENCH_TASK_ID);
+  const completedTaskCount = completed ? 1 : 0;
+  const agents = aggregateAgentMetrics(
+    projectId,
+    driveResult?.agentTurns ?? {},
+    scenario.id,
+    fidelity,
+    completedTaskCount,
+  );
   const merges = aggregateMergeOutcomes(projectId, integrationBranch, repoCwd);
   const implementerBranchesMergedUp = countImplementerBranchesMergedUp(
     projectId,
     integrationBranch,
   );
-  const completed = detectChainCompletion(projectId, ORCH_BENCH_TASK_ID);
 
   // ── Grade the merged artifact under a throwaway worktree of the integration branch (Principle 12). ─
   const artifact = await gradeIntegrationBranch(scenario, repoCwd, integrationBranch);
@@ -280,17 +296,75 @@ export function detectChainCompletion(projectId: ProjectId, taskId: string): boo
 }
 
 /**
+ * The optional per-agent read-model surface this driver reads. The rollup shapes are owned by @co/core;
+ * this local seam only models that a concrete dispatch store may not expose the read methods yet. Both
+ * methods are OPTIONAL: when the store handle does not provide them, the optional call short-circuits to
+ * `undefined` and the corresponding three-score component becomes `null` (N/A) — never a silent zero; a
+ * `null` return is an explicit "no rollup".
+ */
+interface BenchEconStore {
+  /** LIVE-ONLY per-agent token cost rollup, or `null` (sandbox / not yet recorded). */
+  readonly getAgentCostRollup?: (agentId: string) => AgentCostRollup | null;
+  /** Per-agent tool-usage rollup (both arms), or `null` (not yet recorded). */
+  readonly getAgentToolUsage?: (agentId: string) => AgentToolUsage | null;
+}
+
+/**
+ * How the driver opens the econ read-model — defaults to the real dispatch store cast to
+ * {@link BenchEconStore}. A SEAM (not a runtime knob): the `sandbox-fake` cost-skip is enforced in
+ * {@link readAgentEcon} regardless of what this returns, so a test can inject a store whose
+ * `getAgentCostRollup` returns NON-null token data and still assert the sandbox arm forces `cost=null`.
+ */
+export type OpenBenchEcon = (projectId: ProjectId) => BenchEconStore & { close: () => void };
+
+/** The production econ opener: the real dispatch store, structurally typed as a {@link BenchEconStore}. */
+const openDispatchEcon: OpenBenchEcon = (projectId) =>
+  openDispatchStore(projectId) as ReturnType<typeof openDispatchStore> & BenchEconStore;
+
+/**
  * Aggregate the per-agent {@link AgentRunMetric}s from the roster (role) + the dispatch store (provider) +
- * the mail log (escalations), folding in the automation-measured turn/wall samples. The roster is the
- * authoritative agent set; provider/escalation come from the objective record. An agent the automation
- * never sampled still appears (turns/wall = 0) so the scorecard reflects every registered agent.
+ * the mail log (escalations) + PR B's per-agent cost/tool rollups, folding in the automation-measured
+ * turn/wall samples. The roster is the authoritative agent set; provider/escalation come from the
+ * objective record. An agent the automation never sampled still appears (turns/wall = 0) so the scorecard
+ * reflects every registered agent.
+ *
+ * The token-economy + context/tool-efficiency raw signals are read via OPTIONAL CHAINING against an
+ * extended store type ({@link BenchEconStore}) so this compiles on `dev` WITHOUT PR B: when the rollup
+ * methods are absent (or return `null`), {@link buildTokenEconomy}/{@link buildToolEfficiency} fold a
+ * `null` score — never a silent zero (the trap that already afflicts the live `turnsUsed`). `scenarioId`
+ * resolves the (uncalibrated) per-scenario token budget the economy score is measured against.
+ *
+ * `fidelity` ENFORCES the N/A-in-sandbox rule IN CODE: a `sandbox-fake` run spends no real tokens, so the
+ * cost read is SKIPPED entirely (forced to `null`) — token-economy is GUARANTEED `null`, not an accident of
+ * B's store being absent. `completedTaskCount` seeds the per-agent `toolCallsPerCompletedTask` diagnostic
+ * (derived here, since it is NOT a store field): `toolCalls / completedTaskCount`, or `null` when the run
+ * completed no task (no divide-by-zero).
  */
 export function aggregateAgentMetrics(
   projectId: ProjectId,
   agentTurns: Readonly<Record<string, AgentTurnSample>>,
+): readonly AgentRunMetric[];
+export function aggregateAgentMetrics(
+  projectId: ProjectId,
+  agentTurns: Readonly<Record<string, AgentTurnSample>>,
+  scenarioId: string,
+  fidelity: RunFidelity,
+  completedTaskCount: number,
+  openEcon?: OpenBenchEcon,
+): readonly AgentRunMetric[];
+export function aggregateAgentMetrics(
+  projectId: ProjectId,
+  agentTurns: Readonly<Record<string, AgentTurnSample>>,
+  scenarioId?: string,
+  fidelity?: RunFidelity,
+  completedTaskCount = 0,
+  openEcon: OpenBenchEcon = openDispatchEcon,
 ): readonly AgentRunMetric[] {
   const roster = openRosterStore(projectId);
   const mail = openMailStore(projectId);
+  const hasScoringContext = scenarioId !== undefined && fidelity !== undefined;
+  const budgetTokens =
+    scenarioId === undefined ? DEFAULT_BUDGET_TOKENS : budgetTokensForScenario(scenarioId);
   try {
     const escalationsBy = escalationCountsByAgent(mail);
     return roster
@@ -298,6 +372,13 @@ export function aggregateAgentMetrics(
       .filter((a) => a.agentId !== OPERATOR)
       .map((a): AgentRunMetric => {
         const sample = agentTurns[a.agentId];
+        const { cost, tool } = hasScoringContext
+          ? readAgentEcon(projectId, a.agentId, fidelity, openEcon)
+          : { cost: null, tool: null };
+        // The throughput diagnostic is DERIVED (not a store field): tool calls per completed task, or null
+        // when there is no tool rollup / the run completed no task (never a divide-by-zero Infinity).
+        const toolCallsPerCompletedTask =
+          tool == null || completedTaskCount <= 0 ? null : tool.toolCalls / completedTaskCount;
         return {
           agentId: a.agentId,
           role: a.role,
@@ -305,11 +386,52 @@ export function aggregateAgentMetrics(
           turnsUsed: sample?.turnsUsed ?? 0,
           wallClockMs: sample?.wallClockMs ?? 0,
           escalations: escalationsBy[a.agentId] ?? 0,
+          tokenEconomy: buildTokenEconomy(cost, budgetTokens),
+          toolEfficiency: buildToolEfficiency(tool, toolCallsPerCompletedTask),
         };
       });
   } finally {
     mail.close();
     roster.close();
+  }
+}
+
+/**
+ * Read PR B's per-agent cost + tool-usage rollups via OPTIONAL CHAINING against the dispatch store cast to
+ * {@link BenchEconStore}. On `dev` WITHOUT B the methods are absent ⇒ both reads return `null` (the score
+ * becomes N/A). Never throws: a store-open failure or a missing method degrades to `null`, never a crash.
+ *
+ * `fidelity` ENFORCES the N/A-in-sandbox rule IN CODE: a `sandbox-fake` run spends no real tokens, so the
+ * cost read is SKIPPED entirely and `cost` is forced to `null` — token-economy is GUARANTEED `null`, not a
+ * byproduct of B's store being absent. The tool rollup IS read in both arms (tool calls are observable in
+ * the sandbox too).
+ *
+ * A store-open / read FAILURE is LOGGED (not silently swallowed; Principle 9 — no silent green): a
+ * persistent read failure must be visible to the operator rather than degrading invisibly to an all-N/A
+ * scorecard. We still degrade to `null` so the run is graded, but the error is surfaced on stderr.
+ */
+function readAgentEcon(
+  projectId: ProjectId,
+  agentId: string,
+  fidelity: RunFidelity,
+  openEcon: OpenBenchEcon = openDispatchEcon,
+): { cost: AgentCostRollup | null; tool: AgentToolUsage | null } {
+  let store: (BenchEconStore & { close: () => void }) | undefined;
+  try {
+    store = openEcon(projectId);
+    // Sandbox runs spend no real tokens ⇒ skip the cost read entirely (forced null). The tool rollup is
+    // observable in both arms, so it is always read.
+    const cost = fidelity === 'sandbox-fake' ? null : (store.getAgentCostRollup?.(agentId) ?? null);
+    const tool = store.getAgentToolUsage?.(agentId) ?? null;
+    return { cost, tool };
+  } catch (error) {
+    // Surface, don't swallow: a persistent econ-read failure degrades the whole corpus to N/A invisibly.
+    console.error(
+      `[co orch-bench] econ read failed for agent '${agentId}' in project '${projectId}': ${errorMessage(error)}`,
+    );
+    return { cost: null, tool: null };
+  } finally {
+    store?.close();
   }
 }
 

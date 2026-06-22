@@ -19,9 +19,18 @@
 import {
   MAIL_CLARIFY_REQUEST,
   OPERATOR,
+  budgetTokensForScenario,
+  buildTokenEconomy,
+  buildToolEfficiency,
+  correctnessScore,
   defaultMailRenderer,
+  openDispatchStore,
   openMailStore,
   toolsForRole,
+  type AgentCostRollup,
+  type AgentToolEfficiency,
+  type AgentTokenEconomy,
+  type AgentToolUsage,
   type ArtifactCheck,
   type BenchmarkScenario,
   type DeliveredMail,
@@ -111,6 +120,25 @@ export interface WorkerBenchmarkResult {
   readonly stopReason: WorkerBenchmarkStopReason;
   /** Diagnostic: the turn error, when a turn threw or timed out. */
   readonly turnError?: string;
+  /**
+   * The three comparable scores. Optional for public callers that still construct the pre-three-score
+   * result shape; `runWorkerBenchmark` always populates it.
+   */
+  readonly scores?: WorkerScores;
+}
+
+/** The single-agent three-score block (parallels the orchestration `RunScores`). */
+export interface WorkerScores {
+  /** CORRECTNESS ∈ [0,1] (objective; both arms) — the oracle case fraction gated by completion. */
+  readonly correctness: number;
+  /** LIVE-ONLY token economy (raw tokens + economy/cache scores); `null` fields with no cost rollup. */
+  readonly tokenEconomy: AgentTokenEconomy;
+  /** Context/tool efficiency (raw rates + the contextEfficiency score); `null` fields with no rollup. */
+  readonly toolEfficiency: AgentToolEfficiency;
+}
+
+export interface ScoredWorkerBenchmarkResult extends WorkerBenchmarkResult {
+  readonly scores: WorkerScores;
 }
 
 /**
@@ -134,7 +162,7 @@ export function buildWorkerSpawnSpec(
 export async function runWorkerBenchmark(
   provider: 'claude' | 'codex',
   opts: WorkerBenchmarkOptions,
-): Promise<WorkerBenchmarkResult> {
+): Promise<ScoredWorkerBenchmarkResult> {
   const { projectId, identity, scenario, nonce } = opts;
   const maxTurns = opts.maxTurns ?? envInt(CO_BENCH_MAX_TURNS_ENV, WORKER_BENCH_DEFAULTS.maxTurns);
   const wallClockBudgetMs =
@@ -221,6 +249,28 @@ export async function runWorkerBenchmark(
     // ALWAYS grade the artifact — a correct file with no done-mail still reports artifact.correct.
     const artifact = await scenario.evaluate(identity.cwd);
 
+    // The three comparable scores for the single-agent case. Token/tool rollups are read via OPTIONAL
+    // CHAINING against PR B's store surface (declared locally; see {@link WorkerEconStore}) so this
+    // compiles on `dev` WITHOUT B — a `null` rollup ⇒ a `null` score (N/A), never a silent zero.
+    const { cost, tool } = readWorkerEcon(projectId, identity.agent, seams.fidelity);
+    // The throughput diagnostic is DERIVED (not a store field): tool calls per completed task, or null when
+    // there is no rollup / the single task did not complete (never a divide-by-zero).
+    const toolCallsPerCompletedTask = tool == null || !completed ? null : tool.toolCalls;
+    const scores: WorkerScores = {
+      // Single-agent CORRECTNESS via core's scorer: there are no implementer merges, so the merge-up /
+      // every-merge-reviewed factors are vacuously 1. Core owns the normalization + the fail-closed
+      // zero-case rule so the worker corpus shares ONE correctness definition with orchestration.
+      correctness: correctnessScore({
+        artifact,
+        completed,
+        implementerBranchesMergedUp: 0,
+        requiredImplementerMerges: 0, // requiredImplementerMerges <= 0 ⇒ mergeFactor = 1 (vacuous)
+        everyMergeHadReview: true, // ⇒ reviewFactor = 1 (vacuous)
+      }),
+      tokenEconomy: buildTokenEconomy(cost, budgetTokensForScenario(scenario.id)),
+      toolEfficiency: buildToolEfficiency(tool, toolCallsPerCompletedTask),
+    };
+
     return {
       provider,
       scenarioId: scenario.id,
@@ -231,6 +281,7 @@ export async function runWorkerBenchmark(
       wallClockMs: Date.now() - wallStart,
       stopReason,
       ...(turnError != null ? { turnError } : {}),
+      scores,
     };
   } finally {
     unsubData();
@@ -336,6 +387,67 @@ export function doneMailObserved(
       );
   } finally {
     store.close();
+  }
+}
+
+/**
+ * Optional per-agent read-model surface. The rollup shapes are owned by @co/core; this local seam only
+ * models that a concrete dispatch store may not expose the read methods yet. Both methods OPTIONAL: an
+ * absent method / `null` return ⇒ a `null` score (N/A), never a silent zero.
+ */
+interface WorkerEconStore {
+  readonly getAgentCostRollup?: (agentId: string) => AgentCostRollup | null;
+  readonly getAgentToolUsage?: (agentId: string) => AgentToolUsage | null;
+}
+
+/**
+ * How the driver opens the econ read-model — defaults to the real dispatch store cast to
+ * {@link WorkerEconStore}. A SEAM (not a runtime knob): the `sandbox-fake` cost-skip in
+ * {@link readWorkerEcon} is enforced regardless of what this returns, so a test can inject a store whose
+ * `getAgentCostRollup` returns NON-null token data and still assert the sandbox arm forces `cost=null`.
+ */
+export type OpenWorkerEcon = (projectId: ProjectId) => WorkerEconStore & { close: () => void };
+
+/** The production econ opener: the real dispatch store, structurally typed as a {@link WorkerEconStore}. */
+const openDispatchEcon: OpenWorkerEcon = (projectId) =>
+  openDispatchStore(projectId) as ReturnType<typeof openDispatchStore> & WorkerEconStore;
+
+/**
+ * Read PR B's per-agent cost + tool-usage rollups via OPTIONAL CHAINING against the dispatch store cast to
+ * {@link WorkerEconStore}. On `dev` WITHOUT B the methods are absent ⇒ both reads return `null`. Never
+ * throws: a store-open failure or a missing method degrades to `null`.
+ *
+ * `fidelity` ENFORCES the N/A-in-sandbox rule IN CODE — parity with the orchestration driver's
+ * {@link readAgentEcon}: a `sandbox-fake` run spends no real tokens, so the cost read is SKIPPED entirely
+ * and `cost` is forced to `null` (token-economy GUARANTEED `null`, not a byproduct of B's store being
+ * absent). The tool rollup IS read in both arms (tool calls are observable in the sandbox too).
+ *
+ * A store-open / read FAILURE is LOGGED, not silently swallowed (Principle 9 — no silent green): a
+ * persistent econ-read failure degrades the whole corpus to N/A invisibly otherwise. We still degrade to
+ * `null` so the run is graded, but the error is surfaced on stderr.
+ */
+export function readWorkerEcon(
+  projectId: ProjectId,
+  agentId: string,
+  fidelity: ProofFidelity,
+  openEcon: OpenWorkerEcon = openDispatchEcon,
+): { cost: AgentCostRollup | null; tool: AgentToolUsage | null } {
+  let store: (WorkerEconStore & { close: () => void }) | undefined;
+  try {
+    store = openEcon(projectId);
+    // Sandbox runs spend no real tokens ⇒ skip the cost read entirely (forced null). The tool rollup is
+    // observable in both arms, so it is always read.
+    const cost = fidelity === 'sandbox-fake' ? null : (store.getAgentCostRollup?.(agentId) ?? null);
+    const tool = store.getAgentToolUsage?.(agentId) ?? null;
+    return { cost, tool };
+  } catch (error) {
+    // Surface, don't swallow: a persistent econ-read failure degrades the whole corpus to N/A invisibly.
+    console.error(
+      `[co worker-bench] econ read failed for agent '${agentId}' in project '${projectId}': ${errorMessage(error)}`,
+    );
+    return { cost: null, tool: null };
+  } finally {
+    store?.close();
   }
 }
 

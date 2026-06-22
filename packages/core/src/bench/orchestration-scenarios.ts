@@ -126,34 +126,56 @@ const TOKENIZE_CASES: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['42', ['42']],
 ];
 
+/** The total oracle cases the calc-lib scenario grades (add+sub+mul numeric ⊕ tokenize). */
+const CALC_CASES_TOTAL =
+  ADD_CASES.length + SUB_CASES.length + MUL_CASES.length + TOKENIZE_CASES.length;
+
+/** A numeric-op grade: how many of `cases` passed, plus the first failure reason (or null on a clean run). */
+interface OpGrade {
+  readonly passed: number;
+  readonly failure: string | null;
+}
+
 function checkNumericOp(
   fn: unknown,
   name: string,
   cases: ReadonlyArray<readonly [number, number, number]>,
-): string | null {
-  if (typeof fn !== 'function') return `calc.mjs does not export a function '${name}'`;
+): OpGrade {
+  if (typeof fn !== 'function') {
+    return { passed: 0, failure: `calc.mjs does not export a function '${name}'` };
+  }
   const op = fn as (a: number, b: number) => unknown;
+  let passed = 0;
+  let firstFailure: string | null = null;
   for (const [a, b, want] of cases) {
     let got: unknown;
     try {
       got = op(a, b);
     } catch (error) {
-      return `${name}(${a}, ${b}) threw: ${errorMessage(error)}`;
+      firstFailure ??= `${name}(${a}, ${b}) threw: ${errorMessage(error)}`;
+      continue;
     }
-    if (got !== want) return `${name}(${a}, ${b}) = ${String(got)}, want ${want}`;
+    if (got !== want) {
+      firstFailure ??= `${name}(${a}, ${b}) = ${String(got)}, want ${want}`;
+      continue;
+    }
+    passed += 1;
   }
-  return null;
+  return { passed, failure: firstFailure };
+}
+
+/** A hard structural miss (calc.mjs absent / un-importable): zero cases passed out of the scenario total. */
+function calcMiss(detail: string): ArtifactCheck {
+  return { correct: false, detail, casesPassed: 0, casesTotal: CALC_CASES_TOTAL };
 }
 
 async function evaluateCalcLib(integrationDir: string): Promise<ArtifactCheck> {
   const file = join(integrationDir, CALC_DIR, 'calc.mjs');
   if (!existsSync(file)) {
-    return {
-      correct: false,
-      detail:
-        `${CALC_DIR}/calc.mjs not found in the merged integration branch at ${integrationDir} ` +
+    return calcMiss(
+      `${CALC_DIR}/calc.mjs not found in the merged integration branch at ${integrationDir} ` +
         '(the lead barrel never merged up, or the chain did not complete)',
-    };
+    );
   }
   let mod: Record<string, unknown>;
   try {
@@ -161,21 +183,32 @@ async function evaluateCalcLib(integrationDir: string): Promise<ArtifactCheck> {
   } catch (error) {
     // A re-export barrel that imports missing implementer modules throws here — i.e. a module did
     // not merge up. That is exactly the merge-up failure the oracle must catch.
-    return { correct: false, detail: `import of calc.mjs threw: ${errorMessage(error)}` };
+    return calcMiss(`import of calc.mjs threw: ${errorMessage(error)}`);
   }
 
+  // Accumulate the oracle case tally across every op + tokenize so CORRECTNESS can refine the pass into
+  // a fraction of cases passed. Keep the first failure as the diagnostic, but continue through independent
+  // cases so `casesPassed` is the total passed count, not just the prefix before the first failure.
+  let casesPassed = 0;
+  let firstFailure: string | null = null;
   for (const [fn, name, cases] of [
     [mod['add'], 'add', ADD_CASES],
     [mod['sub'], 'sub', SUB_CASES],
     [mod['mul'], 'mul', MUL_CASES],
   ] as const) {
-    const failure = checkNumericOp(fn, name, cases);
-    if (failure != null) return { correct: false, detail: failure };
+    const grade = checkNumericOp(fn, name, cases);
+    casesPassed += grade.passed;
+    firstFailure ??= grade.failure;
   }
 
   const tokenize = mod['tokenize'];
   if (typeof tokenize !== 'function') {
-    return { correct: false, detail: "calc.mjs does not export a function 'tokenize'" };
+    return {
+      correct: false,
+      detail: firstFailure ?? "calc.mjs does not export a function 'tokenize'",
+      casesPassed,
+      casesTotal: CALC_CASES_TOTAL,
+    };
   }
   const tokenizeFn = tokenize as (expr: string) => unknown;
   for (const [expr, want] of TOKENIZE_CASES) {
@@ -183,22 +216,30 @@ async function evaluateCalcLib(integrationDir: string): Promise<ArtifactCheck> {
     try {
       got = tokenizeFn(expr);
     } catch (error) {
-      return {
-        correct: false,
-        detail: `tokenize(${JSON.stringify(expr)}) threw: ${errorMessage(error)}`,
-      };
+      firstFailure ??= `tokenize(${JSON.stringify(expr)}) threw: ${errorMessage(error)}`;
+      continue;
     }
     if (!Array.isArray(got) || got.length !== want.length || want.some((t, i) => got[i] !== t)) {
-      return {
-        correct: false,
-        detail: `tokenize(${JSON.stringify(expr)}) = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`,
-      };
+      firstFailure ??= `tokenize(${JSON.stringify(expr)}) = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`;
+      continue;
     }
+    casesPassed += 1;
+  }
+
+  if (firstFailure != null) {
+    return {
+      correct: false,
+      detail: firstFailure,
+      casesPassed,
+      casesTotal: CALC_CASES_TOTAL,
+    };
   }
 
   return {
     correct: true,
     detail: `calc.mjs correct: add/sub/mul over ${ADD_CASES.length + SUB_CASES.length + MUL_CASES.length} cases + tokenize over ${TOKENIZE_CASES.length} cases`,
+    casesPassed,
+    casesTotal: CALC_CASES_TOTAL,
   };
 }
 

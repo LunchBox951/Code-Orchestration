@@ -175,10 +175,9 @@ export const prMergeTool: ToolSpec<PrMergeInput, PrMergeOutput> = {
   name: 'co_pr_merge',
   title: 'Open a pull request for reviewed work',
   description:
-    'Open a pull request for the reviewed branch — only if a pr_merge PASS verdict is recorded for it. ' +
-    'co renders the house-style PR description from your structured intent (four sections: Why / ' +
-    'What changed / Verification / Conventions). Contributor and owner modes create the PR via gh; ' +
-    'offline refuses. @operator may use an audited override with a non-empty reason.',
+    'Open a pull request for the reviewed branch — only if a pr_merge PASS verdict is recorded for ' +
+    'it. co renders the house-style PR description from your structured intent. @operator may use ' +
+    'an audited override with a non-empty reason.',
   inputSchema: prMergeInput,
   outputSchema: prMergeOutput,
   handler: (ctx, input): PrMergeOutput => {

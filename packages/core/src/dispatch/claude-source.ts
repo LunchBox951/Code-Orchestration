@@ -26,6 +26,7 @@ import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import type { Provider, ProviderUsageSource, UsageSnapshot, UsageWindow } from './usage-source.js';
 import { UsageUnavailableError } from './usage-source.js';
+import { CO_CLAUDE_STATUSLINE_PATH_ENV } from './statusline-env.js';
 import {
   asRecord,
   boolish,
@@ -62,8 +63,12 @@ const CLAUDE_AI_OAUTH_SCOPES = [
   'user:file_upload',
 ] as const;
 
-/** Env var naming the file where the host captures the latest Claude Code statusLine payload. */
-export const CLAUDE_STATUSLINE_PATH_ENV = 'CO_CLAUDE_STATUSLINE_PATH';
+/**
+ * Env var naming the file where the host captures the latest Claude Code statusLine payload. Aliased to
+ * the shared {@link CO_CLAUDE_STATUSLINE_PATH_ENV} leaf constant (the single source of truth shared with
+ * the launch config) so the two can never drift.
+ */
+export const CLAUDE_STATUSLINE_PATH_ENV = CO_CLAUDE_STATUSLINE_PATH_ENV;
 
 /** Env var carrying a Claude OAuth refresh token for the gated idle usage read (host provides; never repo). */
 export const CLAUDE_OAUTH_REFRESH_TOKEN_ENV = 'CO_CLAUDE_OAUTH_REFRESH_TOKEN';
@@ -254,6 +259,130 @@ function canonicalWindowKind(key: string): string {
   if (lower === 'weekly' || lower === 'seven_day' || lower === '7d' || lower === 'week')
     return 'weekly';
   return key;
+}
+
+// ── Per-turn COST from the isolated transcript JSONL (collection seam, spec §4.2) ───────────────────
+/**
+ * The per-turn token cost read off a Claude Code transcript. `input`/`output`/`cacheRead`/`cacheCreation`
+ * are the assistant-message `usage` token counts; `costUsd` is the stream-json `result`'s
+ * `total_cost_usd` when present (a transcript that carries one). Any field may be undefined when the
+ * transcript did not report it — the caller maps present fields onto a {@link import('./events.js').CostRecorded}.
+ */
+export interface ClaudeTurnCost {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cacheReadInputTokens?: number;
+  readonly cacheCreationInputTokens?: number;
+  readonly costUsd?: number;
+}
+
+/**
+ * Parse per-turn cost out of a Claude Code transcript JSONL slice — DEFENSIVE, fail-soft. Each line is a
+ * JSON record; an `assistant` message carries `message.usage` with `input_tokens` / `output_tokens` /
+ * `cache_read_input_tokens` / `cache_creation_input_tokens`. The caller supplies the not-yet-recorded
+ * slice for one co turn, so every assistant usage in that slice is summed. A `result.total_cost_usd`
+ * only pairs with usage that precedes it; a later assistant usage resets that pairing so an older result
+ * is not attached to newer assistant-only usage. Returns `undefined` when no usage/cost is found.
+ *
+ * NEVER an inference call (AC11): a pure parse of an already-written transcript file.
+ */
+export function parseClaudeTranscriptTurnCost(jsonl: string): ClaudeTurnCost | undefined {
+  const lines = jsonl.split(/\r?\n/);
+  const totals: MutableClaudeTurnCost = {};
+  let costUsd: number | undefined;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === undefined || line.trim().length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // a non-JSON line (e.g. truncated tail) is skipped, not fatal.
+    }
+    const record = asRecord(parsed);
+    if (!record) continue;
+    const found = findAssistantUsage(record);
+    if (found) {
+      addUsageTokens(totals, readUsageTokens(found));
+      costUsd = undefined;
+      continue;
+    }
+    const cost = numberish(pick(record, 'total_cost_usd', 'totalCostUsd', 'cost_usd'));
+    if (cost !== undefined) {
+      costUsd = cost;
+    }
+  }
+
+  const result: ClaudeTurnCost = {
+    ...totals,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
+  // Guard against an all-undefined result (a record that had neither usable usage nor a cost).
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+type MutableClaudeTurnCost = {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+};
+
+function addUsageTokens(total: MutableClaudeTurnCost, next: ClaudeTurnCost): void {
+  addTokenField(total, 'inputTokens', next.inputTokens);
+  addTokenField(total, 'outputTokens', next.outputTokens);
+  addTokenField(total, 'cacheReadInputTokens', next.cacheReadInputTokens);
+  addTokenField(total, 'cacheCreationInputTokens', next.cacheCreationInputTokens);
+}
+
+function addTokenField(
+  total: MutableClaudeTurnCost,
+  key: keyof MutableClaudeTurnCost,
+  value: number | undefined,
+): void {
+  if (value === undefined) return;
+  total[key] = (total[key] ?? 0) + value;
+}
+
+/** Find an assistant-message `usage` object inside a transcript record (DEFENSIVE over shape variants). */
+function findAssistantUsage(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  const type = stringish(pick(record, 'type', 'role'));
+  if (type !== undefined && type !== 'assistant' && type !== 'message') {
+    // A `result` / `user` / `system` line carries no assistant usage; only assistant/message lines do.
+    if (type === 'result' || type === 'user' || type === 'system') return undefined;
+  }
+  const direct = asRecord(pick(record, 'usage'));
+  if (direct && hasUsageTokens(direct)) return direct;
+  const message = asRecord(pick(record, 'message'));
+  if (message) {
+    const nested = asRecord(pick(message, 'usage'));
+    if (nested && hasUsageTokens(nested)) return nested;
+  }
+  return undefined;
+}
+
+function hasUsageTokens(usage: Record<string, unknown>): boolean {
+  return (
+    numberish(pick(usage, 'input_tokens', 'inputTokens')) !== undefined ||
+    numberish(pick(usage, 'output_tokens', 'outputTokens')) !== undefined ||
+    numberish(pick(usage, 'cache_read_input_tokens', 'cacheReadInputTokens')) !== undefined ||
+    numberish(pick(usage, 'cache_creation_input_tokens', 'cacheCreationInputTokens')) !== undefined
+  );
+}
+
+function readUsageTokens(usage: Record<string, unknown>): ClaudeTurnCost {
+  const input = numberish(pick(usage, 'input_tokens', 'inputTokens'));
+  const output = numberish(pick(usage, 'output_tokens', 'outputTokens'));
+  const cacheRead = numberish(pick(usage, 'cache_read_input_tokens', 'cacheReadInputTokens'));
+  const cacheCreation = numberish(
+    pick(usage, 'cache_creation_input_tokens', 'cacheCreationInputTokens'),
+  );
+  return {
+    ...(input !== undefined ? { inputTokens: input } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    ...(cacheRead !== undefined ? { cacheReadInputTokens: cacheRead } : {}),
+    ...(cacheCreation !== undefined ? { cacheCreationInputTokens: cacheCreation } : {}),
+  };
 }
 
 /**

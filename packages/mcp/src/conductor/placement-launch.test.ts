@@ -23,6 +23,7 @@ import {
   openRosterStore,
   openSessionStore,
   openWorktreeStore,
+  roleBasePrompt,
   type PlacementRecord,
   type ProjectId,
   type ProjectRegistry,
@@ -300,10 +301,12 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
 
     // MNR-6: only the isolated dir in env — no leakage of user-global config. CLAUDE_CODE_NO_FLICKER
     // is a static rendering flag (#66), not a path; HOME is the ISOLATED home (RC-5, so `~` cannot
-    // resolve to the operator home); LANG is a static locale (RC-6) — none weaken the isolation guarantee.
+    // resolve to the operator home); LANG is a static locale (RC-6); CO_CLAUDE_STATUSLINE_PATH (#67)
+    // points at the per-account statusLine tee file UNDER the isolated home — none weaken isolation.
     expect(spec.env).toEqual({
       CLAUDE_CONFIG_DIR: isolatedHomeDir,
       CLAUDE_CODE_NO_FLICKER: '1',
+      CO_CLAUDE_STATUSLINE_PATH: `${isolatedHomeDir}/co-statusline.json`,
       HOME: isolatedHomeDir,
       LANG: 'C.UTF-8',
     });
@@ -512,6 +515,10 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
       } else {
         expect(spec.args).toEqual([
           '--dangerously-bypass-hook-trust',
+          // Role base-prompt config override (PR D item 1) sits between the hook-trust flag and the
+          // bridge --add-dir; it carries the JSON-encoded implementer base prompt.
+          '-c',
+          `developer_instructions=${JSON.stringify(roleBasePrompt('implementer'))}`,
           '--add-dir',
           `${isolatedHomeDir}/mcp`,
         ]);
@@ -550,7 +557,13 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     const bridgeDir = dirname(socketPath!);
     expect(bridgeDir).not.toBe(tmpdir());
     expect(socketPath).toBe(join(bridgeDir, 'bridge.sock'));
-    expect(spec.args).toEqual(['--dangerously-bypass-hook-trust', '--add-dir', bridgeDir]);
+    expect(spec.args).toEqual([
+      '--dangerously-bypass-hook-trust',
+      '-c',
+      `developer_instructions=${JSON.stringify(roleBasePrompt('implementer'))}`,
+      '--add-dir',
+      bridgeDir,
+    ]);
     const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
     expect(configToml!.contents).toContain(`"bridge", "${socketPath}"`);
   });
@@ -1003,5 +1016,127 @@ describe('researcher seat — engine-wide single-launch authority (AC-S10-2.3 + 
       TEST_MCP_PATHS,
     );
     await expect(engine.ensureHosted(id2, spec2)).rejects.toThrow(/already hosted.*MNR-5/);
+  });
+});
+
+// 7. Role base-prompt wiring (PR D item 1): the repo-agnostic per-role base prompt must reach the
+//    SPAWNED SpawnSpec.args. This is the load-bearing end-to-end check — the builder only appends
+//    the prompt when PaneIdentity.role is set, and buildPlacementLaunchSpec is the production caller
+//    that must thread `identity.role`. Without that wiring the prompt is a dead no-op in production.
+
+describe('role base-prompt reaches the spawned SpawnSpec.args (PR D — item 1 wiring)', () => {
+  it('claude: args carry --append-system-prompt with the role base prompt for the launched role', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-bp', 'implementer', 'claude');
+    const worktree = recordWorktree(projectId, 'impl-bp', 'co/feat-bp', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-bp');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    const flagIdx = spec.args.indexOf('--append-system-prompt');
+    expect(flagIdx).toBeGreaterThanOrEqual(0);
+    // The value immediately follows the flag and is EXACTLY the implementer base prompt.
+    expect(spec.args[flagIdx + 1]).toBe(roleBasePrompt('implementer'));
+  });
+
+  it('codex: args carry the codex base-prompt config override for the launched role', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-cx', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-cx', 'co/feat-cx', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-cx');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    const flagIdx = spec.args.indexOf('-c');
+    expect(flagIdx).toBeGreaterThanOrEqual(0);
+    const override = spec.args[flagIdx + 1] ?? '';
+    // key=<json-string>; the JSON-encoded value embeds the exact role base prompt.
+    expect(override).toContain('developer_instructions=');
+    expect(override).toContain(JSON.stringify(roleBasePrompt('implementer')));
+  });
+
+  it('sub-role launches append the shipped approach focus to the base prompt', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = {
+      ...recordPlacement(projectId, 'rev-pr-bp', 'reviewer', 'claude'),
+      role: 'reviewer:pr',
+    } as PlacementRecord & { kind: 'placed'; provider: string };
+    const worktree = recordWorktree(projectId, 'rev-pr-bp', 'co/feat-rev-pr', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'rev-pr-bp');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement,
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    const flagIdx = spec.args.indexOf('--append-system-prompt');
+    expect(flagIdx).toBeGreaterThanOrEqual(0);
+    const prompt = spec.args[flagIdx + 1] ?? '';
+    expect(prompt).toContain('Sub-role focus (reviewer:pr)');
+    expect(prompt).toContain('PR review');
+    expect(prompt).toContain('co-orchestrated reviewer');
+  });
+
+  it('codex sub-role launches carry mounted CO_ROLE and developer_instructions focus', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-test-cx', 'implementer:test', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-test-cx', 'co/feat-impl-test', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-test-cx');
+
+    const { identity, spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    expect(identity.role).toBe('implementer');
+    expect(identity.subRole).toBe('test');
+    const flagIdx = spec.args.indexOf('-c');
+    expect(flagIdx).toBeGreaterThanOrEqual(0);
+    const override = spec.args[flagIdx + 1] ?? '';
+    expect(override).toContain('developer_instructions=');
+    expect(override).toContain('Sub-role focus (implementer:test)');
+    expect(override).toContain('test-first');
+    const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
+    expect(configToml).toBeDefined();
+    expect(configToml!.contents).toContain('CO_ROLE = "implementer:test"');
+  });
+
+  it('researcher launches through the same path and gets the researcher base prompt', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-bp', 'researcher', 'claude');
+    const worktree = recordWorktree(projectId, 'res-bp', 'co/feat-resbp', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-bp');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    const flagIdx = spec.args.indexOf('--append-system-prompt');
+    expect(spec.args[flagIdx + 1]).toBe(roleBasePrompt('researcher'));
+    // The prompt names the role — proof it is role-specific, not a shared constant.
+    expect(roleBasePrompt('researcher')).toContain('researcher');
+    expect(roleBasePrompt('researcher')).not.toBe(roleBasePrompt('implementer'));
   });
 });

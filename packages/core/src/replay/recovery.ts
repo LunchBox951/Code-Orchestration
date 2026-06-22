@@ -42,6 +42,7 @@ import { SessionProjector } from '../session/session-projector.js';
 import { sessionSchemas, sessionUpcasters } from '../session/events.js';
 import { CostProjector } from '../dispatch/cost-projector.js';
 import { PlacementProjector } from '../dispatch/placement-projector.js';
+import { ToolUsageProjector } from '../dispatch/tool-usage-projector.js';
 import { UsageProjector } from '../dispatch/usage-projector.js';
 import { dispatchSchemas, dispatchUpcasters } from '../dispatch/events.js';
 import { WorktreeProjector } from '../worktrees/worktree-projector.js';
@@ -115,6 +116,7 @@ export function buildProjectProjectors(): readonly Projector[] {
     new WorktreeProjector(),
     new IssuesProjector(),
     new CostProjector(),
+    new ToolUsageProjector(),
     new UsageProjector(),
     new ResearchProjector(),
     new ArchiveProjector(),

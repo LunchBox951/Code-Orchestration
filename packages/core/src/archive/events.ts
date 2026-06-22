@@ -15,6 +15,9 @@ import type { UpcasterRegistry } from '../replay/upcaster.js';
 /** Current payload schema version — v1; no upcasters yet. */
 export const ARCHIVE_EVENT_V = 1;
 
+/** Default archive TTL: 14 days. */
+export const ARCHIVE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
 /** A branch record was appended to the archive. */
 export const EVENT_ARCHIVE_APPENDED = 'archive.appended' as const;
 /** An archived branch record was removed (reaper purge or explicit deletion). */
