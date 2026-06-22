@@ -31,6 +31,12 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
     ...(coCli.args.length > 0 ? { coCliArgs: coCli.args } : {}),
     coMcpBridgeSocketPath: defaultBridgeSocketPath,
     ...(ghToken != null ? { ghToken } : {}),
+    // RC-1: when the daemon runs under Electron (the desktop spawns `co-mcp serve` as the Electron
+    // binary with ELECTRON_RUN_AS_NODE=1), `coMcpCommand` IS that Electron binary. The provider must
+    // therefore run the co-mcp bridge with ELECTRON_RUN_AS_NODE=1 too, or `electron <bin> bridge` boots
+    // a second GUI Electron and the MCP surface never connects. Inject the flag into the MCP server's
+    // env block. `process.versions.electron` is the reliable signal (set even under ELECTRON_RUN_AS_NODE).
+    ...(process.versions.electron != null ? { coMcpExtraEnv: { ELECTRON_RUN_AS_NODE: '1' } } : {}),
     ...(opts.includeProviderAuth
       ? {
           ...readOptionalAuthFile(

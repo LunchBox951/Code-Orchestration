@@ -42,6 +42,8 @@ import {
   ConductorHostRunner,
   defaultServeCoMcpPaths,
   hostLiveTransportRequired,
+  resolveAndApplyDaemonGithubAuth,
+  resolveGhToken,
   runServeConductor,
   serveConductor,
   type IntervalHandle,
@@ -878,6 +880,41 @@ describe('serveConductor — wires the full stack over injected seams (no real b
 
   it('runServeConductor fails loud on an unknown project id', async () => {
     await expect(runServeConductor(['missing-project-id'])).rejects.toThrow(/unknown project id/i);
+  });
+
+  describe('GitHub auth provisioning (RC-2/3/4)', () => {
+    it('resolveGhToken: explicit env wins and the gh fallback is NOT consulted', () => {
+      let called = false;
+      const runner = (): string | undefined => {
+        called = true;
+        return 'gh_fallback';
+      };
+      expect(resolveGhToken({ CO_GH_TOKEN: '  gho_explicit  ' }, runner)).toBe('gho_explicit');
+      expect(resolveGhToken({ GITHUB_TOKEN: 'gho_ci' }, runner)).toBe('gho_ci');
+      expect(called).toBe(false);
+    });
+
+    it('resolveGhToken: falls back to `gh auth token` when no env token is set', () => {
+      expect(resolveGhToken({}, () => 'gho_from_gh')).toBe('gho_from_gh');
+      // gh absent / logged out → undefined (daemon still runs).
+      expect(resolveGhToken({}, () => undefined)).toBeUndefined();
+    });
+
+    it('resolveAndApplyDaemonGithubAuth: provisions the daemon env for gh AND git push', () => {
+      const env: NodeJS.ProcessEnv = {};
+      const token = resolveAndApplyDaemonGithubAuth(env, () => 'gho_tok');
+      expect(token).toBe('gho_tok');
+      // gh reads GH_TOKEN; git push uses the env-scoped credential helper for github.com.
+      expect(env.GH_TOKEN).toBe('gho_tok');
+      expect(env.GIT_CONFIG_KEY_0).toBe('credential.https://github.com.helper');
+      expect(env.GIT_TERMINAL_PROMPT).toBe('0');
+    });
+
+    it('resolveAndApplyDaemonGithubAuth: no token → env untouched, returns undefined', () => {
+      const env: NodeJS.ProcessEnv = {};
+      expect(resolveAndApplyDaemonGithubAuth(env, () => undefined)).toBeUndefined();
+      expect(env).toEqual({});
+    });
   });
 
   it('control.deleteAgent releases panes + clears router suppression + removes from roster', async () => {

@@ -61,8 +61,24 @@ export interface CoMcpPaths {
    * Sourced from `CO_GH_TOKEN` (then `GITHUB_TOKEN`/`GH_TOKEN`) by {@link defaultCoMcpPaths}; the
    * desktop "Connect GitHub" UI (issue #71) is a convenience that sets `CO_GH_TOKEN` on the daemon.
    * Never written to the repo; lives only in the isolated home's 0o600 MCP config.
+   *
+   * NOTE: the gated publish (`co_push`/`co_pr_merge`) and remote detection actually run DAEMON-side
+   * (the pane's `co-mcp bridge` is a dumb stdio↔socket relay that runs no `git`/`gh`), so the
+   * AUTHORITATIVE GitHub auth is provisioned onto the daemon's own env at `co-mcp serve` boot
+   * (see {@link import('./host.js').resolveAndApplyDaemonGithubAuth}). This pane-level token is kept
+   * as defense-in-depth for any future agent-side `gh` use; it is harmless when unused.
    */
   readonly ghToken?: string;
+  /**
+   * Extra environment to inject into the co MCP server's env block (the Claude `mcpServers.co.env`
+   * and the Codex `[mcp_servers.co.env]`). Used to carry `ELECTRON_RUN_AS_NODE=1` when the daemon —
+   * and therefore `coMcpCommand` (= `process.execPath`) — is the Electron binary running under
+   * `ELECTRON_RUN_AS_NODE`: without it the provider would spawn `electron <bin> bridge <socket>` with
+   * NO flag, launching a SECOND GUI Electron instead of the Node bridge, so the MCP surface never
+   * connects. Populated by {@link import('./host-launch-paths.js').defaultCoMcpPaths} only under
+   * Electron; empty otherwise.
+   */
+  readonly coMcpExtraEnv?: Readonly<Record<string, string>>;
 }
 
 export interface ProviderAuthPrelaunchPaths {
@@ -198,11 +214,16 @@ export function buildHostedLaunchSpec(
       [CO_PARENT_ENV]: identity.parent,
       [CO_PROJECT_ID_ENV]: identity.projectId,
       ...bridgeDiagnosticEnv(isolatedHomeDir, bridgeSocketPath),
-      // F3: provision the GitHub token into the co MCP server env so its gated `gh` publish path
-      // authenticates. Only emitted when a token is configured (CO_GH_TOKEN); absent otherwise.
+      // F3 (defense-in-depth): the GitHub token in the pane MCP server env. The publish path itself
+      // runs daemon-side (this `co-mcp bridge` child is a pure relay), so this is NOT the authoritative
+      // auth — that is provisioned onto the daemon env at serve boot. Only emitted when configured.
       ...(coMcpPaths.ghToken != null && coMcpPaths.ghToken.length > 0
         ? { GH_TOKEN: coMcpPaths.ghToken }
         : {}),
+      // RC-1: carry ELECTRON_RUN_AS_NODE=1 (and any other host-required server env) so the provider
+      // runs the co-mcp bridge as Node when `coMcpCommand` is the Electron binary. Last so an explicit
+      // host override wins; the values here never collide with the CO_* / GH_TOKEN keys above.
+      ...(coMcpPaths.coMcpExtraEnv ?? {}),
     },
     coCliCommand: coMcpPaths.coCliCommand,
     ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),
@@ -216,7 +237,15 @@ export function buildHostedLaunchSpec(
     command: provider,
     args: [...paneLaunchConfig.args, ...codexBridgeSocketArgs(provider, bridgeSocketPath)],
     cwd: identity.cwd,
-    env: { ...paneLaunchConfig.env },
+    env: {
+      ...paneLaunchConfig.env,
+      // RC-5: give the pane an ISOLATED HOME (the per-pane config dir) so `~`/`cd ~`/tool config
+      // lookups resolve inside the sandbox instead of leaking the operator's real home (MNR-6). The
+      // node-pty host passes EXACTLY this env (no parent inheritance), so without it HOME is unset and
+      // `~` falls back to the operator home. RC-6: a deterministic UTF-8 locale for the same reason.
+      HOME: isolatedHomeDir,
+      LANG: 'C.UTF-8',
+    },
     prelaunchFiles: [
       ...(paneLaunchConfig.prelaunchFiles ?? []),
       ...providerAuthPrelaunchFiles(provider, isolatedHomeDir, coMcpPaths),

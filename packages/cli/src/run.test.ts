@@ -305,6 +305,10 @@ describe('co doctor', () => {
             status: 0,
           };
         }
+        // --live also probes GitHub auth via the shared command seam.
+        if (command === 'gh' && args.join(' ') === 'auth status') {
+          return { stdout: 'Logged in to github.com', stderr: '', status: 0 };
+        }
         return { stdout: '', stderr: 'unknown command', status: 1 };
       },
     });

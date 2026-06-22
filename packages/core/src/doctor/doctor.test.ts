@@ -23,6 +23,7 @@ import { openReviewStore } from '../review/review-store.js';
 import { ensureReviewTables } from '../review/review-projector.js';
 import {
   defaultProviderProbe,
+  defaultGithubAuthProbe,
   runDoctor,
   REQUIRED_CAPABILITIES,
   type ProviderProbeCommand,
@@ -350,6 +351,83 @@ describe('doctor check: provider-compatibility', () => {
   });
 });
 
+// ── github-auth (RC-2 visibility) ──────────────────────────────────────────────
+
+describe('doctor check: github-auth', () => {
+  it('skips (ok, not run) when no probe is wired — and never prints the word "skipped"', () => {
+    const report = runDoctor({ projectId: PROJECT_ID, repoRoot: repoDir });
+    const check = report.checks.find((c) => c.name === 'github-auth')!;
+    expect(check.status).toBe('ok');
+    expect(check.reason).not.toMatch(/skipped/i);
+  });
+
+  it('ok when authenticated', () => {
+    const report = runDoctor({
+      projectId: PROJECT_ID,
+      repoRoot: repoDir,
+      githubAuthProbe: () => ({ authenticated: true }),
+    });
+    const check = report.checks.find((c) => c.name === 'github-auth')!;
+    expect(check.status).toBe('ok');
+  });
+
+  it('WARN (not fail) when not authenticated — offline/owner-local still works', () => {
+    const report = runDoctor({
+      projectId: PROJECT_ID,
+      repoRoot: repoDir,
+      githubAuthProbe: () => ({
+        authenticated: false,
+        diagnostic: 'gh auth status: not logged in',
+      }),
+    });
+    const check = report.checks.find((c) => c.name === 'github-auth')!;
+    expect(check.status).toBe('warn');
+    expect(check.reason).toMatch(/gh auth login/i);
+    // A missing remote auth must NOT hard-fail the doctor (offline operators run fine).
+    expect(report.checks.find((c) => c.name === 'github-auth')!.status).not.toBe('fail');
+  });
+});
+
+describe('defaultGithubAuthProbe', () => {
+  it('authenticated via an explicit token env without invoking gh', () => {
+    let ghCalled = false;
+    const probe = defaultGithubAuthProbe({
+      env: { CO_GH_TOKEN: 'gho_x' },
+      command: () => {
+        ghCalled = true;
+        return { stdout: '', stderr: '', status: 1 };
+      },
+    });
+    expect(probe().authenticated).toBe(true);
+    expect(ghCalled).toBe(false);
+  });
+
+  it('authenticated when `gh auth status` exits 0', () => {
+    const probe = defaultGithubAuthProbe({
+      env: {},
+      command: (command, args) =>
+        command === 'gh' && args.join(' ') === 'auth status'
+          ? { stdout: 'Logged in', stderr: '', status: 0 }
+          : { stdout: '', stderr: 'no', status: 1 },
+    });
+    expect(probe().authenticated).toBe(true);
+  });
+
+  it('not authenticated when no env token and `gh auth status` fails', () => {
+    const probe = defaultGithubAuthProbe({
+      env: {},
+      command: () => ({
+        stdout: '',
+        stderr: 'You are not logged into any GitHub hosts',
+        status: 1,
+      }),
+    });
+    const result = probe();
+    expect(result.authenticated).toBe(false);
+    expect(result.diagnostic).toMatch(/gh auth status/i);
+  });
+});
+
 // ── default provider probe ([host-live] metadata-only binary checks) ───────────
 
 describe('defaultProviderProbe', () => {
@@ -493,15 +571,16 @@ describe('defaultProviderProbe', () => {
 // ── runDoctor integration ─────────────────────────────────────────────────────
 
 describe('runDoctor integration', () => {
-  it('emits exactly five checks', () => {
+  it('emits exactly six checks', () => {
     const report = runDoctor({ projectId: PROJECT_ID, repoRoot: repoDir });
-    expect(report.checks).toHaveLength(5);
+    expect(report.checks).toHaveLength(6);
     const names = report.checks.map((c) => c.name);
     expect(names).toContain('program-data-integrity');
     expect(names).toContain('global-data-integrity');
     expect(names).toContain('project-memory-validity');
     expect(names).toContain('mcp-surface-completeness');
     expect(names).toContain('provider-compatibility');
+    expect(names).toContain('github-auth');
   });
 
   it('every check has a non-empty reason (no silent failures)', () => {

@@ -251,6 +251,48 @@ export function defaultProviderProbe(options: DefaultProviderProbeOptions = {}):
   };
 }
 
+// ─── GitHub auth probe seam ([host-live]) ────────────────────────────────────
+
+/** Result of probing whether GitHub auth is available for the gated remote publish path. */
+export interface GithubAuthProbeResult {
+  readonly authenticated: boolean;
+  readonly diagnostic?: string;
+}
+
+/** Injectable seam for the GitHub-auth probe ([host-live]). Sandbox tests inject synthetic results. */
+export type GithubAuthProbeSeam = () => GithubAuthProbeResult;
+
+export interface DefaultGithubAuthProbeOptions {
+  readonly command?: ProviderProbeCommand;
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Build the real GitHub-auth probe: authenticated iff an explicit token env is set (CO_GH_TOKEN /
+ * GITHUB_TOKEN / GH_TOKEN) OR `gh auth status` exits 0. This mirrors the daemon's own resolution
+ * ({@link import('@co/mcp')} `resolveGhToken`: env first, then the operator's `gh auth login`), so
+ * `co doctor --live` reports exactly what the gated publish path will see.
+ */
+export function defaultGithubAuthProbe(
+  options: DefaultGithubAuthProbeOptions = {},
+): GithubAuthProbeSeam {
+  const command = options.command ?? realProviderProbeCommand;
+  const env = options.env ?? process.env;
+  return () => {
+    const envToken = [env['CO_GH_TOKEN'], env['GITHUB_TOKEN'], env['GH_TOKEN']]
+      .map((v) => v?.trim())
+      .find((v) => v != null && v.length > 0);
+    if (envToken != null) return { authenticated: true };
+    const res = command('gh', ['auth', 'status']);
+    if (res.error !== undefined) {
+      return { authenticated: false, diagnostic: `gh not runnable: ${res.error.message}` };
+    }
+    if (res.status === 0) return { authenticated: true };
+    const detail = trimmed(res.stderr) ?? trimmed(res.stdout) ?? `exit status ${res.status}`;
+    return { authenticated: false, diagnostic: `gh auth status: ${detail}` };
+  };
+}
+
 // ─── Doctor deps ──────────────────────────────────────────────────────────────
 
 export interface DoctorDeps {
@@ -263,6 +305,11 @@ export interface DoctorDeps {
    * check is skipped (status: 'ok'). The real binary probe wires in at runtime.
    */
   readonly providerProbe?: ProviderProbeSeam;
+  /**
+   * Injectable GitHub-auth probe seam ([host-live]). When absent, the GitHub-auth check is skipped
+   * (status: 'ok'). The real probe wires in for `co doctor --live`.
+   */
+  readonly githubAuthProbe?: GithubAuthProbeSeam;
 }
 
 // ─── Snapshot helpers ────────────────────────────────────────────────────────
@@ -518,6 +565,38 @@ function checkProviderCompatibility(providerProbe: ProviderProbeSeam | undefined
   };
 }
 
+/**
+ * GitHub-auth availability for the gated remote publish (`co_push` / `co_pr_merge`). A WARN (not a
+ * fail): without it, remote publish fails but offline/owner-local `co_merge` still works — so it must
+ * not hard-stop an offline operator. Probe absent → skip (ok); the real probe wires in under --live.
+ */
+function checkGithubAuth(githubAuthProbe: GithubAuthProbeSeam | undefined): DoctorCheck {
+  const name = 'github-auth';
+  if (githubAuthProbe == null) {
+    return {
+      name,
+      status: 'ok',
+      reason: 'GitHub-auth check requires --live (not run in this mode).',
+    };
+  }
+  const result = githubAuthProbe();
+  if (result.authenticated) {
+    return {
+      name,
+      status: 'ok',
+      reason: 'GitHub auth available (gh + remote HTTPS pushes will authenticate).',
+    };
+  }
+  const diagnostic = result.diagnostic === undefined ? '' : ` ${result.diagnostic}`;
+  return {
+    name,
+    status: 'warn',
+    reason:
+      'No GitHub auth: remote publish (co_push / co_pr_merge) will fail. Run `gh auth login` or set ' +
+      `CO_GH_TOKEN. Offline/owner-local co_merge still works.${diagnostic}`,
+  };
+}
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /**
@@ -534,6 +613,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
     checkProjectMemoryValidity(deps.repoRoot),
     checkMcpSurfaceCompleteness(),
     checkProviderCompatibility(deps.providerProbe),
+    checkGithubAuth(deps.githubAuthProbe),
   ];
   return {
     checks,

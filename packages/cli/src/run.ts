@@ -13,6 +13,7 @@ import {
   queryObservability,
   runDoctor,
   defaultProviderProbe,
+  defaultGithubAuthProbe,
   openMailStore,
   OPERATOR,
   MAIL_REVIEW_REQUEST,
@@ -36,6 +37,7 @@ import type {
   DoctorReport,
   ProviderProbeSeam,
   ProviderProbeCommand,
+  GithubAuthProbeSeam,
   MailEnvelope,
   DeliveredMail,
   MailType,
@@ -68,6 +70,11 @@ export interface RunOptions {
    * `co doctor --live` without spawning a real `claude`/`codex` process).
    */
   readonly providerProbeCommand?: ProviderProbeCommand;
+  /**
+   * Injectable GitHub-auth probe seam for `co doctor --live` (sandbox-safe testing without a real
+   * `gh`). When absent under --live, the real {@link defaultGithubAuthProbe} is wired.
+   */
+  readonly githubAuthProbe?: GithubAuthProbeSeam;
 }
 
 const HELP_TEXT = `co — the orchestration CLI
@@ -788,10 +795,19 @@ export async function run(
               options.providerProbeCommand != null ? { command: options.providerProbeCommand } : {},
             )
           : options.providerProbe;
+        // --live also probes GitHub auth (the gated remote-publish prerequisite): an explicit token
+        // env or `gh auth status`. A test may inject a fake probe via options.githubAuthProbe.
+        const githubAuthProbe: GithubAuthProbeSeam | undefined = useLive
+          ? (options.githubAuthProbe ??
+            defaultGithubAuthProbe(
+              options.providerProbeCommand != null ? { command: options.providerProbeCommand } : {},
+            ))
+          : options.githubAuthProbe;
         const report = runDoctor({
           projectId,
           repoRoot: cwd,
           ...(providerProbe != null ? { providerProbe } : {}),
+          ...(githubAuthProbe != null ? { githubAuthProbe } : {}),
         });
         return { output: renderDoctorReport(report), exitCode: report.healthy ? 0 : 1 };
       } catch (err) {

@@ -18,9 +18,11 @@
  * ──────────────────────────────────────────────────────────────────────────────────────────────────
  */
 import { performance } from 'node:perf_hooks';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   NodePtyHost,
+  githubHttpsCredentialEnv,
   defaultGitExec,
   defaultGitRawReader,
   defaultGitReader,
@@ -932,6 +934,71 @@ export function defaultServeCoMcpPaths(
   return defaultCoMcpPaths({ ...opts, includeProviderAuth: true });
 }
 
+// ── GitHub auth provisioning for the daemon (RC-2/3/4) ──────────────────────────────────────────────
+//
+// The gated publish (`co_push`/`co_pr_merge`) and remote detection run DAEMON-side, inheriting the
+// daemon's `process.env`. A GUI-launched desktop app inherits no shell exports and there is no
+// Connect-GitHub UI, so the token must be SOURCED (from the operator's existing `gh auth login`) and
+// the env PROVISIONED so both `gh` and `git push https` authenticate. See {@link githubHttpsCredentialEnv}.
+
+/** Runs `gh auth token`, returning the operator's token or undefined (gh absent / logged out). */
+export type GhAuthTokenRunner = (env: NodeJS.ProcessEnv) => string | undefined;
+
+/** Common absolute `gh` locations to try when a GUI launch has a minimal PATH. */
+const GH_ABSOLUTE_FALLBACKS = ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh'] as const;
+
+/** The real {@link GhAuthTokenRunner}: try `gh` on PATH, then common absolute paths; never throws. */
+export const defaultGhAuthTokenRunner: GhAuthTokenRunner = (env) => {
+  for (const cmd of ['gh', ...GH_ABSOLUTE_FALLBACKS]) {
+    try {
+      const res = spawnSync(cmd, ['auth', 'token'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env,
+      });
+      if (res.status === 0) {
+        const token = res.stdout?.trim();
+        if (token != null && token.length > 0) return token;
+      }
+    } catch {
+      // Try the next candidate (ENOENT etc.) — a missing/failed gh is "no token", not a crash.
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Resolve a GitHub token for the daemon: explicit env (`CO_GH_TOKEN`, then `GITHUB_TOKEN`/`GH_TOKEN`)
+ * wins; otherwise fall back to the operator's existing login via `gh auth token`. So a self-hosting
+ * operator authenticates GitHub with the standard one-time `gh auth login` — no co-specific UI needed.
+ */
+export function resolveGhToken(
+  env: NodeJS.ProcessEnv = process.env,
+  runner: GhAuthTokenRunner = defaultGhAuthTokenRunner,
+): string | undefined {
+  const explicit = [env['CO_GH_TOKEN'], env['GITHUB_TOKEN'], env['GH_TOKEN']]
+    .map((v) => v?.trim())
+    .find((v) => v != null && v.length > 0);
+  if (explicit != null) return explicit;
+  return runner(env);
+}
+
+/**
+ * Source a GitHub token and provision `env` (the daemon's `process.env`) so BOTH `gh` and
+ * `git push https://github.com` authenticate (RC-2/3/4). Mutates `env` in place so every daemon-side
+ * git/gh seam inherits it. Returns the token, or undefined when none is available (the daemon still
+ * runs; remote publish/detection then fail LOUD per Principle 9 rather than hanging).
+ */
+export function resolveAndApplyDaemonGithubAuth(
+  env: NodeJS.ProcessEnv = process.env,
+  runner: GhAuthTokenRunner = defaultGhAuthTokenRunner,
+): string | undefined {
+  const token = resolveGhToken(env, runner);
+  if (token == null) return undefined;
+  Object.assign(env, githubHttpsCredentialEnv(token, env));
+  return token;
+}
+
 /**
  * The `co-mcp serve <projectId>` operator entry: launch the Conductor for a project and keep the
  * process alive on the cadence, surfacing ticks + errors to stderr (stdout is reserved). SIGINT/SIGTERM
@@ -955,6 +1022,17 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   } finally {
     registry.close();
   }
+  // RC-2/3/4: provision GitHub auth onto the daemon env BEFORE building coMcpPaths so (a) the
+  // daemon-side git/gh publish + detection authenticate, and (b) defaultServeCoMcpPaths() picks up the
+  // now-set GH_TOKEN for the pane (defense-in-depth). Sourced from explicit env or the operator's
+  // existing `gh auth login`. Surface the result LOUDLY so a logged-out operator is never left guessing.
+  const ghToken = resolveAndApplyDaemonGithubAuth();
+  console.error(
+    ghToken != null
+      ? '[co-mcp serve] GitHub auth: configured — gh + remote HTTPS pushes will authenticate to github.com.'
+      : '[co-mcp serve] GitHub auth: NONE — run `gh auth login` (or set CO_GH_TOKEN); remote publish ' +
+          '(co_push / co_pr_merge) will fail until then. Offline/owner-local co_merge still works.',
+  );
   const runner = await serveConductor({
     projectId,
     coMcpPaths: defaultServeCoMcpPaths(),
