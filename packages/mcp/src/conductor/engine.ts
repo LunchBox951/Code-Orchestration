@@ -70,6 +70,7 @@ import {
   normalizeStartupOutput,
   isTurnKickoffMail,
   MAIL_APPROVAL_RESPONSE,
+  MAIL_CLARIFY_REQUEST,
   MAIL_CLARIFY_RESPONSE,
   MAIL_REVIEW_RESPONSE,
   MAIL_WORKER_DONE,
@@ -137,6 +138,8 @@ export interface ConductorEngineDeps {
    * to offer the smallest surface needed for the binary proof.
    */
   readonly sessionTools?: (identity: HostedIdentity) => readonly ToolSpec[] | undefined;
+  /** Optional per-session usage-source factory override. */
+  readonly usageSourceFactory?: UsageSourceFactory;
   /**
    * Monotonic ms source — the `at` for synthesized {@link DetectorEvent}s and the `observedAt` for
    * {@link detectTurnEnd}. This is DATA, never a wall clock (the detector's replay-determinism rests on
@@ -460,12 +463,20 @@ export class ConductorEngine {
     { hosted: HostedPane; options: { readonly onPaneKillError?: (error: unknown) => void } }
   >();
   /**
-   * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, generation, chunk)` on
-   * every new pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A
-   * plain subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
+   * GLOBAL transcript listeners (Stage 12 C-P1), fired with
+   * `(projectId, agent, generation, chunk, offset, provider)` on every new pane chunk from any hosted
+   * agent — the fan-out the operator-IPC live push subscribes to. A plain subscriber set; never an
+   * agent surface (Principle D4 — the Conductor registers zero MCP tools).
    */
   private readonly transcriptListeners = new Set<
-    (projectId: ProjectId, agent: string, generation: number, chunk: string, offset: number) => void
+    (
+      projectId: ProjectId,
+      agent: string,
+      generation: number,
+      chunk: string,
+      offset: number,
+      provider: HostedIdentity['provider'],
+    ) => void
   >();
   /**
    * When each unresolved clarify was FIRST observed by a tick, keyed
@@ -502,6 +513,21 @@ export class ConductorEngine {
   /** Agents whose most recent driven turn errored before consuming their selected mail. */
   private readonly lastTurnErrored = new Map<string, boolean>();
   /**
+   * Per-kickoff failed inject-attempt counter (#77), keyed `${projectId}:${agent}::${sender}#${seq}`
+   * — the PARTICULAR kickoff mail, NOT just the agent. A daemon kickoff mail is ALWAYS multiline, so
+   * `injectMail` bracketed-pastes + echo-verifies it; a provider whose composer collapses the paste
+   * (codex — its preview bytes are not yet known) never satisfies the echo predicate, so the multiline
+   * branch THROWS, the turn errors, and (MNR-2) the kickoff is left outstanding — which the daemon then
+   * re-injects every ~1s tick FOREVER. This counter BOUNDS that: after {@link KICKOFF_INJECT_ATTEMPT_CAP}
+   * failed inject attempts the SAME kickoff is RETRACTED (the same path {@link consumeOneShotKickoff}
+   * uses) so the warm pane is freed instead of stranded. Keying by the mail identity (not `agentKey`
+   * alone) keeps each kickoff's budget SEPARATE — two distinct failing kickoffs for one agent never
+   * share a budget, and a later legitimate kickoff is never pre-consumed by an earlier one's failures.
+   * All of an agent's entries are cleared on any successful turn (the budget resets after a success)
+   * and dropped on release.
+   */
+  private readonly kickoffInjectAttempts = new Map<string, number>();
+  /**
    * PR-B COLLECTION — the engine's 0-based per-agent turn ORDINAL, keyed `${projectId}:${agent}`.
    * Incremented at the start of each {@link runOneTurn}; the CURRENT value is the `turn` carried on the
    * per-turn cost observation and forwarded tool-activity (the stable identity that dedupes a re-recorded
@@ -525,6 +551,15 @@ export class ConductorEngine {
   }
   private static paneKey(projectId: ProjectId, pane: string): string {
     return `${projectId}:${pane}`;
+  }
+  /**
+   * #77 — the per-kickoff inject-attempt key: the agent key plus the SPECIFIC kickoff mail identity
+   * (`${sender}#${seq}`). Keying by the mail (not `agentKey` alone) keeps two distinct failing
+   * kickoffs for the same agent on SEPARATE budgets, so a later legitimate kickoff is never
+   * pre-consumed by an earlier one's failed attempts.
+   */
+  private static kickoffAttemptKey(agentKey: string, mail: DeliveredMail): string {
+    return `${agentKey}::${mail.sender}#${mail.seq}`;
   }
 
   /** Whether this engine currently hosts `agent` in `projectId`. */
@@ -613,7 +648,7 @@ export class ConductorEngine {
 
   /**
    * Stage 12 C-P1 (TRANSCRIPT-SEAM) — subscribe to the live transcript stream: `listener` fires with
-   * `(projectId, agent, chunk)` on EVERY new pane chunk from any hosted agent (the operator-IPC live
+   * `(projectId, agent, chunk, offset, provider)` on EVERY new pane chunk from any hosted agent (the operator-IPC live
    * push fan-out). Returns an unsubscribe fn. Transport-agnostic, NO I/O, never throws. This is a
    * METHOD, not a tool (Principle D4 — the Conductor is never agent-callable).
    */
@@ -624,6 +659,7 @@ export class ConductorEngine {
       generation: number,
       chunk: string,
       offset: number,
+      provider: HostedIdentity['provider'],
     ) => void,
   ): () => void {
     this.transcriptListeners.add(listener);
@@ -696,7 +732,13 @@ export class ConductorEngine {
     this.transcriptUnsub.set(
       agentKey,
       pane.onData((chunk) =>
-        this.appendTranscript(agentKey, identity.projectId, identity.agent, chunk),
+        this.appendTranscript(
+          agentKey,
+          identity.projectId,
+          identity.agent,
+          identity.provider,
+          chunk,
+        ),
       ),
     );
     const startupP = driveToReady(pane, identity.provider);
@@ -718,7 +760,11 @@ export class ConductorEngine {
       clientTransport = transportClient;
       const spawnGate = this.deps.reviewerSpawnGate?.();
       const sessionTools = this.deps.sessionTools?.(identity);
-      const usageSourceFactory = this.deps.usageSourceFactoryFor?.(identity);
+      // Compose both usage-source wirings (#81 per-identity isolated readers + #84 host-live capture):
+      // prefer the per-identity factory, falling back to the engine-wide static factory. The two PRs
+      // feed the SAME single hostSession sink, so picking only one would silently drop the other.
+      const usageSourceFactory =
+        this.deps.usageSourceFactoryFor?.(identity) ?? this.deps.usageSourceFactory;
       session = await this.host.hostSession(identity, serverTransport, {
         deliveryFactory: this.routingDeliveryFactory(),
         ...(spawnGate != null ? { reviewerSpawnGate: spawnGate } : {}),
@@ -839,6 +885,10 @@ export class ConductorEngine {
           this.consumeUnreadTurnWakeMail(hosted.identity.projectId, mail);
         }
       }
+      // #77: the turn injected and ran to idle — the kickoff (if this was one) landed, so reset the
+      // failed-inject budget for ALL of this agent's kickoffs. The budget bounds a RE-PASTE loop, not
+      // a healthy agent's later turns.
+      this.clearKickoffInjectAttempts(agentKey);
       this.lastTurnErrored.delete(agentKey);
       // PR-B COLLECTION (cost) — capture this turn's provider cost in the turn-END region, FAIL-SOFT:
       // the host's closure reads the per-turn usage and records it; a missing/garbled usage read (or any
@@ -862,6 +912,53 @@ export class ConductorEngine {
       // MNR-2 seam: yield on an errored turn WITHOUT consuming the mail. We deliberately do nothing
       // that would mark the item read/resolved — it stays outstanding for P1b to re-inject.
       this.lastTurnErrored.set(agentKey, true);
+      // #77: but a ONE-SHOT KICKOFF that keeps erroring is the re-paste-loop trap — a multiline
+      // kickoff whose paste the provider's composer collapses (codex) never echo-verifies, so the
+      // inject THROWS every tick and the daemon re-pastes forever. Bound it: count failed kickoff
+      // inject attempts and, once over the cap, RETRACT the kickoff (the same consume path F5 uses)
+      // so the warm pane is freed rather than stranded. Ordinary actionable / wake mail is untouched
+      // (consumeOneShotKickoff is a no-op unless `mail` IS the kickoff) — it stays outstanding per
+      // MNR-2 for clean re-injection. LOUD diagnostic on retraction (Principle 9 — no silent drop).
+      //
+      // SEMANTICS (#77 round-2): this counts ANY errored kickoff turn, not strictly an inject/echo
+      // failure. `injectMail` and the rest of the turn both throw plain `Error`s with no distinguishing
+      // class, so cleanly isolating the echo-verify failure from (say) an observeTurnEnd error is not
+      // possible here without a brittle message match. The broader bound is SAFE: the only realistic
+      // repeated-error mode for a one-shot kickoff is the collapsed-paste echo-verify throw (the kickoff
+      // text is fixed, so a turn that errors on it errors the same way each tick), and even if some other
+      // turn error contributed, retracting after CAP attempts only DROPS A SCHEDULING NUDGE — the parent
+      // can re-kick a healthy agent, whereas a stranded warm pane blocks the slot indefinitely. So the
+      // conservative choice is to bound any repeated kickoff-turn error, not just the echo failure.
+      if (isTurnKickoffMail(mail)) {
+        const kickoffKey = ConductorEngine.kickoffAttemptKey(agentKey, mail);
+        const attempts = (this.kickoffInjectAttempts.get(kickoffKey) ?? 0) + 1;
+        this.kickoffInjectAttempts.set(kickoffKey, attempts);
+        if (attempts >= ConductorEngine.KICKOFF_INJECT_ATTEMPT_CAP) {
+          // Emit the loud diagnostic FIRST so it cannot be lost to a mail-store throw in the cap
+          // cleanup below (Principle 9 — no silent drop). The retraction + counter delete + operator
+          // notice are best-effort: a store error there must NOT mask the turn's own outcome (it is
+          // still returned as `{ errored: true, error }`) nor abort the tick.
+          console.error(
+            `[ConductorEngine] RETRACTING one-shot kickoff for agent '${hosted.identity.agent}' in ` +
+              `project '${hosted.identity.projectId}' after ${attempts} failed inject attempt(s) ` +
+              `(provider '${hosted.identity.provider}'). The kickoff paste never echo-verified — likely ` +
+              `a collapsed multiline composer paste whose preview bytes are not yet matched (#77). ` +
+              `Freeing the warm pane instead of re-pasting every tick. Last error: ${errorMessage(error)}`,
+          );
+          try {
+            this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+            this.surfaceCappedKickoffFailure(hosted, mail, attempts, error);
+          } catch (retractErr) {
+            // Best-effort cap cleanup must NOT mask the turn's own outcome (mirrors the finally below).
+            console.error(
+              `[ConductorEngine] cap-retraction for '${hosted.identity.agent}' hit a mail-store error; ` +
+                `original turn error preserved: ${errorMessage(retractErr)}`,
+            );
+          } finally {
+            this.kickoffInjectAttempts.delete(kickoffKey);
+          }
+        }
+      }
       return { errored: true, error };
     } finally {
       this.turnInFlight.set(agentKey, false); // P6: turn yielded (success or error) — reset flag
@@ -1411,6 +1508,7 @@ export class ConductorEngine {
     agentKey: string,
     projectId: ProjectId,
     agent: string,
+    provider: HostedIdentity['provider'],
     chunk: string,
   ): void {
     this.lastByteAt.set(agentKey, this.deps.now()); // P6: track last-byte time for liveness probe
@@ -1420,10 +1518,39 @@ export class ConductorEngine {
     accumulator?.append(chunk);
     for (const listener of [...this.transcriptListeners]) {
       try {
-        listener(projectId, agent, generation, chunk, chunkOffset);
+        listener(projectId, agent, generation, chunk, chunkOffset, provider);
       } catch {
         /* transcript subscribers are diagnostic surfaces; pane output must keep flowing */
       }
+    }
+  }
+
+  private surfaceCappedKickoffFailure(
+    hosted: HostedPane,
+    mail: DeliveredMail,
+    attempts: number,
+    error: unknown,
+  ): void {
+    const store = this.openMail(hosted.identity.projectId);
+    try {
+      store.send({
+        type: MAIL_CLARIFY_REQUEST,
+        from: hosted.identity.agent,
+        to: mail.sender,
+        subject: `Kickoff injection failed for ${hosted.identity.agent}`,
+        body:
+          `The one-shot kickoff for ${hosted.identity.agent} was retracted after ${attempts} ` +
+          `failed injection attempt(s), so the warm pane is no longer stuck re-pasting it every ` +
+          `tick. Provider: ${hosted.identity.provider}. Original kickoff seq: ${mail.seq}. ` +
+          `Last error: ${errorMessage(error)}\n\nOriginal kickoff subject:\n${mail.subject}\n\n` +
+          `Original kickoff body:\n${mail.body}`,
+        causationId: String(mail.seq),
+        idempotencyKey:
+          `kickoff-injection-failed:${hosted.identity.projectId}:` +
+          `${hosted.identity.agent}:${mail.sender}:${mail.seq}`,
+      });
+    } finally {
+      store.close();
     }
   }
 
@@ -1442,12 +1569,34 @@ export class ConductorEngine {
     this.toolActivityListeners.delete(agentKey);
     this.turnOrdinal.delete(agentKey); // PR-B: a re-hosted agent restarts its turn ordinal at 0
     this.overloadBackoff.delete(agentKey); // #68
+    this.clearKickoffInjectAttempts(agentKey); // #77
+  }
+
+  /**
+   * #77 — clear EVERY per-kickoff inject-attempt counter for `agentKey`. The counter is keyed by the
+   * specific kickoff mail (`${agentKey}::${sender}#${seq}`), so a single `delete(agentKey)` would miss
+   * the per-mail entries; iterate the agent's prefix instead. Called on any successful turn (budget
+   * reset) and on release/teardown.
+   */
+  private clearKickoffInjectAttempts(agentKey: string): void {
+    const prefix = `${agentKey}::`;
+    for (const key of this.kickoffInjectAttempts.keys()) {
+      if (key.startsWith(prefix)) this.kickoffInjectAttempts.delete(key);
+    }
   }
 
   // #68 — transient-overload backoff. Base/cap chosen so a 529 storm backs off exponentially
   // (1s, 2s, 4s, …) up to a 60s ceiling instead of re-injecting the same mail every ~1s tick.
   private static readonly OVERLOAD_BACKOFF_BASE_MS = 1_000;
   private static readonly OVERLOAD_BACKOFF_CAP_MS = 60_000;
+
+  /**
+   * #77 — max failed one-shot-kickoff inject attempts before the kickoff is RETRACTED. Three gives a
+   * collapsed/transient composer state two retries to settle before the engine gives up and frees the
+   * warm pane (a stranded warm pane is worse than a dropped scheduling nudge — the operator/parent can
+   * re-kick a healthy agent, but a quarantined pane blocks the slot indefinitely).
+   */
+  private static readonly KICKOFF_INJECT_ATTEMPT_CAP = 3;
 
   /** True while `agentKey` is in an overload backoff window (skip it this cycle). */
   private inOverloadBackoff(agentKey: string): boolean {

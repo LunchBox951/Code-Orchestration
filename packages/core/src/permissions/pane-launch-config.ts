@@ -286,6 +286,34 @@ function requireTrustedMcpExecutableArgs(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Codex MCP-tool pre-approval (#78)
+// ---------------------------------------------------------------------------
+//
+// #78 ROOT CAUSE: Claude pre-grants the `co_*` MCP tools by name (`--allowedTools mcp__co__*`), so a
+// hosted Claude pane never prompts to call `co_finish` / `co_sling` / …. Codex's `approval_policy =
+// "never"` gates the SYSCALL/SANDBOX axis (the wrong axis) but says NOTHING about MCP-tool approval,
+// so a hosted codex pane STILL raises an interactive "allow this MCP tool?" prompt and — with no
+// operator at its stdin — deadlocks the turn. We need codex's MCP-tool AUTO-APPROVAL.
+//
+// Codex documents per-MCP-server tool approval as `default_tools_approval_mode`, with `approve`
+// meaning calls from that server are pre-approved. This is the same axis Claude covers with
+// `--allowedTools mcp__co__*`; do not confuse it with top-level `approval_policy`, which governs
+// shell/sandbox approvals.
+export const CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY = 'default_tools_approval_mode';
+export const CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE = 'approve';
+
+/**
+ * [PLACEHOLDER · #78] The codex CLI flag that runs the pane NON-INTERACTIVELY for tool approvals.
+ * `--ask-for-approval never` is the documented codex approval-mode flag; whether it also suppresses
+ * the MCP-tool prompt is pending live verification (see `needsLiveVerification`). Applied in the codex
+ * launch args alongside `--dangerously-bypass-hook-trust`.
+ */
+export const CODEX_NON_INTERACTIVE_APPROVAL_ARGS: readonly string[] = [
+  '--ask-for-approval',
+  'never',
+];
+
 interface CodexConfigArtifacts {
   readonly codexConfigToml: string;
   readonly codexMcpCommand: string;
@@ -347,6 +375,10 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
     `args = ${tomlArray(args)}`,
     'required = true',
     'startup_timeout_sec = 60',
+    // #78: Pre-approve the co MCP tools so a hosted codex pane never deadlocks on an interactive
+    // "allow this MCP tool?" prompt. This is the documented MCP-tool approval axis; top-level
+    // approval_policy = "never" covers shell/sandbox approval only.
+    `${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY} = "${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE}"`,
     '',
     ...(mcpEnvLines.length > 0 ? ['[mcp_servers.co.env]', ...mcpEnvLines, ''] : []),
     '[[hooks.PreToolUse]]',
@@ -577,7 +609,13 @@ function buildCodexLaunchConfig(
   // orchestrator-generated PreToolUse block-list hook would otherwise be skipped (a silent
   // guardrail hole) or deadlock on a trust prompt. The orchestrator vets the hook source (it
   // writes it), so bypass the trust prompt to guarantee the block-list actually runs.
-  const args: string[] = ['--dangerously-bypass-hook-trust'];
+  // #78: also run NON-INTERACTIVELY for tool approvals — without it a hosted codex pane (no
+  // operator at its stdin) deadlocks on the MCP-tool "allow?" prompt the config pre-approval aims
+  // to suppress. PLACEHOLDER flag (`--ask-for-approval never`) pending live verification.
+  const args: string[] = [
+    '--dangerously-bypass-hook-trust',
+    ...CODEX_NON_INTERACTIVE_APPROVAL_ARGS,
+  ];
   // Repo-agnostic base prompt (prompts-and-memory.md), the Codex analogue of Claude's
   // `--append-system-prompt`: a `-c <key>=<json-string>` config override. Only when the caller set
   // the role — an unset role is a deliberate no-op (the placement/host callers MUST thread the role).

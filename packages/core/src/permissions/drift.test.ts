@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BLOCK_LIST } from './block-list.js';
-import { checkBlockListDrift } from './drift.js';
+import { checkBlockListDrift, CODEX_MCP_PRE_GRANT_VIOLATION_ID } from './drift.js';
 
 const ALL_IDS = BLOCK_LIST.map((r) => r.id);
 
@@ -36,6 +36,37 @@ describe('checkBlockListDrift', () => {
     expect(violations).toHaveLength(2);
     expect(violations.find((v) => v.kind === 'declared-not-enforced')?.id).toBe(missing);
     expect(violations.find((v) => v.kind === 'enforced-not-declared')?.id).toBe(bogus);
+  });
+
+  it('#78: a missing codex MCP pre-grant raises a DISTINCT kind, NOT block-list drift', () => {
+    // The block list is FULLY enforced (ids exactly match) but the codex MCP pre-grant regressed. The
+    // missing pre-grant must surface as its OWN violation kind — never as declared-not-enforced for
+    // every rule (the misleading signal #78 round-2 kills).
+    const enforced = { blockedIds: ALL_IDS, codexMcpPreGrantMissing: true };
+    const violations = checkBlockListDrift(BLOCK_LIST, enforced);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toMatchObject({
+      id: CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+      kind: 'codex-mcp-pre-grant-missing',
+    });
+    // The (intact) block list contributes NO declared-not-enforced violations.
+    expect(violations.some((v) => v.kind === 'declared-not-enforced')).toBe(false);
+  });
+
+  it('#78: the pre-grant violation is ADDITIVE — real block-list drift still reports alongside it', () => {
+    // A pre-grant regression and a genuine dropped rule are independent signals: both must surface, each
+    // with its own kind, so the operator sees the FULL picture (not one masking the other).
+    const missing = 'sudo';
+    const enforced = {
+      blockedIds: ALL_IDS.filter((id) => id !== missing),
+      codexMcpPreGrantMissing: true,
+    };
+    const violations = checkBlockListDrift(BLOCK_LIST, enforced);
+    expect(violations).toHaveLength(2);
+    expect(violations.find((v) => v.kind === 'declared-not-enforced')?.id).toBe(missing);
+    expect(violations.find((v) => v.kind === 'codex-mcp-pre-grant-missing')?.id).toBe(
+      CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+    );
   });
 });
 

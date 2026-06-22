@@ -33,7 +33,9 @@ import {
   type MailStore,
   type ProjectId,
   type ProjectRegistry,
+  type ProviderUsageSource,
   type RosterStore,
+  type UsageSourceFactory,
 } from '@co/core';
 import {
   ConductorEngine,
@@ -45,7 +47,13 @@ import {
   type HostedPane,
   type RouteFailure,
 } from './engine.js';
-import type { HostedIdentity } from '../live-session-host.js';
+import type {
+  HostedIdentity,
+  HostedSession,
+  HostSessionOptions,
+  LiveSessionHost,
+} from '../live-session-host.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 // ── Scripted startup fixture: a claude session that is ready immediately (no interstitial). ──
 // ESC authored as a `\u` escape so the SOURCE holds no raw control byte (the C2 pristine-repo rule).
@@ -529,6 +537,68 @@ describe('ConductorEngine — ensure-hosted → bind → inject → ONE turn →
     const outcome = await turnP;
     expect(outcome.errored).toBe(false);
     expect(outcome.turnEnd?.idle).toBe(true);
+  });
+});
+
+// ── usage-source-factory plumbing: deps → engine → host.hostSession (host-live capture wiring) ──
+describe('ConductorEngine — threads usageSourceFactory into the per-session host', () => {
+  it('passes the deps usageSourceFactory through to host.hostSession (so a live run records usage)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+
+    // A sentinel factory the engine must thread, unchanged, into the per-session hostSession opts.
+    // Its `read` is never invoked here (the fake host only records the factory identity), so a
+    // rejecting stub is enough to satisfy the ProviderUsageSource shape.
+    const sentinelSource: ProviderUsageSource = {
+      read: () => Promise.reject(new Error('sentinel source must not be read in this test')),
+    };
+    const sentinelFactory: UsageSourceFactory = () => sentinelSource;
+
+    // A fake host that records the usageSourceFactory it was handed (proves the deps→engine hop).
+    let seenFactory: UsageSourceFactory | undefined;
+    const fakeHost: LiveSessionHost = {
+      hostSession: async (
+        _id: HostedIdentity,
+        _transport: Transport,
+        opts?: HostSessionOptions,
+      ): Promise<HostedSession> => {
+        seenFactory = opts?.usageSourceFactory;
+        return { close: async () => {} };
+      },
+    };
+
+    const { engine, pty } = makeEngine({ host: fakeHost, usageSourceFactory: sentinelFactory });
+    const ensureP = engine.ensureHosted(identity);
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await ensureP;
+
+    expect(seenFactory).toBe(sentinelFactory);
+  });
+
+  it('omits usageSourceFactory from hostSession opts when no factory is configured', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-y', projectId, cwd });
+
+    let sawKey = true;
+    const fakeHost: LiveSessionHost = {
+      hostSession: async (
+        _id: HostedIdentity,
+        _transport: Transport,
+        opts?: HostSessionOptions,
+      ): Promise<HostedSession> => {
+        sawKey = opts != null && 'usageSourceFactory' in opts;
+        return { close: async () => {} };
+      },
+    };
+
+    const { engine, pty } = makeEngine({ host: fakeHost }); // no usageSourceFactory dep
+    const ensureP = engine.ensureHosted(identity);
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await ensureP;
+
+    expect(sawKey).toBe(false); // conditional spread adds nothing when the dep is absent
   });
 });
 
@@ -1401,6 +1471,31 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     expect(seen).toEqual([CLAUDE_READY]);
   });
 
+  it('tags startup transcript bytes with the authoritative provider before the pane is registered', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({
+      agent: 'impl-codex',
+      projectId,
+      cwd,
+      provider: 'codex',
+      resume: { provider: 'codex', codexHome: join(cwd, '.codex-home') },
+    });
+    const { engine, pty } = makeEngine();
+    const seen: Array<[ProjectId, string, string, string]> = [];
+    const unsub = engine.onTranscript((pid, agent, _generation, chunk, _offset, provider) =>
+      seen.push([pid, agent, chunk, provider]),
+    );
+
+    const ensureP = engine.ensureHosted(identity);
+    const pane = pty.panes[pty.panes.length - 1]!;
+    pane.emit('› \r\n  send · newline\r\n');
+    await ensureP;
+    unsub();
+
+    expect(seen).toEqual([[projectId, 'impl-codex', '› \r\n  send · newline\r\n', 'codex']]);
+  });
+
   it('accumulates a hosted pane’s output (ANSI/ESC bytes intact) into the tail', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
@@ -1452,16 +1547,16 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     expect(engine.transcriptTail(projectId, 'nobody')).toBe('');
   });
 
-  it('onTranscript fires (projectId, agent, chunk) on every chunk; unsubscribe stops it', async () => {
+  it('onTranscript fires (projectId, agent, generation, chunk, offset, provider) on every chunk; unsubscribe stops it', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
     const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
     const { engine, pty } = makeEngine();
     const { pane } = await hostPane(engine, pty, identity);
 
-    const seen: Array<[ProjectId, string, number, string]> = [];
-    const unsub = engine.onTranscript((pid, agent, generation, chunk) =>
-      seen.push([pid, agent, generation, chunk]),
+    const seen: Array<[ProjectId, string, number, string, string]> = [];
+    const unsub = engine.onTranscript((pid, agent, generation, chunk, _offset, provider) =>
+      seen.push([pid, agent, generation, chunk, provider]),
     );
     pane.emit('one');
     pane.emit('two');
@@ -1469,8 +1564,8 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     pane.emit('three'); // after unsubscribe — not observed
 
     expect(seen).toEqual([
-      [projectId, 'impl-x', 1, 'one'],
-      [projectId, 'impl-x', 1, 'two'],
+      [projectId, 'impl-x', 1, 'one', 'claude'],
+      [projectId, 'impl-x', 1, 'two', 'claude'],
     ]);
   });
 

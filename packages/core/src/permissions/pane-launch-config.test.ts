@@ -10,13 +10,20 @@
 
 import { describe, expect, it } from 'vitest';
 import { BLOCK_LIST } from './block-list.js';
-import { checkBlockListDrift, readEnforcedConfig } from './drift.js';
+import {
+  checkBlockListDrift,
+  readEnforcedConfig,
+  CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+} from './drift.js';
 import {
   buildPaneLaunchConfig,
   buildClaudeStatusLineCommand,
   paneMayUseWebTools,
-  CODEX_BASE_PROMPT_CONFIG_KEY,
   CO_CLAUDE_STATUSLINE_PATH_ENV,
+  CODEX_BASE_PROMPT_CONFIG_KEY,
+  CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY,
+  CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE,
+  CODEX_NON_INTERACTIVE_APPROVAL_ARGS,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
 import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
@@ -517,6 +524,98 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #78 — codex MCP-tool pre-approval (deadlock fix) + tolerant drift
+// ---------------------------------------------------------------------------
+
+describe('#78 codex MCP-tool pre-approval', () => {
+  it('codex config.toml pre-grants the co MCP tools under [mcp_servers.co] with the documented key', () => {
+    const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    const toml = config.codexConfigToml ?? '';
+    expect(toml).toContain(
+      `${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY} = "${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE}"`,
+    );
+  });
+
+  it('codex args apply the non-interactive approval launch flag', () => {
+    const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    // The full flag sequence appears contiguously in the codex launch args.
+    const joined = config.args.join(' ');
+    expect(joined).toContain(CODEX_NON_INTERACTIVE_APPROVAL_ARGS.join(' '));
+    expect(config.args).toContain('--dangerously-bypass-hook-trust');
+  });
+
+  it('drift REQUIRES the pre-grant: removing it → a DISTINCT codex-mcp-pre-grant-missing violation (NOT block-list drift)', () => {
+    const good = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    const toml = (good.codexConfigToml ?? '').replace(
+      new RegExp(`^\\s*${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY}\\s*=.*$\\n?`, 'mu'),
+      '',
+    );
+    const config: PaneLaunchConfig = {
+      ...good,
+      codexConfigToml: toml,
+      prelaunchFiles: good.prelaunchFiles?.map((file) =>
+        file.path === good.codexConfigTomlPath ? { ...file, contents: toml } : file,
+      ),
+    };
+    const violations = checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config));
+    // EXACTLY ONE violation, and it is the DISTINCT pre-grant kind — the block list itself is intact, so
+    // the missing pre-grant must NOT masquerade as declared-not-enforced for every rule (#78 round-2).
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toMatchObject({
+      id: CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+      kind: 'codex-mcp-pre-grant-missing',
+    });
+    // And specifically: NO block-list-drift kinds are raised (the regression the round-2 fix kills).
+    expect(violations.some((v) => v.kind === 'declared-not-enforced')).toBe(false);
+  });
+
+  it('drift REQUIRES an enabled pre-grant: setting the candidate key false still violates', () => {
+    const good = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    const toml = (good.codexConfigToml ?? '').replace(
+      new RegExp(`^(\\s*)${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY}(\\s*=).*$`, 'mu'),
+      `$1${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY}$2 "prompt"`,
+    );
+    expect(toml).not.toBe(good.codexConfigToml);
+    const config: PaneLaunchConfig = {
+      ...good,
+      codexConfigToml: toml,
+      prelaunchFiles: good.prelaunchFiles?.map((file) =>
+        file.path === good.codexConfigTomlPath ? { ...file, contents: toml } : file,
+      ),
+    };
+
+    const violations = checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config));
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toMatchObject({
+      id: CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+      kind: 'codex-mcp-pre-grant-missing',
+    });
+  });
+
+  it('drift rejects the old placeholder auto_approve key even when present', () => {
+    const good = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    const toml = (good.codexConfigToml ?? '').replace(
+      new RegExp(`^(\\s*)${CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY}(\\s*=.*)$`, 'mu'),
+      '$1auto_approve = true',
+    );
+    expect(toml).not.toBe(good.codexConfigToml);
+    const config: PaneLaunchConfig = {
+      ...good,
+      codexConfigToml: toml,
+      prelaunchFiles: good.prelaunchFiles?.map((file) =>
+        file.path === good.codexConfigTomlPath ? { ...file, contents: toml } : file,
+      ),
+    };
+    const violations = checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config));
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toMatchObject({
+      id: CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+      kind: 'codex-mcp-pre-grant-missing',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 4. SpawnSpec composition — builder output merges without conflict
 // ---------------------------------------------------------------------------
 
@@ -546,8 +645,12 @@ describe('SpawnSpec composition (AC-L7-6)', () => {
     expect(spec.command).toBe('codex');
     expect(spec.env['CODEX_HOME']).toBe(ISOLATED_HOME);
     // The orchestrator-generated PreToolUse block-list hook needs the trust prompt bypassed to run
-    // in the ephemeral isolated CODEX_HOME (the orchestrator vets the hook source).
-    expect(spec.args).toEqual(['--dangerously-bypass-hook-trust']);
+    // in the ephemeral isolated CODEX_HOME (the orchestrator vets the hook source); #78 also applies
+    // the non-interactive approval flag so a hosted pane never deadlocks on the MCP-tool prompt.
+    expect(spec.args).toEqual([
+      '--dangerously-bypass-hook-trust',
+      ...CODEX_NON_INTERACTIVE_APPROVAL_ARGS,
+    ]);
     expect(spec.prelaunchFiles).toHaveLength(2);
   });
 });

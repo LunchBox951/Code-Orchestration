@@ -15,6 +15,13 @@ const CLAUDE_SPEC: SpawnSpec = {
   env: { CLAUDE_CONFIG_DIR: '/data/config/agent' },
 };
 
+const CODEX_SPEC: SpawnSpec = {
+  command: 'codex',
+  args: [],
+  cwd: '/work/agent',
+  env: { CODEX_HOME: '/data/config/agent' },
+};
+
 // [synthesized] Claude MCP-tool permission prompt (host-confirmed later).
 const CLAUDE_PERMISSION =
   'Claude wants to use co_probe.\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n';
@@ -109,6 +116,71 @@ describe('injectMail — multi-line: bracketed paste + one submit', () => {
     await p;
 
     expect(pane.written).toEqual([PASTE_START + text + PASTE_END, '\r']);
+  });
+});
+
+describe('injectMail — codex collapsed-paste preview (#77)', () => {
+  it('accepts a codex collapsed-paste echo carrying BOTH needles, then submits once', async () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const { delay } = controllableDelay();
+    const text = 'first line\nsecond line\nthird line';
+    const p = injectMail(pane, text, { provider: 'codex', retryDelay: delay });
+
+    pane.emit('Pasted text — 12 lines collapsed'); // needles: 'pasted' AND 'lines'
+    await p;
+
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END, '\r']);
+  });
+
+  it('does NOT accept a codex echo missing a needle (only "pasted", no "lines")', async () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const { delay, release } = controllableDelay();
+    const text = 'first line\nsecond line';
+    const p = injectMail(pane, text, { provider: 'codex', retryDelay: delay });
+    const rejection = expect(p).rejects.toThrow(/uncertain multiline retry/i);
+
+    pane.emit('Pasted text — preview'); // 'pasted' present but 'lines' absent → .every() fails
+    release(); // the retry window elapses with no full echo
+    await rejection;
+
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END]); // never submitted
+  });
+});
+
+describe('injectMail — onPasteEcho observation tap', () => {
+  it('invokes onPasteEcho with each emitted chunk and the multiline flag', async () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const { delay } = controllableDelay();
+    const observed: Array<{ chunk: string; multiline: boolean }> = [];
+    const text = 'first line\nsecond line';
+    const p = injectMail(pane, text, {
+      provider: 'codex',
+      retryDelay: delay,
+      onPasteEcho: (chunk, multiline) => observed.push({ chunk, multiline }),
+    });
+
+    pane.emit('Pasted text — 2 lines collapsed');
+    await p;
+
+    expect(observed).toEqual([{ chunk: 'Pasted text — 2 lines collapsed', multiline: true }]);
+  });
+
+  it('swallows an onPasteEcho that throws — echo-verify and submit are unaffected', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const { delay } = controllableDelay();
+    const text = 'first line\nsecond line';
+    const p = injectMail(pane, text, {
+      provider: 'claude',
+      retryDelay: delay,
+      onPasteEcho: () => {
+        throw new Error('observer blew up');
+      },
+    });
+
+    pane.emit(text); // the composer renders the pasted content; the throwing observer must not break it
+    await p;
+
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END, '\r']); // still submits exactly once
   });
 });
 

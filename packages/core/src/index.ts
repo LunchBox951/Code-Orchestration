@@ -1066,7 +1066,11 @@ export { checkSubRoleCompleteness } from './roles/sub-role-completeness.js';
 export type { BlockCategory, BlockRule, MatchBlockOptions } from './permissions/block-list.js';
 export { BLOCK_LIST, matchBlock } from './permissions/block-list.js';
 export type { EnforcedConfig, DriftViolation } from './permissions/drift.js';
-export { checkBlockListDrift, readEnforcedConfig } from './permissions/drift.js';
+export {
+  checkBlockListDrift,
+  readEnforcedConfig,
+  CODEX_MCP_PRE_GRANT_VIOLATION_ID,
+} from './permissions/drift.js';
 export type { PaneIdentity, PaneLaunchConfig } from './permissions/pane-launch-config.js';
 export { buildPaneLaunchConfig } from './permissions/pane-launch-config.js';
 export type { NudgeRule } from './permissions/nudges.js';

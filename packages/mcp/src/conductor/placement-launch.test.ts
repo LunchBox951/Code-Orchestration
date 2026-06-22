@@ -515,7 +515,11 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
       } else {
         expect(spec.args).toEqual([
           '--dangerously-bypass-hook-trust',
-          // Role base-prompt config override (PR D item 1) sits between the hook-trust flag and the
+          // #78: non-interactive tool-approval flag so a hosted codex pane never deadlocks on the
+          // MCP-tool approval prompt (PLACEHOLDER — pending live verification).
+          '--ask-for-approval',
+          'never',
+          // Role base-prompt config override (PR D item 1) sits between the approval flag and the
           // bridge --add-dir; it carries the JSON-encoded implementer base prompt.
           '-c',
           `developer_instructions=${JSON.stringify(roleBasePrompt('implementer'))}`,
@@ -559,6 +563,8 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(socketPath).toBe(join(bridgeDir, 'bridge.sock'));
     expect(spec.args).toEqual([
       '--dangerously-bypass-hook-trust',
+      '--ask-for-approval', // #78 non-interactive tool approval (PLACEHOLDER)
+      'never',
       '-c',
       `developer_instructions=${JSON.stringify(roleBasePrompt('implementer'))}`,
       '--add-dir',

@@ -28,6 +28,8 @@ import {
   openRegistry,
   openRosterStore,
   openWorktreeStore,
+  turnKickoffCorrelationId,
+  isTurnKickoffMail,
   type DeliveredMail,
   type DispatchStore,
   type MailStore,
@@ -39,7 +41,7 @@ import {
   type WorktreeStore,
 } from '@co/core';
 import { ConductorDaemon } from './daemon.js';
-import { ConductorEngine } from './engine.js';
+import { ConductorEngine, type TurnOutcome } from './engine.js';
 import type { HostedIdentity } from '../live-session-host.js';
 
 // ── Scripted startup fixture. ESC via fromCharCode so the SOURCE holds no raw control byte. ──
@@ -506,5 +508,386 @@ describe('co_sling kickoff → daemon first-turn (AC-S14-2)', () => {
     expect(tickOut.cycle?.turn.errored).toBe(false);
     expect(tickOut.cycle?.turn.turnEnd?.idle).toBe(true);
     expect(pty.panes).toHaveLength(1);
+  });
+});
+
+// ── #77: codex collapsed-paste kickoff re-paste loop — consume-after-cap ──────────────────────────
+//
+// A daemon kickoff is ALWAYS multiline (the renderer joins header + body), so injectMail bracketed-
+// pastes + echo-verifies it. The codex composer is observed to COLLAPSE the paste into a preview
+// instead of echoing the full text, so echoed() never matches, the multiline branch THROWS, the turn
+// errors, and (pre-#77) F5 never consumed the kickoff → the daemon re-pasted it every tick forever.
+// The fix BOUNDS the failed inject attempts and RETRACTS the kickoff after the cap, freeing the pane.
+
+// Codex idle composer fixture: the `send` + `newline` ready anchor group (startup-classifier.ts).
+const CODEX_READY = ESC + '[2J' + ESC + '[H' + '› \r\n  send · newline\r\n';
+
+/**
+ * Controllable inject-retry seam (the analogue of {@link makeQuietWindow} for `injectMail`): each
+ * `retryDelay()` returns a promise the test settles via `settle()`. A FAILED codex turn settles it
+ * with NO matching echo (so the multiline branch throws); a SUCCESS turn emits the echo first (which
+ * wins the echo-vs-retry race) before settling. maxEchoAttempts:1 keeps one failed turn = one attempt.
+ */
+function makeInjectRetry(): {
+  retryDelay: (signal?: AbortSignal) => Promise<void>;
+  settle: () => void;
+} {
+  const waiters = new Set<() => void>();
+  return {
+    retryDelay: (signal) =>
+      new Promise<void>((resolve) => {
+        if (signal?.aborted === true) return resolve();
+        const finish = (): void => {
+          waiters.delete(finish);
+          signal?.removeEventListener('abort', finish);
+          resolve();
+        };
+        signal?.addEventListener('abort', finish, { once: true });
+        waiters.add(finish);
+      }),
+    settle: () => {
+      for (const w of [...waiters]) w();
+    },
+  };
+}
+
+function makeCodexEngine(
+  clock: ReturnType<typeof makeClock>,
+  qw: ReturnType<typeof makeQuietWindow>,
+  retry: ReturnType<typeof makeInjectRetry>,
+): { engine: ConductorEngine; pty: FakePty } {
+  const pty = new FakePty();
+  const engine = new ConductorEngine({
+    pty,
+    makeTransport: () => InMemoryTransport.createLinkedPair(),
+    now: clock.now,
+    quietWindow: qw.quietWindow,
+    injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+  });
+  engines.push(engine);
+  return { engine, pty };
+}
+
+/** Drive ONE codex turn whose paste never echoes: settle the retry with no echo ⇒ inject THROWS. */
+async function driveCodexInjectFailure(
+  engine: ConductorEngine,
+  hosted: ReturnType<ConductorEngine['getHosted']> & object,
+  kickoff: DeliveredMail,
+  retry: ReturnType<typeof makeInjectRetry>,
+): Promise<TurnOutcome> {
+  const turnP = engine.runOneTurn(hosted, kickoff);
+  await tick();
+  retry.settle(); // retry window wins with no echo ⇒ multiline branch throws
+  return turnP;
+}
+
+async function hostCodexPane(
+  engine: ConductorEngine,
+  pty: FakePty,
+  identity: HostedIdentity,
+): Promise<FakePty['panes'][number]> {
+  const ensureP = engine.ensureHosted(identity);
+  const pane = pty.panes[pty.panes.length - 1]!;
+  pane.emit(CODEX_READY);
+  await ensureP;
+  return pane;
+}
+
+/**
+ * Seed a codex child's turn-kickoff exactly as `co_sling`'s PLACED path does — an actionable
+ * `clarify_request` carrying `turnKickoffCorrelationId(agent)` (so `isTurnKickoffMail` is true). We
+ * seed it directly rather than driving the dispatch balancer to a codex placement: the #77 behavior
+ * under test is the engine's consume-after-cap on a real turn-kickoff mail, not the placement policy
+ * (the claude `co_sling` cases above already prove the seeding path). The body is single-line, but the
+ * renderer joins header + body into MULTILINE text, so injectMail bracketed-pastes it — the codex
+ * collapsed-paste failure (#77) the rest of the test exercises.
+ */
+function seedCodexKickoff(
+  projectId: ProjectId,
+  repo: string,
+  from = 'lead-1',
+): { kickoff: DeliveredMail; worktreePath: string; ctxMail: MailStore } {
+  const roster = openRosterStore(projectId);
+  rosterStores.push(roster);
+  roster.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+  roster.recordAgent({ agentId: 'lead-1', role: 'lead', parent: 'coord-1' });
+  const mail = openMailStore(projectId);
+  mailStores.push(mail);
+  const kickoff = mail.send({
+    type: 'clarify_request',
+    from,
+    to: 'impl-cx',
+    subject: 'kickoff',
+    body: 'Implement the feature per the spec in your session context.',
+    correlationId: turnKickoffCorrelationId('impl-cx'),
+  });
+  expect(isTurnKickoffMail(kickoff)).toBe(true);
+  return { kickoff, worktreePath: repo, ctxMail: mail };
+}
+
+function codexIdentity(projectId: ProjectId, worktreePath: string): HostedIdentity {
+  return {
+    agent: 'impl-cx',
+    role: 'implementer',
+    parent: 'lead-1',
+    pane: 'pane-impl-cx',
+    projectId,
+    cwd: worktreePath,
+    provider: 'codex',
+    resume: { provider: 'codex', codexHome: '/tmp/codex-home-impl-cx' },
+  };
+}
+
+/** Read whether the given kickoff seq is still outstanding for impl-cx (fresh store each call). */
+function kickoffOutstanding(projectId: ProjectId, seq: number): boolean {
+  const store = openMailStore(projectId);
+  mailStores.push(store);
+  return store.outstanding('impl-cx').some((m) => m.seq === seq);
+}
+
+function outstandingFor(projectId: ProjectId, agent: string): readonly DeliveredMail[] {
+  const store = openMailStore(projectId);
+  mailStores.push(store);
+  return store.outstanding(agent);
+}
+
+/** Drive ONE successful codex turn: emit the collapsed-paste preview (needle-matching), then idle. */
+async function driveCodexInjectSuccess(
+  engine: ConductorEngine,
+  hosted: ReturnType<ConductorEngine['getHosted']> & object,
+  kickoff: DeliveredMail,
+  pane: FakePty['panes'][number],
+  clock: ReturnType<typeof makeClock>,
+  qw: ReturnType<typeof makeQuietWindow>,
+): Promise<TurnOutcome> {
+  const turnP = engine.runOneTurn(hosted, kickoff);
+  await tick();
+  // The codex composer echoes a collapsed-paste preview matching CODEX_COLLAPSED_PASTE_NEEDLES
+  // (['pasted','lines']) — echoed() accepts it, injectMail submits, the turn runs to idle.
+  pane.emit('Pasted text — 12 lines collapsed\r\n');
+  await tick();
+  clock.set(1000);
+  pane.emit('⠋ working…\r\n');
+  await tick();
+  clock.set(1000 + WEDGE_MS + 1);
+  qw.settle();
+  return turnP;
+}
+
+describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt cap', () => {
+  it('a codex kickoff whose paste never echoes is RETRACTED after the cap (not re-pasted forever)', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath, ctxMail } = seedCodexKickoff(projectId, repo);
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+
+    // The kickoff is the only outstanding item, and it IS a turn-kickoff mail.
+    expect(ctxMail.outstanding('impl-cx').map((m) => m.seq)).toEqual([kickoff.seq]);
+
+    const CAP = 3; // ConductorEngine.KICKOFF_INJECT_ATTEMPT_CAP
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Drive CAP-1 failed turns: each inject throws (codex multiline paste never echoes); the kickoff
+    // is NOT yet consumed (still outstanding for a retry — MNR-2).
+    for (let i = 0; i < CAP - 1; i++) {
+      const turn = await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+      expect(turn.errored).toBe(true);
+      expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
+    }
+
+    // The CAP-th failed turn crosses the cap: the kickoff is RETRACTED so the warm pane is freed.
+    const finalTurn = await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    expect(finalTurn.errored).toBe(true);
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    // No second pane was spawned; the pane is still hosted (freed of the kickoff, not killed).
+    expect(pty.panes).toHaveLength(1);
+    expect(engine.isHosted(projectId, 'impl-cx')).toBe(true);
+    expect(pane.written.filter((w) => w === '\r')).toHaveLength(0); // never blind-fired Enter
+  });
+
+  it('NON-VACUOUS: the kickoff SURVIVES every failed turn strictly before the cap, then disappears at it', async () => {
+    // Makes the consume-after-cap assertion real: the kickoff must persist at attempts 1 and 2 and
+    // vanish exactly at attempt 3 — so the test fails if the cap is removed (never consumed) OR set
+    // to 1 (consumed too early).
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 1
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 2 (still < cap of 3)
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 3 == cap → retracted
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+  });
+
+  it('surfaces a durable actionable notice to the kickoff sender when the cap retracts it', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo, '@operator');
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    const [notice] = outstandingFor(projectId, '@operator').filter(
+      (item) =>
+        item.sender === 'impl-cx' &&
+        item.type === 'clarify_request' &&
+        item.subject === 'Kickoff injection failed for impl-cx',
+    );
+    expect(notice).toBeDefined();
+    expect(notice!.body).toContain('retracted after 3 failed injection attempt(s)');
+    expect(notice!.body).toContain(`Original kickoff seq: ${kickoff.seq}`);
+    expect(notice!.body).toContain('Original kickoff body:');
+  });
+
+  it('resets the budget after a SUCCESS — NON-VACUOUS: 2 more failed injects after a success stay under the cap', async () => {
+    // A success must CLEAR the failed-inject counter so the cap only ever bounds a contiguous re-paste
+    // loop, never a healthy agent's later turns. Non-vacuous: after a success we do 2 MORE failed
+    // injects (which, were the budget NOT reset, would be attempts 3+ ⇒ over the cap) and assert the
+    // fresh kickoff is STILL outstanding (under the cap) — proving the reset happened.
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // 2 failed injects (under the cap of 3) — kickoff survives.
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
+
+    // A SUCCESS: the collapsed-paste preview echoes, injectMail submits, the turn runs to idle. This
+    // consumes the kickoff AND resets the failed-inject counter.
+    const successTurn = await driveCodexInjectSuccess(engine, hosted, kickoff, pane, clock, qw);
+    expect(successTurn.errored).toBe(false);
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+
+    // Re-seed a fresh kickoff and do 2 MORE failed injects. Were the counter NOT reset, these would be
+    // the 3rd/4th attempts (over the cap). Because it WAS reset, they are attempts 1 and 2 — under the
+    // cap — so the fresh kickoff stays outstanding.
+    const reseed = openMailStore(projectId);
+    mailStores.push(reseed);
+    const freshKickoff = reseed.send({
+      type: 'clarify_request',
+      from: 'lead-1',
+      to: 'impl-cx',
+      subject: 'kickoff',
+      body: 'Second kickoff after a successful first turn.',
+      correlationId: turnKickoffCorrelationId('impl-cx'),
+    });
+
+    await driveCodexInjectFailure(engine, hosted, freshKickoff, retry); // reset-budget attempt 1
+    await driveCodexInjectFailure(engine, hosted, freshKickoff, retry); // reset-budget attempt 2 (< cap)
+    expect(kickoffOutstanding(projectId, freshKickoff.seq)).toBe(true);
+  });
+
+  it('keys the budget by the SPECIFIC kickoff mail — two distinct failing kickoffs do NOT share a budget', async () => {
+    // The attempt counter must be keyed by (agent + kickoff mail identity), NOT the agent alone. Drive
+    // kickoff A to CAP-1 failed injects (it survives). Then seed a DISTINCT kickoff B for the SAME agent
+    // (no success in between, so no reset) and drive B to CAP-1 failed injects. With a SHARED per-agent
+    // budget, A's CAP-1 attempts would pre-consume B so its very FIRST failed inject would hit the cap
+    // and retract B prematurely. With per-mail keying, B gets its OWN full budget and survives — proving
+    // a later legitimate kickoff is never pre-consumed by an earlier one's failures.
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff: kickoffA, worktreePath } = seedCodexKickoff(projectId, repo);
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    const CAP = 3; // ConductorEngine.KICKOFF_INJECT_ATTEMPT_CAP
+
+    // Kickoff A: CAP-1 failed injects — A survives (strictly under the cap), budget for A = CAP-1.
+    for (let i = 0; i < CAP - 1; i++) {
+      await driveCodexInjectFailure(engine, hosted, kickoffA, retry);
+    }
+    expect(kickoffOutstanding(projectId, kickoffA.seq)).toBe(true);
+
+    // Seed a DISTINCT kickoff B for the SAME agent (different seq) — NO success has reset any budget.
+    const bus = openMailStore(projectId);
+    mailStores.push(bus);
+    const kickoffB = bus.send({
+      type: 'clarify_request',
+      from: 'lead-1',
+      to: 'impl-cx',
+      subject: 'kickoff',
+      body: 'A SECOND distinct kickoff for the same agent (e.g. a re-kick from the parent).',
+      correlationId: turnKickoffCorrelationId('impl-cx'),
+    });
+    expect(isTurnKickoffMail(kickoffB)).toBe(true);
+    expect(kickoffB.seq).not.toBe(kickoffA.seq); // genuinely distinct mail
+
+    // Kickoff B: CAP-1 failed injects. Under per-mail keying these are B's OWN attempts 1..CAP-1, so B
+    // stays outstanding. Under the OLD shared per-agent budget the FIRST of these would be attempt CAP
+    // and retract B immediately — so this assertion fails if the fix is reverted (non-vacuous).
+    for (let i = 0; i < CAP - 1; i++) {
+      await driveCodexInjectFailure(engine, hosted, kickoffB, retry);
+    }
+    expect(kickoffOutstanding(projectId, kickoffB.seq)).toBe(true);
+
+    // And B's own budget is honored end-to-end: ITS cap-th failed inject (not A's) retracts B.
+    await driveCodexInjectFailure(engine, hosted, kickoffB, retry);
+    expect(kickoffOutstanding(projectId, kickoffB.seq)).toBe(false);
+  });
+});
+
+// ── #77 cap-path resilience: a diagnostic mail-store throw must NOT mask the turn or abort the tick ──
+//
+// The cap branch in runOneTurn's catch handler does real mail-store I/O (consumeOneShotKickoff +
+// surfaceCappedKickoffFailure). If the operator-notice send throws, it must NOT propagate out of the
+// turn (which would replace the original turn error and reject the whole tick) and the kickoff must
+// still be retracted (loop-safety) — the diagnostic is best-effort (Principle 9: never break a turn).
+
+describe('#77 cap-path resilience — a diagnostic store throw is contained', () => {
+  it('still returns the ORIGINAL turn error (not the store error) when the cap notice throws', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Stub the diagnostic so the operator-notice send throws on the cap-th turn.
+    (engine as unknown as { surfaceCappedKickoffFailure: () => void }).surfaceCappedKickoffFailure =
+      () => {
+        throw new Error('mail store unavailable');
+      };
+
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 1
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 2
+    const finalTurn = await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 3 == cap
+
+    // The outcome is the REAL turn error (the inject echo-verify throw), NOT the stubbed store error.
+    expect(finalTurn.errored).toBe(true);
+    expect(finalTurn.error).toBeInstanceOf(Error);
+    expect((finalTurn.error as Error).message).not.toMatch(/mail store unavailable/);
+    expect((finalTurn.error as Error).message).toMatch(/multiline|echo/i);
+    // Loop-safety still holds: the kickoff was retracted BEFORE the throwing notice ran.
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    // The pane is freed, not killed.
+    expect(engine.isHosted(projectId, 'impl-cx')).toBe(true);
   });
 });

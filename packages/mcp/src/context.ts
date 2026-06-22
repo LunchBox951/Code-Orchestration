@@ -138,7 +138,7 @@ export interface OpenContextStoresOptions {
   /**
    * Passive usage-source factory for this mounted context. Hosted panes can inject identity-scoped
    * provider readers (for example the pane's isolated Claude statusLine file) instead of using daemon
-   * process globals.
+   * process globals — also used by host-live capture wrappers.
    */
   readonly usageSourceFactory?: UsageSourceFactory;
 }

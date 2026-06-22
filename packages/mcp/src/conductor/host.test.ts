@@ -44,6 +44,9 @@ import {
   GH_AUTH_TOKEN_TIMEOUT_MS,
   defaultServeCoMcpPaths,
   hostLiveTransportRequired,
+  hostLiveCaptureUsageSourceFactory,
+  looksLikeApprovalPrompt,
+  statusLineCandidates,
   makeGhCommandResolver,
   makeGhAuthTokenRunner,
   resolveAndApplyDaemonGithubAuth,
@@ -55,12 +58,18 @@ import {
   type IntervalScheduler,
 } from './host.js';
 import { DaemonBackedAgentRouter } from './agent-router.js';
+import type {
+  HostLiveCapture,
+  McpApprovalObservation,
+  ClaudeStatusLineObservation,
+} from './host-live-capture.js';
 import type { HostedIdentity } from '../live-session-host.js';
 
 const ESC = String.fromCharCode(0x1b);
 const CLAUDE_READY = ESC + '[2J' + ESC + '[H' + '╭─ Welcome ─╮\r\n❯ \r\n  ? for shortcuts\r\n';
 
 const ORIGINAL_ENV = process.env;
+const ORIGINAL_CWD = process.cwd();
 let dataDirs: string[] = [];
 let engines: ConductorEngine[] = [];
 let registries: ProjectRegistry[] = [];
@@ -94,6 +103,7 @@ afterEach(async () => {
     }
   }
   process.env = ORIGINAL_ENV;
+  process.chdir(ORIGINAL_CWD);
   for (const dir of dataDirs) {
     try {
       rmSync(dir, { recursive: true, force: true });
@@ -577,6 +587,91 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
   });
 });
 
+describe('hostLiveCaptureUsageSourceFactory', () => {
+  it('records the exact usage snapshot returned by the underlying source', async () => {
+    const samples: unknown[] = [];
+    const capture = {
+      armed: true,
+      captureMcpApproval: () => {},
+      captureClaudeStatusLine: () => {},
+      captureUsageSample: (obs: unknown) => samples.push(obs),
+    };
+    const factory = hostLiveCaptureUsageSourceFactory(capture, (account) => ({
+      read: async (provider) => ({
+        provider,
+        account: account.account,
+        available: true,
+        source: 'fake-live-source',
+        sampled_at: '2026-06-22T00:00:00.000Z',
+        windows: [],
+      }),
+    }));
+
+    expect(factory).toBeDefined();
+    const snapshot = await factory!({ provider: 'claude', account: 'claude:max' }).read('claude');
+
+    expect(snapshot).toEqual({
+      provider: 'claude',
+      account: 'claude:max',
+      available: true,
+      source: 'fake-live-source',
+      sampled_at: '2026-06-22T00:00:00.000Z',
+      windows: [],
+    });
+    expect(samples).toEqual([
+      {
+        provider: 'claude',
+        account: 'claude:max',
+        source: 'fake-live-source',
+        raw: snapshot,
+      },
+    ]);
+  });
+
+  it('does not wrap the usage source when capture is inert', () => {
+    const factory = hostLiveCaptureUsageSourceFactory({
+      armed: false,
+      captureMcpApproval: () => {},
+      captureClaudeStatusLine: () => {},
+      captureUsageSample: () => {},
+    });
+
+    expect(factory).toBeUndefined();
+  });
+});
+
+// ── #78/#67 capture heuristics: the crux of what the armed harness flags-and-records ──
+describe('looksLikeApprovalPrompt (#78 MCP-approval needle scan)', () => {
+  it.each([
+    'Allow this MCP tool? (y/n)',
+    'Approve the tool call? yes/no',
+    'Grant permission to run the tool? (y)',
+    'co wants to use a tool — approve? y/n',
+  ])('matches an interactive approval prompt: %s', (chunk) => {
+    expect(looksLikeApprovalPrompt(chunk)).toBe(true);
+  });
+
+  it.each([
+    '⠋ working on the task…',
+    'Wrote 42 lines to src/index.ts',
+    'allow-listing is enabled in the config', // "allow" but no tool/mcp/y-n confirmer
+    'the tool ran successfully', // "tool" but no approve/allow/permission verb
+  ])('does NOT match ordinary pane output: %s', (chunk) => {
+    expect(looksLikeApprovalPrompt(chunk)).toBe(false);
+  });
+});
+
+describe('statusLineCandidates (#67-adjacent usage status-line filter)', () => {
+  it('extracts non-empty lines carrying a usage/limit/context token', () => {
+    const chunk = '\r\n  Context: 42% · 5h limit resets in 2h  \r\nplain status text\r\n';
+    expect(statusLineCandidates(chunk)).toEqual(['Context: 42% · 5h limit resets in 2h']);
+  });
+
+  it('returns nothing for pane output with no usage tokens', () => {
+    expect(statusLineCandidates('just some\r\nordinary output\r\n')).toEqual([]);
+  });
+});
+
 // ── serveConductor wiring + the [host-live] handoff seams ─────────────────────
 describe('serveConductor — wires the full stack over injected seams (no real binary)', () => {
   it('builds, recovers, arms, and ticks over FakePty + a controllable scheduler', async () => {
@@ -795,6 +890,57 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     }
   });
 
+  it('armed hostLiveCapture records an MCP-approval prompt + a Claude status line from the pane stream', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+
+    // An armed capture stub recording the two transcript-driven observations (#78 / #67-adjacent).
+    const approvals: McpApprovalObservation[] = [];
+    const statusLines: ClaudeStatusLineObservation[] = [];
+    const capture: HostLiveCapture = {
+      armed: true,
+      captureMcpApproval: (obs) => approvals.push(obs),
+      captureClaudeStatusLine: (obs) => statusLines.push(obs),
+      captureUsageSample: () => {},
+    };
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+      hostLiveCapture: capture,
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const ensureP = engine.ensureHosted(makeIdentity('impl-cap', projectId, cwd));
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY); // startup bytes — emitted before the transcript subscription is armed
+    await ensureP;
+
+    // An interactive MCP-approval prompt in the pane stream means the pre-grant did NOT suppress it.
+    pane.emit('Allow this MCP tool? (y/n)');
+    // A Claude usage status line as the sampler would parse it.
+    pane.emit('Context: 42% · 5h limit resets in 2h\r\n');
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]!.promptDetected).toBe(true);
+    expect(approvals[0]!.agent).toBe('impl-cap');
+    expect(approvals[0]!.provider).toBe('claude');
+    expect(approvals[0]!.paneExcerpt).toContain('Allow this MCP tool?');
+
+    expect(statusLines).toEqual([
+      { agent: 'impl-cap', rawLine: 'Context: 42% · 5h limit resets in 2h' },
+    ]);
+
+    await runner.stop();
+  });
+
   it('stop() waits for pending router stop teardown before resolving', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
@@ -984,6 +1130,34 @@ describe('serveConductor — wires the full stack over injected seams (no real b
 
   it('runServeConductor fails loud on an unknown project id', async () => {
     await expect(runServeConductor(['missing-project-id'])).rejects.toThrow(/unknown project id/i);
+  });
+
+  it('runServeConductor rejects capture paths inside the registered repo even when launched elsewhere', async () => {
+    const { projectId, cwd } = makeProject();
+    const outsideCwd = mkdtempSync(join(tmpdir(), 'co-host-outside-cwd-'));
+    dataDirs.push(outsideCwd);
+    process.chdir(outsideCwd);
+    process.env.CO_HOST_LIVE_CAPTURE = join(cwd, 'captures');
+    process.env.CO_CLI_COMMAND = 'relative-co-cli'; // force a later launch-path error before a runner starts
+    const errors: string[] = [];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map((arg) => String(arg)).join(' '));
+    });
+    try {
+      await expect(runServeConductor([projectId])).rejects.toThrow(
+        /CO_CLI_COMMAND must be absolute/i,
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    expect(errors.some((msg) => msg.includes('GitHub auth:'))).toBe(true);
+    expect(
+      errors.some(
+        (msg) => msg.includes('refusing to write capture evidence inside') && msg.includes(cwd),
+      ),
+    ).toBe(true);
+    expect(errors.some((msg) => msg.includes('host-live capture: ARMED'))).toBe(false);
   });
 
   describe('GitHub auth provisioning (RC-2/3/4)', () => {

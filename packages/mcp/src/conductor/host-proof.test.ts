@@ -1145,6 +1145,10 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
     expect(spec.command).toBe('codex');
     expect(spec.args).toEqual([
       '--dangerously-bypass-hook-trust',
+      // #78: non-interactive tool-approval flag so a hosted codex pane never deadlocks on the
+      // MCP-tool approval prompt (PLACEHOLDER — pending live verification).
+      '--ask-for-approval',
+      'never',
       // Role base-prompt config override (PR D item 1): the host-proof pane is threaded its role
       // too, so the coordinator base prompt rides along as a `-c` override.
       '-c',

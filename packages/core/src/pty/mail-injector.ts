@@ -33,6 +33,24 @@ const PASTE_END = '\u001B[201~';
 const SUBMIT = '\r';
 const CLEAR_COMPOSER = '\u0015'; // Ctrl-U: clear the current input line before an uncertain retry.
 
+/**
+ * [host-live · PLACEHOLDER] Codex collapsed-paste composer-preview needles (#77).
+ *
+ * Like Claude — which renders a `[Pasted text #N +M lines]` preview instead of echoing a long
+ * bracketed paste — the Codex TUI is believed to COLLAPSE a multi-line bracketed paste into a
+ * composer-side preview rather than echoing the full pasted text. Because every daemon kickoff is
+ * multiline, `injectMail`'s echo-verify never matches the literal text, the multiline branch THROWS,
+ * the turn errors, and (pre-#77) the daemon re-pasted the kickoff every tick forever.
+ *
+ * The EXACT bytes Codex emits are UNKNOWN until the host-live capture harness
+ * (`CO_HOST_LIVE_CAPTURE`) records a real paste against a live `codex` binary — these are PLACEHOLDER
+ * needles, NOT a verified contract (see `needsLiveVerification`). LOOP-SAFETY DOES NOT DEPEND ON THEM:
+ * the engine's bounded kickoff-attempt cap (#77) retracts the kickoff after N failed injects whether
+ * or not this fast-path ever matches. This branch is a best-effort accelerator so that, once the real
+ * needle lands, a codex kickoff settles on its first turn instead of burning the whole attempt budget.
+ */
+const CODEX_COLLAPSED_PASTE_NEEDLES: readonly string[] = ['pasted', 'lines'];
+
 const DEFAULT_MAX_ECHO_ATTEMPTS = 5;
 /** Production-only fallback settle window (ms). The TESTABLE path injects `retryDelay` instead. */
 const DEFAULT_SETTLE_MS = 250;
@@ -57,6 +75,15 @@ export interface InjectMailOptions {
    * effect for the injected turn (e.g. a nonce-bearing MCP tool call) because echo proof is absent.
    */
   readonly allowUnverifiedSubmit?: boolean;
+  /**
+   * [host-live capture] OPTIONAL observation tap: invoked with each composer echo chunk seen during
+   * the inject phase (and whether the inject is `multiline`). Inert by default; the host-live capture
+   * harness (`CO_HOST_LIVE_CAPTURE`) wires it to RECORD a real provider's composer echo so the codex
+   * collapsed-paste preview bytes (#77 `CODEX_COLLAPSED_PASTE_NEEDLES`) can be identified from a real
+   * run. NEVER affects echo-verify, submit, or timing — it is a pure observer (never throws into the
+   * inject path; the harness wraps its own failures).
+   */
+  readonly onPasteEcho?: (chunk: string, multiline: boolean) => void;
 }
 
 /**
@@ -90,11 +117,24 @@ export async function injectMail(
     // [host-live] Claude Code 2.1.158 collapses longer bracketed pastes into a composer-side
     // `[Pasted text #N +M lines]` preview instead of echoing the full pasted text. That preview is
     // still the provider acknowledging the paste landed in the composer; submit exactly once.
-    return (
+    if (
       multiline &&
       opts.provider === 'claude' &&
       normalizedEcho.toLowerCase().includes('pasted text #') &&
       normalizedEcho.toLowerCase().includes('paste again to expand')
+    ) {
+      return true;
+    }
+    // [host-live · PLACEHOLDER] Codex is believed to collapse a multi-line paste the same way (#77).
+    // Accept its composer-side preview as a landed paste once ALL placeholder needles appear. The real
+    // bytes are pending the capture harness; this fast-path is purely an accelerator and is NEVER the
+    // loop-safety guarantee (the engine's #77 attempt cap is). See CODEX_COLLAPSED_PASTE_NEEDLES.
+    return (
+      multiline &&
+      opts.provider === 'codex' &&
+      CODEX_COLLAPSED_PASTE_NEEDLES.every((needle) =>
+        normalizedEcho.toLowerCase().includes(needle.toLowerCase()),
+      )
     );
   };
 
@@ -102,6 +142,15 @@ export async function injectMail(
     echoBuffer += chunk;
     if (echoBuffer.length > MAX_ECHO_BUFFER_CHARS) {
       echoBuffer = echoBuffer.slice(-MAX_ECHO_BUFFER_CHARS);
+    }
+    // [host-live capture] Tap the raw composer echo so the capture harness can record a real
+    // provider's paste preview (#77). Pure observer — guarded so it never disturbs echo-verify.
+    if (opts.onPasteEcho != null) {
+      try {
+        opts.onPasteEcho(chunk, multiline);
+      } catch {
+        /* capture is best-effort; never let it break the inject path */
+      }
     }
     if (notifyEcho && echoed()) {
       const fire = notifyEcho;
