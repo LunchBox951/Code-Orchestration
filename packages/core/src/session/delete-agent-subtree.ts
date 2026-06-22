@@ -34,12 +34,14 @@ import {
   isBranchMerged,
   localBranchExists,
   isWorktreeDirty,
+  probeWorktreeDirty,
   snapshotDirtyWorktree,
 } from '../worktrees/branch-state.js';
 import { openRosterStore, type RosterStore } from '../roles/roster-store.js';
 import { openWorktreeStore, type WorktreeStore } from '../worktrees/worktree-store.js';
 import { openSessionStore, type SessionStore } from './session-store.js';
 import { openArchiveStore, type ArchiveStore } from '../archive/archive-store.js';
+import { ARCHIVE_TTL_MS } from '../archive/events.js';
 import { openMailStore, type MailStore } from '../mail/mail-store.js';
 import { MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE, type DeliveredMail } from '../mail/events.js';
 import { openReviewStore, type ReviewStore } from '../review/review-store.js';
@@ -47,8 +49,7 @@ import { defaultGitExec, type GitExec } from '../worktrees/sling.js';
 import { isMissingBranchDeleteError } from '../worktrees/branch-delete.js';
 import { defaultGitReader, type GitReader } from '../worktrees/detect-base.js';
 
-/** Default archive TTL: 14 days. */
-export const ARCHIVE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+export { ARCHIVE_TTL_MS };
 
 export interface DeleteAgentSubtreeDeps {
   /** Factory for the roster store; defaults to `openRosterStore`. */
@@ -73,6 +74,8 @@ export interface DeleteAgentSubtreeDeps {
   readonly gitExec?: GitExec;
   /** Read-only git seam (defaults to `defaultGitReader`). */
   readonly gitReader?: GitReader;
+  /** Sandbox existence seam for dirty probes; defaults to the real filesystem. */
+  readonly sandboxPathExists?: (path: string) => boolean;
 }
 
 export interface DeleteAgentSubtreePreflightDeps {
@@ -216,6 +219,7 @@ export function deleteAgentSubtree(
   } = deps;
   const gitExec = deps.gitExec ?? defaultGitExec;
   const gitReader = deps.gitReader ?? defaultGitReader;
+  const sandboxPathExists = deps.sandboxPathExists;
 
   // Open every store INSIDE the try and track opened handles, so a throw from any open (not just
   // the first) still closes the handles opened before it. Opening all six before the try would
@@ -382,7 +386,8 @@ export function deleteAgentSubtree(
               // the read on a retry whose sandbox a prior pass already force-removed (the dir is gone, so
               // `isWorktreeDirty` would throw on its absent cwd) — that residue still `needsArchive` to
               // self-heal the missing record, and the snapshot guard is skipped under `!wt.removed`.
-              const dirty = !wt.removed && isWorktreeDirty(wt.path, gitReader);
+              const dirty =
+                !wt.removed && probeWorktreeDirty(wt.path, gitReader, sandboxPathExists);
               const needsArchive = wt.removed || dirty;
 
               if (needsArchive) {

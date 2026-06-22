@@ -464,6 +464,7 @@ describe('deleteAgentSubtree', () => {
       nowMs: NOW,
       gitExec,
       gitReader,
+      sandboxPathExists: (path) => path === sandboxPath,
     });
 
     // Teardown COMPLETES (no AggregateError): the agent is removed.
@@ -535,6 +536,64 @@ describe('deleteAgentSubtree', () => {
       (c) => c[1] === 'branch' && c[2] === '-d' && c[3] === 'co/coord-x',
     );
     expect(deletesBranch).toBe(true);
+  });
+
+  it('treats an absent merged sandbox as clean so removeWorktree can self-heal before branch delete (MAINT-A1)', () => {
+    // `WorktreeStore.removeWorktree` is intentionally absent-dir idempotent. The merged-path dirty
+    // probe must not run first and turn an already-missing sandbox into a teardown failure.
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+    ]);
+    const sandboxPath = '/data/worktrees/co/coord-x';
+    const wt = worktree('co/coord-x', 'coord-x', 'main', sandboxPath);
+    const worktreeStore = makeFakeWorktrees([wt]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec, calls } = makeGitExecSpy();
+    const gitReader: GitReader = (cwd, args) => {
+      if (
+        cwd === '/repo' &&
+        args[0] === 'rev-parse' &&
+        args[1] === '--verify' &&
+        args[3] === 'refs/heads/co/coord-x'
+      ) {
+        return 'a'.repeat(40);
+      }
+      if (
+        cwd === '/repo' &&
+        args[0] === 'merge-base' &&
+        args[1] === '--is-ancestor' &&
+        args[2] === 'co/coord-x' &&
+        args[3] === 'main'
+      ) {
+        return '';
+      }
+      if (cwd === sandboxPath && args[0] === 'status' && args[1] === '--porcelain') {
+        return null;
+      }
+      return null;
+    };
+
+    const result = deleteAgentSubtree('proj', 'coord-x', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    expect(result.removed).toEqual(['coord-x']);
+    expect(result.deletedBranches).toEqual(['co/coord-x']);
+    expect(result.archivedBranches).toEqual([]);
+    expect(worktreeStore.removedBranches).toEqual(['co/coord-x']);
+    expect(worktreeStore.removeForce).toEqual([]);
+    expect(archive.records).toEqual([]);
+    expect(calls.some((c) => c[1] === 'branch' && c[2] === '-d' && c[3] === 'co/coord-x')).toBe(
+      true,
+    );
   });
 
   it('does NOT record a merged branch as deleted when its `git branch -d` throws (result-honesty)', () => {

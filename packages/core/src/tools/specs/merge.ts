@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { OPERATOR } from '../../mail/events.js';
 import { roleParentResolver } from '../../mail/escalation.js';
 import {
@@ -19,8 +18,10 @@ import {
   detectCurrentBranchTarget,
   resolveRefSha,
 } from '../../worktrees/detect-base.js';
-import { isWorktreeDirty, snapshotDirtyWorktree } from '../../worktrees/branch-state.js';
+import { probeWorktreeDirty, snapshotDirtyWorktree } from '../../worktrees/branch-state.js';
+import { defaultGitExec, type GitExec } from '../../worktrees/sling.js';
 import { resolveRepoMode } from '../../worktrees/repo-mode.js';
+import { ARCHIVE_TTL_MS } from '../../archive/events.js';
 import type { ToolSpec } from '../registry.js';
 import { assertToolCallerRole } from '../caller-auth.js';
 
@@ -197,42 +198,36 @@ function resolveMergeBaseSha(repoCwd: string, into: string, branch: string): str
   return sha;
 }
 
-/**
- * Does the merge-time error mean the sandbox dir is simply ABSENT (so the dirty-probe should fall
- * through to the plain remove), rather than a transient git/IO failure on a PRESENT tree?
- *
- * Only an ENOENT — a `cwd`/dir that vanished between the `existsSync` check and the `git status` read
- * (a TOCTOU race against a concurrent teardown) — is treated as "absent". Every other failure (a git
- * binary error, a permissions/EACCES fault, or `isWorktreeDirty`'s own "unable to read git status"
- * throw on a present worktree) is a genuine, unknown state that MUST propagate: silently downgrading
- * it to `false` here would route a possibly-dirty tree through a NON-force remove, which git refuses —
- * stranding the sandbox and losing the residue it was supposed to snapshot first (Principle 9).
- */
-function isAbsentDirError(cause: unknown): boolean {
-  return (
-    cause != null &&
-    typeof cause === 'object' &&
-    'code' in cause &&
-    (cause as { code?: unknown }).code === 'ENOENT'
-  );
+function archiveBranchForMergeTeardown(branch: string, snapshotSha: string): string {
+  const safeBranch =
+    branch
+      .replace(/[^A-Za-z0-9._-]+/gu, '-')
+      .replace(/-+/gu, '-')
+      .replace(/^-|-$/gu, '') || 'branch';
+  return `co/archive-${safeBranch}-${snapshotSha.slice(0, 12)}`;
 }
 
-/**
- * A defensive `isWorktreeDirty` for the merge-time teardown closure (#76): returns false (rather than
- * throwing) ONLY when the sandbox dir is absent, so a half-torn-down or never-materialized sandbox
- * falls through to the plain remove instead of becoming a new teardown failure. A genuinely
- * present-but-dirty tree still reports dirty so its residue is snapshotted before a force-remove, and a
- * transient git failure on a PRESENT tree propagates (never silently downgraded to a non-force remove —
- * Principle 9).
- */
-function probeWorktreeDirty(sandboxPath: string): boolean {
-  if (!existsSync(sandboxPath)) return false;
-  try {
-    return isWorktreeDirty(sandboxPath);
-  } catch (cause) {
-    if (isAbsentDirError(cause)) return false;
-    throw cause;
+function snapshotMergeTeardownResidue(
+  repoCwd: string,
+  sandboxPath: string,
+  branch: string,
+  reviewedHead: string,
+  gitExec: GitExec = defaultGitExec,
+): { readonly snapshotSha: string; readonly archiveBranch: string } {
+  const snapshotSha = snapshotDirtyWorktree(
+    sandboxPath,
+    'co: merge-time teardown snapshot before remove',
+    gitExec,
+  );
+  if (snapshotSha.length === 0) {
+    throw new Error(
+      `co_merge: dirty teardown snapshot for '${branch}' did not return a commit sha.`,
+    );
   }
+  const archiveBranch = archiveBranchForMergeTeardown(branch, snapshotSha);
+  gitExec(repoCwd, ['update-ref', `refs/heads/${archiveBranch}`, snapshotSha]);
+  gitExec(repoCwd, ['update-ref', `refs/heads/${branch}`, reviewedHead]);
+  return { snapshotSha, archiveBranch };
 }
 
 /**
@@ -391,18 +386,37 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
       // Merge-time teardown trigger (AC-L5-7): the merge gate tears the merged branch's sandbox down
       // AFTER the merge is recorded + the slot released — never before (the review-finalize cure).
       // #76: the just-merged sandbox can still hold uncommitted/untracked working files (handoff docs,
-      // build artifacts). A plain `git worktree remove` (no --force) is REFUSED by git on a dirty tree,
-      // so the teardown would fail and strand the sandbox. The branch's reviewed work is already merged
-      // into `into`, so snapshot any residue onto the branch first (lose nothing), then force-remove.
-      // The branch ref is left intact for the post-merge reaper. The dirty PROBE is defensive: if the
-      // sandbox dir is already gone/unreadable (a half-torn-down or never-materialized sandbox), fall
-      // through to the plain remove, which tolerates an absent dir idempotently — the snapshot path is a
-      // safety net for a present-but-dirty tree, never a new failure mode for an absent one.
+      // build artifacts). A plain `git worktree remove` (no --force) is REFUSED by git on a dirty tree.
+      // Preserve that residue without moving the REVIEWED source branch: snapshot in the sandbox, create
+      // a separate archive branch pointing at the snapshot, reset the reviewed branch back to its PASSed
+      // head, record the archive branch, then force-remove the dirty sandbox. Owner `co_push` still
+      // validates the original branch against the merge commit, while the residue remains restoreable.
+      // The dirty PROBE is defensive: if the sandbox dir is already gone, fall through to the plain
+      // remove, which tolerates an absent dir idempotently.
       teardown: {
         teardown: (branch): void => {
           const wt = worktrees.getWorktree(branch);
           if (wt != null && !wt.removed && probeWorktreeDirty(wt.path)) {
-            snapshotDirtyWorktree(wt.path, 'co: merge-time teardown snapshot before remove');
+            if (ctx.archive == null) {
+              throw new Error(
+                'co_merge: the mount did not inject an archive store (ctx.archive absent).',
+              );
+            }
+            const { archiveBranch } = snapshotMergeTeardownResidue(
+              repoCwd,
+              wt.path,
+              branch,
+              branchHead,
+            );
+            const nowMs = ctx.nowMs ?? Date.now();
+            ctx.archive.appendRecord({
+              id: archiveBranch,
+              name: `${branch} teardown residue`,
+              branch: archiveBranch,
+              baseRef: into,
+              deletedAt: nowMs,
+              expiresAt: nowMs + ARCHIVE_TTL_MS,
+            });
             worktrees.removeWorktree(branch, { repoCwd, force: true });
             return;
           }

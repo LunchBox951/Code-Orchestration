@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { isBranchMerged, isWorktreeDirty, snapshotDirtyWorktree } from './branch-state.js';
+import {
+  isBranchMerged,
+  isWorktreeDirty,
+  probeWorktreeDirty,
+  snapshotDirtyWorktree,
+} from './branch-state.js';
 import type { GitReader } from './detect-base.js';
 import type { GitExec } from './sling.js';
 
@@ -64,6 +69,32 @@ describe('branch-state git helpers', () => {
       const fakeGitReader: GitReader = () => null;
 
       expect(() => isWorktreeDirty('/sbx', fakeGitReader)).toThrow(
+        "unable to read git status for worktree '/sbx'",
+      );
+    });
+  });
+
+  describe('probeWorktreeDirty', () => {
+    it('treats an absent sandbox path as clean without reading git status', () => {
+      const fakeGitReader: GitReader = () => {
+        throw new Error('git status should not run for an absent path');
+      };
+
+      expect(probeWorktreeDirty('/sbx', fakeGitReader, () => false)).toBe(false);
+    });
+
+    it('treats a raced-away sandbox ENOENT as clean', () => {
+      const fakeGitReader: GitReader = () => {
+        throw Object.assign(new Error('cwd vanished'), { code: 'ENOENT' });
+      };
+
+      expect(probeWorktreeDirty('/sbx', fakeGitReader, () => true)).toBe(false);
+    });
+
+    it('propagates present-sandbox status failures', () => {
+      const fakeGitReader: GitReader = () => null;
+
+      expect(() => probeWorktreeDirty('/sbx', fakeGitReader, () => true)).toThrow(
         "unable to read git status for worktree '/sbx'",
       );
     });
