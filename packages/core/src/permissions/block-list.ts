@@ -2191,13 +2191,46 @@ function ghApiEndpoint(args: readonly string[]): string | undefined {
   return undefined;
 }
 
+// gh field flags that supply a request body — their presence makes `gh api` implicitly POST.
+const GH_API_FIELD_FLAGS = new Set(['-f', '--field', '-F', '--raw-field', '--input']);
+
+// GraphQL mutations that publish a PR outside the recorded-PASS gate.
+const GH_GRAPHQL_PUBLISH_MUTATIONS = [
+  'mergePullRequest',
+  'createPullRequest',
+  'enablePullRequestAutoMerge',
+] as const;
+
+function ghApiHasFieldFlag(args: readonly string[]): boolean {
+  for (let i = 1; i < args.length; i++) {
+    const token = args[i]!;
+    if (GH_API_FIELD_FLAGS.has(token)) return true;
+    if (/^--(field|raw-field|input)=/u.test(token)) return true; // equals form
+    if (/^-[fF].+/u.test(token)) return true; // attached short form: -fkey=… / -Fkey=…
+  }
+  return false;
+}
+
+function ghApiPublishesViaGraphql(args: readonly string[]): boolean {
+  // `gh api graphql` carries its query inline via field flags (`-f query=…`, `--raw-field`,
+  // `-F`), so any inline publishing-mutation identifier is a gate bypass. A read-only
+  // `query{…}` carries none of these names and stays permitted — this mirrors the Claude
+  // posture for the publishing vectors without blocking read-only introspection.
+  const haystack = args.join('\n');
+  return GH_GRAPHQL_PUBLISH_MUTATIONS.some((mutation) => haystack.includes(mutation));
+}
+
 function ghApiBypassesPrGate(args: readonly string[]): boolean {
   if (args[0] !== 'api') return false;
   const endpoint = ghApiEndpoint(args);
   if (endpoint == null) return false;
+  // A hosted Codex agent can otherwise merge/create a PR via GraphQL, which the REST patterns
+  // below never match (`ghApiEndpoint` resolves `gh api graphql …` to `graphql`).
+  if (endpoint === 'graphql') return ghApiPublishesViaGraphql(args);
   if (/^repos\/[^/]+\/[^/]+\/pulls\/\d+\/merge$/u.test(endpoint)) return true;
   if (/^repos\/[^/]+\/[^/]+\/pulls$/u.test(endpoint)) {
-    return ghApiMethod(args) === 'POST';
+    // gh implicitly POSTs when body field flags are present, even without an explicit -X POST.
+    return ghApiMethod(args) === 'POST' || ghApiHasFieldFlag(args);
   }
   return false;
 }

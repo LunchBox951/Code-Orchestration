@@ -245,6 +245,67 @@ describe('matchBlock — blocked commands', () => {
     );
   });
 
+  it('raw-gh-pr-merge: gh api graphql publishing mutations bypass the gate (#64)', () => {
+    expect(
+      matchBlock(
+        `gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:"x"}){clientMutationId} }'`,
+      )?.id,
+    ).toBe('raw-gh-pr-merge');
+    expect(
+      matchBlock(
+        `gh api graphql -f query='mutation{ createPullRequest(input:{repositoryId:"x"}){pullRequest{id}} }'`,
+      )?.id,
+    ).toBe('raw-gh-pr-merge');
+    expect(
+      matchBlock(
+        `gh api graphql --raw-field query='mutation{ enablePullRequestAutoMerge(input:{pullRequestId:"x"}){clientMutationId} }'`,
+      )?.id,
+    ).toBe('raw-gh-pr-merge');
+    // interleaved repo/host flags must not let the mutation slip past
+    expect(
+      matchBlock(
+        `gh -R owner/repo api graphql -F query='mutation{ mergePullRequest(input:{pullRequestId:"x"}){clientMutationId} }'`,
+      )?.id,
+    ).toBe('raw-gh-pr-merge');
+  });
+
+  it('raw-gh-pr-merge: gh api graphql read-only queries stay permitted (#64)', () => {
+    expect(matchBlock(`gh api graphql -f query='query{ viewer{ login } }'`)).toBeNull();
+    expect(matchBlock(`gh api graphql -f query='{ repository(owner:"o",name:"r"){ id } }'`)).toBeNull();
+  });
+
+  it('raw-gh-pr-merge: gh api repos/.../pulls implicit POST via field flags (#64)', () => {
+    // gh auto-POSTs when -f/-F/--field/--raw-field/--input are present, even without -X POST.
+    expect(matchBlock('gh api repos/owner/repo/pulls -f title=x -f head=co/x -f base=dev')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
+    expect(matchBlock('gh api /repos/owner/repo/pulls -F title=x')?.id).toBe('raw-gh-pr-merge');
+    expect(matchBlock('gh api repos/owner/repo/pulls --field title=x')?.id).toBe('raw-gh-pr-merge');
+    expect(matchBlock('gh api repos/owner/repo/pulls --raw-field title=x')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
+    expect(matchBlock('gh api repos/owner/repo/pulls --input body.json')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
+    // a bare GET (no body fields) on the collection is read-only and stays permitted
+    expect(matchBlock('gh api repos/owner/repo/pulls')).toBeNull();
+  });
+
+  it('raw-gh-pr-merge: Codex block-list parity with the Claude `gh api` deny for publish vectors (#64)', () => {
+    // The Claude pane denies all of these via the blanket `Bash(gh api*)` pattern; the Codex
+    // surface (matchBlock) must block the same publishing vectors so enforcement is equivalent.
+    const publishVectors = [
+      `gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:"x"}){clientMutationId} }'`,
+      `gh api graphql -f query='mutation{ createPullRequest(input:{repositoryId:"x"}){pullRequest{id}} }'`,
+      `gh api graphql -f query='mutation{ enablePullRequestAutoMerge(input:{pullRequestId:"x"}){clientMutationId} }'`,
+      'gh api repos/owner/repo/pulls -f title=x -f head=co/x -f base=dev',
+      'gh api repos/owner/repo/pulls/18/merge --method PUT',
+    ];
+    for (const vector of publishVectors) {
+      expect(matchBlock(vector)?.id, vector).toBe('raw-gh-pr-merge');
+    }
+  });
+
   it('raw-gh-pr-merge: wrapped/path gh pr merge variants', () => {
     expect(matchBlock('env gh pr merge 5')?.id).toBe('raw-gh-pr-merge');
     expect(matchBlock('env gh pr create --fill')?.id).toBe('raw-gh-pr-merge');
