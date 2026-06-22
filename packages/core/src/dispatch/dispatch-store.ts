@@ -103,7 +103,8 @@ export interface CostRecordResult {
  * The canonical per-agent cost read-model {@link DispatchStore.getAgentCostRollup} returns — the agent's
  * `cost.recorded` totals projected onto the operator-facing shape: summed token counts (input / output /
  * the two prompt-cache buckets / total) and `costUsd` (the summed dollar cost where any was reported,
- * else null — Codex reports no dollars). Derived from the agent-side {@link CostRollup}.
+ * else null — Codex reports no dollars). Derived from the agent-side {@link CostRollup}. The method
+ * returns this or undefined when no cost has been recorded for the agent.
  */
 export interface AgentCostRollup {
   readonly agentId: string;
@@ -190,17 +191,17 @@ export interface DispatchStore {
   readNearBudget(task?: string): readonly NearBudgetRecord[];
   /**
    * The canonical per-agent cost read-model for `agentId` — the agent's `cost.recorded` totals projected
-   * onto {@link AgentCostRollup}, or null when no cost has been recorded for it. `costUsd` is null when no
-   * observation reported a dollar cost (Codex), the summed dollars otherwise.
+   * onto {@link AgentCostRollup}, or undefined when no cost has been recorded for it. `costUsd` is null when
+   * no observation reported a dollar cost (Codex), the summed dollars otherwise.
    */
-  getAgentCostRollup(agentId: string): AgentCostRollup | null;
+  getAgentCostRollup(agentId: string): AgentCostRollup | undefined;
   /**
    * Record one agent tool call (append `tool.invoked` + fold into the durable per-agent tool-usage
    * projection). Returns the updated {@link AgentToolUsage} rollup.
    */
   recordToolInvoked(inv: ToolInvoked): AgentToolUsage;
-  /** The canonical per-agent tool-usage read-model for `agentId`, or null when no tool call recorded. */
-  getAgentToolUsage(agentId: string): AgentToolUsage | null;
+  /** The canonical per-agent tool-usage read-model for `agentId`, or undefined when no tool call recorded. */
+  getAgentToolUsage(agentId: string): AgentToolUsage | undefined;
   /** Record a placement decision (append `placement.decided` + fold); returns the stored record. */
   recordPlacement(agent: string, payload: PlacementDecided): PlacementRecord;
   /** Record a placement decision and its review request atomically. */
@@ -467,10 +468,10 @@ export function openDispatchStore(projectId: string): DispatchStore {
       return store.transaction((tx) => selectNearBudgetEvents(tx.raw as DatabaseSync, task));
     },
 
-    getAgentCostRollup(agentId: string): AgentCostRollup | null {
+    getAgentCostRollup(agentId: string): AgentCostRollup | undefined {
       return store.transaction((tx) => {
         const rollup = selectCostRollup(tx.raw as DatabaseSync, 'agent', agentId);
-        return rollup ? toAgentCostRollup(rollup) : null;
+        return rollup ? toAgentCostRollup(rollup) : undefined;
       });
     },
 
@@ -491,10 +492,8 @@ export function openDispatchStore(projectId: string): DispatchStore {
       });
     },
 
-    getAgentToolUsage(agentId: string): AgentToolUsage | null {
-      return store.transaction(
-        (tx) => selectAgentToolUsage(tx.raw as DatabaseSync, agentId) ?? null,
-      );
+    getAgentToolUsage(agentId: string): AgentToolUsage | undefined {
+      return store.transaction((tx) => selectAgentToolUsage(tx.raw as DatabaseSync, agentId));
     },
 
     recordPlacement(agent: string, payload: PlacementDecided): PlacementRecord {

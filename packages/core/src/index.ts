@@ -635,6 +635,7 @@ export {
   usageObservedUnavailableSchema,
   usageObservedSchema,
   costRecordedSchema,
+  hasMeasuredCostField,
   costNearBudgetSchema,
   toolInvokedSchema,
   dispatchSchemas,

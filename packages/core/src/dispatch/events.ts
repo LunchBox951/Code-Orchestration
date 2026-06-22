@@ -100,6 +100,31 @@ export type UsageObserved = z.infer<typeof usageObservedSchema>;
 
 // ── cost.recorded ────────────────────────────────────────────────────────────────────────────────
 /**
+ * The "at least one measured field" guard for a cost observation — the single source of truth for what
+ * makes a {@link CostRecorded} non-vacuous. The schema's `.refine` reuses it, and adapters (the mcp host)
+ * import it instead of re-listing the field set so the two can never drift.
+ */
+export function hasMeasuredCostField(p: {
+  readonly cost_usd?: number;
+  readonly input_tokens?: number;
+  readonly output_tokens?: number;
+  readonly total_tokens?: number;
+  readonly cache_read_input_tokens?: number;
+  readonly cache_creation_input_tokens?: number;
+  readonly used_pct?: number;
+}): boolean {
+  return (
+    p.cost_usd !== undefined ||
+    p.input_tokens !== undefined ||
+    p.output_tokens !== undefined ||
+    p.total_tokens !== undefined ||
+    p.cache_read_input_tokens !== undefined ||
+    p.cache_creation_input_tokens !== undefined ||
+    p.used_pct !== undefined
+  );
+}
+
+/**
  * A per-turn cost observation (spec §4.2). It accommodates BOTH provider shapes with ONE schema:
  * Claude reports a dollar cost (`cost_usd`, from the stream-json `result`'s `total_cost_usd`); Codex
  * reports tokens / usage-% with NO native dollar cost (v1 carries `used_pct` + token fields and ships
@@ -127,17 +152,9 @@ export const costRecordedSchema = z
     cache_creation_input_tokens: z.number().int().nonnegative().optional(),
     used_pct: z.number().min(0).optional(), // Codex usage-% readout (the dollar-cost-free expression).
   })
-  .refine(
-    (p) =>
-      p.cost_usd !== undefined ||
-      p.input_tokens !== undefined ||
-      p.output_tokens !== undefined ||
-      p.total_tokens !== undefined ||
-      p.cache_read_input_tokens !== undefined ||
-      p.cache_creation_input_tokens !== undefined ||
-      p.used_pct !== undefined,
-    { message: 'cost.recorded requires at least one measured field' },
-  );
+  .refine((p) => hasMeasuredCostField(p), {
+    message: 'cost.recorded requires at least one measured field',
+  });
 export type CostRecorded = z.infer<typeof costRecordedSchema>;
 
 // ── cost.near_budget ─────────────────────────────────────────────────────────────────────────────

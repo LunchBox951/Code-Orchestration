@@ -85,7 +85,7 @@ describe('recordToolInvoked — folds the per-agent tool-usage rollup', () => {
         turnsToFirstProductiveCoCall: 2,
       });
       expect(store.getAgentToolUsage('a1')).toEqual(usage);
-      expect(store.getAgentToolUsage('nobody')).toBeNull();
+      expect(store.getAgentToolUsage('nobody')).toBeUndefined();
     } finally {
       store.close();
     }

@@ -21,12 +21,16 @@ import {
   openRosterStore,
   WEDGE_MS,
   type DeliveredMail,
+  type DispatchStore,
   type ProjectId,
   type ProjectRegistry,
+  type ToolInvoked,
 } from '@co/core';
 import { ConductorEngine, type ConductorEngineDeps, type HostedPane } from './engine.js';
 import type { TurnCostCapture } from './engine.js';
 import {
+  claudeTurnCostToObservation,
+  codexTurnCostToObservation,
   makeHostedUsageSourceFactory,
   makeTurnCostCapture,
   makeToolActivityRecorder,
@@ -233,7 +237,22 @@ describe('host.ts collection wiring — records cost + tool usage over a product
     const captureTurnCost = makeTurnCostCapture(projectId, {
       readClaudeTranscript: async () => transcriptJsonl,
     });
-    const recordToolActivity = makeToolActivityRecorder(projectId);
+    // Spy on the durable recordToolInvoked the recorder feeds the store so we can assert the host
+    // recorder's activity.durationMs → tool.invoked duration_ms passthrough end-to-end (the adapter
+    // layering rule forbids opening the store directly from the test to read the raw row).
+    const recordedInvocations: ToolInvoked[] = [];
+    const recordToolActivity = makeToolActivityRecorder(projectId, {
+      openDispatch: (pid) => {
+        const store = openDispatchStore(pid);
+        return {
+          ...store,
+          recordToolInvoked: (inv) => {
+            recordedInvocations.push(inv);
+            return store.recordToolInvoked(inv);
+          },
+        } satisfies DispatchStore;
+      },
+    });
 
     const { engine, pty, clock, qw } = makeEngine({
       captureTurnCost,
@@ -277,10 +296,19 @@ describe('host.ts collection wiring — records cost + tool usage over a product
 
       // The tool activity was recorded into the durable per-agent tool-usage projection.
       const usage = store.getAgentToolUsage('impl-x');
-      expect(usage).not.toBeNull();
+      expect(usage).toBeDefined();
       expect(usage!.toolCalls).toBeGreaterThanOrEqual(1);
       expect(usage!.toolErrors).toBe(0);
       expect(usage!.turnsToFirstProductiveCoCall).toBe(0); // co_status succeeded on turn 0
+
+      // The host recorder mapped the server's activity.durationMs onto the durable tool.invoked
+      // duration_ms (the rollup carries no duration column, so assert the recorded payload directly).
+      const coStatusInv = recordedInvocations.find(
+        (inv) => inv.agent === 'impl-x' && inv.tool === 'co_status',
+      );
+      expect(coStatusInv).toBeDefined();
+      expect(typeof coStatusInv!.duration_ms).toBe('number');
+      expect(coStatusInv!.duration_ms).toBeGreaterThanOrEqual(0);
     } finally {
       store.close();
     }
@@ -307,7 +335,7 @@ describe('host.ts collection wiring — records cost + tool usage over a product
     expect(outcome.errored).toBe(false); // the turn still completed cleanly
     const store = openDispatchStore(projectId);
     try {
-      expect(store.getAgentCostRollup('impl-x')).toBeNull(); // nothing recorded — never a fabricated 0
+      expect(store.getAgentCostRollup('impl-x')).toBeUndefined(); // nothing recorded — never a fabricated 0
     } finally {
       store.close();
     }
@@ -345,7 +373,7 @@ describe('host.ts collection wiring — records cost + tool usage over a product
     });
     const store = openDispatchStore(projectId);
     try {
-      expect(store.getAgentCostRollup('impl-x')).toBeNull();
+      expect(store.getAgentCostRollup('impl-x')).toBeUndefined();
     } finally {
       store.close();
     }
@@ -588,7 +616,7 @@ describe('host.ts collection — DEFAULT Claude transcript reader over the real 
 
     const store = openDispatchStore(projectId);
     try {
-      expect(store.getAgentCostRollup('impl-x')).toBeNull();
+      expect(store.getAgentCostRollup('impl-x')).toBeUndefined();
     } finally {
       store.close();
     }
@@ -913,5 +941,41 @@ describe('host.ts collection — Codex cumulative token_count is delta-d per tur
     } finally {
       store.close();
     }
+  });
+});
+
+// ── The exported PURE field-mapping helpers, tested in isolation (their docstring's stated contract) ──
+describe('host.ts collection — claude/codexTurnCostToObservation field mapping', () => {
+  it('codexTurnCostToObservation maps usedPct onto used_pct', () => {
+    const identity = makeIdentity({ agent: 'codex-1', projectId: 'p', cwd: '/tmp/repo' });
+    const obs = codexTurnCostToObservation(
+      { ...identity, provider: 'codex' },
+      'codex-1',
+      0,
+      { totalTokens: 100, usedPct: 42 },
+      'src',
+    );
+    expect(obs?.used_pct).toBe(42);
+    expect(obs?.total_tokens).toBe(100);
+  });
+
+  it('claudeTurnCostToObservation maps cost_usd and the cache token fields', () => {
+    const identity = makeIdentity({ agent: 'impl-x', projectId: 'p', cwd: '/tmp/repo' });
+    const obs = claudeTurnCostToObservation(
+      identity,
+      'impl-x',
+      0,
+      {
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheReadInputTokens: 5000,
+        cacheCreationInputTokens: 750,
+        costUsd: 1.5,
+      },
+      'src',
+    );
+    expect(obs?.cost_usd).toBe(1.5);
+    expect(obs?.cache_read_input_tokens).toBe(5000);
+    expect(obs?.cache_creation_input_tokens).toBe(750);
   });
 });

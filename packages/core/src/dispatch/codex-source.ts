@@ -599,7 +599,8 @@ export function readLatestCodexTokenCountReadout(
 }
 
 /**
- * Back-compat payload-only helper for callers that do not need the source cursor.
+ * Payload-only convenience accessor over {@link readLatestCodexTokenCountReadout} for callers
+ * (currently tests) that do not need the source cursor.
  */
 export function readLatestCodexTokenCount(db: DatabaseSync): unknown | undefined {
   return readLatestCodexTokenCountReadout(db)?.payload;
@@ -630,8 +631,11 @@ function readCodexTokenCandidates(
             `WHERE ${quoteIdent(column)} LIKE ? ESCAPE '\\' ORDER BY rowid DESC LIMIT 50`,
         )
         .all(`%${escapeLikeLiteral(signature)}%`) as Array<Record<string, unknown>>;
-    } catch {
-      return; // a column a text LIKE cannot bind against is skipped.
+    } catch (error) {
+      // a column a text LIKE cannot bind against is skipped; log so a persistently corrupt/busy db is
+      // not entirely invisible (the broad catch otherwise swallows SQLITE_CORRUPT/IOERR/BUSY too).
+      console.error('[co] codex token scan: unexpected sqlite error', error);
+      return;
     }
     for (const row of rows) {
       if (typeof row.value !== 'string') continue;
@@ -682,8 +686,11 @@ function readCodexTokenCandidatesAfter(
         `%${escapeLikeLiteral(TOKEN_COUNT_SIGNATURE)}%`,
         `%${escapeLikeLiteral(POST_SAMPLING_SIGNATURE)}%`,
       ) as Array<Record<string, unknown>>;
-  } catch {
-    return undefined; // schema changed or cursor path vanished; caller falls back to discovery.
+  } catch (error) {
+    // schema changed or cursor path vanished; caller falls back to discovery. Log so a persistently
+    // corrupt/busy db is not entirely invisible (the broad catch otherwise swallows real sqlite errors).
+    console.error('[co] codex token scan: unexpected sqlite error', error);
+    return undefined;
   }
   const candidates: CodexTokenCandidate[] = [];
   for (const row of rows) {

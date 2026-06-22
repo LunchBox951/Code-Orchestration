@@ -27,6 +27,7 @@
 
 import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
+import { CO_CLAUDE_STATUSLINE_PATH_ENV } from '../dispatch/statusline-env.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
 import { ROLE_PROFILES, type Capability } from '../roles/profile.js';
 import type { BlockRule } from './block-list.js';
@@ -471,11 +472,12 @@ function buildClaudeLaunchConfig(
 }
 
 /**
- * Env var (mirrors `CLAUDE_STATUSLINE_PATH_ENV` in `dispatch/claude-source.ts`) naming the file the
- * statusLine command tees the Claude Code rate-limit payload to. Re-declared here (not imported) to keep
- * the permissions module free of a dispatch import; the VALUE is the contract, kept in lockstep.
+ * Env var naming the file the statusLine command tees the Claude Code rate-limit payload to. Re-exported
+ * from the shared {@link CO_CLAUDE_STATUSLINE_PATH_ENV} leaf constant (the single source of truth shared
+ * with `dispatch/claude-source.ts`) — imported, not re-declared, so the two can never drift while still
+ * keeping the permissions module free of a dispatch-logic import.
  */
-export const CO_CLAUDE_STATUSLINE_PATH_ENV = 'CO_CLAUDE_STATUSLINE_PATH';
+export { CO_CLAUDE_STATUSLINE_PATH_ENV } from '../dispatch/statusline-env.js';
 
 /**
  * Build the Claude statusLine command (#67 COLLECTION). Claude Code pipes the statusLine JSON payload

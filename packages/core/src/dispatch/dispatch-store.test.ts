@@ -313,7 +313,7 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
         totalTokens: 330,
         costUsd: 2.0,
       });
-      expect(store.getAgentCostRollup('unknown')).toBeNull();
+      expect(store.getAgentCostRollup('unknown')).toBeUndefined();
     } finally {
       store.close();
     }
@@ -393,6 +393,34 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
       expect(duplicate.agent.totalTokens).toBe(300);
       expect(duplicate.agent.observations).toBe(1);
       expect(store.latestCostSourceId('claude', 'a1', 't1')).toBe('claude-jsonl:v1:path:12');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('fails loud on conflicting source observations at a different turn', () => {
+    const store = openDispatchStore('p-rollup-source-conflict');
+    try {
+      store.recordCost({
+        provider: 'claude',
+        agent: 'a1',
+        task: 't1',
+        turn: 0,
+        source_id: 'claude-jsonl:v1:path:12',
+        input_tokens: 100,
+        output_tokens: 200,
+      });
+      expect(() =>
+        store.recordCost({
+          provider: 'claude',
+          agent: 'a1',
+          task: 't1',
+          turn: 1,
+          source_id: 'claude-jsonl:v1:path:12',
+          input_tokens: 999,
+          output_tokens: 200,
+        }),
+      ).toThrow(/conflicting duplicate cost observation/);
     } finally {
       store.close();
     }
@@ -482,6 +510,16 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
         used_pct: 3,
       });
       expect(recorded.task.usedPct).toBe(3);
+
+      // A cache-token-only payload is also non-vacuous (the refine's cache-token accept-branch).
+      const cacheOnly = store.recordCost({
+        provider: 'claude',
+        agent: 'a1',
+        task: 't1',
+        turn: 1,
+        cache_read_input_tokens: 100,
+      });
+      expect(cacheOnly.agent.cacheReadTokens).toBe(100);
     } finally {
       store.close();
     }

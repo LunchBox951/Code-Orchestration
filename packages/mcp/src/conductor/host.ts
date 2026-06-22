@@ -47,6 +47,7 @@ import {
   openWorktreeStore,
   createProviderUsageSource,
   defaultUsageSourceFactory,
+  hasMeasuredCostField,
   parseClaudeTranscriptTurnCost,
   parseCodexTokenCount,
   queryLiveObservability,
@@ -568,18 +569,6 @@ function positiveDelta(
   return delta > 0 ? { [key]: delta } : {};
 }
 
-function hasMeasuredCostField(obs: CostRecorded): boolean {
-  return (
-    obs.cost_usd !== undefined ||
-    obs.input_tokens !== undefined ||
-    obs.output_tokens !== undefined ||
-    obs.total_tokens !== undefined ||
-    obs.cache_read_input_tokens !== undefined ||
-    obs.cache_creation_input_tokens !== undefined ||
-    obs.used_pct !== undefined
-  );
-}
-
 /**
  * Default Claude transcript reader. Claude Code, run with CLAUDE_CONFIG_DIR = the agent's isolated home,
  * writes its session transcript under `${isolatedHome}/projects/<slugified-cwd>/<session-uuid>.jsonl`
@@ -622,8 +611,9 @@ async function readClaudeTranscriptFromCursor(previous: {
   let info: { readonly size: number };
   try {
     info = await stat(previous.path);
-  } catch {
-    return undefined;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined; // cursor file gone (benign)
+    throw err; // real failure → captureTurnCost's caller routes it through onCollectionError (Principle 9)
   }
   if (info.size > previous.offset) {
     const text = await readFileRange(previous.path, previous.offset, info.size);
@@ -654,8 +644,9 @@ async function readWholeClaudeTranscript(
       jsonl: complete.jsonl,
       sourceId: claudeJsonlSourceId(path, complete.byteLength),
     };
-  } catch {
-    return undefined; // file vanished/unreadable between stat and read ⇒ no record (fail-soft).
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined; // file vanished (benign)
+    throw err; // real failure → captureTurnCost's caller routes it through onCollectionError (Principle 9)
   }
 }
 
@@ -707,8 +698,9 @@ function completeJsonlPrefix(text: string): {
 
 /**
  * Recursively find the newest-by-mtime `*.jsonl` under `projectsDir` (Claude Code's per-cwd transcript
- * tree). Tolerates a missing directory (returns undefined) and skips unreadable entries — best-effort,
- * never throws.
+ * tree). Tolerates a missing/vanished entry (ENOENT — the benign "no usage yet" case) but rethrows any
+ * other readdir/stat failure so a persistent real fault (perms/IO) reaches the onCollectionError seam
+ * (Principle 9 — no silent failures).
  */
 async function newestClaudeTranscriptPath(
   projectsDir: string,
@@ -720,8 +712,9 @@ async function newestClaudeTranscriptPath(
     let entries: Array<{ name: string; isDirectory: () => boolean; isFile: () => boolean }>;
     try {
       entries = await readdir(current, { withFileTypes: true });
-    } catch {
-      return; // missing/unreadable dir — skip.
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return; // dir not created yet (benign)
+      throw err; // real failure → captureTurnCost's caller routes it through onCollectionError (Principle 9)
     }
     for (const entry of entries) {
       const full = join(current, entry.name);
@@ -733,8 +726,9 @@ async function newestClaudeTranscriptPath(
           if (newest == null || info.mtimeMs > newest.mtimeMs) {
             newest = { path: full, mtimeMs: info.mtimeMs };
           }
-        } catch {
-          // unreadable entry — skip.
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue; // entry vanished (benign)
+          throw err; // real failure → captureTurnCost's caller routes it through onCollectionError (Principle 9)
         }
       }
     }
@@ -765,8 +759,11 @@ const defaultReadCodexTokenCount = (
       } finally {
         db.close();
       }
-    } catch {
-      return undefined; // missing/locked db ⇒ no record (fail-soft).
+    } catch (err) {
+      // node:sqlite throws ERR_SQLITE_ERROR (not an ENOENT ErrnoException) for a read-only open of a
+      // missing db — errcode 14 (SQLITE_CANTOPEN) is the benign "logs_2.sqlite not created yet" case.
+      if ((err as { readonly errcode?: number })?.errcode === 14) return undefined;
+      throw err; // corrupt/locked/perms db → captureTurnCost's caller routes it through onCollectionError (Principle 9)
     }
   };
 };

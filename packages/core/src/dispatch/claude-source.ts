@@ -26,6 +26,7 @@ import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import type { Provider, ProviderUsageSource, UsageSnapshot, UsageWindow } from './usage-source.js';
 import { UsageUnavailableError } from './usage-source.js';
+import { CO_CLAUDE_STATUSLINE_PATH_ENV } from './statusline-env.js';
 import {
   asRecord,
   boolish,
@@ -62,8 +63,12 @@ const CLAUDE_AI_OAUTH_SCOPES = [
   'user:file_upload',
 ] as const;
 
-/** Env var naming the file where the host captures the latest Claude Code statusLine payload. */
-export const CLAUDE_STATUSLINE_PATH_ENV = 'CO_CLAUDE_STATUSLINE_PATH';
+/**
+ * Env var naming the file where the host captures the latest Claude Code statusLine payload. Aliased to
+ * the shared {@link CO_CLAUDE_STATUSLINE_PATH_ENV} leaf constant (the single source of truth shared with
+ * the launch config) so the two can never drift.
+ */
+export const CLAUDE_STATUSLINE_PATH_ENV = CO_CLAUDE_STATUSLINE_PATH_ENV;
 
 /** Env var carrying a Claude OAuth refresh token for the gated idle usage read (host provides; never repo). */
 export const CLAUDE_OAUTH_REFRESH_TOKEN_ENV = 'CO_CLAUDE_OAUTH_REFRESH_TOKEN';
