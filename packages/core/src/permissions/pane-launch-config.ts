@@ -248,6 +248,49 @@ function requireTrustedMcpExecutableArgs(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Codex MCP-tool pre-approval (#78)
+// ---------------------------------------------------------------------------
+//
+// #78 ROOT CAUSE: Claude pre-grants the `co_*` MCP tools by name (`--allowedTools mcp__co__*`), so a
+// hosted Claude pane never prompts to call `co_finish` / `co_sling` / …. Codex's `approval_policy =
+// "never"` gates the SYSCALL/SANDBOX axis (the wrong axis) but says NOTHING about MCP-tool approval,
+// so a hosted codex pane STILL raises an interactive "allow this MCP tool?" prompt and — with no
+// operator at its stdin — deadlocks the turn. We need codex's MCP-tool AUTO-APPROVAL.
+//
+// The exact honored config key is UNKNOWN (codex's config schema for per-MCP-server tool approval is
+// not publicly pinned). So we emit a small CANDIDATE SET of plausible keys under `[mcp_servers.co]`
+// rather than betting on one, and the drift check (drift.ts) is TOLERANT — it requires that AT LEAST
+// ONE candidate is present, not a specific one. Swapping a wrong guess for the real key (once the
+// capture harness records which prompt is suppressed) is then a one-line constant change that does
+// NOT read as permanent drift. These keys are SCHEMA-SPECULATIVE (see the inline note in the TOML
+// builder) and harmless if codex ignores them.
+
+/** [PLACEHOLDER · #78] Candidate `[mcp_servers.co]` keys that may auto-approve the co MCP tools. */
+export const CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS = [
+  'auto_approve',
+  'trust_level',
+  'approval_policy',
+] as const;
+
+/**
+ * [PLACEHOLDER · #78] The `[mcp_servers.co]` TOML lines that pre-grant the co MCP tools. We emit the
+ * single best candidate (`auto_approve = true`) as the active assignment; the drift check accepts any
+ * key in {@link CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS}, so the real key can be swapped in later.
+ */
+const CODEX_MCP_AUTO_APPROVE_TOML_LINES: readonly string[] = ['auto_approve = true'];
+
+/**
+ * [PLACEHOLDER · #78] The codex CLI flag that runs the pane NON-INTERACTIVELY for tool approvals.
+ * `--ask-for-approval never` is the documented codex approval-mode flag; whether it also suppresses
+ * the MCP-tool prompt is pending live verification (see `needsLiveVerification`). Applied in the codex
+ * launch args alongside `--dangerously-bypass-hook-trust`.
+ */
+export const CODEX_NON_INTERACTIVE_APPROVAL_ARGS: readonly string[] = [
+  '--ask-for-approval',
+  'never',
+];
+
 interface CodexConfigArtifacts {
   readonly codexConfigToml: string;
   readonly codexMcpCommand: string;
@@ -309,6 +352,11 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
     `args = ${tomlArray(args)}`,
     'required = true',
     'startup_timeout_sec = 60',
+    // #78 [PLACEHOLDER] Pre-approve the co MCP tools so a hosted codex pane never deadlocks on an
+    // interactive "allow this MCP tool?" prompt (Claude pre-grants via --allowedTools; codex's
+    // approval_policy = "never" only covers the syscall axis). SCHEMA-SPECULATIVE key — the real one
+    // is pending the capture harness; the drift check is tolerant of the whole candidate set.
+    ...CODEX_MCP_AUTO_APPROVE_TOML_LINES,
     '',
     ...(mcpEnvLines.length > 0 ? ['[mcp_servers.co.env]', ...mcpEnvLines, ''] : []),
     '[[hooks.PreToolUse]]',
@@ -490,7 +538,10 @@ function buildCodexLaunchConfig(
     // orchestrator-generated PreToolUse block-list hook would otherwise be skipped (a silent
     // guardrail hole) or deadlock on a trust prompt. The orchestrator vets the hook source (it
     // writes it), so bypass the trust prompt to guarantee the block-list actually runs.
-    args: ['--dangerously-bypass-hook-trust'],
+    // #78: also run NON-INTERACTIVELY for tool approvals — without it a hosted codex pane (no
+    // operator at its stdin) deadlocks on the MCP-tool "allow?" prompt the config pre-approval aims
+    // to suppress. PLACEHOLDER flag (`--ask-for-approval never`) pending live verification.
+    args: ['--dangerously-bypass-hook-trust', ...CODEX_NON_INTERACTIVE_APPROVAL_ARGS],
     env: { CODEX_HOME: identity.isolatedHomeDir },
     codexConfigToml,
     codexConfigTomlPath,

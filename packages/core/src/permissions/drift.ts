@@ -8,7 +8,11 @@
  * patterns / Codex isolated inline hooks), not a self-reported id list.
  */
 
-import { claudeDisallowedPatternsForRule, type PaneLaunchConfig } from './pane-launch-config.js';
+import {
+  claudeDisallowedPatternsForRule,
+  CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS,
+  type PaneLaunchConfig,
+} from './pane-launch-config.js';
 import { BLOCK_LIST, type BlockRule } from './block-list.js';
 import { assertNever } from '../assert-never.js';
 import { isAbsolute, relative, resolve } from 'node:path';
@@ -123,7 +127,23 @@ function readCodexBlockedIds(config: PaneLaunchConfig): string[] {
   if (!hasPrelaunchFile(config, configPath, toml)) return [];
   if (!hasPrelaunchFile(config, rulesPath, config.codexBlockListRulesJson ?? '')) return [];
   if (!codexConfigTomlReferencesRuleFile(toml, rulesPath, config.codexHookCommand)) return [];
+  // #78: REQUIRE the MCP-tool pre-grant (else a hosted codex pane deadlocks on the approval prompt),
+  // but be TOLERANT of WHICH candidate key carries it — swapping a wrong guess for the real key (once
+  // the capture harness identifies it) must not read as permanent drift. Absent ⇒ [] ⇒ the drift
+  // check reports declared-not-enforced for every rule (a LOUD signal the pre-grant regressed).
+  if (!codexConfigTomlHasMcpAutoApprove(toml)) return [];
   return readCodexHookRuleIds(config.codexBlockListRulesJson);
+}
+
+/**
+ * #78 — TOLERANT check that `[mcp_servers.co]` carries an MCP-tool pre-approval. Accepts an active
+ * assignment for ANY key in {@link CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS} (the honored key is not yet
+ * pinned). Loop-safety / block-list enforcement does not hinge on this; it guards the #78 deadlock fix.
+ */
+function codexConfigTomlHasMcpAutoApprove(toml: string): boolean {
+  return CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS.some(
+    (key) => tomlActiveAssignmentValue(toml, 'mcp_servers.co', key) != null,
+  );
 }
 
 function parseJsonObject(raw: string | undefined): Record<string, unknown> | undefined {

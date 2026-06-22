@@ -70,6 +70,11 @@ import { createSocketBridgeTransportPair } from './real-transport.js';
 import { defaultCoMcpPaths, type HostLaunchPathOptions } from './host-launch-paths.js';
 import { resolveReviewContext } from './review-context.js';
 import { OperatorIpcServer, operatorIpcSocketPath } from '../operator-ipc/server.js';
+import {
+  injectCaptureOptions,
+  openHostLiveCapture,
+  type HostLiveCapture,
+} from './host-live-capture.js';
 
 export { GH_AUTH_TOKEN_COMMANDS, GH_AUTH_TOKEN_TIMEOUT_MS } from '@co/core';
 
@@ -310,6 +315,34 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * [host-live capture · #78] Heuristic: does a pane chunk look like an interactive MCP-tool / command
+ * approval prompt? Best-effort needle scan (case-insensitive) — only used by the armed capture harness
+ * to flag-and-record a real prompt for later inspection; never gates any control flow.
+ */
+function looksLikeApprovalPrompt(chunk: string): boolean {
+  const lower = chunk.toLowerCase();
+  return (
+    (lower.includes('approve') || lower.includes('allow') || lower.includes('permission')) &&
+    (lower.includes('tool') ||
+      lower.includes('mcp') ||
+      lower.includes('y/n') ||
+      lower.includes('(y)') ||
+      lower.includes('yes/no'))
+  );
+}
+
+/**
+ * [host-live capture · #67-adjacent] Extract candidate status lines from a pane chunk — non-empty
+ * lines mentioning a usage/limit/reset token the sampler would parse. Best-effort; armed-capture only.
+ */
+function statusLineCandidates(chunk: string): string[] {
+  return chunk
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && /\b(usage|limit|reset|tokens?|%|context)\b/iu.test(line));
+}
+
 function reportServeControlDiagnostic(
   onError: ((error: unknown) => void) | undefined,
   error: Error,
@@ -448,6 +481,15 @@ export interface ServeConductorOptions {
    * registers ZERO agent MCP tools (Principle 4 + D4).
    */
   readonly operatorIpc?: OperatorIpcServeConfig;
+  /**
+   * [host-live capture] The observation harness (#77/#78). When armed (operator set
+   * `CO_HOST_LIVE_CAPTURE=<dir>`), its `onPasteEcho` is spread into every hosted turn's
+   * `injectOptions` so a real provider's composer echo is recorded — finalizing the codex
+   * collapsed-paste PLACEHOLDER. INERT by default ({@link openHostLiveCapture} returns a no-op when
+   * the env is unset), so production carries no overhead. {@link runServeConductor} always wires it,
+   * so it arms on a real run — it is NOT test-only.
+   */
+  readonly hostLiveCapture?: HostLiveCapture;
 }
 
 /** Stage 11 P1 (OP-IPC) — configuration for the operator-IPC server `co-mcp serve` starts. */
@@ -526,6 +568,10 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
             buildHostedLaunchSpec(identity, homeFor(identity.agent), coMcpPaths);
         })()
       : undefined;
+  // [host-live capture] Spread the armed capture's onPasteEcho into every hosted turn's injectOptions
+  // so a real provider's composer echo is recorded (#77). Inert (adds nothing) when unarmed.
+  const injectCapture =
+    opts.hostLiveCapture != null ? injectCaptureOptions(opts.hostLiveCapture) : {};
   const engine = new ConductorEngine({
     pty,
     makeTransport,
@@ -533,6 +579,7 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     quietWindow: opts.quietWindow ?? realQuietWindow,
     reviewerSpawnGate: () => spawnGate,
     ...(spawnSpecFor != null ? { spawnSpecFor } : {}),
+    ...('onPasteEcho' in injectCapture ? { injectOptions: injectCapture } : {}),
   });
   if (opts.coMcpPaths != null) {
     ownedWtStore = openWorktreeStore(projectId);
@@ -542,6 +589,36 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       isolatedHomeDirFor!,
       opts.coMcpPaths,
     );
+  }
+
+  // [host-live capture] MCP-approval observation point (#78): scan each hosted pane's transcript for
+  // an interactive approval prompt and record an excerpt, so a real run reveals whether the config
+  // pre-grant + launch flag actually suppress the codex MCP-tool prompt. Subscribes ONLY when armed
+  // (inert by default — zero overhead). The unsubscribe is torn down with the engine on stop.
+  if (opts.hostLiveCapture?.armed === true) {
+    const capture = opts.hostLiveCapture;
+    engine.onTranscript((pid, agentId, chunk) => {
+      if (pid !== projectId) return;
+      const provider = engine.getHosted(projectId, agentId)?.identity.provider ?? 'unknown';
+      // #78 — an interactive MCP-tool approval prompt in the pane stream means the pre-grant did NOT
+      // suppress it (the codex pane would deadlock). Record an excerpt so the real prompt is captured.
+      if (looksLikeApprovalPrompt(chunk)) {
+        capture.captureMcpApproval({
+          agent: agentId,
+          provider,
+          tool: 'unknown', // the specific tool is not in the raw pane stream; the excerpt has context
+          paneExcerpt: chunk.slice(0, 2048),
+          promptDetected: true,
+        });
+      }
+      // #67-adjacent — capture a Claude status line as the usage sampler would see it, so the parse
+      // format is verified against a real binary.
+      if (provider === 'claude') {
+        for (const line of statusLineCandidates(chunk)) {
+          capture.captureClaudeStatusLine({ agent: agentId, rawLine: line });
+        }
+      }
+    });
   }
 
   // P3 (CTL-OBS) — the operator control/observe surface, backed by the running engine.
@@ -1104,9 +1181,20 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
       : '[co-mcp serve] GitHub auth: NONE — run `gh auth login` (or set CO_GH_TOKEN); remote publish ' +
           '(co_push / co_pr_merge) will fail until then. Offline/owner-local co_merge still works.',
   );
+  // [host-live capture] Arm the observation harness when CO_HOST_LIVE_CAPTURE=<dir> is set, so a single
+  // real run records the codex paste-preview bytes / MCP-approval prompt / status-line / usage sample
+  // that finalize the PLACEHOLDER constants. INERT (zero overhead) when the env is unset.
+  const hostLiveCapture = openHostLiveCapture(process.env);
+  if (hostLiveCapture.armed) {
+    console.error(
+      `[co-mcp serve] host-live capture: ARMED — recording observations to ` +
+        `${process.env['CO_HOST_LIVE_CAPTURE']} (#77/#78 placeholder finalization).`,
+    );
+  }
   const runner = await serveConductor({
     projectId,
     coMcpPaths: defaultServeCoMcpPaths(),
+    hostLiveCapture,
     // Stage 11 P1 (OP-IPC) — start the cross-process operator-IPC server so the desktop app can
     // observe + control + write over the Unix socket (operator-uid-only). Errors go to stderr.
     operatorIpc: {

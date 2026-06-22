@@ -14,6 +14,8 @@ import { checkBlockListDrift, readEnforcedConfig } from './drift.js';
 import {
   buildPaneLaunchConfig,
   paneMayUseWebTools,
+  CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS,
+  CODEX_NON_INTERACTIVE_APPROVAL_ARGS,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
 import { ROLE_PROFILES, type Capability } from '../roles/profile.js';
@@ -475,6 +477,74 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #78 — codex MCP-tool pre-approval (deadlock fix) + tolerant drift
+// ---------------------------------------------------------------------------
+
+describe('#78 codex MCP-tool pre-approval', () => {
+  it('codex config.toml pre-grants the co MCP tools under [mcp_servers.co] (best candidate key)', () => {
+    const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    const toml = config.codexConfigToml ?? '';
+    // At least one candidate auto-approve key is present (the emitted best candidate).
+    const present = CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS.some((key) =>
+      new RegExp(`^\\s*${key}\\s*=`, 'mu').test(toml),
+    );
+    expect(present).toBe(true);
+  });
+
+  it('codex args apply the non-interactive approval launch flag', () => {
+    const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    // The full flag sequence appears contiguously in the codex launch args.
+    const joined = config.args.join(' ');
+    expect(joined).toContain(CODEX_NON_INTERACTIVE_APPROVAL_ARGS.join(' '));
+    expect(config.args).toContain('--dangerously-bypass-hook-trust');
+  });
+
+  it('drift REQUIRES the pre-grant: removing it entirely → declared-not-enforced violations', () => {
+    const good = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    // Strip EVERY candidate auto-approve assignment from the [mcp_servers.co] block.
+    let toml = good.codexConfigToml ?? '';
+    for (const key of CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS) {
+      toml = toml.replace(new RegExp(`^\\s*${key}\\s*=.*$\\n?`, 'mu'), '');
+    }
+    const config: PaneLaunchConfig = {
+      ...good,
+      codexConfigToml: toml,
+      prelaunchFiles: good.prelaunchFiles?.map((file) =>
+        file.path === good.codexConfigTomlPath ? { ...file, contents: toml } : file,
+      ),
+    };
+    const violations = checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config));
+    expect(violations.length).toBeGreaterThan(0);
+    expect(violations.every((v) => v.kind === 'declared-not-enforced')).toBe(true);
+  });
+
+  it('drift is TOLERANT of the key: swapping the emitted key for ANOTHER candidate stays drift-clean', () => {
+    const good = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    const emittedKey = CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS.find((key) =>
+      new RegExp(`^\\s*${key}\\s*=`, 'mu').test(good.codexConfigToml ?? ''),
+    );
+    expect(emittedKey).toBeDefined();
+    const otherKey = CODEX_MCP_AUTO_APPROVE_CANDIDATE_KEYS.find((key) => key !== emittedKey);
+    expect(otherKey).toBeDefined();
+    // Swap the emitted candidate for a DIFFERENT candidate (simulating the real key landing later).
+    const toml = (good.codexConfigToml ?? '').replace(
+      new RegExp(`^(\\s*)${emittedKey}(\\s*=.*)$`, 'mu'),
+      `$1${otherKey}$2`,
+    );
+    expect(toml).not.toBe(good.codexConfigToml); // the swap actually changed the TOML
+    const config: PaneLaunchConfig = {
+      ...good,
+      codexConfigToml: toml,
+      prelaunchFiles: good.prelaunchFiles?.map((file) =>
+        file.path === good.codexConfigTomlPath ? { ...file, contents: toml } : file,
+      ),
+    };
+    // Still drift-clean — the swap did NOT read as permanent drift (the whole point of #78 tolerance).
+    expect(checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 4. SpawnSpec composition — builder output merges without conflict
 // ---------------------------------------------------------------------------
 
@@ -504,8 +574,12 @@ describe('SpawnSpec composition (AC-L7-6)', () => {
     expect(spec.command).toBe('codex');
     expect(spec.env['CODEX_HOME']).toBe(ISOLATED_HOME);
     // The orchestrator-generated PreToolUse block-list hook needs the trust prompt bypassed to run
-    // in the ephemeral isolated CODEX_HOME (the orchestrator vets the hook source).
-    expect(spec.args).toEqual(['--dangerously-bypass-hook-trust']);
+    // in the ephemeral isolated CODEX_HOME (the orchestrator vets the hook source); #78 also applies
+    // the non-interactive approval flag so a hosted pane never deadlocks on the MCP-tool prompt.
+    expect(spec.args).toEqual([
+      '--dangerously-bypass-hook-trust',
+      ...CODEX_NON_INTERACTIVE_APPROVAL_ARGS,
+    ]);
     expect(spec.prelaunchFiles).toHaveLength(2);
   });
 });

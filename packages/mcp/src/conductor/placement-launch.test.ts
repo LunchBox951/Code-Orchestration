@@ -512,6 +512,10 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
       } else {
         expect(spec.args).toEqual([
           '--dangerously-bypass-hook-trust',
+          // #78: non-interactive tool-approval flag so a hosted codex pane never deadlocks on the
+          // MCP-tool approval prompt (PLACEHOLDER — pending live verification).
+          '--ask-for-approval',
+          'never',
           '--add-dir',
           `${isolatedHomeDir}/mcp`,
         ]);
@@ -550,7 +554,13 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     const bridgeDir = dirname(socketPath!);
     expect(bridgeDir).not.toBe(tmpdir());
     expect(socketPath).toBe(join(bridgeDir, 'bridge.sock'));
-    expect(spec.args).toEqual(['--dangerously-bypass-hook-trust', '--add-dir', bridgeDir]);
+    expect(spec.args).toEqual([
+      '--dangerously-bypass-hook-trust',
+      '--ask-for-approval', // #78 non-interactive tool approval (PLACEHOLDER)
+      'never',
+      '--add-dir',
+      bridgeDir,
+    ]);
     const configToml = spec.prelaunchFiles?.find((file) => file.path.endsWith('/config.toml'));
     expect(configToml!.contents).toContain(`"bridge", "${socketPath}"`);
   });

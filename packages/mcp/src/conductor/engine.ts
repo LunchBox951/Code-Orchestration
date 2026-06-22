@@ -437,6 +437,17 @@ export class ConductorEngine {
   private readonly toolActivityListeners = new Map<string, Set<(ev: DetectorEvent) => void>>();
   /** Agents whose most recent driven turn errored before consuming their selected mail. */
   private readonly lastTurnErrored = new Map<string, boolean>();
+  /**
+   * Per-agent failed one-shot-kickoff inject-attempt counter (#77), keyed `${projectId}:${agent}`.
+   * A daemon kickoff mail is ALWAYS multiline, so `injectMail` bracketed-pastes + echo-verifies it;
+   * a provider whose composer collapses the paste (codex — its preview bytes are not yet known) never
+   * satisfies the echo predicate, so the multiline branch THROWS, the turn errors, and (MNR-2) the
+   * kickoff is left outstanding — which the daemon then re-injects every ~1s tick FOREVER. This
+   * counter BOUNDS that: after {@link KICKOFF_INJECT_ATTEMPT_CAP} failed inject attempts the kickoff
+   * is RETRACTED (the same path {@link consumeOneShotKickoff} uses) so the warm pane is freed instead
+   * of stranded. Cleared on any successful turn (the budget resets after a success). Dropped on release.
+   */
+  private readonly kickoffInjectAttempts = new Map<string, number>();
 
   constructor(deps: ConductorEngineDeps) {
     this.deps = deps;
@@ -749,12 +760,37 @@ export class ConductorEngine {
           this.consumeUnreadTurnWakeMail(hosted.identity.projectId, mail);
         }
       }
+      // #77: the turn injected and ran to idle — the kickoff (if this was one) landed, so reset the
+      // failed-inject budget. The budget bounds a RE-PASTE loop, not a healthy agent's later turns.
+      this.kickoffInjectAttempts.delete(agentKey);
       this.lastTurnErrored.delete(agentKey);
       return { turnEnd, errored: false, liveness };
     } catch (error) {
       // MNR-2 seam: yield on an errored turn WITHOUT consuming the mail. We deliberately do nothing
       // that would mark the item read/resolved — it stays outstanding for P1b to re-inject.
       this.lastTurnErrored.set(agentKey, true);
+      // #77: but a ONE-SHOT KICKOFF that keeps erroring is the re-paste-loop trap — a multiline
+      // kickoff whose paste the provider's composer collapses (codex) never echo-verifies, so the
+      // inject THROWS every tick and the daemon re-pastes forever. Bound it: count failed kickoff
+      // inject attempts and, once over the cap, RETRACT the kickoff (the same consume path F5 uses)
+      // so the warm pane is freed rather than stranded. Ordinary actionable / wake mail is untouched
+      // (consumeOneShotKickoff is a no-op unless `mail` IS the kickoff) — it stays outstanding per
+      // MNR-2 for clean re-injection. LOUD diagnostic on retraction (Principle 9 — no silent drop).
+      if (isTurnKickoffMail(mail)) {
+        const attempts = (this.kickoffInjectAttempts.get(agentKey) ?? 0) + 1;
+        this.kickoffInjectAttempts.set(agentKey, attempts);
+        if (attempts >= ConductorEngine.KICKOFF_INJECT_ATTEMPT_CAP) {
+          this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+          this.kickoffInjectAttempts.delete(agentKey);
+          console.error(
+            `[ConductorEngine] RETRACTING one-shot kickoff for agent '${hosted.identity.agent}' in ` +
+              `project '${hosted.identity.projectId}' after ${attempts} failed inject attempt(s) ` +
+              `(provider '${hosted.identity.provider}'). The kickoff paste never echo-verified — likely ` +
+              `a collapsed multiline composer paste whose preview bytes are not yet matched (#77). ` +
+              `Freeing the warm pane instead of re-pasting every tick. Last error: ${errorMessage(error)}`,
+          );
+        }
+      }
       return { errored: true, error };
     } finally {
       this.turnInFlight.set(agentKey, false); // P6: turn yielded (success or error) — reset flag
@@ -1287,12 +1323,21 @@ export class ConductorEngine {
     this.lastTurnErrored.delete(agentKey);
     this.toolActivityListeners.delete(agentKey);
     this.overloadBackoff.delete(agentKey); // #68
+    this.kickoffInjectAttempts.delete(agentKey); // #77
   }
 
   // #68 — transient-overload backoff. Base/cap chosen so a 529 storm backs off exponentially
   // (1s, 2s, 4s, …) up to a 60s ceiling instead of re-injecting the same mail every ~1s tick.
   private static readonly OVERLOAD_BACKOFF_BASE_MS = 1_000;
   private static readonly OVERLOAD_BACKOFF_CAP_MS = 60_000;
+
+  /**
+   * #77 — max failed one-shot-kickoff inject attempts before the kickoff is RETRACTED. Three gives a
+   * collapsed/transient composer state two retries to settle before the engine gives up and frees the
+   * warm pane (a stranded warm pane is worse than a dropped scheduling nudge — the operator/parent can
+   * re-kick a healthy agent, but a quarantined pane blocks the slot indefinitely).
+   */
+  private static readonly KICKOFF_INJECT_ATTEMPT_CAP = 3;
 
   /** True while `agentKey` is in an overload backoff window (skip it this cycle). */
   private inOverloadBackoff(agentKey: string): boolean {
