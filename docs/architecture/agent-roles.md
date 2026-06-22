@@ -18,7 +18,7 @@ feature.)
 
 | Base role | Mandate | Writes |
 |---|---|---|
-| **Coordinator** | task owner: shape intent → lock spec → plan phases → dispatch → gate → publish → close. **Plans the work itself**, spawning Researchers when investigation is needed. | delegates |
+| **Coordinator** | task owner: shape intent → draft spec (the **operator** locks it) → plan phases → dispatch → gate → publish → close. **Plans the work itself**, spawning Researchers when investigation is needed. | delegates |
 | **Lead** | phase owner: decompose → dispatch workers → integrate reviewed branches → verify → report phase-ready. | delegates |
 | **Implementer** | changes code in an isolated worktree, finishes through the gate. | code |
 | **Reviewer** | the gate; inspects a target and returns a verdict. | read-only-for-code |

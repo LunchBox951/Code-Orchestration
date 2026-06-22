@@ -166,6 +166,26 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
     expect(new Set(contents).size).toBe(BASE_ROLES.length);
   });
 
+  it('the coordinator arc NAMES the workflow verbs at each lifecycle step (F4 — drive from orient)', () => {
+    const out = orientContent('coordinator');
+    for (const verb of [
+      'co_spec_draft',
+      'co_plan_ingest',
+      'co_sling',
+      'co_kickback',
+      'co_merge',
+      'co_push',
+      'co_pr_merge',
+      'co_phase_update',
+      'co_task_complete',
+    ]) {
+      expect(out, `coordinator orient should name ${verb}`).toContain(verb);
+    }
+    // The spec LOCK is the operator's surface — orient must say so, not name a self-lock verb.
+    expect(out.toLowerCase()).toContain('locked by the operator');
+    // Naming verbs must NOT drift into restating their fields (P5 is asserted separately above).
+  });
+
   it('an unknown role gets generic workflow guidance, not an error (lenient input)', () => {
     const out = orientContent('wizard');
     expect(out.length).toBeGreaterThan(0);

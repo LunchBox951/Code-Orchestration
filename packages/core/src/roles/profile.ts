@@ -53,7 +53,7 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
   coordinator: {
     baseRole: 'coordinator',
     mandate:
-      'task owner: shape intent → lock spec → plan phases → dispatch → gate → publish → close. Plans the work itself, spawning Researchers when investigation is needed.',
+      'task owner: shape intent → draft spec (the OPERATOR locks it) → plan phases → dispatch → gate → publish → close. Plans the work itself, spawning Researchers when investigation is needed.',
     writeScope: 'delegates',
     toolset: [
       ...UNIVERSAL,
