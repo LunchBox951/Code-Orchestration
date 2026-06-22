@@ -40,6 +40,8 @@ const CREATE_COST_TABLES = `
     input_tokens   INTEGER,
     output_tokens  INTEGER,
     total_tokens   INTEGER,
+    cache_read_tokens INTEGER,
+    cache_creation_tokens INTEGER,
     used_pct       REAL,
     PRIMARY KEY (provider, agent, task, turn)
   );
@@ -52,6 +54,8 @@ const CREATE_COST_TABLES = `
     output_tokens  INTEGER NOT NULL DEFAULT 0,
     total_tokens   INTEGER NOT NULL DEFAULT 0,
     token_observations INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     used_pct       REAL NOT NULL DEFAULT 0,
     used_pct_observations INTEGER NOT NULL DEFAULT 0,
     observations   INTEGER NOT NULL DEFAULT 0,
@@ -78,6 +82,12 @@ export function ensureCostTables(db: DatabaseSync): void {
   ensureColumn(db, 'cost_rollup', 'cost_usd_observations', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'cost_rollup', 'token_observations', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'cost_rollup', 'used_pct_observations', 'INTEGER NOT NULL DEFAULT 0');
+  // Prompt-cache token columns (added after the original cost tables): migrate an existing store
+  // so a re-fold of its log lands the cache totals without dropping the table (replay-safe, freeze #6).
+  ensureColumn(db, 'cost_observations', 'cache_read_tokens', 'INTEGER');
+  ensureColumn(db, 'cost_observations', 'cache_creation_tokens', 'INTEGER');
+  ensureColumn(db, 'cost_rollup', 'cache_read_tokens', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'cost_rollup', 'cache_creation_tokens', 'INTEGER NOT NULL DEFAULT 0');
   backfillCostObservationState(db);
 }
 
@@ -158,7 +168,7 @@ function recomputeCostRollupsFromObservations(db: DatabaseSync): void {
     db.exec(`
       INSERT INTO cost_rollup
         (kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens,
-         token_observations, used_pct, used_pct_observations, observations)
+         token_observations, cache_read_tokens, cache_creation_tokens, used_pct, used_pct_observations, observations)
       SELECT
         '${kind}',
         ${idColumn},
@@ -168,6 +178,8 @@ function recomputeCostRollupsFromObservations(db: DatabaseSync): void {
         SUM(COALESCE(output_tokens, 0)),
         SUM(COALESCE(total_tokens, 0)),
         SUM(CASE WHEN total_tokens IS NOT NULL THEN 1 ELSE 0 END),
+        SUM(COALESCE(cache_read_tokens, 0)),
+        SUM(COALESCE(cache_creation_tokens, 0)),
         SUM(COALESCE(used_pct, 0)),
         SUM(CASE WHEN used_pct IS NOT NULL THEN 1 ELSE 0 END),
         COUNT(*)
@@ -188,6 +200,8 @@ export function rowToCostRollup(row: Record<string, unknown>): CostRollup {
     outputTokens: Number(row.output_tokens),
     totalTokens: Number(row.total_tokens),
     tokenObservations: Number(row.token_observations ?? 0),
+    cacheReadTokens: Number(row.cache_read_tokens ?? 0),
+    cacheCreationTokens: Number(row.cache_creation_tokens ?? 0),
     usedPct: Number(row.used_pct),
     usedPctObservations: Number(row.used_pct_observations ?? 0),
     observations: Number(row.observations),
@@ -209,7 +223,7 @@ export function rowToNearBudgetRecord(row: Record<string, unknown>): NearBudgetR
 }
 
 const ROLLUP_COLUMNS =
-  'kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens, token_observations, used_pct, used_pct_observations, observations';
+  'kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens, token_observations, cache_read_tokens, cache_creation_tokens, used_pct, used_pct_observations, observations';
 const NEAR_BUDGET_COLUMNS =
   'seq, task, agent, provider, total_cost_usd, cap_cents, threshold_pct, ts';
 
@@ -365,6 +379,8 @@ interface NormalizedCostObservation {
   readonly inputTokens: number | null;
   readonly outputTokens: number | null;
   readonly totalTokens: number | null;
+  readonly cacheReadTokens: number | null;
+  readonly cacheCreationTokens: number | null;
   readonly usedPct: number | null;
 }
 
@@ -374,8 +390,9 @@ function recordCostObservation(db: DatabaseSync, p: CostRecorded): boolean {
   const result = db
     .prepare(
       `INSERT OR IGNORE INTO cost_observations
-         (provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens, used_pct)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens,
+          cache_read_tokens, cache_creation_tokens, used_pct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       n.provider,
@@ -386,13 +403,16 @@ function recordCostObservation(db: DatabaseSync, p: CostRecorded): boolean {
       n.inputTokens,
       n.outputTokens,
       n.totalTokens,
+      n.cacheReadTokens,
+      n.cacheCreationTokens,
       n.usedPct,
     ) as { readonly changes?: number };
   if ((result.changes ?? 0) > 0) return true;
 
   const existing = db
     .prepare(
-      `SELECT provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens, used_pct
+      `SELECT provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens,
+              cache_read_tokens, cache_creation_tokens, used_pct
          FROM cost_observations
         WHERE provider = ? AND agent = ? AND task = ? AND turn = ?`,
     )
@@ -414,6 +434,8 @@ function normalizeCostObservation(p: CostRecorded): NormalizedCostObservation {
     inputTokens: p.input_tokens ?? null,
     outputTokens: p.output_tokens ?? null,
     totalTokens: normalizedTotalTokens(p),
+    cacheReadTokens: p.cache_read_input_tokens ?? null,
+    cacheCreationTokens: p.cache_creation_input_tokens ?? null,
     usedPct: p.used_pct ?? null,
   };
 }
@@ -436,6 +458,8 @@ function rowToObservation(row: Record<string, unknown>): NormalizedCostObservati
     inputTokens: nullableNumber(row.input_tokens),
     outputTokens: nullableNumber(row.output_tokens),
     totalTokens: nullableNumber(row.total_tokens),
+    cacheReadTokens: nullableNumber(row.cache_read_tokens),
+    cacheCreationTokens: nullableNumber(row.cache_creation_tokens),
     usedPct: nullableNumber(row.used_pct),
   };
 }
@@ -454,6 +478,8 @@ function observationsMatch(a: NormalizedCostObservation, b: NormalizedCostObserv
     a.inputTokens === b.inputTokens &&
     a.outputTokens === b.outputTokens &&
     a.totalTokens === b.totalTokens &&
+    a.cacheReadTokens === b.cacheReadTokens &&
+    a.cacheCreationTokens === b.cacheCreationTokens &&
     a.usedPct === b.usedPct
   );
 }
@@ -462,8 +488,8 @@ function observationsMatch(a: NormalizedCostObservation, b: NormalizedCostObserv
 function addToRollup(db: DatabaseSync, kind: CostRollupKind, id: string, p: CostRecorded): void {
   db.prepare(
     `INSERT INTO cost_rollup
-       (kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens, token_observations, used_pct, used_pct_observations, observations)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+       (kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens, token_observations, cache_read_tokens, cache_creation_tokens, used_pct, used_pct_observations, observations)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
      ON CONFLICT(kind, id) DO UPDATE SET
        total_cost_usd = total_cost_usd + excluded.total_cost_usd,
        cost_usd_observations = cost_usd_observations + excluded.cost_usd_observations,
@@ -471,6 +497,8 @@ function addToRollup(db: DatabaseSync, kind: CostRollupKind, id: string, p: Cost
        output_tokens = output_tokens + excluded.output_tokens,
        total_tokens = total_tokens + excluded.total_tokens,
        token_observations = token_observations + excluded.token_observations,
+       cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+       cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
        used_pct = used_pct + excluded.used_pct,
        used_pct_observations = used_pct_observations + excluded.used_pct_observations,
        observations = observations + excluded.observations`,
@@ -483,6 +511,8 @@ function addToRollup(db: DatabaseSync, kind: CostRollupKind, id: string, p: Cost
     p.output_tokens ?? 0,
     normalizedTotalTokens(p) ?? 0,
     normalizedTotalTokens(p) !== null ? 1 : 0,
+    p.cache_read_input_tokens ?? 0,
+    p.cache_creation_input_tokens ?? 0,
     p.used_pct ?? 0,
     p.used_pct !== undefined ? 1 : 0,
   );

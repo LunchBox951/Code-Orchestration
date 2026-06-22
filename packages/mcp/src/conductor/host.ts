@@ -19,6 +19,7 @@
  */
 import { performance } from 'node:perf_hooks';
 import { spawnSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   GH_AUTH_TOKEN_COMMANDS,
@@ -35,6 +36,7 @@ import {
   descendantsLeafFirst,
   isMissingBranchDeleteError,
   openArchiveStore,
+  openDispatchStore,
   openMailStore,
   openRegistry,
   openReviewStore,
@@ -42,12 +44,19 @@ import {
   openSessionStore,
   openSpecStore,
   openWorktreeStore,
+  parseClaudeTranscriptTurnCost,
+  parseCodexTokenCount,
   queryLiveObservability,
+  readLatestCodexTokenCount,
   reapExpiredArchives,
   waitingItems,
+  openCodexLogsDb,
+  resolveBudgetCap,
   QUIET_WINDOW_MS,
   type ArchiveEntry,
   type BreakSignal,
+  type CostRecorded,
+  type DispatchStore,
   type InjectNudgeFn,
   type LiveObservabilitySnapshot,
   type MarkStuck,
@@ -57,9 +66,15 @@ import {
   type RunningAgent,
   type TranscriptTail,
   type GitExec,
+  type Provider,
 } from '@co/core';
 import { ReconcileLoop } from '@co/core';
-import { ConductorEngine, type TransportPair } from './engine.js';
+import {
+  ConductorEngine,
+  type TransportPair,
+  type TurnCostCapture,
+  type ToolActivityCapture,
+} from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
 import { DaemonBackedAgentRouter } from './agent-router.js';
 import { EngineLiveStateProvider } from './live-observe.js';
@@ -310,6 +325,228 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// ── PR-B COLLECTION — cost + tool-usage capture seams wired onto the real engine ───────────────────
+//
+// These are the PRODUCTION emitters the prior round left UNWIRED. `makeTurnCostCapture` is bound to the
+// engine's `captureTurnCost`; `makeToolActivityRecorder` to its `onToolActivity`. Both open the project
+// {@link DispatchStore} per call and record over L0 (program-data only — AC9/P12), and both are
+// FAIL-SOFT: a thrown reader/record is swallowed (the engine also guards), so collection can never fail
+// a live turn or MCP call. The provider readers are INJECTABLE seams so the wiring is hermetically
+// testable (the integration test injects fixture readers + a temp store); the defaults are the real ones.
+
+/** Per-turn provider usage readers (Claude transcript JSONL / Codex token_count) — injectable for tests. */
+export interface TurnCostReaderDeps {
+  /** Read the agent's isolated Claude transcript JSONL (the `usage` source). Default: read under isolated home. */
+  readonly readClaudeTranscript?: (identity: HostedIdentity) => Promise<string | undefined>;
+  /** Read the agent's Codex `token_count` payload from `logs_2.sqlite`. Default: open it read-only. */
+  readonly readCodexTokenCount?: (identity: HostedIdentity) => Promise<unknown | undefined>;
+  /** Open the project dispatch store. Default: {@link openDispatchStore}. */
+  readonly openDispatch?: (projectId: ProjectId) => DispatchStore;
+  /** Resolve the agent's task id from its identity. Default: the agent id (one task per agent in v1). */
+  readonly taskFor?: (identity: HostedIdentity) => string;
+}
+
+/** Default task resolver — v1 files cost under the agent's own id (one logical task per agent). */
+function defaultTaskFor(identity: HostedIdentity): string {
+  return identity.agent;
+}
+
+/**
+ * Lower a parsed provider per-turn usage onto a {@link CostRecorded}, or undefined when there is nothing
+ * to record (so the caller records NOTHING — never a vacuous all-zero observation). PURE + exported so
+ * the field mapping is unit-testable in isolation (the exact transcript/sqlite field names are the
+ * `needsLiveVerification` contract).
+ */
+export function claudeTurnCostToObservation(
+  identity: HostedIdentity,
+  task: string,
+  turn: number,
+  cost: {
+    readonly inputTokens?: number;
+    readonly outputTokens?: number;
+    readonly cacheReadInputTokens?: number;
+    readonly cacheCreationInputTokens?: number;
+    readonly costUsd?: number;
+  },
+): CostRecorded | undefined {
+  const obs: CostRecorded = {
+    provider: 'claude',
+    agent: identity.agent,
+    task,
+    turn,
+    ...(cost.inputTokens !== undefined ? { input_tokens: cost.inputTokens } : {}),
+    ...(cost.outputTokens !== undefined ? { output_tokens: cost.outputTokens } : {}),
+    ...(cost.cacheReadInputTokens !== undefined
+      ? { cache_read_input_tokens: cost.cacheReadInputTokens }
+      : {}),
+    ...(cost.cacheCreationInputTokens !== undefined
+      ? { cache_creation_input_tokens: cost.cacheCreationInputTokens }
+      : {}),
+    ...(cost.costUsd !== undefined ? { cost_usd: cost.costUsd } : {}),
+  };
+  return hasMeasuredCostField(obs) ? obs : undefined;
+}
+
+/** Lower a parsed Codex per-turn usage onto a {@link CostRecorded} (tokens / usage-% — no dollars). */
+export function codexTurnCostToObservation(
+  identity: HostedIdentity,
+  task: string,
+  turn: number,
+  cost: {
+    readonly inputTokens?: number;
+    readonly outputTokens?: number;
+    readonly totalTokens?: number;
+    readonly usedPct?: number;
+  },
+): CostRecorded | undefined {
+  const obs: CostRecorded = {
+    provider: 'codex',
+    agent: identity.agent,
+    task,
+    turn,
+    ...(cost.inputTokens !== undefined ? { input_tokens: cost.inputTokens } : {}),
+    ...(cost.outputTokens !== undefined ? { output_tokens: cost.outputTokens } : {}),
+    ...(cost.totalTokens !== undefined ? { total_tokens: cost.totalTokens } : {}),
+    ...(cost.usedPct !== undefined ? { used_pct: cost.usedPct } : {}),
+  };
+  return hasMeasuredCostField(obs) ? obs : undefined;
+}
+
+function hasMeasuredCostField(obs: CostRecorded): boolean {
+  return (
+    obs.cost_usd !== undefined ||
+    obs.input_tokens !== undefined ||
+    obs.output_tokens !== undefined ||
+    obs.total_tokens !== undefined ||
+    obs.cache_read_input_tokens !== undefined ||
+    obs.cache_creation_input_tokens !== undefined ||
+    obs.used_pct !== undefined
+  );
+}
+
+/** Default Claude transcript reader: the host writes the per-account transcript path; absent ⇒ no read. */
+const defaultReadClaudeTranscript = (
+  isolatedHomeDirFor: ((agent: string) => string) | undefined,
+): ((identity: HostedIdentity) => Promise<string | undefined>) => {
+  return async (identity) => {
+    if (isolatedHomeDirFor == null) return undefined;
+    // The isolated Claude transcript jsonl lives under CLAUDE_CONFIG_DIR (= the isolated home). The
+    // exact filename is provider-version-specific (needsLiveVerification); read the captured statusLine
+    // tee's sibling transcript when present. Best-effort: a missing file resolves undefined (no record).
+    const home = isolatedHomeDirFor(identity.agent).replace(/\/+$/u, '');
+    const path = `${home}/co-transcript-${identity.agent}.jsonl`;
+    try {
+      return await readFile(path, 'utf8');
+    } catch {
+      return undefined;
+    }
+  };
+};
+
+/** Default Codex token_count reader: open the per-agent isolated `logs_2.sqlite` read-only. */
+const defaultReadCodexTokenCount = (
+  isolatedHomeDirFor: ((agent: string) => string) | undefined,
+): ((identity: HostedIdentity) => Promise<unknown | undefined>) => {
+  return async (identity) => {
+    if (isolatedHomeDirFor == null) return undefined;
+    const home = isolatedHomeDirFor(identity.agent).replace(/\/+$/u, '');
+    const path = `${home}/logs_2.sqlite`;
+    try {
+      const db = openCodexLogsDb(path);
+      try {
+        return readLatestCodexTokenCount(db);
+      } finally {
+        db.close();
+      }
+    } catch {
+      return undefined; // missing/locked db ⇒ no record (fail-soft).
+    }
+  };
+};
+
+/**
+ * Build the engine's `captureTurnCost` closure for `projectId`. On each non-errored turn it reads the
+ * provider's per-turn usage, lowers it onto a {@link CostRecorded}, and records it (with any configured
+ * budget cap so the near-budget observability signal still fires). Missing usage ⇒ records nothing.
+ * FAIL-SOFT: any throw is swallowed (the engine guards too). Exported + seam-injectable so the
+ * production wiring is hermetically testable.
+ */
+export function makeTurnCostCapture(
+  projectId: ProjectId,
+  deps: TurnCostReaderDeps & { readonly isolatedHomeDirFor?: (agent: string) => string } = {},
+): (capture: TurnCostCapture) => Promise<void> {
+  const openDispatch = deps.openDispatch ?? openDispatchStore;
+  const taskFor = deps.taskFor ?? defaultTaskFor;
+  const readClaude =
+    deps.readClaudeTranscript ?? defaultReadClaudeTranscript(deps.isolatedHomeDirFor);
+  const readCodex = deps.readCodexTokenCount ?? defaultReadCodexTokenCount(deps.isolatedHomeDirFor);
+  return async ({ identity, turn }: TurnCostCapture): Promise<void> => {
+    const task = taskFor(identity);
+    const obs = await readTurnCostObservation(identity, task, turn, readClaude, readCodex);
+    if (obs == null) return; // no usage observed — record nothing (never a fabricated zero).
+    const store = openDispatch(projectId);
+    try {
+      const budget = resolveBudgetCap(projectId);
+      store.recordCost(obs, budget);
+    } finally {
+      store.close();
+    }
+  };
+}
+
+async function readTurnCostObservation(
+  identity: HostedIdentity,
+  task: string,
+  turn: number,
+  readClaude: (identity: HostedIdentity) => Promise<string | undefined>,
+  readCodex: (identity: HostedIdentity) => Promise<unknown | undefined>,
+): Promise<CostRecorded | undefined> {
+  const provider: Provider = identity.provider;
+  if (provider === 'claude') {
+    const jsonl = await readClaude(identity);
+    if (jsonl == null) return undefined;
+    const parsed = parseClaudeTranscriptTurnCost(jsonl);
+    return parsed ? claudeTurnCostToObservation(identity, task, turn, parsed) : undefined;
+  }
+  const payload = await readCodex(identity);
+  if (payload == null) return undefined;
+  const parsed = parseCodexTokenCount(payload);
+  return parsed ? codexTurnCostToObservation(identity, task, turn, parsed) : undefined;
+}
+
+/**
+ * Build the engine's `onToolActivity` closure for `projectId`: record one durable `tool.invoked` per
+ * completed (`end`) tool call into the per-agent tool-usage projection. Only `end` events are recorded
+ * (a `start`/`end` pair is one call). A non-`ok` end is a tool error; an `ok` `co_*` end is a productive
+ * call. FAIL-SOFT — a thrown record never breaks the live MCP call path.
+ */
+export function makeToolActivityRecorder(
+  projectId: ProjectId,
+  deps: {
+    readonly openDispatch?: (projectId: ProjectId) => DispatchStore;
+    readonly taskFor?: (i: HostedIdentity) => string;
+  } = {},
+): (capture: ToolActivityCapture) => void {
+  const openDispatch = deps.openDispatch ?? openDispatchStore;
+  const taskFor = deps.taskFor ?? defaultTaskFor;
+  return ({ identity, turn, activity }: ToolActivityCapture): void => {
+    if (activity.phase !== 'end') return; // one record per completed call (start/end is one call).
+    const store = openDispatch(projectId);
+    try {
+      store.recordToolInvoked({
+        agent: identity.agent,
+        task: taskFor(identity),
+        tool: activity.tool,
+        turn,
+        ok: activity.ok === true,
+        ...(activity.durationMs !== undefined ? { duration_ms: activity.durationMs } : {}),
+      });
+    } finally {
+      store.close();
+    }
+  };
+}
+
 function reportServeControlDiagnostic(
   onError: ((error: unknown) => void) | undefined,
   error: Error,
@@ -526,12 +763,21 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
             buildHostedLaunchSpec(identity, homeFor(identity.agent), coMcpPaths);
         })()
       : undefined;
+  // PR-B COLLECTION — bind the production cost + tool-usage emitters onto the engine. Both record into
+  // the project DispatchStore (program-data only); both are fail-soft. Bound here, on the real engine,
+  // so a live `co-mcp serve` run actually records (the prior round left these seams DEAD).
+  const captureTurnCost = makeTurnCostCapture(projectId, {
+    ...(isolatedHomeDirFor != null ? { isolatedHomeDirFor } : {}),
+  });
+  const recordToolActivity = makeToolActivityRecorder(projectId);
   const engine = new ConductorEngine({
     pty,
     makeTransport,
     now,
     quietWindow: opts.quietWindow ?? realQuietWindow,
     reviewerSpawnGate: () => spawnGate,
+    captureTurnCost,
+    onToolActivity: recordToolActivity,
     ...(spawnSpecFor != null ? { spawnSpecFor } : {}),
   });
   if (opts.coMcpPaths != null) {

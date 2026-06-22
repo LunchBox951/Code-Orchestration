@@ -300,10 +300,12 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
 
     // MNR-6: only the isolated dir in env — no leakage of user-global config. CLAUDE_CODE_NO_FLICKER
     // is a static rendering flag (#66), not a path; HOME is the ISOLATED home (RC-5, so `~` cannot
-    // resolve to the operator home); LANG is a static locale (RC-6) — none weaken the isolation guarantee.
+    // resolve to the operator home); LANG is a static locale (RC-6); CO_CLAUDE_STATUSLINE_PATH (#67)
+    // points at the per-account statusLine tee file UNDER the isolated home — none weaken isolation.
     expect(spec.env).toEqual({
       CLAUDE_CONFIG_DIR: isolatedHomeDir,
       CLAUDE_CODE_NO_FLICKER: '1',
+      CO_CLAUDE_STATUSLINE_PATH: `${isolatedHomeDir}/co-statusline.json`,
       HOME: isolatedHomeDir,
       LANG: 'C.UTF-8',
     });

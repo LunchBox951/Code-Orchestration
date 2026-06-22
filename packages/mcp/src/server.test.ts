@@ -16,7 +16,7 @@ import {
   type ReviewStore,
   type ToolContext,
 } from '@co/core';
-import { createCoMcpServer, type CoMcpServerOptions } from './server.js';
+import { createCoMcpServer, type CoMcpServerOptions, type ToolActivityEvent } from './server.js';
 import { LiveSessionHostImpl } from './live-session-host.js';
 
 // The canonical `co_*` tools the mount must expose 1:1 (registration order from buildCoreRegistry).
@@ -370,7 +370,7 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
 
   it('reports tool end activity with success/failure status', async () => {
     const ctx = makeTestContext('impl-activity');
-    const events: Array<{ phase: 'start' | 'end'; tool: string; ok?: boolean }> = [];
+    const events: ToolActivityEvent[] = [];
     const client = await connect({
       contextFactory: () => ctx,
       onToolActivity: (event) => events.push(event),
@@ -388,10 +388,41 @@ describe('createCoMcpServer — protocol round-trip (in-memory)', () => {
     });
     expect(failed.isError).toBe(true);
 
-    expect(events).toEqual([
-      { phase: 'start', tool: 'co_mail_send' },
+    // The phase/tool/ok structure is exact; durationMs is wall-time (non-deterministic) so it is
+    // asserted by SHAPE (present + a non-negative number on every end event) rather than by value.
+    expect(events.map((e) => ({ phase: e.phase, tool: e.tool, ok: e.ok }))).toEqual([
+      { phase: 'start', tool: 'co_mail_send', ok: undefined },
       { phase: 'end', tool: 'co_mail_send', ok: true },
-      { phase: 'start', tool: 'co_mail_send' },
+      { phase: 'start', tool: 'co_mail_send', ok: undefined },
+      { phase: 'end', tool: 'co_mail_send', ok: false },
+    ]);
+    for (const end of events.filter((e) => e.phase === 'end')) {
+      expect(typeof end.durationMs).toBe('number');
+      expect(end.durationMs).toBeGreaterThanOrEqual(0);
+    }
+    // start events carry no durationMs (PR-B: duration is an end-only field).
+    for (const start of events.filter((e) => e.phase === 'start')) {
+      expect(start.durationMs).toBeUndefined();
+    }
+  });
+
+  it('emits end{ok:false} when the context build itself fails (contextFactory inside the try)', async () => {
+    // PR-B: a contextFactory throw must still surface as a recorded tool ERROR (not a dropped call),
+    // so the durable tool-usage projection sees it. The start/end pair must be complete.
+    const events: ToolActivityEvent[] = [];
+    const client = await connect({
+      contextFactory: () => {
+        throw new Error('ctx build failed');
+      },
+      onToolActivity: (event) => events.push(event),
+    });
+    const res = await client.callTool({
+      name: 'co_mail_send',
+      arguments: { to: 'x', type: 'chat', subject: 's', body: 'b' },
+    });
+    expect(res.isError).toBe(true);
+    expect(events.map((e) => ({ phase: e.phase, tool: e.tool, ok: e.ok }))).toEqual([
+      { phase: 'start', tool: 'co_mail_send', ok: undefined },
       { phase: 'end', tool: 'co_mail_send', ok: false },
     ]);
   });

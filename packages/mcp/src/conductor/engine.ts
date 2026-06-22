@@ -191,6 +191,39 @@ export interface ConductorEngineDeps {
    * passes an explicit `undefined` (exactOptionalPropertyTypes safe).
    */
   readonly reviewerSpawnGate?: () => ReviewerSpawnGate | undefined;
+  /**
+   * PR-B COLLECTION (cost) — per-turn cost-capture seam, called in the turn-END region of
+   * {@link ConductorEngine.runOneTurn} (after the detector yields, before the warm yield). The host
+   * binds a closure that reads the provider's per-turn usage (Claude: the isolated transcript JSONL
+   * assistant-message `usage`; Codex: `logs_2.sqlite` `token_count`) and records it via
+   * `DispatchStore.recordCost`. Called for EVERY non-errored turn with the agent identity + the engine's
+   * per-agent turn ordinal. MUST be fail-soft: a throw here is swallowed by the engine (a missing/garbled
+   * usage read must never fail the turn). Absent ⇒ no cost capture (headless / sandbox path).
+   */
+  readonly captureTurnCost?: (capture: TurnCostCapture) => void | Promise<void>;
+  /**
+   * PR-B COLLECTION (tool-usage) — the engine forwards EVERY hosted session's
+   * {@link ToolActivityEvent} to this seam (in addition to the in-memory watchdog liveness trace). The
+   * host binds a closure that records each completed `end` activity into the durable per-agent tool-usage
+   * projection (`DispatchStore.recordToolInvoked`). MUST be fail-soft. Absent ⇒ no durable tool-usage
+   * collection (headless / sandbox path).
+   */
+  readonly onToolActivity?: (capture: ToolActivityCapture) => void;
+}
+
+/** The per-turn cost-capture invocation: the acting agent's identity + the engine's per-agent turn ordinal. */
+export interface TurnCostCapture {
+  readonly identity: HostedIdentity;
+  /** The engine's 0-based per-agent turn ordinal — the stable `turn` for the cost observation identity. */
+  readonly turn: number;
+}
+
+/** A durable tool-activity forward: the acting agent identity, the engine turn ordinal, and the raw event. */
+export interface ToolActivityCapture {
+  readonly identity: HostedIdentity;
+  /** The engine's 0-based per-agent turn ordinal at the time of the call. */
+  readonly turn: number;
+  readonly activity: ToolActivityEvent;
 }
 
 /** A routed live-delivery side-effect that failed post-persist (the {@link LiveDelivery} ledger re-tries). */
@@ -437,6 +470,13 @@ export class ConductorEngine {
   private readonly toolActivityListeners = new Map<string, Set<(ev: DetectorEvent) => void>>();
   /** Agents whose most recent driven turn errored before consuming their selected mail. */
   private readonly lastTurnErrored = new Map<string, boolean>();
+  /**
+   * PR-B COLLECTION — the engine's 0-based per-agent turn ORDINAL, keyed `${projectId}:${agent}`.
+   * Incremented at the start of each {@link runOneTurn}; the CURRENT value is the `turn` carried on the
+   * per-turn cost observation and forwarded tool-activity (the stable identity that dedupes a re-recorded
+   * turn). Survives across warm turns; dropped on release (so a re-hosted agent restarts at 0).
+   */
+  private readonly turnOrdinal = new Map<string, number>();
 
   constructor(deps: ConductorEngineDeps) {
     this.deps = deps;
@@ -639,7 +679,7 @@ export class ConductorEngine {
         deliveryFactory: this.routingDeliveryFactory(),
         ...(spawnGate != null ? { reviewerSpawnGate: spawnGate } : {}),
         ...(sessionTools != null ? { tools: sessionTools } : {}),
-        onToolActivity: (activity) => this.emitToolActivity(agentKey, activity),
+        onToolActivity: (activity) => this.emitToolActivity(agentKey, activity, identity),
       });
 
       // Drive it through its startup interstitials to ready (or surface a terminal login menu).
@@ -709,6 +749,11 @@ export class ConductorEngine {
     const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
     this.turnStartedAt.set(agentKey, this.deps.now());
     this.turnInFlight.set(agentKey, true); // P6: mark turn in flight so the reconcile watchdog sees turnActive
+    // PR-B COLLECTION — the CURRENT turn ordinal (first turn is 0). The stored value reflects THIS turn
+    // for its whole duration, so the cost observation AND any tool-activity forwarded mid-turn share the
+    // same stable `turn`. It is bumped to the NEXT ordinal in the finally (once this turn yields).
+    const turnOrdinal = this.turnOrdinal.get(agentKey) ?? 0;
+    this.turnOrdinal.set(agentKey, turnOrdinal);
     try {
       const text = this.renderMail(mail);
       await injectMail(hosted.pane, text, {
@@ -750,6 +795,18 @@ export class ConductorEngine {
         }
       }
       this.lastTurnErrored.delete(agentKey);
+      // PR-B COLLECTION (cost) — capture this turn's provider cost in the turn-END region, FAIL-SOFT:
+      // the host's closure reads the per-turn usage and records it; a missing/garbled usage read (or any
+      // throw) is swallowed so cost collection can never fail a healthy turn (Principle 9 inverse — the
+      // turn is load-bearing, the metric is not). Skipped on a transient-overload no-progress turn (no
+      // real usage was produced).
+      if (this.deps.captureTurnCost != null && !(sawOverload && !sawMcpActivity)) {
+        try {
+          await this.deps.captureTurnCost({ identity: hosted.identity, turn: turnOrdinal });
+        } catch {
+          /* cost capture is best-effort; the turn result stands */
+        }
+      }
       return { turnEnd, errored: false, liveness };
     } catch (error) {
       // MNR-2 seam: yield on an errored turn WITHOUT consuming the mail. We deliberately do nothing
@@ -758,6 +815,9 @@ export class ConductorEngine {
       return { errored: true, error };
     } finally {
       this.turnInFlight.set(agentKey, false); // P6: turn yielded (success or error) — reset flag
+      // PR-B: advance the per-agent turn ordinal so the NEXT runOneTurn records under turn+1. Done in
+      // the finally so an errored turn still advances (its ordinal was already consumed).
+      this.turnOrdinal.set(agentKey, turnOrdinal + 1);
       // #73: a release() that arrived mid-turn was deferred — finalize it now that the pane is idle,
       // so the kill + session close never tore the pane out from under this turn. Best-effort: a
       // finalize failure must not mask the turn's own outcome.
@@ -925,13 +985,35 @@ export class ConductorEngine {
     };
   }
 
-  private emitToolActivity(agentKey: string, activity: ToolActivityEvent): void {
+  // `agentKey` is kept FIRST (the landed signature the watchdog-liveness consumer drives directly).
+  // `identity` is an OPTIONAL second arg carrying the full identity for the PR-B durable tool-usage
+  // forward — present on the live hosting path, absent when a test drives the in-memory liveness trace.
+  private emitToolActivity(
+    agentKey: string,
+    activity: ToolActivityEvent,
+    identity?: HostedIdentity,
+  ): void {
     if (
       activity.phase === 'end' &&
       activity.ok === true &&
       COMPLETION_VERBS.includes(activity.tool)
     ) {
       this.turnStartedAt.delete(agentKey);
+    }
+    // PR-B COLLECTION (tool-usage) — forward EVERY activity to the durable consumer (in addition to the
+    // in-memory watchdog trace below). Done BEFORE the no-watchdog-listeners early return so durable
+    // collection happens even when no turn is currently observing. FAIL-SOFT: a throwing consumer must
+    // never break the live MCP call path. The current per-agent turn ordinal scopes the recorded call.
+    if (this.deps.onToolActivity != null && identity != null) {
+      try {
+        this.deps.onToolActivity({
+          identity,
+          turn: this.turnOrdinal.get(agentKey) ?? 0,
+          activity,
+        });
+      } catch {
+        /* durable tool-usage collection is best-effort; the MCP call path must keep flowing */
+      }
     }
     const listeners = this.toolActivityListeners.get(agentKey);
     if (listeners == null || listeners.size === 0) return;
@@ -1286,6 +1368,7 @@ export class ConductorEngine {
     this.turnStartedAt.delete(agentKey); // P6
     this.lastTurnErrored.delete(agentKey);
     this.toolActivityListeners.delete(agentKey);
+    this.turnOrdinal.delete(agentKey); // PR-B: a re-hosted agent restarts its turn ordinal at 0
     this.overloadBackoff.delete(agentKey); // #68
   }
 

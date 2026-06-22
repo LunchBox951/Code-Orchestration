@@ -454,6 +454,109 @@ const realCodexCli: CodexCli = (args) =>
     });
   });
 
+// ── Per-turn COST from logs_2.sqlite token_count (collection seam, spec §4.2) ───────────────────────
+/**
+ * The per-turn token cost read off a Codex `token_count` payload. Codex ships NO price table (v1), so
+ * there is no `costUsd` — only token counts (and a usage-% expression where present). Any field may be
+ * undefined when the payload did not report it.
+ */
+export interface CodexTurnCost {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly totalTokens?: number;
+  readonly usedPct?: number;
+}
+
+/**
+ * Parse a Codex `token_count` payload into a {@link CodexTurnCost} — DEFENSIVE over the
+ * unknown-but-host-validated schema. It locates the object carrying `total_token_usage` /
+ * `last_token_usage` / `info` (tolerating an envelope), reads `input_tokens` / `output_tokens` /
+ * `total_tokens` (with aliases), and — when a rate-limits body is present — the primary window's
+ * `used_percent`. Returns `undefined` when no token field is found (the caller records nothing).
+ */
+export function parseCodexTokenCount(payload: unknown): CodexTurnCost | undefined {
+  const root = asRecord(payload);
+  if (!root) return undefined;
+  const body = findTokenUsageBody(root) ?? root;
+  const input = numberish(pick(body, 'input_tokens', 'inputTokens', 'prompt_tokens'));
+  const output = numberish(pick(body, 'output_tokens', 'outputTokens', 'completion_tokens'));
+  const total = numberish(pick(body, 'total_tokens', 'totalTokens', 'total_token_count'));
+  const rateBody = findRateLimitsBody(root);
+  const primary = rateBody ? asRecord(pick(rateBody, 'primary')) : undefined;
+  const usedPct = primary
+    ? numberish(pick(primary, 'used_percent', 'used_percentage', 'used_pct'))
+    : undefined;
+  if (input === undefined && output === undefined && total === undefined && usedPct === undefined) {
+    return undefined;
+  }
+  return {
+    ...(input !== undefined ? { inputTokens: input } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    ...(total !== undefined ? { totalTokens: total } : {}),
+    ...(usedPct !== undefined ? { usedPct } : {}),
+  };
+}
+
+/** Locate the object carrying token-usage counts inside an arbitrary Codex `token_count` envelope. */
+function findTokenUsageBody(value: unknown, depth = 0): Record<string, unknown> | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  for (const key of ['total_token_usage', 'last_token_usage', 'token_usage', 'usage', 'info']) {
+    const nested = asRecord(pick(record, key));
+    if (nested && hasTokenFields(nested)) return nested;
+  }
+  if (hasTokenFields(record)) return record;
+  if (depth >= 4) return undefined;
+  for (const child of Object.values(record)) {
+    const found = findTokenUsageBody(child, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function hasTokenFields(record: Record<string, unknown>): boolean {
+  return (
+    numberish(pick(record, 'input_tokens', 'inputTokens', 'prompt_tokens')) !== undefined ||
+    numberish(pick(record, 'output_tokens', 'outputTokens', 'completion_tokens')) !== undefined ||
+    numberish(pick(record, 'total_tokens', 'totalTokens', 'total_token_count')) !== undefined
+  );
+}
+
+/**
+ * The verified signature of a Codex `token_count` websocket event in a `feedback_log_body` row — used to
+ * pin the latest GENUINE token_count event past prose that merely mentions the event name.
+ */
+const TOKEN_COUNT_SIGNATURE = 'websocket event: {"type":"token_count"';
+
+/**
+ * Scan a Codex log database (read-only) for the LATEST `token_count` payload — DEFENSIVE, mirroring
+ * {@link readLatestCodexRateLimits}. Returns the parsed embedded JSON of the newest genuine `token_count`
+ * websocket event, or undefined when none is found.
+ */
+export function readLatestCodexTokenCount(db: DatabaseSync): unknown | undefined {
+  const columns = collectTextColumns(db);
+  for (const textColumn of columns) {
+    const { table, column } = textColumn;
+    let rows: Array<Record<string, unknown>>;
+    try {
+      rows = db
+        .prepare(
+          `SELECT ${quoteIdent(column)} AS value FROM ${quoteIdent(table)} ` +
+            `WHERE ${quoteIdent(column)} LIKE ? ESCAPE '\\' ORDER BY rowid DESC LIMIT 1`,
+        )
+        .all(`%${escapeLikeLiteral(TOKEN_COUNT_SIGNATURE)}%`) as Array<Record<string, unknown>>;
+    } catch {
+      continue; // a column a text LIKE cannot bind against is skipped.
+    }
+    for (const row of rows) {
+      if (typeof row.value !== 'string') continue;
+      const parsed = tryParseJson(extractEmbeddedJson(row.value));
+      if (parsed !== undefined && parseCodexTokenCount(parsed) !== undefined) return parsed;
+    }
+  }
+  return undefined;
+}
+
 /** Default `logs_2.sqlite` path (`$CO_CODEX_LOGS_DB` or `~/.codex/logs_2.sqlite`). */
 export function defaultCodexLogsDbPath(): string {
   return process.env[CODEX_LOGS_DB_ENV] ?? join(homedir(), '.codex', 'logs_2.sqlite');

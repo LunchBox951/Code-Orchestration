@@ -610,32 +610,39 @@ export type {
   UsageObservedUnavailable,
   CostRecorded,
   CostNearBudget,
+  ToolInvoked,
   UsageBucket,
   UsageAccountStatus,
   CostRollup,
   CostRollupKind,
   NearBudgetRecord,
+  AgentToolUsage,
 } from './dispatch/events.js';
 export {
   DISPATCH_EVENT_V,
   EVENT_USAGE_OBSERVED,
   EVENT_COST_RECORDED,
   EVENT_COST_NEAR_BUDGET,
+  EVENT_TOOL_INVOKED,
   USAGE_SCOPE_PREFIX,
   COST_SCOPE_PREFIX,
+  TOOL_SCOPE_PREFIX,
   usageScope,
   costScope,
+  toolScope,
   providerSchema,
   usageObservedAvailableSchema,
   usageObservedUnavailableSchema,
   usageObservedSchema,
   costRecordedSchema,
   costNearBudgetSchema,
+  toolInvokedSchema,
   dispatchSchemas,
   dispatchUpcasters,
   makeUsageObservedEvent,
   makeCostRecordedEvent,
   makeCostNearBudgetEvent,
+  makeToolInvokedEvent,
 } from './dispatch/events.js';
 export {
   UsageProjector,
@@ -657,6 +664,22 @@ export {
   selectNearBudgetBySeq,
   selectNearBudgetEvents,
 } from './dispatch/cost-projector.js';
+// L4 tool-usage collection: the durable, replay-safe per-agent tool-call projection (#67-adjacent),
+// the counterpart to the engine's in-memory ToolActivityEvent watchdog seam.
+export {
+  ToolUsageProjector,
+  ensureToolUsageTables,
+  isProductiveCoTool,
+  rowToAgentToolUsage,
+  selectAgentToolUsage,
+  selectAllAgentToolUsage,
+} from './dispatch/tool-usage-projector.js';
+// L4 live per-turn COST collection parsers (spec §4.2): the fail-soft Claude transcript JSONL reader +
+// the Codex logs_2.sqlite token_count reader the host wires into the engine's captureTurnCost seam.
+export type { ClaudeTurnCost } from './dispatch/claude-source.js';
+export { parseClaudeTranscriptTurnCost } from './dispatch/claude-source.js';
+export type { CodexTurnCost } from './dispatch/codex-source.js';
+export { parseCodexTokenCount, readLatestCodexTokenCount } from './dispatch/codex-source.js';
 // L4-1 PURE policy (AC10, Principle 16): headroom as a discriminated value (never a magic number),
 // near-budget edge trigger, and a clock-free staleness predicate (injected `now` — replay-deterministic).
 export type { Headroom, StaleInput, BudgetInput } from './dispatch/policy.js';
@@ -675,6 +698,7 @@ export type {
   DispatchStore,
   BudgetCap,
   CostRecordResult,
+  AgentCostRollup,
   UsageObservedResult,
   SnapshotIngestResult,
 } from './dispatch/dispatch-store.js';

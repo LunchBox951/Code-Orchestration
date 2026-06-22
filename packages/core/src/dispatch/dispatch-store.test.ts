@@ -270,6 +270,77 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
     }
   });
 
+  it('sums prompt-cache tokens and exposes the canonical AgentCostRollup', () => {
+    const store = openDispatchStore('p-rollup-cache');
+    try {
+      store.recordCost({
+        provider: 'claude',
+        agent: 'a1',
+        task: 't1',
+        turn: 0,
+        cost_usd: 1.5,
+        input_tokens: 100,
+        output_tokens: 200,
+        total_tokens: 300,
+        cache_read_input_tokens: 1000,
+        cache_creation_input_tokens: 250,
+      });
+      store.recordCost({
+        provider: 'claude',
+        agent: 'a1',
+        task: 't1',
+        turn: 1,
+        cost_usd: 0.5,
+        input_tokens: 10,
+        output_tokens: 20,
+        total_tokens: 30,
+        cache_read_input_tokens: 4000,
+        cache_creation_input_tokens: 0,
+      });
+
+      const rollup = store.getRollup('agent', 'a1');
+      expect(rollup?.cacheReadTokens).toBe(5000);
+      expect(rollup?.cacheCreationTokens).toBe(250);
+
+      // Canonical read-model: dollars present ⇒ costUsd is the sum (not null), cache tokens summed.
+      const agent = store.getAgentCostRollup('a1');
+      expect(agent).toEqual({
+        agentId: 'a1',
+        inputTokens: 110,
+        outputTokens: 220,
+        cacheReadTokens: 5000,
+        cacheCreationTokens: 250,
+        totalTokens: 330,
+        costUsd: 2.0,
+      });
+      expect(store.getAgentCostRollup('unknown')).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('getAgentCostRollup reports costUsd null when no dollar cost was reported (Codex)', () => {
+    const store = openDispatchStore('p-rollup-codex-null');
+    try {
+      store.recordCost({
+        provider: 'codex',
+        agent: 'cx',
+        task: 't1',
+        turn: 0,
+        used_pct: 5,
+        input_tokens: 10,
+        output_tokens: 20,
+        total_tokens: 30,
+      });
+      const agent = store.getAgentCostRollup('cx');
+      expect(agent?.costUsd).toBeNull();
+      expect(agent?.totalTokens).toBe(30);
+      expect(agent?.cacheReadTokens).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
   it('deduplicates repeated provider turn observations before folding rollups', () => {
     const store = openDispatchStore('p-rollup-dedupe');
     try {
@@ -730,12 +801,12 @@ describe('AC5 — the dispatch read-model rebuilds byte-identical from the L0 lo
         .all(),
       cost_rollup: db
         .prepare(
-          'SELECT kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens, token_observations, used_pct, used_pct_observations, observations FROM cost_rollup ORDER BY kind, id',
+          'SELECT kind, id, total_cost_usd, cost_usd_observations, input_tokens, output_tokens, total_tokens, token_observations, cache_read_tokens, cache_creation_tokens, used_pct, used_pct_observations, observations FROM cost_rollup ORDER BY kind, id',
         )
         .all(),
       cost_observations: db
         .prepare(
-          'SELECT provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens, used_pct FROM cost_observations ORDER BY provider, agent, task, turn',
+          'SELECT provider, agent, task, turn, cost_usd, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, used_pct FROM cost_observations ORDER BY provider, agent, task, turn',
         )
         .all(),
       cost_near_budget: db
@@ -806,6 +877,8 @@ describe('AC5 — the dispatch read-model rebuilds byte-identical from the L0 lo
         input_tokens: 100,
         output_tokens: 200,
         total_tokens: 300,
+        cache_read_input_tokens: 1000,
+        cache_creation_input_tokens: 250,
       }),
       makeCostRecordedEvent(pid, {
         provider: 'claude',
@@ -866,6 +939,9 @@ describe('AC5 — the dispatch read-model rebuilds byte-identical from the L0 lo
       expect(live).toContain('"available":0'); // codex:pro went unavailable
       expect(live).toContain('"kind":"agent","id":"a1"');
       expect(live).toContain('"kind":"task","id":"t1"');
+      // AC5: the cache token columns are part of the replayed snapshot (summed read=1000, creation=250).
+      expect(live).toContain('"cache_read_tokens":1000');
+      expect(live).toContain('"cache_creation_tokens":250');
       expect(live).toContain('"cap_cents":1000');
       expect(live).toContain('"kind":"placed","provider":"claude"');
       expect(live).toContain('"kind":"waiting"');

@@ -117,6 +117,11 @@ export const costRecordedSchema = z
     input_tokens: z.number().int().nonnegative().optional(),
     output_tokens: z.number().int().nonnegative().optional(),
     total_tokens: z.number().int().nonnegative().optional(),
+    // Claude's prompt-caching token counts (the isolated transcript JSONL assistant-message `usage`):
+    // a cache READ (tokens served from the cache) and a cache CREATION (tokens written to the cache).
+    // Optional — Codex reports neither. Rolled up separately so the per-agent cache footprint is visible.
+    cache_read_input_tokens: z.number().int().nonnegative().optional(),
+    cache_creation_input_tokens: z.number().int().nonnegative().optional(),
     used_pct: z.number().min(0).optional(), // Codex usage-% readout (the dollar-cost-free expression).
   })
   .refine(
@@ -125,6 +130,8 @@ export const costRecordedSchema = z
       p.input_tokens !== undefined ||
       p.output_tokens !== undefined ||
       p.total_tokens !== undefined ||
+      p.cache_read_input_tokens !== undefined ||
+      p.cache_creation_input_tokens !== undefined ||
       p.used_pct !== undefined,
     { message: 'cost.recorded requires at least one measured field' },
   );
@@ -147,6 +154,45 @@ export const costNearBudgetSchema = z.object({
   threshold_pct: z.number().min(0).max(100),
 });
 export type CostNearBudget = z.infer<typeof costNearBudgetSchema>;
+
+// ── tool.invoked ─────────────────────────────────────────────────────────────────────────────────
+/**
+ * One agent `co_*` MCP tool call, recorded for the durable per-agent tool-usage projection (#67-adjacent
+ * collection). The engine's existing in-memory {@link import('../../mcp/server.js').ToolActivityEvent}
+ * watchdog seam drives turn-liveness; this is the DURABLE, replay-safe counterpart — a `tool.invoked`
+ * event per completed call (one per `end` activity), folded into a per-agent rollup (calls / errors /
+ * redundant reads / permission asks / turns-to-first-productive-co-call).
+ *
+ * Filed under `tool:<agent>` (one stream per acting agent), mirroring how `cost.recorded` is filed under
+ * `cost:<agent>`. `ok` is whether the tool handler returned successfully (a `false` is a tool error, not
+ * a turn failure). `turn` lets the rollup learn how many turns elapsed before the agent's first
+ * productive `co_*` call. `duration_ms` is the call's wall duration (observability only). AC8: this is
+ * INTERNAL orchestration state — not agent-facing; the event is program-data only (AC9, P12).
+ */
+export const EVENT_TOOL_INVOKED = 'tool.invoked' as const;
+
+/** Scope prefix for the per-agent tool-usage stream. */
+export const TOOL_SCOPE_PREFIX = 'tool:';
+
+/** A tool-usage stream scope: `tool:<agent>`. */
+export function toolScope(agent: string): string {
+  return TOOL_SCOPE_PREFIX + agent;
+}
+
+export const toolInvokedSchema = z.object({
+  agent: z.string().min(1),
+  task: z.string().min(1),
+  tool: z.string().min(1),
+  turn: z.number().int().nonnegative(),
+  ok: z.boolean(),
+  /** True when the call was a READ whose result duplicated a read the agent already did (heuristic). */
+  redundant_read: z.boolean().optional(),
+  /** True when the call surfaced a permission ask (a denied/gated tool the agent re-attempted). */
+  permission_ask: z.boolean().optional(),
+  /** Wall duration of the call in ms (observability only; never gates). */
+  duration_ms: z.number().nonnegative().optional(),
+});
+export type ToolInvoked = z.infer<typeof toolInvokedSchema>;
 
 // ── placement.decided ────────────────────────────────────────────────────────────────────────────
 /**
@@ -253,6 +299,7 @@ export const dispatchSchemas: SchemaMap = new Map<string, z.ZodType>([
   [EVENT_USAGE_OBSERVED, usageObservedSchema],
   [EVENT_COST_RECORDED, costRecordedSchema],
   [EVENT_COST_NEAR_BUDGET, costNearBudgetSchema],
+  [EVENT_TOOL_INVOKED, toolInvokedSchema],
   [EVENT_PLACEMENT_DECIDED, placementDecidedSchema],
 ]);
 
@@ -317,6 +364,22 @@ export function makeCostNearBudgetEvent(projectId: string, nb: CostNearBudget): 
   };
 }
 
+/**
+ * Build + validate a `tool.invoked` `NewEvent`, filed under the acting AGENT's tool stream. The acting
+ * agent is recorded as the event `actor` (mirroring `makeCostRecordedEvent`).
+ */
+export function makeToolInvokedEvent(projectId: string, inv: ToolInvoked): NewEvent {
+  const payload = toolInvokedSchema.parse(inv);
+  return {
+    projectId,
+    scope: toolScope(payload.agent),
+    type: EVENT_TOOL_INVOKED,
+    v: DISPATCH_EVENT_V,
+    payload,
+    actor: payload.agent,
+  };
+}
+
 // ── Read-model record shapes (what the store facade returns) ───────────────────────────────────────
 /**
  * The latest KNOWN per-window usage observation — one row per `(provider, account, window_kind)`.
@@ -370,6 +433,10 @@ export interface CostRollup {
   readonly outputTokens: number;
   readonly totalTokens: number;
   readonly tokenObservations: number;
+  /** Summed Claude prompt-cache READ tokens (served from cache) across all observations. */
+  readonly cacheReadTokens: number;
+  /** Summed Claude prompt-cache CREATION tokens (written to cache) across all observations. */
+  readonly cacheCreationTokens: number;
   readonly usedPct: number;
   readonly usedPctObservations: number;
   readonly observations: number;
@@ -388,6 +455,22 @@ export interface NearBudgetRecord {
   readonly capCents: number;
   readonly thresholdPct: number;
   readonly recordedTs: number;
+}
+
+/**
+ * A per-agent tool-usage rollup — one row per agent, folded from the agent's `tool.invoked` events (the
+ * canonical read-model {@link import('./dispatch-store.js').DispatchStore.getAgentToolUsage} returns).
+ * `toolCalls` is every recorded call; `toolErrors` the `ok: false` subset; `redundantReads` and
+ * `permissionAsks` the flagged subsets. `turnsToFirstProductiveCoCall` is the `turn` of the agent's
+ * FIRST successful `co_*` call (null until one is recorded) — the "ramp-up" signal the operator reads.
+ */
+export interface AgentToolUsage {
+  readonly agentId: string;
+  readonly toolCalls: number;
+  readonly toolErrors: number;
+  readonly redundantReads: number;
+  readonly permissionAsks: number;
+  readonly turnsToFirstProductiveCoCall: number | null;
 }
 
 /** Build + validate a `placement.decided` `NewEvent`, filed under `placement:<agent>`. */
