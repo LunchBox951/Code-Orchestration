@@ -287,9 +287,15 @@ export interface OperatorIpcTranscript {
 
 /**
  * The on-demand `transcript` ({@link OPERATOR_IPC_METHODS.transcript}) request result: a hosted agent's
- * bounded transcript tail — the most-recent pane bytes, up to the engine's character bound. `tail` is
- * `''` when the agent is not hosted or has produced no output yet (the read DEGRADES cleanly — never a
- * hang/throw). PINNED public shape — Console phases C-P2/C-P3 and the renderer consume it; do not rename.
+ * bounded transcript tail — recent pane bytes, up to the engine's character bound. `tail` is `''` when
+ * the agent is not hosted or has produced no output yet (the read DEGRADES cleanly — never a hang/throw).
+ * PINNED public shape — Console phases C-P2/C-P3 and the renderer consume it; do not rename.
+ *
+ * #66 sub-bug B — the engine begins `tail` at a FRAME BOUNDARY (the last alternate-screen-enter
+ * `ESC[?1049h`, else a full-screen clear) rather than a flat most-recent-N cut, so replaying it into a
+ * fresh xterm reproduces the alt-screen setup instead of stacking mid-stream frames. `offset` always
+ * names that start position, so a consumer stitching live `transcript:push` chunks onto this tail keeps a
+ * correct absolute coordinate even though the tail may begin earlier than the soft bound (and exceed it).
  */
 export interface TranscriptTail {
   readonly agentId: string;

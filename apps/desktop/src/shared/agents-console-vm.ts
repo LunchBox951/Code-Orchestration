@@ -8,7 +8,17 @@ import type {
 } from '@co/core';
 import type { AgentStatus } from './dashboard-vm.js';
 
-export const CONSOLE_TRANSCRIPT_MAX_CHARS = 64 * 1024;
+/**
+ * #66 sub-bug B — the renderer-side bound on the reconstructed transcript. Kept in lockstep with the
+ * engine's HARD ceiling (`TRANSCRIPT_TAIL_HARD_MAX_CHARS` in `@co/mcp` — 4 × 64 KiB = 256 KiB), NOT the
+ * old flat 64 KiB. The engine now retains its tail back to the last alternate-screen-enter (`ESC[?1049h`)
+ * so the alt-screen setup an interactive TUI needs to replay cleanly is never sliced away — up to that
+ * 256 KiB ceiling. Bounding the renderer to the SAME ceiling means this VM never re-slices below what the
+ * engine carefully preserved (which would re-drop the `ESC[?1049h` and re-introduce the stacked-frame
+ * garble). Mirrored as a literal — desktop imports `@co/core`/`@co/mcp` but this stays the single
+ * renderer knob; if the engine ceiling changes, change this with it.
+ */
+export const CONSOLE_TRANSCRIPT_MAX_CHARS = 4 * 64 * 1024;
 
 export interface AgentConsoleRow {
   readonly agentId: string;

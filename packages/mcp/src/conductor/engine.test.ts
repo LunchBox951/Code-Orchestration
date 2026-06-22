@@ -38,7 +38,9 @@ import {
 import {
   ConductorEngine,
   selectEligible,
+  transcriptTailFrom,
   TRANSCRIPT_TAIL_MAX_CHARS,
+  TRANSCRIPT_TAIL_HARD_MAX_CHARS,
   type ConductorEngineDeps,
   type HostedPane,
   type RouteFailure,
@@ -1504,5 +1506,125 @@ describe('transcript tail (Stage 12 C-P1) — a bounded, most-recent-bytes ring 
     pane.emit('after release'); // the pane is detached — no listener fires, no buffer grows
     expect(seen).toHaveLength(0);
     expect(engine.transcriptTail(projectId, 'impl-x')).toBe(''); // tail dropped on release
+  });
+});
+
+// ── #66 sub-bug B — the alt-screen-boundary tail (transcriptTailFrom) ─────────────
+// A flat most-recent-64KiB slice drops the early `ESC[?1049h` an interactive TUI emits ONCE to enter the
+// alternate screen, so replaying a mid-stream tail into a fresh xterm stacks/garbles frames. The retained
+// tail must ALWAYS start at-or-before the last alt-screen-enter (within the hard ceiling). These assert
+// the PURE function directly; every alt-screen case below would FAIL under the old flat-64KiB logic.
+const ALT_ENTER = ESC + '[?1049h'; // DEC private mode 1049 set — switch to the alternate screen
+const ALT_LEAVE = ESC + '[?1049l'; // DEC private mode 1049 reset — leave it (NOT a retain boundary)
+describe('transcriptTailFrom (#66 sub-bug B) — never slices away the alternate-screen setup', () => {
+  it('keeps the FULL buffer verbatim when at/under the soft bound (common case, unchanged)', () => {
+    const buf = ALT_ENTER + 'a small frame';
+    expect(transcriptTailFrom(buf)).toEqual({ tail: buf, dropped: 0 });
+
+    const exact = 'z'.repeat(TRANSCRIPT_TAIL_MAX_CHARS); // exactly at the bound — still verbatim
+    expect(transcriptTailFrom(exact)).toEqual({ tail: exact, dropped: 0 });
+  });
+
+  it('retains back to the early alt-screen-enter even after >64 KiB of frames (the fix)', () => {
+    // Early alt-screen setup, then far more than the soft bound of redraw frames after it.
+    const setup = ALT_ENTER + ESC + '[2J' + ESC + '[H'; // enter alt screen, clear, home
+    const frames = 'F'.repeat(TRANSCRIPT_TAIL_MAX_CHARS * 2); // 128 KiB > 64 KiB soft bound
+    const buf = setup + frames;
+
+    const { tail, dropped } = transcriptTailFrom(buf);
+
+    // The load-bearing invariant: the alt-screen-enter is ALWAYS present in the retained tail…
+    expect(tail.includes(ALT_ENTER)).toBe(true);
+    // …and it is the FIRST thing in the tail (we retained from exactly that boundary).
+    expect(tail.startsWith(ALT_ENTER)).toBe(true);
+    expect(tail).toBe(buf); // setup+frames is under the 256 KiB hard ceiling, so nothing is dropped
+    expect(dropped).toBe(0);
+    // The OLD flat-64KiB logic would have kept only `buf.slice(buf.length - 64KiB)` — pure 'F's, no
+    // ESC[?1049h — which is exactly the garble this fix prevents:
+    expect(buf.slice(buf.length - TRANSCRIPT_TAIL_MAX_CHARS).includes(ALT_ENTER)).toBe(false);
+  });
+
+  it('keeps the LAST alt-screen-enter when several are present (re-entered the alt screen)', () => {
+    const firstEnter = ALT_ENTER + 'one'.repeat(TRANSCRIPT_TAIL_MAX_CHARS); // pushed well past the bound
+    const lastEnter = ALT_ENTER + 'two'; // the re-enter we must anchor on
+    const buf = firstEnter + lastEnter;
+
+    const { tail } = transcriptTailFrom(buf);
+
+    expect(tail.startsWith(ALT_ENTER)).toBe(true);
+    expect(tail).toBe(lastEnter); // anchored on the LAST enter, not the first
+    // Exactly one alt-screen-enter survives — we did not drag in the earlier one.
+    expect(tail.split(ALT_ENTER).length - 1).toBe(1);
+  });
+
+  it('honours the HARD ceiling: an unreachably-old alt-screen-enter is NOT dragged in', () => {
+    // Alt-screen-enter, then MORE than the hard ceiling of bytes after it → it falls outside the window.
+    const buf = ALT_ENTER + 'G'.repeat(TRANSCRIPT_TAIL_HARD_MAX_CHARS + 5_000);
+
+    const { tail, dropped } = transcriptTailFrom(buf);
+
+    expect(tail.length).toBeLessThanOrEqual(TRANSCRIPT_TAIL_HARD_MAX_CHARS); // memory stays bounded
+    expect(tail.includes(ALT_ENTER)).toBe(false); // the stale enter is beyond reach — not retained
+    expect(dropped).toBe(buf.length - tail.length); // dropped + tail re-form the whole buffer
+    expect(buf.slice(dropped)).toBe(tail);
+  });
+
+  it('an alt-screen-LEAVE is not a retain boundary (only ENTER setup matters)', () => {
+    // Only a 1049l (leave) early, then >64 KiB of frames. Leave is not load-bearing for replay setup.
+    const buf = ALT_LEAVE + 'H'.repeat(TRANSCRIPT_TAIL_MAX_CHARS + 4_000);
+
+    const { tail } = transcriptTailFrom(buf);
+
+    expect(tail.includes(ALT_LEAVE)).toBe(false); // leave is treated as ordinary bytes, may be dropped
+    expect(tail.length).toBe(TRANSCRIPT_TAIL_MAX_CHARS); // falls back to the flat most-recent-N window
+  });
+
+  it('with NO alt-screen, snaps the start FORWARD to the last full-screen-clear (clean frame)', () => {
+    // No 1049h anywhere. A full-screen clear sits just inside the soft window; replay should open there.
+    const head = 'P'.repeat(TRANSCRIPT_TAIL_MAX_CHARS); // older than the window — dropped
+    const clearFrame = ESC + '[2J' + ESC + '[H' + 'fresh frame';
+    const buf = head + clearFrame;
+
+    const { tail, dropped } = transcriptTailFrom(buf);
+
+    expect(tail.startsWith(ESC + '[2J')).toBe(true); // opens on the clean clear, not mid-frame
+    expect(tail).toBe(clearFrame);
+    expect(tail.length).toBeLessThanOrEqual(TRANSCRIPT_TAIL_MAX_CHARS); // snapping forward never grows
+    expect(buf.slice(dropped)).toBe(tail);
+  });
+
+  it('with neither alt-screen nor a clear, falls back to the flat most-recent-N (legacy behavior)', () => {
+    const buf = 'A'.repeat(TRANSCRIPT_TAIL_MAX_CHARS) + 'B'.repeat(1_000);
+
+    const { tail, dropped } = transcriptTailFrom(buf);
+
+    expect(tail.length).toBe(TRANSCRIPT_TAIL_MAX_CHARS);
+    expect(tail.endsWith('B'.repeat(1_000))).toBe(true);
+    expect(dropped).toBe(1_000);
+    expect(buf.slice(dropped)).toBe(tail);
+  });
+});
+
+// ── #66 sub-bug B — the live engine tail keeps the alt-screen-enter across chunk boundaries ──────
+describe('engine transcript tail (#66 sub-bug B) — alt-screen-enter survives a >64 KiB stream', () => {
+  it('retains the early ESC[?1049h in the engine tail + tracks the absolute offset', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { pane } = await hostPane(engine, pty, identity); // emits CLAUDE_READY first
+
+    // The interactive TUI enters the alt screen ONCE, then redraws far past the soft bound.
+    pane.emit(ALT_ENTER + ESC + '[2J' + ESC + '[H');
+    pane.emit('F'.repeat(TRANSCRIPT_TAIL_MAX_CHARS));
+    pane.emit('F'.repeat(20_000) + 'LIVE-TAIL');
+
+    const snap = engine.transcriptTailSnapshot(projectId, 'impl-x');
+    expect(snap.tail.includes(ALT_ENTER)).toBe(true); // never sliced away across chunk boundaries
+    expect(snap.tail.startsWith(ALT_ENTER)).toBe(true); // retained from exactly the alt-screen boundary
+    expect(snap.tail.endsWith('LIVE-TAIL')).toBe(true); // the live tail is still present
+    // The offset is the absolute char position where the retained tail starts in the pane stream — here
+    // the alt-screen-enter sits immediately after CLAUDE_READY, so the tail starts at CLAUDE_READY.length.
+    expect(snap.offset).toBe(CLAUDE_READY.length);
   });
 });
