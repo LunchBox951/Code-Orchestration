@@ -1148,7 +1148,7 @@ describe('buildHostProofSpawnSpec — real-provider MCP config', () => {
       // Role base-prompt config override (PR D item 1): the host-proof pane is threaded its role
       // too, so the coordinator base prompt rides along as a `-c` override.
       '-c',
-      `experimental_instructions=${JSON.stringify(roleBasePrompt('coordinator'))}`,
+      `developer_instructions=${JSON.stringify(roleBasePrompt('coordinator'))}`,
       '--add-dir',
       `${dataDir}/sockets`,
     ]);

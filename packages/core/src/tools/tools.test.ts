@@ -169,6 +169,13 @@ describe('buildCoreRegistry — the canonical single source of truth', () => {
       co_pr_merge: { preTrim: 363, max: 254 },
       co_sling: { preTrim: 451, max: 290 },
     };
+    const requiredTerms: Record<string, RegExp[]> = {
+      co_research_finalize: [/locator map/i, /cited answer/i, /Researcher-only/i],
+      co_plan_ingest: [/locked spec/i, /wired verify/i, /DAG/i, /Coordinator-only/i],
+      co_review_finalize: [/PASS or ISSUES/i, /blocker/i, /merges nothing/i],
+      co_pr_merge: [/pull request/i, /pr_merge PASS/i, /audited override/i],
+      co_sling: [/baseline/i, /dispatch policy/i, /WAITING/i, /no sandbox/i],
+    };
     for (const [name, { preTrim, max }] of Object.entries(budgets)) {
       const desc = reg.get(name)?.description ?? '';
       expect(desc.length, `${name} description should be non-empty`).toBeGreaterThan(0);
@@ -177,6 +184,9 @@ describe('buildCoreRegistry — the canonical single source of truth', () => {
       expect(max, `${name} budget is ≥30% below baseline`).toBeLessThanOrEqual(
         Math.floor(preTrim * 0.7),
       );
+      for (const term of requiredTerms[name] ?? []) {
+        expect(desc, `${name} retained semantic term ${term}`).toMatch(term);
+      }
     }
   });
 });

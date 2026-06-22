@@ -739,11 +739,38 @@ describe('role base-prompt injection into builder args', () => {
     for (const role of ['coordinator', 'lead', 'implementer', 'reviewer', 'researcher'] as const) {
       const prompt = roleBasePrompt(role);
       expect(prompt).toContain(role);
+      expect(prompt).toMatch(/typed, threaded mail/);
+      expect(prompt).toMatch(/act solely as yourself/);
+      expect(prompt).toMatch(/reading your inbox and acknowledging/);
+      expect(prompt).toContain('co_orient');
+      expect(prompt).toMatch(/tool schemas.*only syntax/s);
+      expect(prompt).toMatch(/blocked.*ambiguous.*ask.*wait/s);
+      expect(prompt).toMatch(/do not drop a blocker silently/);
+      expect(prompt).toMatch(/end your turn/);
       // Prompting split (Principle 11): never names a project-memory file or repo conventions.
       expect(prompt).not.toMatch(/CLAUDE\.md|AGENTS\.md/);
       // ~5-8 lines — short enough not to crowd out co orient + the schemas.
       expect(prompt.split('\n').length).toBeLessThanOrEqual(8);
     }
+  });
+
+  it('appends the shipped sub-role approach when a valid sub-role is threaded', () => {
+    const config = buildPaneLaunchConfig('claude', {
+      ...BASE_IDENTITY,
+      role: 'reviewer',
+      subRole: 'pr',
+    });
+    const idx = config.args.indexOf('--append-system-prompt');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const prompt = config.args[idx + 1] ?? '';
+    expect(prompt).toContain('Sub-role focus (reviewer:pr)');
+    expect(prompt).toContain('PR review');
+  });
+
+  it('fails loud rather than silently dropping an unknown sub-role prompt focus', () => {
+    expect(() =>
+      buildPaneLaunchConfig('claude', { ...BASE_IDENTITY, role: 'reviewer', subRole: 'random' }),
+    ).toThrow(/unknown sub-role 'reviewer:random'/i);
   });
 
   it('the injected base prompt does NOT disturb the block-list drift roundtrip', () => {

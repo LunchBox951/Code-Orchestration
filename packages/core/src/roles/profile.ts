@@ -130,11 +130,17 @@ export function profileFor(role: Role): RoleProfile {
  * into every pane). Workflow/lifecycle detail and tool syntax stay in `co orient` + the published
  * schemas; this stays short so it never crowds them out.
  *
- * Wired at pane launch via Claude `--append-system-prompt` and the Codex `experimental_instructions`
- * equivalent (see pane-launch-config.ts). PURE function of `role` — reads no file, cwd, or env.
+ * Wired at pane launch via Claude `--append-system-prompt` and the Codex `developer_instructions`
+ * equivalent (see pane-launch-config.ts). PURE function of `role` plus optional sub-role approach —
+ * reads no file, cwd, or env.
  */
-export function roleBasePrompt(role: Role): string {
-  return [
+export interface RoleBasePromptOptions {
+  readonly subRole?: string;
+  readonly subRoleApproach?: string;
+}
+
+export function roleBasePrompt(role: Role, options: RoleBasePromptOptions = {}): string {
+  const lines = [
     `You are a co-orchestrated ${role} working as one agent in a team.`,
     'Coordinate only through typed, threaded mail — act solely as yourself, never on another',
     'agent’s behalf. Start by reading your inbox and acknowledging what you read.',
@@ -142,7 +148,11 @@ export function roleBasePrompt(role: Role): string {
     'reference. When you are blocked or intent is genuinely ambiguous, ask the agent above you and',
     'wait — do not guess, and do not drop a blocker silently. When you are waiting on a reply,',
     'end your turn; the response arrives in your next inbox.',
-  ].join('\n');
+  ];
+  if (options.subRole != null && options.subRoleApproach != null) {
+    lines.push(`Sub-role focus (${role}:${options.subRole}): ${options.subRoleApproach}.`);
+  }
+  return lines.join('\n');
 }
 
 export interface RoleProfileViolation {

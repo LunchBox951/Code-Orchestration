@@ -1,4 +1,5 @@
 import { assertNever } from '../assert-never.js';
+import { findSubRole, parseSubRoleId } from '../roles/sub-roles.js';
 import type { Role } from './scoping.js';
 
 /**
@@ -38,9 +39,9 @@ const CLOSING =
 const GENERIC_GUIDANCE = [
   'Do the work in your worktree, raising a question to your parent the moment intent is genuinely',
   'ambiguous rather than guessing, and escalating a true blocker rather than dropping it silently.',
-  'When the work is done and verified, finish through the gate with co_finish (the tool schemas',
-  'remain the only source of syntax); integrating or publishing a reviewed result is the job of the',
-  'owner above you, not yours.',
+  'When the work is done and verified, use the completion or finalization path exposed by your',
+  'mounted role (the tool schemas remain the only source of syntax); integrating or publishing a',
+  'reviewed result is the job of the owner above you, not yours.',
 ].join('\n');
 
 const COORDINATOR_GUIDANCE = [
@@ -153,10 +154,14 @@ function roleGuidance(role: Role): string {
   }
 }
 
-/** Leniently map a self-declared role string to a base {@link Role}, or undefined (→ generic). */
-function asRole(input: string | undefined): Role | undefined {
-  if (input == null) return undefined;
-  switch (input.trim().toLowerCase()) {
+interface ResolvedRole {
+  readonly role?: Role;
+  readonly subRole?: string;
+  readonly subRoleApproach?: string;
+}
+
+function asBaseRole(input: string): Role | undefined {
+  switch (input) {
     case 'coordinator':
       return 'coordinator';
     case 'lead':
@@ -172,11 +177,26 @@ function asRole(input: string | undefined): Role | undefined {
   }
 }
 
+/** Leniently map a self-declared role string to a base role plus known sub-role focus. */
+function resolveRole(input: string | undefined): ResolvedRole {
+  if (input == null) return {};
+  const parsed = parseSubRoleId(input.trim().toLowerCase());
+  const role = asBaseRole(parsed.baseRole);
+  if (role == null) return {};
+  if (parsed.name == null) return { role };
+  const subRole = findSubRole(role, parsed.name);
+  if (subRole == null) return { role };
+  return { role, subRole: subRole.name, subRoleApproach: subRole.approach };
+}
+
 /** An optional one-line focus for a known lifecycle topic; unknown topics add nothing (lenient). */
-function topicFocus(topic: string): string {
+function topicFocus(topic: string, role: Role | undefined): string {
   switch (topic.trim().toLowerCase()) {
     case 'finish':
-      return 'Focus — finishing: commit your work through co_finish; it records the finish, notifies your parent, and stops before review or publish.';
+      if (role === 'lead' || role === 'implementer') {
+        return 'Focus — finishing: commit your work through co_finish; it records the finish, notifies your parent, and stops before review or publish.';
+      }
+      return 'Focus — finishing: use the completion or finalization verb exposed by your mounted role; record the result and stop before review or publish.';
     case 'mail':
       return 'Focus — mail: every message is typed and threaded; reply within the thread you are answering so the conversation stays linked, and never invent a new mail type.';
     case 'review':
@@ -187,6 +207,13 @@ function topicFocus(topic: string): string {
     default:
       return '';
   }
+}
+
+function subRoleFocus(resolved: ResolvedRole): string {
+  if (resolved.role == null || resolved.subRole == null || resolved.subRoleApproach == null) {
+    return '';
+  }
+  return `Sub-role focus (${resolved.role}:${resolved.subRole}): ${resolved.subRoleApproach}.`;
 }
 
 /** The header naming the requested role / topic, or '' when neither was given. */
@@ -205,10 +232,12 @@ function header(role: string | undefined, topic: string | undefined): string {
  * gets its lifecycle arc; an unknown / absent role gets generic workflow guidance.
  */
 export function orientContent(role?: string, topic?: string): string {
-  const body = asRole(role);
-  const arc = body === undefined ? GENERIC_GUIDANCE : roleGuidance(body);
-  const focus = topic != null ? topicFocus(topic) : '';
+  const resolved = resolveRole(role);
+  const arc = resolved.role === undefined ? GENERIC_GUIDANCE : roleGuidance(resolved.role);
+  const subRole = subRoleFocus(resolved);
+  const focus = topic != null ? topicFocus(topic, resolved.role) : '';
   const sections = [SHARED_PREAMBLE, arc];
+  if (subRole.length > 0) sections.push(subRole);
   if (focus.length > 0) sections.push(focus);
   sections.push(CLOSING);
   return header(role, topic) + sections.join('\n\n');

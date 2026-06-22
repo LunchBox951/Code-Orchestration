@@ -29,6 +29,7 @@ import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
 import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
+import { findSubRole } from '../roles/sub-roles.js';
 import type { Role } from '../tools/scoping.js';
 import type { BlockRule } from './block-list.js';
 import { BLOCK_LIST } from './block-list.js';
@@ -64,10 +65,12 @@ export interface PaneIdentity {
   readonly capabilities?: ReadonlySet<Capability>;
   /**
    * The pane's base role. When set, the repo-agnostic {@link roleBasePrompt} is injected into the
-   * launch args (Claude `--append-system-prompt`, Codex `experimental_instructions` config override).
+   * launch args (Claude `--append-system-prompt`, Codex `developer_instructions` config override).
    * Absent ⇒ no base prompt is appended — so a PRODUCTION caller MUST set it or the prompt is a no-op.
    */
   readonly role?: Role;
+  /** Optional sub-role token; when present, the shipped sub-role approach is appended to the prompt. */
+  readonly subRole?: string;
 }
 
 /**
@@ -157,11 +160,30 @@ export const WEB_SEARCH_TOOLS = ['WebSearch', 'WebFetch'] as const;
 
 /**
  * Codex config key carrying the repo-agnostic base prompt, emitted as `-c <key>=<json-string>`.
- * Isolated as a single named constant so flipping to the confirmed additive Codex surface is a
- * one-line change. The brief flags this as needs-live-verification: confirm against the real codex
- * binary that this key ADDS to (does not replace) Codex's built-in instructions before relying on it.
+ * `developer_instructions` is model-visible through `codex debug prompt-input`; the old
+ * `experimental_instructions` key was ignored by Codex 0.141.0.
  */
-export const CODEX_BASE_PROMPT_CONFIG_KEY = 'experimental_instructions';
+export const CODEX_BASE_PROMPT_CONFIG_KEY = 'developer_instructions';
+
+function rolePromptFor(identity: PaneIdentity): string | undefined {
+  if (identity.role == null) {
+    if (identity.subRole != null) {
+      throw new Error('buildPaneLaunchConfig: subRole requires role.');
+    }
+    return undefined;
+  }
+  if (identity.subRole == null) return roleBasePrompt(identity.role);
+  const subRole = findSubRole(identity.role, identity.subRole);
+  if (subRole == null) {
+    throw new Error(
+      `buildPaneLaunchConfig: unknown sub-role '${identity.role}:${identity.subRole}'.`,
+    );
+  }
+  return roleBasePrompt(identity.role, {
+    subRole: subRole.name,
+    subRoleApproach: subRole.approach,
+  });
+}
 
 /**
  * Whether a pane with these capabilities may use the built-in web tools (#7 §5 #3).
@@ -421,8 +443,9 @@ function buildClaudeLaunchConfig(
   // built-in system prompt rather than replacing it, so the universal "how to be an orchestrated
   // agent" guidance rides on top of the native one. Only when the caller set the role — an unset
   // role makes this a deliberate no-op (the placement/host callers MUST thread `identity.role`).
-  if (identity.role != null) {
-    args.push('--append-system-prompt', roleBasePrompt(identity.role));
+  const basePrompt = rolePromptFor(identity);
+  if (basePrompt != null) {
+    args.push('--append-system-prompt', basePrompt);
   }
   // Built-in web tools (#7 §5 #3): state the decision EXPLICITLY rather than leaving it undefined
   // under bypassPermissions — allow when the role may browse, hard-deny otherwise.
@@ -514,11 +537,9 @@ function buildCodexLaunchConfig(
   // Repo-agnostic base prompt (prompts-and-memory.md), the Codex analogue of Claude's
   // `--append-system-prompt`: a `-c <key>=<json-string>` config override. Only when the caller set
   // the role — an unset role is a deliberate no-op (the placement/host callers MUST thread the role).
-  if (identity.role != null) {
-    args.push(
-      '-c',
-      `${CODEX_BASE_PROMPT_CONFIG_KEY}=${JSON.stringify(roleBasePrompt(identity.role))}`,
-    );
+  const basePrompt = rolePromptFor(identity);
+  if (basePrompt != null) {
+    args.push('-c', `${CODEX_BASE_PROMPT_CONFIG_KEY}=${JSON.stringify(basePrompt)}`);
   }
   return {
     provider: 'codex',

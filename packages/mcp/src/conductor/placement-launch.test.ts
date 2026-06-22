@@ -516,7 +516,7 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
           // Role base-prompt config override (PR D item 1) sits between the hook-trust flag and the
           // bridge --add-dir; it carries the JSON-encoded implementer base prompt.
           '-c',
-          `experimental_instructions=${JSON.stringify(roleBasePrompt('implementer'))}`,
+          `developer_instructions=${JSON.stringify(roleBasePrompt('implementer'))}`,
           '--add-dir',
           `${isolatedHomeDir}/mcp`,
         ]);
@@ -558,7 +558,7 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(spec.args).toEqual([
       '--dangerously-bypass-hook-trust',
       '-c',
-      `experimental_instructions=${JSON.stringify(roleBasePrompt('implementer'))}`,
+      `developer_instructions=${JSON.stringify(roleBasePrompt('implementer'))}`,
       '--add-dir',
       bridgeDir,
     ]);
@@ -1061,8 +1061,33 @@ describe('role base-prompt reaches the spawned SpawnSpec.args (PR D — item 1 w
     expect(flagIdx).toBeGreaterThanOrEqual(0);
     const override = spec.args[flagIdx + 1] ?? '';
     // key=<json-string>; the JSON-encoded value embeds the exact role base prompt.
-    expect(override).toContain('experimental_instructions=');
+    expect(override).toContain('developer_instructions=');
     expect(override).toContain(JSON.stringify(roleBasePrompt('implementer')));
+  });
+
+  it('sub-role launches append the shipped approach focus to the base prompt', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = {
+      ...recordPlacement(projectId, 'rev-pr-bp', 'reviewer', 'claude'),
+      role: 'reviewer:pr',
+    } as PlacementRecord & { kind: 'placed'; provider: string };
+    const worktree = recordWorktree(projectId, 'rev-pr-bp', 'co/feat-rev-pr', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'rev-pr-bp');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement,
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    const flagIdx = spec.args.indexOf('--append-system-prompt');
+    expect(flagIdx).toBeGreaterThanOrEqual(0);
+    const prompt = spec.args[flagIdx + 1] ?? '';
+    expect(prompt).toContain('Sub-role focus (reviewer:pr)');
+    expect(prompt).toContain('PR review');
+    expect(prompt).toContain('co-orchestrated reviewer');
   });
 
   it('researcher launches through the same path and gets the researcher base prompt', () => {

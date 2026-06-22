@@ -203,9 +203,30 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
     expect(out).toContain('co_research_finalize');
   });
 
-  it('the generic (unknown-role) arc NAMES co_finish for the gate (F4 — generic too)', () => {
+  it('the generic (unknown-role) arc stays role-neutral and does not name unavailable tools', () => {
     const out = orientContent();
-    expect(out).toContain('co_finish');
+    expect(out).toContain('completion or finalization path');
+    expect(out).not.toContain('co_finish');
+  });
+
+  it('reviewer and researcher arcs do not point at co_finish, which they cannot call', () => {
+    expect(orientContent('reviewer')).not.toContain('co_finish');
+    expect(orientContent('researcher')).not.toContain('co_finish');
+    expect(orientContent('reviewer', 'finish')).not.toContain('co_finish');
+    expect(orientContent('researcher', 'finish')).not.toContain('co_finish');
+  });
+
+  it('known sub-role input adds the shipped approach while preserving base lifecycle guidance', () => {
+    const reviewer = orientContent('reviewer:pr');
+    expect(reviewer).toContain('co_review_finalize');
+    expect(reviewer).toContain('Sub-role focus (reviewer:pr)');
+    expect(reviewer).toContain('PR review');
+    expect(reviewer).not.toContain('co_finish');
+
+    const implementer = orientContent('implementer:test');
+    expect(implementer).toContain('co_finish');
+    expect(implementer).toContain('Sub-role focus (implementer:test)');
+    expect(implementer).toContain('test-first');
   });
 
   it('an unknown role gets generic workflow guidance, not an error (lenient input)', () => {
