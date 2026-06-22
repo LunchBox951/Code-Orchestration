@@ -99,27 +99,28 @@ async function evaluateAddModule(
   }
   const addFn = add as (a: number, b: number) => unknown;
   let casesPassed = 0;
+  let firstFailure: string | null = null;
   for (const [a, b, want] of ADD_CASES) {
     let got: unknown;
     try {
       got = addFn(a, b);
     } catch (error) {
-      return {
-        correct: false,
-        detail: `add(${a}, ${b}) threw: ${errorMessage(error)}`,
-        casesPassed,
-        casesTotal,
-      };
+      firstFailure ??= `add(${a}, ${b}) threw: ${errorMessage(error)}`;
+      continue;
     }
     if (got !== want) {
-      return {
-        correct: false,
-        detail: `add(${a}, ${b}) = ${String(got)}, want ${want}`,
-        casesPassed,
-        casesTotal,
-      };
+      firstFailure ??= `add(${a}, ${b}) = ${String(got)}, want ${want}`;
+      continue;
     }
     casesPassed += 1;
+  }
+  if (firstFailure != null) {
+    return {
+      correct: false,
+      detail: firstFailure,
+      casesPassed,
+      casesTotal,
+    };
   }
   return {
     correct: true,

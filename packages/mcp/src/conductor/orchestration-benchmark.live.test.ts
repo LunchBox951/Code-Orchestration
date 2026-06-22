@@ -364,10 +364,10 @@ describe('maybePassReviews — per-reviewId failStreak + wedge-logging (hermetic
   // attempt fails + the streak climbs); pass-mode resolves a context + a no-op reply (so the streak clears).
   function makeStubIpc(): {
     ipc: OperatorIpcClient;
-    setMode: (mode: 'fail' | 'pass') => void;
+    setMode: (mode: 'fail' | 'not-found' | 'pass') => void;
     replyCount: () => number;
   } {
-    let mode: 'fail' | 'pass' = 'fail';
+    let mode: 'fail' | 'not-found' | 'pass' = 'fail';
     let replies = 0;
     const resolved = (reviewId: string): ReviewContextResolved => ({
       kind: 'resolved',
@@ -383,6 +383,9 @@ describe('maybePassReviews — per-reviewId failStreak + wedge-logging (hermetic
       reviewContext: (reviewId: string): Promise<ReviewContext> => {
         if (mode === 'fail') {
           return Promise.reject(new Error(`stub: reviewContext '${reviewId}' is wedged`));
+        }
+        if (mode === 'not-found') {
+          return Promise.resolve({ kind: 'not-found', reviewId });
         }
         return Promise.resolve(resolved(reviewId));
       },
@@ -457,6 +460,11 @@ describe('maybePassReviews — per-reviewId failStreak + wedge-logging (hermetic
       // No PASS reply was ever submitted while the gate was wedged.
       expect(replyCount()).toBe(0);
 
+      // More failed ticks after the threshold keep the streak visible but do not spam duplicate logs.
+      await maybePassReviews(ipc, projectId, failStreak);
+      expect(failStreak.get(reviewId)).toBe(REVIEW_PASS_FAIL_LOG_AFTER + 1);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+
       // PASS-MODE: the gate now resolves + the reply lands. The streak is CLEARED (deleted), and the reply
       // was submitted — the chain un-wedges.
       setMode('pass');
@@ -491,6 +499,38 @@ describe('maybePassReviews — per-reviewId failStreak + wedge-logging (hermetic
       await maybePassReviews(ipc, projectId, failStreak);
       expect(failStreak.get(reviewId)).toBe(1);
       expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('counts a persistent non-resolved reviewContext as a wedged gate instead of silently retrying forever', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'co-ob-wedge3-data-'));
+    dataDirs.push(dataDir);
+    process.env.CO_DATA_DIR = dataDir;
+
+    const registry = openRegistry();
+    let projectId: ProjectId;
+    try {
+      projectId = registry.register(join(dataDir, 'repo'));
+    } finally {
+      registry.close();
+    }
+    const reviewId = 'rev-not-found-1';
+    seedPendingReview(projectId, reviewId);
+
+    const { ipc, setMode, replyCount } = makeStubIpc();
+    setMode('not-found');
+    const failStreak = new Map<string, number>();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (let tick = 1; tick <= REVIEW_PASS_FAIL_LOG_AFTER; tick++) {
+        await maybePassReviews(ipc, projectId, failStreak);
+        expect(failStreak.get(reviewId)).toBe(tick);
+      }
+      expect(replyCount()).toBe(0);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0]?.[0]).toMatch(/not-found/u);
     } finally {
       errorSpy.mockRestore();
     }
@@ -558,16 +598,13 @@ async function makeLiveAutomation(
   // pty it returns is what the driver derives fidelity from — a non-NodePtyHost would fail loud upstream.
   const seams = await resolveHostLiveSeams(provider);
 
-  // A manual scheduler captures the runner's tick callback so this test steps it one tick at a time.
-  let tickCb: (() => void) | null = null;
+  // A manual scheduler arms the runner without real intervals; this test steps ticks by awaiting
+  // `runner.step()`, so each daemon tick is per-step bounded instead of fire-and-forget.
   const manual: IntervalScheduler = {
-    setInterval: (cb) => {
-      tickCb = cb;
+    setInterval: () => {
       return {};
     },
-    clearInterval: () => {
-      tickCb = null;
-    },
+    clearInterval: () => {},
   };
 
   // A throwaway operator-IPC socket so the human review-PASS gate can be played over the production wire.
@@ -586,11 +623,12 @@ async function makeLiveAutomation(
     // Large interval (we step manually); autoStart arms the cadence + runs recover().
     intervalMs: 3_600_000,
   });
+  let stepTimedOut = false;
 
   return {
     pty: seams.pty,
     teardown: async () => {
-      await runner.stop();
+      await runner.stop({ waitForInFlight: !stepTimedOut });
     },
     drive: async (input): Promise<AutomationDriveResult> => {
       const reg = buildCoreRegistry();
@@ -625,13 +663,26 @@ async function makeLiveAutomation(
       // silently-stalled chain (Principle 9 — no silent green).
       const reviewFailStreak = new Map<string, number>();
       let completed = false;
+      let stopReason: AutomationDriveResult['stopReason'] | undefined;
+      let stepError: string | undefined;
       let ticks = 0;
       try {
         for (; ticks < input.maxTicks; ticks++) {
           if (seams.now() >= deadline) break;
-          // Step one daemon tick (the runner's captured callback fires `beat()`), then settle.
-          tickCb?.();
-          await settle();
+          // Step one daemon tick and await it. The per-step timeout is the benchmark's loud wedge bound:
+          // a real turn cannot let maxTicks burn down in the background while teardown later blocks.
+          try {
+            await withTimeout(
+              runner.step(),
+              input.perStepTimeoutMs,
+              `orchestration benchmark tick ${ticks + 1}`,
+            );
+          } catch (error) {
+            stepTimedOut = true;
+            stopReason = 'wedged';
+            stepError = errorMessage(error);
+            break;
+          }
 
           // Record the first wall time each non-operator agent is observed in the roster (its session
           // is live). Cheap + monotonic — the earliest tick an agent exists bounds its active window.
@@ -654,11 +705,10 @@ async function makeLiveAutomation(
 
       const driveEndMs = seams.now();
       return {
-        stopReason: completed
-          ? 'task-complete'
-          : driveEndMs >= deadline
-            ? 'wall-budget'
-            : 'turn-budget',
+        stopReason:
+          stopReason ??
+          (completed ? 'task-complete' : driveEndMs >= deadline ? 'wall-budget' : 'turn-budget'),
+        ...(stepError != null ? { error: stepError } : {}),
         // REAL per-agent samples: turns from the durable cost rollup (one observation per turn), wall from
         // the observed active window. Replaces the `agentTurns:{}` silent zero — an agent that took turns
         // now reports a non-zero turn count and a measured wall-clock.
@@ -667,11 +717,6 @@ async function makeLiveAutomation(
       };
     },
   };
-}
-
-/** Settle the event loop briefly so an in-flight async tick can complete before the next step. */
-function settle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 50));
 }
 
 /** Lock the spec once the coordinator has drafted it (the operator's spec-lock gate). Idempotent. */
@@ -716,7 +761,10 @@ async function maybePassReviews(
     if (reviewId == null) continue;
     try {
       const context = await ipc.reviewContext(reviewId);
-      if (context.kind !== 'resolved') continue; // not yet resolvable — retry next tick
+      if (context.kind !== 'resolved') {
+        recordReviewPassFailure(failStreak, reviewId, `reviewContext returned ${context.kind}`);
+        continue;
+      }
       await ipc.reply(
         { seq: req.seq, recipient: OPERATOR },
         {
@@ -729,18 +777,7 @@ async function maybePassReviews(
       );
       failStreak?.delete(reviewId); // a PASS landed — reset the per-gate failure streak.
     } catch (error) {
-      // A transient reviewContext/reply race (e.g. the request landed mid-tick) is retried next tick. But
-      // count it: a gate that fails the PASS attempt for many ticks running is WEDGED — log it loudly so an
-      // operator sees a stalled review instead of an invisibly-hung chain (Principle 9 — never silently
-      // dropped). The chain still does not throw here; the gate simply re-surfaces next tick.
-      const streak = (failStreak?.get(reviewId) ?? 0) + 1;
-      failStreak?.set(reviewId, streak);
-      if (failStreak != null && streak >= REVIEW_PASS_FAIL_LOG_AFTER) {
-        console.error(
-          `[co orch-bench] review '${reviewId}' has failed its operator PASS attempt ${streak} ticks ` +
-            `running — the gate may be wedged: ${errorMessage(error)}`,
-        );
-      }
+      recordReviewPassFailure(failStreak, reviewId, errorMessage(error));
     }
   }
 }
@@ -748,9 +785,46 @@ async function maybePassReviews(
 /** Log a persistent review PASS-attempt failure after this many CONSECUTIVE failed ticks (a wedge signal). */
 const REVIEW_PASS_FAIL_LOG_AFTER = 5;
 
+function recordReviewPassFailure(
+  failStreak: Map<string, number> | undefined,
+  reviewId: string,
+  detail: string,
+): void {
+  if (failStreak == null) return;
+  // A transient reviewContext/reply race (e.g. the request landed mid-tick) is retried next tick. But count
+  // it: a gate that fails the PASS attempt for many ticks running is WEDGED. Log exactly on the threshold
+  // crossing so the operator sees the stall without stderr spam on every subsequent retry.
+  const streak = (failStreak.get(reviewId) ?? 0) + 1;
+  failStreak.set(reviewId, streak);
+  if (streak === REVIEW_PASS_FAIL_LOG_AFTER) {
+    console.error(
+      `[co orch-bench] review '${reviewId}' has failed its operator PASS attempt ${streak} ticks ` +
+        `running — the gate may be wedged: ${detail}`,
+    );
+  }
+}
+
 /** Normalize an unknown thrown value to a string message for logging. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} exceeded the per-step timeout (${ms}ms).`));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
 }
 
 /**

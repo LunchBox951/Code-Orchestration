@@ -500,7 +500,8 @@ describe('clamp01', () => {
 
 describe('toJsonl + renderScorecard', () => {
   it('emits one JSON record per agent (with all three per-agent score blocks) plus a run-summary record', () => {
-    const jsonl = toJsonl(summarizeRun(baseInput()));
+    const scorecard = summarizeRun(baseInput());
+    const jsonl = toJsonl(scorecard);
     const records = jsonl
       .trim()
       .split('\n')
@@ -508,16 +509,14 @@ describe('toJsonl + renderScorecard', () => {
     const agentRecords = records.filter((r) => r['type'] === 'agent');
     expect(agentRecords).toHaveLength(agents.length);
     // Each agent record carries the token-economy + tool-efficiency blocks (the per-provider corpus).
-    expect(agentRecords[0]!['tokenEconomy']).toBeDefined();
-    expect(agentRecords[0]!['toolEfficiency']).toBeDefined();
+    expect(agentRecords[0]!['tokenEconomy']).toEqual(scorecard.agents[0]!.tokenEconomy);
+    expect(agentRecords[0]!['toolEfficiency']).toEqual(scorecard.agents[0]!.toolEfficiency);
     const run = records.find((r) => r['type'] === 'run') as Record<string, unknown> | undefined;
     expect(run).toBeDefined();
     expect(run!['pass']).toBe(true);
     expect(run!['totalTurns']).toBe(11);
     // The run record carries the three run-level scores + the per-role folds + the artifact case tally.
-    const scores = run!['scores'] as Record<string, unknown>;
-    expect(scores['correctness']).toBe(1);
-    expect(scores['contextEfficiency']).toBeDefined();
+    expect(run!['scores']).toEqual(scorecard.scores);
     expect(run!['artifactCasesPassed']).toBe(13);
     expect(run!['artifactCasesTotal']).toBe(13);
   });

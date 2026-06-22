@@ -35,16 +35,23 @@ describe('addModuleScenario — objective evaluator (hermetic)', () => {
     expect(check.casesPassed).toBe(4);
   });
 
-  it('fails a wrong solution.mjs with a concrete reason', async () => {
+  it('fails a wrong solution.mjs with a concrete reason and counts every passing oracle case', async () => {
     writeFileSync(
       join(dir, scenario.artifactPath),
-      'export function add(a, b) { return a - b; }\n',
+      [
+        'export function add(a, b) {',
+        '  if (a === 2 && b === 3) return -1;',
+        '  return a + b;',
+        '}',
+        '',
+      ].join('\n'),
     );
     const check = await scenario.evaluate(dir);
     expect(check.correct).toBe(false);
     expect(check.detail).toMatch(/add\(/);
-    // add(2,3) is the FIRST case and is wrong ⇒ zero cases passed before the bail (a real partial count).
-    expect(check.casesPassed).toBe(0);
+    // add(2,3) is the FIRST case and is wrong, but the remaining 3 cases pass. The tally is total cases
+    // passed, not a prefix-before-first-failure count.
+    expect(check.casesPassed).toBe(3);
     expect(check.casesTotal).toBe(4);
   });
 

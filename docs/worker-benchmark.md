@@ -151,6 +151,9 @@ calibration. All have safe defaults and are overridable without a code change:
 A passing run is **evidence** an operator reviews, not an automatic checkbox flip. It exercises the
 same host-live surface the [`SF-1` / `PV-2`](v1-acceptance-criteria.md) proofs need (a real binary
 reaching ready and routing real mail through a real pty), and unlike a scripted host-proof it also
-confirms the provider can do real coding work. It does not flip any `☑` — see
+confirms the provider can do real coding work. The per-provider score corpus supports `PV-1` by comparing
+the same task across Claude/Codex, and the explicit N/A / no-silent-zero score behavior provides post-hoc
+`ST-3` evidence; it does not discharge the remaining host-live live-stream monitoring proof by itself. It
+does not flip any `☑` — see
 [`v1-handoff.md`](v1-handoff.md) for the deferral catalogue and [`sh1-runbook.md`](sh1-runbook.md) for
 the full self-host evidence bundle.

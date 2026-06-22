@@ -211,10 +211,11 @@ in the sandbox arm; `costUsd` is `number | null` — `null` where the provider r
 > data is read from the conductor's per-agent cost/tool read-model (the `AgentCostRollup` / `AgentToolUsage`
 > shapes — owned canonically by the cost/tool-usage PR; the benchmark keeps an *identical bench-local copy*
 > and reads the store via **optional chaining**, so it needs no import of those types and `pnpm typecheck`
-> stays green whether or not that surface has landed). In a **live** run, until that surface lands the two
-> live-dependent scores are `null` (an absent rollup is an honest N/A). A persistent econ-read failure is
-> **logged**, never swallowed (Principle 9), so a wedged read surfaces instead of degrading invisibly to an
-> all-N/A scorecard.
+> stays green whether or not that surface has landed). Until those read-model surfaces land, their
+> respective score blocks are `null` (an absent rollup is an honest N/A). Only TOKEN-ECONOMY is live-only;
+> CONTEXT/TOOL-EFFICIENCY applies to both arms once the tool-usage rollup exists. A persistent econ-read
+> failure is **logged**, never swallowed (Principle 9), so a wedged read surfaces instead of degrading
+> invisibly to an all-N/A scorecard.
 
 > **Reconstruction limit (honest):** once a merge lands (a final PASS), the review store keeps only the
 > latest verdict and resets the strike counter, so exact historical kickback counts are reconstructed
@@ -247,6 +248,9 @@ runs are the calibration. All have safe defaults and are overridable without a c
 A passing run is **evidence** an operator reviews on the SH-1 / RL-1 / RL-3 / RL-4 ladder — not an
 automatic checkbox flip. It exercises the same host-live surface the SH-1 self-host bundle needs (a real
 binary reaching ready and routing real mail through a real pty), and unlike a single-agent host-proof it
-confirms the **whole chain** can decompose, dispatch, review, and merge up. See
+confirms the **whole chain** can decompose, dispatch, review, and merge up. The per-provider score corpus
+supports `PV-1` by comparing the same scenario across Claude/Codex, and its explicit N/A / fail-loud score
+semantics provide post-hoc `ST-3` evidence; neither discharges the remaining host-live live-stream
+monitoring proof by itself. See
 [`sh1-runbook.md`](sh1-runbook.md) for the full self-host evidence bundle and
 [`worker-benchmark.md`](worker-benchmark.md) for the single-agent sibling.

@@ -75,10 +75,13 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     expect(result.casesTotal).toBe(13);
   });
 
-  it('fails when a numeric op is wrong (executes the artifact, names the failing case)', async () => {
+  it('fails when a numeric op is wrong and still counts later passing oracle cases', async () => {
     const files = referenceFiles();
     files['calc-lib/ops.mjs'] = [
-      'export function add(a, b) { return a - b; }', // wrong on the FIRST add case
+      'export function add(a, b) {',
+      '  if (a === 2 && b === 3) return -1;', // wrong on the FIRST add case only
+      '  return a + b;',
+      '}',
       'export function sub(a, b) { return a - b; }',
       'export function mul(a, b) { return a * b; }',
       '',
@@ -87,8 +90,9 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
     expect(result.detail).toMatch(/add\(2, 3\) = -1, want 5/);
-    // add fails on its first case ⇒ zero cases passed before the bail; the tally is a real partial count.
-    expect(result.casesPassed).toBe(0);
+    // The first add case fails, but the other 12 oracle cases pass. casesPassed is the total passed count,
+    // not a prefix-before-first-failure count.
+    expect(result.casesPassed).toBe(12);
     expect(result.casesTotal).toBe(13);
   });
 
@@ -103,8 +107,9 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     writeFiles(files);
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
-    // 3 add + 3 sub passed before mul's first case fails → casesPassed=6 of 13 (a true partial, not 0/1).
-    expect(result.casesPassed).toBe(6);
+    // 3 add + 3 sub + 4 tokenize cases pass; all 3 mul cases fail. The tally is total passed cases, not
+    // cases before the first mul failure.
+    expect(result.casesPassed).toBe(10);
     expect(result.casesTotal).toBe(13);
   });
 
@@ -115,6 +120,24 @@ describe('calc-lib orchestration scenario — the objective merge-up oracle', ()
     const result = await calcLibScenario().evaluate(dir);
     expect(result.correct).toBe(false);
     expect(result.detail).toMatch(/tokenize\(.*\).*want/);
+  });
+
+  it('counts later passing tokenize cases after the first tokenize failure', async () => {
+    const files = referenceFiles();
+    files['calc-lib/tokenize.mjs'] = [
+      'export function tokenize(expr) {',
+      '  if (expr === "12+3*4") return [];',
+      '  const matched = String(expr).match(/\\d+|[+\\-*/()]/g);',
+      '  return matched ?? [];',
+      '}',
+      '',
+    ].join('\n');
+    writeFiles(files);
+    const result = await calcLibScenario().evaluate(dir);
+    expect(result.correct).toBe(false);
+    expect(result.detail).toMatch(/tokenize\("12\+3\*4"\)/);
+    expect(result.casesPassed).toBe(12);
+    expect(result.casesTotal).toBe(13);
   });
 });
 

@@ -173,6 +173,11 @@ export interface ConductorHostRunnerDeps {
   readonly control?: ConductorControlSurface;
 }
 
+export interface ConductorHostRunnerStopOptions {
+  /** Wait for any active daemon/watchdog tick before running stop hooks. Default: true. */
+  readonly waitForInFlight?: boolean;
+}
+
 /**
  * Drives {@link ConductorDaemon.tick} on a real cadence. Re-entrancy-guarded: daemon ticks never
  * overlap or stack, but an overlap beat still runs the watchdog reconcile sweep so an active long turn
@@ -229,16 +234,27 @@ export class ConductorHostRunner {
   }
 
   /** Disarm the cadence (idempotent) and invoke the stop hook (e.g. to close owned resources). */
-  async stop(): Promise<void> {
+  async stop(options: ConductorHostRunnerStopOptions = {}): Promise<void> {
     if (this.handle != null) {
       this.scheduler.clearInterval(this.handle);
       this.handle = null;
     }
     if (this.stopped) return;
     this.stopped = true;
-    await this.inFlight;
-    await this.watchdogInFlight;
+    const waitForInFlight = options.waitForInFlight ?? true;
+    if (waitForInFlight) {
+      await this.inFlight;
+      await this.watchdogInFlight;
+    }
     await this.onStop?.();
+  }
+
+  /** Run one cadence beat and resolve only after that beat has completed. */
+  async step(): Promise<void> {
+    if (this.stopped) {
+      throw new Error('ConductorHostRunner.step: runner has already been stopped.');
+    }
+    await this.beat();
   }
 
   /**

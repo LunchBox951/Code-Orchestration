@@ -476,6 +476,42 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
 
     expect(onStop).toHaveBeenCalledTimes(1);
   });
+
+  it('step() is awaitable and resolves only after the daemon tick completes', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const pane = await hostPane(engine, pty, makeIdentity('impl-x', projectId, cwd));
+    seedActionableMail(projectId, 'impl-x');
+    const daemon = new ConductorDaemon({
+      engine,
+      reconcile: makeReconcile(clock),
+      projectId,
+      now: clock.now,
+      reconcileEvery: 1,
+    });
+    const ticks: DaemonTickOutcome[] = [];
+    const runner = new ConductorHostRunner({
+      daemon,
+      intervalMs: 1000,
+      scheduler: new FakeScheduler(),
+      onTick: (o) => ticks.push(o),
+    });
+
+    runner.start();
+    const stepP = runner.step();
+    await tick();
+    expect(ticks).toHaveLength(0);
+
+    await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
+    await stepP;
+
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]!.selected).toBe('impl-x');
+    await runner.stop();
+  });
 });
 
 // ── serveConductor wiring + the [host-live] handoff seams ─────────────────────

@@ -146,18 +146,22 @@ function checkNumericOp(
   }
   const op = fn as (a: number, b: number) => unknown;
   let passed = 0;
+  let firstFailure: string | null = null;
   for (const [a, b, want] of cases) {
     let got: unknown;
     try {
       got = op(a, b);
     } catch (error) {
-      return { passed, failure: `${name}(${a}, ${b}) threw: ${errorMessage(error)}` };
+      firstFailure ??= `${name}(${a}, ${b}) threw: ${errorMessage(error)}`;
+      continue;
     }
-    if (got !== want)
-      return { passed, failure: `${name}(${a}, ${b}) = ${String(got)}, want ${want}` };
+    if (got !== want) {
+      firstFailure ??= `${name}(${a}, ${b}) = ${String(got)}, want ${want}`;
+      continue;
+    }
     passed += 1;
   }
-  return { passed, failure: null };
+  return { passed, failure: firstFailure };
 }
 
 /** A hard structural miss (calc.mjs absent / un-importable): zero cases passed out of the scenario total. */
@@ -183,8 +187,10 @@ async function evaluateCalcLib(integrationDir: string): Promise<ArtifactCheck> {
   }
 
   // Accumulate the oracle case tally across every op + tokenize so CORRECTNESS can refine the pass into
-  // a fraction of cases passed; bail on the first concrete failure with the count passed so far.
+  // a fraction of cases passed. Keep the first failure as the diagnostic, but continue through independent
+  // cases so `casesPassed` is the total passed count, not just the prefix before the first failure.
   let casesPassed = 0;
+  let firstFailure: string | null = null;
   for (const [fn, name, cases] of [
     [mod['add'], 'add', ADD_CASES],
     [mod['sub'], 'sub', SUB_CASES],
@@ -192,16 +198,14 @@ async function evaluateCalcLib(integrationDir: string): Promise<ArtifactCheck> {
   ] as const) {
     const grade = checkNumericOp(fn, name, cases);
     casesPassed += grade.passed;
-    if (grade.failure != null) {
-      return { correct: false, detail: grade.failure, casesPassed, casesTotal: CALC_CASES_TOTAL };
-    }
+    firstFailure ??= grade.failure;
   }
 
   const tokenize = mod['tokenize'];
   if (typeof tokenize !== 'function') {
     return {
       correct: false,
-      detail: "calc.mjs does not export a function 'tokenize'",
+      detail: firstFailure ?? "calc.mjs does not export a function 'tokenize'",
       casesPassed,
       casesTotal: CALC_CASES_TOTAL,
     };
@@ -212,22 +216,23 @@ async function evaluateCalcLib(integrationDir: string): Promise<ArtifactCheck> {
     try {
       got = tokenizeFn(expr);
     } catch (error) {
-      return {
-        correct: false,
-        detail: `tokenize(${JSON.stringify(expr)}) threw: ${errorMessage(error)}`,
-        casesPassed,
-        casesTotal: CALC_CASES_TOTAL,
-      };
+      firstFailure ??= `tokenize(${JSON.stringify(expr)}) threw: ${errorMessage(error)}`;
+      continue;
     }
     if (!Array.isArray(got) || got.length !== want.length || want.some((t, i) => got[i] !== t)) {
-      return {
-        correct: false,
-        detail: `tokenize(${JSON.stringify(expr)}) = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`,
-        casesPassed,
-        casesTotal: CALC_CASES_TOTAL,
-      };
+      firstFailure ??= `tokenize(${JSON.stringify(expr)}) = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`;
+      continue;
     }
     casesPassed += 1;
+  }
+
+  if (firstFailure != null) {
+    return {
+      correct: false,
+      detail: firstFailure,
+      casesPassed,
+      casesTotal: CALC_CASES_TOTAL,
+    };
   }
 
   return {
