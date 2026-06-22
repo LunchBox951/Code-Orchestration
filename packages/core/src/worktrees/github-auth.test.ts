@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { githubHttpsCredentialEnv, resolveGhTokenFromEnv } from './github-auth.js';
+import {
+  ghCommandPathEnv,
+  githubHttpsCredentialEnv,
+  resolveGhTokenFromEnv,
+} from './github-auth.js';
 
 describe('resolveGhTokenFromEnv — shared token-precedence policy', () => {
   it('CO_GH_TOKEN wins, then GH_TOKEN, then GITHUB_TOKEN (gh-native order); trims + omits blanks', () => {
@@ -63,5 +67,18 @@ describe('githubHttpsCredentialEnv — daemon-side GitHub HTTPS auth (RC-3/RC-4)
       expect(env['GIT_CONFIG_COUNT']).toBe('2');
       expect(env['GIT_CONFIG_KEY_0']).toBe('credential.https://github.com.helper');
     }
+  });
+});
+
+describe('ghCommandPathEnv — make an absolute gh fallback available to later bare gh calls', () => {
+  it('prepends the absolute gh command directory when it is missing from PATH', () => {
+    expect(ghCommandPathEnv('/usr/local/bin/gh', { PATH: '/usr/bin:/bin' })).toEqual({
+      PATH: '/usr/local/bin:/usr/bin:/bin',
+    });
+  });
+
+  it('returns no env change for PATH hits or already-present absolute dirs', () => {
+    expect(ghCommandPathEnv('gh', { PATH: '/usr/bin:/bin' })).toEqual({});
+    expect(ghCommandPathEnv('/usr/bin/gh', { PATH: '/usr/bin:/bin' })).toEqual({});
   });
 });

@@ -12,7 +12,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { CLAUDE_AUTH_STATUS_ARGS, parseClaudeAuthStatus } from '../dispatch/claude-source.js';
-import { resolveGhTokenFromEnv } from '../worktrees/github-auth.js';
+import { GH_AUTH_TOKEN_COMMANDS, resolveGhTokenFromEnv } from '../worktrees/github-auth.js';
 import { CODEX_DOCTOR_ARGS, parseCodexDoctor } from '../dispatch/codex-source.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import { openGlobalStore, openProjectStore } from '../store/sqlite-store.js';
@@ -270,9 +270,9 @@ export interface DefaultGithubAuthProbeOptions {
 
 /**
  * Build the real GitHub-auth probe: authenticated iff an explicit token env is set (CO_GH_TOKEN /
- * GITHUB_TOKEN / GH_TOKEN) OR `gh auth status` exits 0. This mirrors the daemon's own resolution
- * ({@link import('@co/mcp')} `resolveGhToken`: env first, then the operator's `gh auth login`), so
- * `co doctor --live` reports exactly what the gated publish path will see.
+ * GITHUB_TOKEN / GH_TOKEN) OR `gh auth token` returns a non-empty token. This mirrors the daemon's own
+ * resolution ({@link import('@co/mcp')} `resolveGhToken`: env first, then the operator's `gh auth login`),
+ * so `co doctor --live` reports exactly what the gated publish path will see.
  */
 export function defaultGithubAuthProbe(
   options: DefaultGithubAuthProbeOptions = {},
@@ -282,13 +282,22 @@ export function defaultGithubAuthProbe(
   return () => {
     // Same env-token precedence the daemon uses (shared policy), so doctor reports what publish sees.
     if (resolveGhTokenFromEnv(env) != null) return { authenticated: true };
-    const res = command('gh', ['auth', 'status']);
-    if (res.error !== undefined) {
-      return { authenticated: false, diagnostic: `gh not runnable: ${res.error.message}` };
+    const diagnostics: string[] = [];
+    for (const cmd of GH_AUTH_TOKEN_COMMANDS) {
+      const res = command(cmd, ['auth', 'token']);
+      const token = trimmed(res.stdout);
+      if (res.status === 0 && token !== undefined) return { authenticated: true };
+      if (res.error !== undefined) {
+        diagnostics.push(`${cmd}: ${res.error.message}`);
+      } else {
+        const detail = trimmed(res.stderr) ?? trimmed(res.stdout) ?? `exit status ${res.status}`;
+        diagnostics.push(`${cmd}: ${detail}`);
+      }
     }
-    if (res.status === 0) return { authenticated: true };
-    const detail = trimmed(res.stderr) ?? trimmed(res.stdout) ?? `exit status ${res.status}`;
-    return { authenticated: false, diagnostic: `gh auth status: ${detail}` };
+    return {
+      authenticated: false,
+      diagnostic: `gh auth token failed: ${diagnostics.join('; ')}`,
+    };
   };
 }
 

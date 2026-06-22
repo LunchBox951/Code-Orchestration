@@ -306,8 +306,8 @@ describe('co doctor', () => {
           };
         }
         // --live also probes GitHub auth via the shared command seam.
-        if (command === 'gh' && args.join(' ') === 'auth status') {
-          return { stdout: 'Logged in to github.com', stderr: '', status: 0 };
+        if (command === 'gh' && args.join(' ') === 'auth token') {
+          return { stdout: 'gho_token\n', stderr: '', status: 0 };
         }
         return { stdout: '', stderr: 'unknown command', status: 1 };
       },
@@ -415,6 +415,8 @@ describe('co doctor', () => {
             stderr: '',
             status: 0,
           };
+        if (command === 'gh' && args.join(' ') === 'auth token')
+          return { stdout: 'gho_token\n', stderr: '', status: 0 };
         return { stdout: '', stderr: '', status: 0 };
       },
     });

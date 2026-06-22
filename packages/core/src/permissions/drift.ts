@@ -179,15 +179,25 @@ function codexConfigTomlHasExpectedHookCommand(
 }
 
 function hookCommandUsesTrustedExecutable(command: string): boolean {
-  const direct = /^"([^"]+)" hook codex-block-list --rules /u.exec(command);
+  const invocation = stripHookEnvPrefix(command);
+  const direct = /^"([^"]+)" hook codex-block-list --rules /u.exec(invocation);
   if (direct?.[1] != null && isTrustedAbsoluteCommand(direct[1])) return true;
-  const viaNode = /^"([^"]+)" "([^"]+)" hook codex-block-list --rules /u.exec(command);
+  const viaNode = /^"([^"]+)" "([^"]+)" hook codex-block-list --rules /u.exec(invocation);
   return (
     viaNode?.[1] != null &&
     viaNode[2] != null &&
     isTrustedAbsoluteCommand(viaNode[1]) &&
     isTrustedAbsoluteCommand(viaNode[2])
   );
+}
+
+function stripHookEnvPrefix(command: string): string {
+  let rest = command;
+  while (true) {
+    const match = /^[A-Za-z_][A-Za-z0-9_]*="(?:\\.|[^"\\])*"\s+/u.exec(rest);
+    if (match == null) return rest;
+    rest = rest.slice(match[0].length);
+  }
 }
 
 function isTrustedAbsoluteCommand(command: string): boolean {

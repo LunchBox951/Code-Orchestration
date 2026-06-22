@@ -79,6 +79,11 @@ export interface CoMcpPaths {
    * Electron; empty otherwise.
    */
   readonly coMcpExtraEnv?: Readonly<Record<string, string>>;
+  /**
+   * Extra environment to prefix onto the Codex PreToolUse hook command. This is separate from
+   * `coMcpExtraEnv`: the hook runs as a shell command inside Codex, not as the MCP server child.
+   */
+  readonly coCliExtraEnv?: Readonly<Record<string, string>>;
 }
 
 export interface ProviderAuthPrelaunchPaths {
@@ -227,6 +232,7 @@ export function buildHostedLaunchSpec(
     },
     coCliCommand: coMcpPaths.coCliCommand,
     ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),
+    ...(coMcpPaths.coCliExtraEnv != null ? { coCliEnv: coMcpPaths.coCliExtraEnv } : {}),
     // Thread the role's capabilities so the built-in web-tool decision is explicit at launch
     // (#7 §5 #3). Sub-roles may only narrow, so the base-role set is the capability ceiling.
     capabilities: profileFor(identity.role).capabilities,

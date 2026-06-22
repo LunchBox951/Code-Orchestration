@@ -1,3 +1,5 @@
+import { delimiter, dirname, isAbsolute } from 'node:path';
+
 /**
  * GitHub HTTPS auth provisioning for the daemon's git/gh seams (RC-3 / RC-4).
  *
@@ -24,6 +26,20 @@
  *  `$GH_TOKEN` from the environment at git-credential time, so it carries no secret in the value. */
 const GITHUB_CREDENTIAL_HELPER =
   '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f';
+
+/** Commands to try when resolving `gh` from a GUI launch with a minimal PATH. */
+export const GH_AUTH_TOKEN_COMMANDS = [
+  'gh',
+  '/opt/homebrew/bin/gh',
+  '/usr/local/bin/gh',
+  '/usr/bin/gh',
+] as const;
+
+/**
+ * Per-candidate cap for `gh auth token`. Four candidates worst-case at 1.5s remains below the
+ * desktop daemon health budget (10s), so optional auth discovery cannot make startup look dead.
+ */
+export const GH_AUTH_TOKEN_TIMEOUT_MS = 1_500;
 
 /**
  * Resolve a GitHub token from an env's EXPLICIT token variables — the single source of truth for the
@@ -63,4 +79,20 @@ export function githubHttpsCredentialEnv(
     [`GIT_CONFIG_VALUE_${start + 1}`]: 'false',
     GIT_TERMINAL_PROMPT: '0',
   };
+}
+
+/**
+ * If `gh` was discovered through an absolute fallback, prepend its directory to PATH so later daemon
+ * seams that intentionally call bare `gh` (`gh pr create`, `gh repo view`) use the same binary.
+ */
+export function ghCommandPathEnv(
+  command: string,
+  baseEnv: NodeJS.ProcessEnv = {},
+): Record<string, string> {
+  if (!isAbsolute(command)) return {};
+  const dir = dirname(command);
+  const current = baseEnv['PATH'] ?? '';
+  const entries = current.split(delimiter).filter((entry) => entry.length > 0);
+  if (entries.includes(dir)) return {};
+  return { PATH: entries.length > 0 ? [dir, ...entries].join(delimiter) : dir };
 }

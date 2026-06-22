@@ -796,7 +796,7 @@ export async function run(
             )
           : options.providerProbe;
         // --live also probes GitHub auth (the gated remote-publish prerequisite): an explicit token
-        // env or `gh auth status`. A test may inject a fake probe via options.githubAuthProbe.
+        // env or `gh auth token`. A test may inject a fake probe via options.githubAuthProbe.
         const githubAuthProbe: GithubAuthProbeSeam | undefined = useLive
           ? (options.githubAuthProbe ??
             defaultGithubAuthProbe(

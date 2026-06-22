@@ -457,6 +457,21 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
     );
     expect(checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config))).toEqual([]);
   });
+
+  it('codex: hook command can carry host-required env without leaking it into pane env', () => {
+    const config = buildPaneLaunchConfig('codex', {
+      ...BASE_IDENTITY,
+      coCliCommand: '/electron',
+      coCliArgs: ['/repo/packages/cli/dist/index.js'],
+      coCliEnv: { ELECTRON_RUN_AS_NODE: '1' },
+    });
+
+    expect(config.codexConfigToml).toContain(
+      `command = "ELECTRON_RUN_AS_NODE=\\"1\\" \\"/electron\\" \\"/repo/packages/cli/dist/index.js\\" hook codex-block-list --rules \\"/tmp/co-pane-isolated-test/hooks/co-block-list-rules.json\\""`,
+    );
+    expect(config.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+    expect(checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config))).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------

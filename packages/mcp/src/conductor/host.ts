@@ -21,7 +21,10 @@ import { performance } from 'node:perf_hooks';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
+  GH_AUTH_TOKEN_COMMANDS,
+  GH_AUTH_TOKEN_TIMEOUT_MS,
   NodePtyHost,
+  ghCommandPathEnv,
   githubHttpsCredentialEnv,
   resolveGhTokenFromEnv,
   defaultGitExec,
@@ -67,6 +70,8 @@ import { createSocketBridgeTransportPair } from './real-transport.js';
 import { defaultCoMcpPaths, type HostLaunchPathOptions } from './host-launch-paths.js';
 import { resolveReviewContext } from './review-context.js';
 import { OperatorIpcServer, operatorIpcSocketPath } from '../operator-ipc/server.js';
+
+export { GH_AUTH_TOKEN_COMMANDS, GH_AUTH_TOKEN_TIMEOUT_MS } from '@co/core';
 
 // ── The cadence scheduler seam (injected so the loop is FakePty-unit-testable) ──────────────────────
 
@@ -942,15 +947,14 @@ export function defaultServeCoMcpPaths(
 // Connect-GitHub UI, so the token must be SOURCED (from the operator's existing `gh auth login`) and
 // the env PROVISIONED so both `gh` and `git push https` authenticate. See {@link githubHttpsCredentialEnv}.
 
+/** Resolved `gh auth token` output plus the command that produced it. */
+export interface GhAuthTokenResolution {
+  readonly token: string;
+  readonly command: string;
+}
+
 /** Runs `gh auth token`, returning the operator's token or undefined (gh absent / logged out). */
-export type GhAuthTokenRunner = (env: NodeJS.ProcessEnv) => string | undefined;
-
-/** Common absolute `gh` locations to try when a GUI launch has a minimal PATH. */
-const GH_ABSOLUTE_FALLBACKS = ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh'] as const;
-
-/** Hard cap on `gh auth token` so a hung gh (credential prompt, stuck helper) cannot wedge the
- *  daemon-boot hot path; on timeout spawnSync returns status null and we degrade to "no token". */
-const GH_AUTH_TOKEN_TIMEOUT_MS = 15_000;
+export type GhAuthTokenRunner = (env: NodeJS.ProcessEnv) => GhAuthTokenResolution | undefined;
 
 /** Sync spawn seam for the gh runner — injectable so the real runner is testable without a real gh. */
 export type GhSpawnSync = (
@@ -976,12 +980,12 @@ const realGhSpawn: GhSpawnSync = (command, args, env) => {
  */
 export function makeGhAuthTokenRunner(spawn: GhSpawnSync = realGhSpawn): GhAuthTokenRunner {
   return (env) => {
-    for (const cmd of ['gh', ...GH_ABSOLUTE_FALLBACKS]) {
+    for (const cmd of GH_AUTH_TOKEN_COMMANDS) {
       try {
         const res = spawn(cmd, ['auth', 'token'], env);
         if (res.status === 0) {
           const token = res.stdout?.trim();
-          if (token != null && token.length > 0) return token;
+          if (token != null && token.length > 0) return { token, command: cmd };
         }
       } catch {
         // ENOENT / spawn failure → try the next candidate; a missing/failed gh is "no token".
@@ -1004,7 +1008,16 @@ export function resolveGhToken(
   env: NodeJS.ProcessEnv = process.env,
   runner: GhAuthTokenRunner = defaultGhAuthTokenRunner,
 ): string | undefined {
-  return resolveGhTokenFromEnv(env) ?? runner(env);
+  return resolveGhAuth(env, runner)?.token;
+}
+
+function resolveGhAuth(
+  env: NodeJS.ProcessEnv,
+  runner: GhAuthTokenRunner,
+): GhAuthTokenResolution | undefined {
+  const explicit = resolveGhTokenFromEnv(env);
+  if (explicit != null) return { token: explicit, command: 'gh' };
+  return runner(env);
 }
 
 /**
@@ -1017,10 +1030,11 @@ export function resolveAndApplyDaemonGithubAuth(
   env: NodeJS.ProcessEnv = process.env,
   runner: GhAuthTokenRunner = defaultGhAuthTokenRunner,
 ): string | undefined {
-  const token = resolveGhToken(env, runner);
-  if (token == null) return undefined;
-  Object.assign(env, githubHttpsCredentialEnv(token, env));
-  return token;
+  const auth = resolveGhAuth(env, runner);
+  if (auth == null) return undefined;
+  Object.assign(env, githubHttpsCredentialEnv(auth.token, env));
+  Object.assign(env, ghCommandPathEnv(auth.command, env));
+  return auth.token;
 }
 
 /**

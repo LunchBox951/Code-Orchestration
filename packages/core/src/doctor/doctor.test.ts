@@ -402,18 +402,36 @@ describe('defaultGithubAuthProbe', () => {
     expect(ghCalled).toBe(false);
   });
 
-  it('authenticated when `gh auth status` exits 0', () => {
+  it('authenticated when `gh auth token` returns a token', () => {
     const probe = defaultGithubAuthProbe({
       env: {},
       command: (command, args) =>
-        command === 'gh' && args.join(' ') === 'auth status'
-          ? { stdout: 'Logged in', stderr: '', status: 0 }
+        command === 'gh' && args.join(' ') === 'auth token'
+          ? { stdout: 'gho_token\n', stderr: '', status: 0 }
           : { stdout: '', stderr: 'no', status: 1 },
     });
     expect(probe().authenticated).toBe(true);
   });
 
-  it('not authenticated when no env token and `gh auth status` fails', () => {
+  it('not authenticated when `gh auth status` succeeds but `gh auth token` fails', () => {
+    const probe = defaultGithubAuthProbe({
+      env: {},
+      command: (command, args) => {
+        if (command === 'gh' && args.join(' ') === 'auth status') {
+          return { stdout: 'Logged in', stderr: '', status: 0 };
+        }
+        if (command === 'gh' && args.join(' ') === 'auth token') {
+          return { stdout: '', stderr: 'no token available', status: 1 };
+        }
+        return { stdout: '', stderr: 'not found', status: 127 };
+      },
+    });
+    const result = probe();
+    expect(result.authenticated).toBe(false);
+    expect(result.diagnostic).toMatch(/gh auth token/i);
+  });
+
+  it('not authenticated when no env token and `gh auth token` fails', () => {
     const probe = defaultGithubAuthProbe({
       env: {},
       command: () => ({
@@ -424,7 +442,7 @@ describe('defaultGithubAuthProbe', () => {
     });
     const result = probe();
     expect(result.authenticated).toBe(false);
-    expect(result.diagnostic).toMatch(/gh auth status/i);
+    expect(result.diagnostic).toMatch(/gh auth token/i);
   });
 });
 

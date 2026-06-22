@@ -40,6 +40,8 @@ import { ConductorEngine, type ConductorEngineDeps } from './engine.js';
 import { ConductorDaemon, type DaemonTickOutcome } from './daemon.js';
 import {
   ConductorHostRunner,
+  GH_AUTH_TOKEN_COMMANDS,
+  GH_AUTH_TOKEN_TIMEOUT_MS,
   defaultServeCoMcpPaths,
   hostLiveTransportRequired,
   makeGhAuthTokenRunner,
@@ -887,9 +889,9 @@ describe('serveConductor — wires the full stack over injected seams (no real b
   describe('GitHub auth provisioning (RC-2/3/4)', () => {
     it('resolveGhToken: explicit env wins and the gh fallback is NOT consulted', () => {
       let called = false;
-      const runner = (): string | undefined => {
+      const runner = () => {
         called = true;
-        return 'gh_fallback';
+        return { token: 'gh_fallback', command: 'gh' };
       };
       expect(resolveGhToken({ CO_GH_TOKEN: '  gho_explicit  ' }, runner)).toBe('gho_explicit');
       expect(resolveGhToken({ GITHUB_TOKEN: 'gho_ci' }, runner)).toBe('gho_ci');
@@ -897,19 +899,34 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     });
 
     it('resolveGhToken: falls back to `gh auth token` when no env token is set', () => {
-      expect(resolveGhToken({}, () => 'gho_from_gh')).toBe('gho_from_gh');
+      expect(resolveGhToken({}, () => ({ token: 'gho_from_gh', command: 'gh' }))).toBe(
+        'gho_from_gh',
+      );
       // gh absent / logged out → undefined (daemon still runs).
       expect(resolveGhToken({}, () => undefined)).toBeUndefined();
     });
 
     it('resolveAndApplyDaemonGithubAuth: provisions the daemon env for gh AND git push', () => {
       const env: NodeJS.ProcessEnv = {};
-      const token = resolveAndApplyDaemonGithubAuth(env, () => 'gho_tok');
+      const token = resolveAndApplyDaemonGithubAuth(env, () => ({
+        token: 'gho_tok',
+        command: 'gh',
+      }));
       expect(token).toBe('gho_tok');
       // gh reads GH_TOKEN; git push uses the env-scoped credential helper for github.com.
       expect(env.GH_TOKEN).toBe('gho_tok');
       expect(env.GIT_CONFIG_KEY_0).toBe('credential.https://github.com.helper');
       expect(env.GIT_TERMINAL_PROMPT).toBe('0');
+    });
+
+    it('resolveAndApplyDaemonGithubAuth: prepends the resolved absolute gh dir to PATH for later gh calls', () => {
+      const env: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin' };
+      const token = resolveAndApplyDaemonGithubAuth(env, () => ({
+        token: 'gho_tok',
+        command: '/usr/local/bin/gh',
+      }));
+      expect(token).toBe('gho_tok');
+      expect(env.PATH?.split(':')[0]).toBe('/usr/local/bin');
     });
 
     it('resolveAndApplyDaemonGithubAuth: no token → env untouched, returns undefined', () => {
@@ -919,20 +936,27 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     });
 
     describe('makeGhAuthTokenRunner (real runner over an injectable spawn seam)', () => {
+      it('worst-case gh discovery timeout stays below the desktop daemon health budget', () => {
+        expect(GH_AUTH_TOKEN_TIMEOUT_MS * GH_AUTH_TOKEN_COMMANDS.length).toBeLessThan(10_000);
+      });
+
       it('returns the token from `gh` on PATH (first candidate)', () => {
         const calls: string[] = [];
         const spawn: GhSpawnSync = (cmd) => {
           calls.push(cmd);
           return cmd === 'gh' ? { status: 0, stdout: 'ghp_path\n' } : { status: 127 };
         };
-        expect(makeGhAuthTokenRunner(spawn)({})).toBe('ghp_path');
+        expect(makeGhAuthTokenRunner(spawn)({})).toEqual({ token: 'ghp_path', command: 'gh' });
         expect(calls).toEqual(['gh']); // stopped at the first success
       });
 
       it('falls through to an absolute candidate when `gh` is not on PATH', () => {
         const spawn: GhSpawnSync = (cmd) =>
           cmd === '/usr/local/bin/gh' ? { status: 0, stdout: 'ghp_abs' } : { status: 127 };
-        expect(makeGhAuthTokenRunner(spawn)({})).toBe('ghp_abs');
+        expect(makeGhAuthTokenRunner(spawn)({})).toEqual({
+          token: 'ghp_abs',
+          command: '/usr/local/bin/gh',
+        });
       });
 
       it('returns undefined when every candidate fails (logged out / not found)', () => {

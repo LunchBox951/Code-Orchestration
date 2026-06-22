@@ -35,7 +35,12 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
     // therefore run the co-mcp bridge with ELECTRON_RUN_AS_NODE=1 too, or `electron <bin> bridge` boots
     // a second GUI Electron and the MCP surface never connects. Inject the flag into the MCP server's
     // env block. `process.versions.electron` is the reliable signal (set even under ELECTRON_RUN_AS_NODE).
-    ...(process.versions.electron != null ? { coMcpExtraEnv: { ELECTRON_RUN_AS_NODE: '1' } } : {}),
+    ...(process.versions.electron != null
+      ? {
+          coMcpExtraEnv: { ELECTRON_RUN_AS_NODE: '1' },
+          coCliExtraEnv: { ELECTRON_RUN_AS_NODE: '1' },
+        }
+      : {}),
     ...(opts.includeProviderAuth
       ? {
           ...readOptionalAuthFile(

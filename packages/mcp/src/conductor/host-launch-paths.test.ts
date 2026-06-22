@@ -72,6 +72,7 @@ describe('host launch path resolution', () => {
     try {
       (process.versions as Record<string, string | undefined>)['electron'] = '38.0.0';
       expect(defaultCoMcpPaths(base).coMcpExtraEnv).toEqual({ ELECTRON_RUN_AS_NODE: '1' });
+      expect(defaultCoMcpPaths(base).coCliExtraEnv).toEqual({ ELECTRON_RUN_AS_NODE: '1' });
     } finally {
       if (hadElectron) (process.versions as Record<string, string | undefined>)['electron'] = prev;
       else delete (process.versions as Record<string, string | undefined>)['electron'];

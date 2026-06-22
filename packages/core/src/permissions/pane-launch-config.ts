@@ -54,6 +54,8 @@ export interface PaneIdentity {
   readonly coCliCommand: string;
   /** Optional trusted absolute arguments that precede the Codex hook subcommand. */
   readonly coCliArgs?: readonly string[];
+  /** Environment variables prefixed onto the Codex hook command itself. */
+  readonly coCliEnv?: Readonly<Record<string, string>>;
   /**
    * The pane role's effective capability set (#7 §5 #3). Drives the explicit built-in web-tool
    * decision below. Absent ⇒ empty set. Threaded from the role profile by the placement launcher.
@@ -282,7 +284,12 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
   const hookArgs = [...(identity.coCliArgs ?? [])];
   requireTrustedHookExecutableArgs(hookArgs);
   const hookExecutable = [hookCli, ...hookArgs].map(shellDoubleQuote).join(' ');
-  const hookCommand = `${hookExecutable} hook codex-block-list --rules ${shellDoubleQuote(rulesPath)}`;
+  const hookEnvPrefix = sortedEnvEntries(identity.coCliEnv)
+    .map(([key, value]) => `${key}=${shellDoubleQuote(value)}`)
+    .join(' ');
+  const hookInvocation = `${hookExecutable} hook codex-block-list --rules ${shellDoubleQuote(rulesPath)}`;
+  const hookCommand =
+    hookEnvPrefix.length > 0 ? `${hookEnvPrefix} ${hookInvocation}` : hookInvocation;
   const mcpEnvLines = sortedEnvEntries(identity.coMcpEnv).flatMap(([key, value]) => [
     `${key} = "${tomlStringEscape(value)}"`,
   ]);

@@ -395,6 +395,32 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(configToml!.contents).toContain('ELECTRON_RUN_AS_NODE = "1"');
   });
 
+  it('RC-1: coCliExtraEnv (ELECTRON_RUN_AS_NODE) reaches the Codex hook command only', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-hook-elx', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-hook-elx', 'co/feat-hook-elx', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-hook-elx');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      {
+        ...TEST_MCP_PATHS,
+        coCliCommand: '/electron',
+        coCliArgs: ['/repo/packages/cli/dist/index.js'],
+        coCliExtraEnv: { ELECTRON_RUN_AS_NODE: '1' },
+      },
+    );
+
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain(
+      'command = "ELECTRON_RUN_AS_NODE=\\"1\\" \\"/electron\\" \\"/repo/packages/cli/dist/index.js\\" hook codex-block-list',
+    );
+    expect(spec.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+  });
+
   it('RC-5: the pane HOME is the ISOLATED home dir, never the operator home', () => {
     const { projectId, cwd, dataDir } = makeProject();
     for (const provider of ['claude', 'codex'] as const) {
