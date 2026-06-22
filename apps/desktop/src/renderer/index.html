@@ -1241,16 +1241,23 @@
       .sess-row .role {
         font-size: 10.5px;
         margin-top: 2px;
+        /* #66: the agentId + role lines reuse this class; clamp them so a long id/role ellipsizes
+           inside the 248px rail instead of overflowing and overlapping the state / action buttons. */
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
       .sess-row .state {
         font-family: 'IBM Plex Mono', monospace;
         font-size: 9.5px;
+        flex: 0 0 auto; /* #66: keep the state label its own width; never let it be overrun */
       }
       .sess-actions {
         display: flex;
         gap: 4px;
         margin: 0;
         padding-right: 8px;
+        flex: 0 0 auto; /* #66: reserve the action buttons' width so they don't collide with .mid */
       }
       .sess-actions .btn {
         height: 22px;

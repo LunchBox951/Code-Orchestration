@@ -428,7 +428,12 @@ function buildClaudeLaunchConfig(
   const base = {
     provider: 'claude',
     args,
-    env: { CLAUDE_CONFIG_DIR: identity.isolatedHomeDir },
+    // CLAUDE_CONFIG_DIR isolates the pane's config. CLAUDE_CODE_NO_FLICKER makes Claude emit
+    // append-friendly output instead of the alternate-screen full-redraw stream (#66): the desktop
+    // console reassembles an append-only offset transcript, so a redraw replayed as appended frames
+    // renders garbled (codex, which is already append-friendly, looked fine). This makes Claude's
+    // stream match that model at the source.
+    env: { CLAUDE_CONFIG_DIR: identity.isolatedHomeDir, CLAUDE_CODE_NO_FLICKER: '1' },
     claudeSettingsJson,
     claudeSettingsPath,
     prelaunchFiles: [settingsPrelaunch],

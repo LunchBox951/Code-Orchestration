@@ -298,8 +298,12 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
       TEST_MCP_PATHS,
     );
 
-    // MNR-6: only the isolated dir in env — no leakage of user-global config
-    expect(spec.env).toEqual({ CLAUDE_CONFIG_DIR: isolatedHomeDir });
+    // MNR-6: only the isolated dir in env — no leakage of user-global config. CLAUDE_CODE_NO_FLICKER
+    // is a static rendering flag (#66), not a path, so it does not weaken the isolation guarantee.
+    expect(spec.env).toEqual({
+      CLAUDE_CONFIG_DIR: isolatedHomeDir,
+      CLAUDE_CODE_NO_FLICKER: '1',
+    });
     expect(spec.env).not.toHaveProperty('CODEX_HOME');
     // --strict-mcp-config suppresses user MCP servers
     expect(spec.args).toContain('--strict-mcp-config');

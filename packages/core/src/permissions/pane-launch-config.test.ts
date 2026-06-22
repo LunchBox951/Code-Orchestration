@@ -311,6 +311,8 @@ describe('isolation: no user-global config paths (AC-L7-6)', () => {
     expect(config.env['CLAUDE_CONFIG_DIR']).not.toContain('/.claude');
     // No user CODEX_HOME leaks into a claude config
     expect(config.env['CODEX_HOME']).toBeUndefined();
+    // #66: Claude runs append-friendly (no alt-screen full-redraw) so the console renders cleanly.
+    expect(config.env['CLAUDE_CODE_NO_FLICKER']).toBe('1');
   });
 
   it('claude: args include --strict-mcp-config and --disallowedTools', () => {
