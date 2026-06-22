@@ -2194,11 +2194,16 @@ function ghApiEndpoint(args: readonly string[]): string | undefined {
 // gh field flags that supply a request body — their presence makes `gh api` implicitly POST.
 const GH_API_FIELD_FLAGS = new Set(['-f', '--field', '-F', '--raw-field', '--input']);
 
-// GraphQL mutations that publish a PR outside the recorded-PASS gate.
+// HTTP methods that mutate server state.
+const GH_API_WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+// GraphQL mutations that publish a PR outside the recorded-PASS gate. Kept for documentation;
+// the gate now blocks ANY inline `mutation` operation, not only these specific names.
 const GH_GRAPHQL_PUBLISH_MUTATIONS = [
   'mergePullRequest',
   'createPullRequest',
   'enablePullRequestAutoMerge',
+  'markPullRequestReadyForReview',
 ] as const;
 
 function ghApiHasFieldFlag(args: readonly string[]): boolean {
@@ -2211,12 +2216,38 @@ function ghApiHasFieldFlag(args: readonly string[]): boolean {
   return false;
 }
 
-function ghApiPublishesViaGraphql(args: readonly string[]): boolean {
-  // `gh api graphql` carries its query inline via field flags (`-f query=…`, `--raw-field`,
-  // `-F`), so any inline publishing-mutation identifier is a gate bypass. A read-only
-  // `query{…}` carries none of these names and stays permitted — this mirrors the Claude
-  // posture for the publishing vectors without blocking read-only introspection.
+// True iff a request body is supplied INDIRECTLY — from a file (`key=@path`), stdin (`key=@-`),
+// or `--input <file|->`. The body content is then OPAQUE to this gate (it never appears in argv),
+// so a publishing mutation hidden there cannot be detected and the call must fail closed.
+function ghApiHasOpaqueBody(args: readonly string[]): boolean {
+  for (let i = 1; i < args.length; i++) {
+    const token = args[i]!;
+    if (token === '--input' || token.startsWith('--input=')) return true; // file path or '-'
+    if (token === '-f' || token === '-F' || token === '--field' || token === '--raw-field') {
+      if ((args[i + 1] ?? '').includes('=@')) return true; // separate-token: key=@file / key=@-
+      continue;
+    }
+    if (/^--(field|raw-field)=.*=@/u.test(token)) return true; // equals form: --field=key=@x
+    if (/^-[fF].*=@/u.test(token)) return true; // attached short form: -Fkey=@x
+  }
+  return false;
+}
+
+// gh sends GET unless an explicit write method is given or a request-body field flag is present
+// (which makes it an implicit POST). An explicit GET/HEAD keeps `-f/-F` as read query params.
+function ghApiIsWriteRequest(args: readonly string[]): boolean {
+  const method = ghApiMethod(args);
+  if (method != null) return GH_API_WRITE_METHODS.has(method);
+  return ghApiHasFieldFlag(args);
+}
+
+function ghApiGraphqlIsBypass(args: readonly string[]): boolean {
+  // An opaque mutation body (file/stdin) cannot be inspected → fail closed.
+  if (ghApiHasOpaqueBody(args)) return true;
+  // Any inline GraphQL *mutation* operation publishes. The `mutation` keyword is required for
+  // mutations (read queries are anonymous `{…}` or `query{…}`), so a read query stays permitted.
   const haystack = args.join('\n');
+  if (/\bmutation\b/u.test(haystack)) return true;
   return GH_GRAPHQL_PUBLISH_MUTATIONS.some((mutation) => haystack.includes(mutation));
 }
 
@@ -2224,15 +2255,14 @@ function ghApiBypassesPrGate(args: readonly string[]): boolean {
   if (args[0] !== 'api') return false;
   const endpoint = ghApiEndpoint(args);
   if (endpoint == null) return false;
-  // A hosted Codex agent can otherwise merge/create a PR via GraphQL, which the REST patterns
-  // below never match (`ghApiEndpoint` resolves `gh api graphql …` to `graphql`).
-  if (endpoint === 'graphql') return ghApiPublishesViaGraphql(args);
-  if (/^repos\/[^/]+\/[^/]+\/pulls\/\d+\/merge$/u.test(endpoint)) return true;
-  if (/^repos\/[^/]+\/[^/]+\/pulls$/u.test(endpoint)) {
-    // gh implicitly POSTs when body field flags are present, even without an explicit -X POST.
-    return ghApiMethod(args) === 'POST' || ghApiHasFieldFlag(args);
-  }
-  return false;
+  // `gh api graphql` resolves its endpoint to `graphql`; inspect the operation directly.
+  if (endpoint === 'graphql') return ghApiGraphqlIsBypass(args);
+  // Mirror the Claude `Bash(gh api*)` posture on the Codex surface: fail closed on ANY write
+  // through `gh api`. Enumerating publishing endpoints (pulls, pulls/N/merge, pulls/N/update-branch,
+  // merges, git/refs, …) is whack-a-mole — a *write* is the thing that can publish, merge, or move
+  // refs outside the recorded-PASS gate. Read-only GETs (no write method, no request body) stay
+  // permitted, so non-publishing inspection still works on both providers.
+  return ghApiIsWriteRequest(args);
 }
 
 function ghAliasSet(argv: string[]): { name: string; value: string; shell: boolean } | undefined {

@@ -293,15 +293,70 @@ describe('matchBlock — blocked commands', () => {
     expect(matchBlock('gh api repos/owner/repo/pulls')).toBeNull();
   });
 
+  it('raw-gh-pr-merge: gh api GraphQL bodies supplied from a file/stdin fail closed (#64)', () => {
+    // The mutation lives OUTSIDE argv (a file or stdin), so keyword scanning cannot see it. An
+    // opaque GraphQL body must be blocked conservatively — the Claude `Bash(gh api*)` deny covers
+    // it and the Codex surface must too.
+    expect(matchBlock('gh api graphql -F query=@merge.graphql')?.id).toBe('raw-gh-pr-merge');
+    expect(matchBlock('gh api graphql -F query=@-')?.id).toBe('raw-gh-pr-merge');
+    expect(matchBlock('gh api graphql --input mutation.graphql')?.id).toBe('raw-gh-pr-merge');
+    expect(matchBlock('gh api graphql --input -')?.id).toBe('raw-gh-pr-merge');
+    expect(matchBlock('gh api graphql -Fquery=@merge.graphql')?.id).toBe('raw-gh-pr-merge');
+  });
+
+  it('raw-gh-pr-merge: gh api GraphQL off-list mutations are still blocked (#64)', () => {
+    // Any inline `mutation` operation publishes — not only the few named identifiers.
+    expect(
+      matchBlock(`gh api graphql -f query='mutation{ markPullRequestReadyForReview(input:{}){x} }'`)
+        ?.id,
+    ).toBe('raw-gh-pr-merge');
+    expect(
+      matchBlock(`gh api graphql -f query='mutation MyMerge { addComment(input:{}){x} }'`)?.id,
+    ).toBe('raw-gh-pr-merge');
+  });
+
+  it('raw-gh-pr-merge: gh api REST publish/merge/ref-write endpoints are blocked (#64)', () => {
+    // Direct branch merge (no PR/review at all), protected-ref fast-forward, and PR update-branch
+    // all skip the recorded-PASS gate. Claude blocks them via `Bash(gh api*)`; Codex must too.
+    expect(matchBlock('gh api repos/owner/repo/merges -f base=main -f head=co/x')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
+    expect(
+      matchBlock('gh api repos/owner/repo/git/refs/heads/main -X PATCH -f sha=deadbeef')?.id,
+    ).toBe('raw-gh-pr-merge');
+    expect(matchBlock('gh api repos/owner/repo/pulls/18/update-branch -X PUT')?.id).toBe(
+      'raw-gh-pr-merge',
+    );
+    expect(
+      matchBlock('gh api repos/owner/repo/git/refs -f ref=refs/heads/x -f sha=deadbeef')?.id,
+    ).toBe('raw-gh-pr-merge');
+  });
+
+  it('raw-gh-pr-merge: read-only gh api stays permitted (#64)', () => {
+    // No write method and no request body → GET → permitted on both providers.
+    expect(matchBlock('gh api repos/owner/repo/pulls/18')).toBeNull();
+    expect(matchBlock('gh api repos/owner/repo/commits')).toBeNull();
+    // An explicit GET keeps -f/-F as read query params, not an implicit POST.
+    expect(matchBlock('gh api -X GET search/issues -f q=is:pr')).toBeNull();
+  });
+
   it('raw-gh-pr-merge: Codex block-list parity with the Claude `gh api` deny for publish vectors (#64)', () => {
     // The Claude pane denies all of these via the blanket `Bash(gh api*)` pattern; the Codex
-    // surface (matchBlock) must block the same publishing vectors so enforcement is equivalent.
+    // surface (matchBlock) must block the same write vectors so enforcement is equivalent. This
+    // list deliberately spans EVERY known publish/merge/ref-write shape, not just the inline
+    // GraphQL case, so it cannot silently pass while real parity is broken.
     const publishVectors = [
       `gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:"x"}){clientMutationId} }'`,
       `gh api graphql -f query='mutation{ createPullRequest(input:{repositoryId:"x"}){pullRequest{id}} }'`,
       `gh api graphql -f query='mutation{ enablePullRequestAutoMerge(input:{pullRequestId:"x"}){clientMutationId} }'`,
+      'gh api graphql -F query=@merge.graphql',
+      'gh api graphql -F query=@-',
+      'gh api graphql --input mutation.graphql',
       'gh api repos/owner/repo/pulls -f title=x -f head=co/x -f base=dev',
       'gh api repos/owner/repo/pulls/18/merge --method PUT',
+      'gh api repos/owner/repo/pulls/18/update-branch -X PUT',
+      'gh api repos/owner/repo/merges -f base=main -f head=co/x',
+      'gh api repos/owner/repo/git/refs/heads/main -X PATCH -f sha=deadbeef',
     ];
     for (const vector of publishVectors) {
       expect(matchBlock(vector)?.id, vector).toBe('raw-gh-pr-merge');
