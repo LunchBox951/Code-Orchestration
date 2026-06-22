@@ -45,6 +45,8 @@ import {
   defaultServeCoMcpPaths,
   hostLiveTransportRequired,
   hostLiveCaptureUsageSourceFactory,
+  looksLikeApprovalPrompt,
+  statusLineCandidates,
   makeGhCommandResolver,
   makeGhAuthTokenRunner,
   resolveAndApplyDaemonGithubAuth,
@@ -56,6 +58,11 @@ import {
   type IntervalScheduler,
 } from './host.js';
 import { DaemonBackedAgentRouter } from './agent-router.js';
+import type {
+  HostLiveCapture,
+  McpApprovalObservation,
+  ClaudeStatusLineObservation,
+} from './host-live-capture.js';
 import type { HostedIdentity } from '../live-session-host.js';
 
 const ESC = String.fromCharCode(0x1b);
@@ -534,6 +541,38 @@ describe('hostLiveCaptureUsageSourceFactory', () => {
   });
 });
 
+// ── #78/#67 capture heuristics: the crux of what the armed harness flags-and-records ──
+describe('looksLikeApprovalPrompt (#78 MCP-approval needle scan)', () => {
+  it.each([
+    'Allow this MCP tool? (y/n)',
+    'Approve the tool call? yes/no',
+    'Grant permission to run the tool? (y)',
+    'co wants to use a tool — approve? y/n',
+  ])('matches an interactive approval prompt: %s', (chunk) => {
+    expect(looksLikeApprovalPrompt(chunk)).toBe(true);
+  });
+
+  it.each([
+    '⠋ working on the task…',
+    'Wrote 42 lines to src/index.ts',
+    'allow-listing is enabled in the config', // "allow" but no tool/mcp/y-n confirmer
+    'the tool ran successfully', // "tool" but no approve/allow/permission verb
+  ])('does NOT match ordinary pane output: %s', (chunk) => {
+    expect(looksLikeApprovalPrompt(chunk)).toBe(false);
+  });
+});
+
+describe('statusLineCandidates (#67-adjacent usage status-line filter)', () => {
+  it('extracts non-empty lines carrying a usage/limit/context token', () => {
+    const chunk = '\r\n  Context: 42% · 5h limit resets in 2h  \r\nplain status text\r\n';
+    expect(statusLineCandidates(chunk)).toEqual(['Context: 42% · 5h limit resets in 2h']);
+  });
+
+  it('returns nothing for pane output with no usage tokens', () => {
+    expect(statusLineCandidates('just some\r\nordinary output\r\n')).toEqual([]);
+  });
+});
+
 // ── serveConductor wiring + the [host-live] handoff seams ─────────────────────
 describe('serveConductor — wires the full stack over injected seams (no real binary)', () => {
   it('builds, recovers, arms, and ticks over FakePty + a controllable scheduler', async () => {
@@ -750,6 +789,57 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     } finally {
       sessions.close();
     }
+  });
+
+  it('armed hostLiveCapture records an MCP-approval prompt + a Claude status line from the pane stream', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+
+    // An armed capture stub recording the two transcript-driven observations (#78 / #67-adjacent).
+    const approvals: McpApprovalObservation[] = [];
+    const statusLines: ClaudeStatusLineObservation[] = [];
+    const capture: HostLiveCapture = {
+      armed: true,
+      captureMcpApproval: (obs) => approvals.push(obs),
+      captureClaudeStatusLine: (obs) => statusLines.push(obs),
+      captureUsageSample: () => {},
+    };
+
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+      hostLiveCapture: capture,
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+    const ensureP = engine.ensureHosted(makeIdentity('impl-cap', projectId, cwd));
+    const pane = pty.panes[0]!;
+    pane.emit(CLAUDE_READY); // startup bytes — emitted before the transcript subscription is armed
+    await ensureP;
+
+    // An interactive MCP-approval prompt in the pane stream means the pre-grant did NOT suppress it.
+    pane.emit('Allow this MCP tool? (y/n)');
+    // A Claude usage status line as the sampler would parse it.
+    pane.emit('Context: 42% · 5h limit resets in 2h\r\n');
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]!.promptDetected).toBe(true);
+    expect(approvals[0]!.agent).toBe('impl-cap');
+    expect(approvals[0]!.provider).toBe('claude');
+    expect(approvals[0]!.paneExcerpt).toContain('Allow this MCP tool?');
+
+    expect(statusLines).toEqual([
+      { agent: 'impl-cap', rawLine: 'Context: 42% · 5h limit resets in 2h' },
+    ]);
+
+    await runner.stop();
   });
 
   it('stop() waits for pending router stop teardown before resolving', async () => {

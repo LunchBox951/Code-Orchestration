@@ -33,7 +33,9 @@ import {
   type MailStore,
   type ProjectId,
   type ProjectRegistry,
+  type ProviderUsageSource,
   type RosterStore,
+  type UsageSourceFactory,
 } from '@co/core';
 import {
   ConductorEngine,
@@ -43,7 +45,13 @@ import {
   type HostedPane,
   type RouteFailure,
 } from './engine.js';
-import type { HostedIdentity } from '../live-session-host.js';
+import type {
+  HostedIdentity,
+  HostedSession,
+  HostSessionOptions,
+  LiveSessionHost,
+} from '../live-session-host.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 // ── Scripted startup fixture: a claude session that is ready immediately (no interstitial). ──
 // ESC authored as a `\u` escape so the SOURCE holds no raw control byte (the C2 pristine-repo rule).
@@ -527,6 +535,68 @@ describe('ConductorEngine — ensure-hosted → bind → inject → ONE turn →
     const outcome = await turnP;
     expect(outcome.errored).toBe(false);
     expect(outcome.turnEnd?.idle).toBe(true);
+  });
+});
+
+// ── usage-source-factory plumbing: deps → engine → host.hostSession (host-live capture wiring) ──
+describe('ConductorEngine — threads usageSourceFactory into the per-session host', () => {
+  it('passes the deps usageSourceFactory through to host.hostSession (so a live run records usage)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+
+    // A sentinel factory the engine must thread, unchanged, into the per-session hostSession opts.
+    // Its `read` is never invoked here (the fake host only records the factory identity), so a
+    // rejecting stub is enough to satisfy the ProviderUsageSource shape.
+    const sentinelSource: ProviderUsageSource = {
+      read: () => Promise.reject(new Error('sentinel source must not be read in this test')),
+    };
+    const sentinelFactory: UsageSourceFactory = () => sentinelSource;
+
+    // A fake host that records the usageSourceFactory it was handed (proves the deps→engine hop).
+    let seenFactory: UsageSourceFactory | undefined;
+    const fakeHost: LiveSessionHost = {
+      hostSession: async (
+        _id: HostedIdentity,
+        _transport: Transport,
+        opts?: HostSessionOptions,
+      ): Promise<HostedSession> => {
+        seenFactory = opts?.usageSourceFactory;
+        return { close: async () => {} };
+      },
+    };
+
+    const { engine, pty } = makeEngine({ host: fakeHost, usageSourceFactory: sentinelFactory });
+    const ensureP = engine.ensureHosted(identity);
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await ensureP;
+
+    expect(seenFactory).toBe(sentinelFactory);
+  });
+
+  it('omits usageSourceFactory from hostSession opts when no factory is configured', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-y', projectId, cwd });
+
+    let sawKey = true;
+    const fakeHost: LiveSessionHost = {
+      hostSession: async (
+        _id: HostedIdentity,
+        _transport: Transport,
+        opts?: HostSessionOptions,
+      ): Promise<HostedSession> => {
+        sawKey = opts != null && 'usageSourceFactory' in opts;
+        return { close: async () => {} };
+      },
+    };
+
+    const { engine, pty } = makeEngine({ host: fakeHost }); // no usageSourceFactory dep
+    const ensureP = engine.ensureHosted(identity);
+    pty.panes[0]!.emit(CLAUDE_READY);
+    await ensureP;
+
+    expect(sawKey).toBe(false); // conditional spread adds nothing when the dep is absent
   });
 });
 

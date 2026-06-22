@@ -324,7 +324,7 @@ function errorMessage(error: unknown): string {
  * approval prompt? Best-effort needle scan (case-insensitive) — only used by the armed capture harness
  * to flag-and-record a real prompt for later inspection; never gates any control flow.
  */
-function looksLikeApprovalPrompt(chunk: string): boolean {
+export function looksLikeApprovalPrompt(chunk: string): boolean {
   const lower = chunk.toLowerCase();
   return (
     (lower.includes('approve') || lower.includes('allow') || lower.includes('permission')) &&
@@ -340,7 +340,7 @@ function looksLikeApprovalPrompt(chunk: string): boolean {
  * [host-live capture · #67-adjacent] Extract candidate status lines from a pane chunk — non-empty
  * lines mentioning a usage/limit/reset token the sampler would parse. Best-effort; armed-capture only.
  */
-function statusLineCandidates(chunk: string): string[] {
+export function statusLineCandidates(chunk: string): string[] {
   return chunk
     .split(/\r?\n/u)
     .map((line) => line.trim())

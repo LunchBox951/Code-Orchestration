@@ -830,9 +830,10 @@ export class ConductorEngine {
         const attempts = (this.kickoffInjectAttempts.get(kickoffKey) ?? 0) + 1;
         this.kickoffInjectAttempts.set(kickoffKey, attempts);
         if (attempts >= ConductorEngine.KICKOFF_INJECT_ATTEMPT_CAP) {
-          this.consumeOneShotKickoff(hosted.identity.projectId, mail);
-          this.surfaceCappedKickoffFailure(hosted, mail, attempts, error);
-          this.kickoffInjectAttempts.delete(kickoffKey);
+          // Emit the loud diagnostic FIRST so it cannot be lost to a mail-store throw in the cap
+          // cleanup below (Principle 9 — no silent drop). The retraction + counter delete + operator
+          // notice are best-effort: a store error there must NOT mask the turn's own outcome (it is
+          // still returned as `{ errored: true, error }`) nor abort the tick.
           console.error(
             `[ConductorEngine] RETRACTING one-shot kickoff for agent '${hosted.identity.agent}' in ` +
               `project '${hosted.identity.projectId}' after ${attempts} failed inject attempt(s) ` +
@@ -840,6 +841,18 @@ export class ConductorEngine {
               `a collapsed multiline composer paste whose preview bytes are not yet matched (#77). ` +
               `Freeing the warm pane instead of re-pasting every tick. Last error: ${errorMessage(error)}`,
           );
+          try {
+            this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+            this.surfaceCappedKickoffFailure(hosted, mail, attempts, error);
+          } catch (retractErr) {
+            // Best-effort cap cleanup must NOT mask the turn's own outcome (mirrors the finally below).
+            console.error(
+              `[ConductorEngine] cap-retraction for '${hosted.identity.agent}' hit a mail-store error; ` +
+                `original turn error preserved: ${errorMessage(retractErr)}`,
+            );
+          } finally {
+            this.kickoffInjectAttempts.delete(kickoffKey);
+          }
         }
       }
       return { errored: true, error };

@@ -851,3 +851,43 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     expect(kickoffOutstanding(projectId, kickoffB.seq)).toBe(false);
   });
 });
+
+// ── #77 cap-path resilience: a diagnostic mail-store throw must NOT mask the turn or abort the tick ──
+//
+// The cap branch in runOneTurn's catch handler does real mail-store I/O (consumeOneShotKickoff +
+// surfaceCappedKickoffFailure). If the operator-notice send throws, it must NOT propagate out of the
+// turn (which would replace the original turn error and reject the whole tick) and the kickoff must
+// still be retracted (loop-safety) — the diagnostic is best-effort (Principle 9: never break a turn).
+
+describe('#77 cap-path resilience — a diagnostic store throw is contained', () => {
+  it('still returns the ORIGINAL turn error (not the store error) when the cap notice throws', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Stub the diagnostic so the operator-notice send throws on the cap-th turn.
+    (engine as unknown as { surfaceCappedKickoffFailure: () => void }).surfaceCappedKickoffFailure =
+      () => {
+        throw new Error('mail store unavailable');
+      };
+
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 1
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 2
+    const finalTurn = await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 3 == cap
+
+    // The outcome is the REAL turn error (the inject echo-verify throw), NOT the stubbed store error.
+    expect(finalTurn.errored).toBe(true);
+    expect(finalTurn.error).toBeInstanceOf(Error);
+    expect((finalTurn.error as Error).message).not.toMatch(/mail store unavailable/);
+    expect((finalTurn.error as Error).message).toMatch(/multiline|echo/i);
+    // Loop-safety still holds: the kickoff was retracted BEFORE the throwing notice ran.
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    // The pane is freed, not killed.
+    expect(engine.isHosted(projectId, 'impl-cx')).toBe(true);
+  });
+});

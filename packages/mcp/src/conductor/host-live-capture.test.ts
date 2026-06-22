@@ -7,7 +7,7 @@
  * The sink is injected so the gating/shaping is proven WITHOUT real I/O or a live binary.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -177,6 +177,20 @@ describe('openHostLiveCapture — rejects unsafe or unwritable capture paths', (
     expect(capture.armed).toBe(false);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('is not writable');
+  });
+
+  it('creates the capture dir owner-only (0o700) and the capture file 0o600 — captured bytes are sensitive', () => {
+    const root = mkdtempSync(join(tmpdir(), 'co-capture-perms-'));
+    tempDirs.push(root);
+    const dir = join(root, 'captures');
+    const sink = fileCaptureSink(dir);
+
+    sink.append(CAPTURE_FILES.pasteEcho, { chunk: 'secret-ish bytes' });
+
+    // The append actually landed, and the perms restrict the dir + file to the owner.
+    expect(readFileSync(join(dir, CAPTURE_FILES.pasteEcho), 'utf8')).toContain('secret-ish bytes');
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(join(dir, CAPTURE_FILES.pasteEcho)).mode & 0o777).toBe(0o600);
   });
 
   it('reports append failures from the file sink once instead of silently swallowing them', () => {

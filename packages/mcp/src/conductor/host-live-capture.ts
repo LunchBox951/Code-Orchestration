@@ -23,9 +23,9 @@
  * without a live binary. NEVER throws into the caller (Principle 9 stays the daemon's; capture is
  * diagnostic and must never break a turn).
  */
-import { appendFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { appendFileSync, closeSync, mkdirSync, openSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import type { InjectMailOptions } from '@co/core';
+import type { InjectMailOptions, Provider } from '@co/core';
 
 /** The env var that arms the harness; its value is the capture output directory. */
 export const CO_HOST_LIVE_CAPTURE_ENV = 'CO_HOST_LIVE_CAPTURE';
@@ -41,7 +41,7 @@ export const CAPTURE_FILES = {
 /** One MCP-tool approval observation (#78): did a prompt appear, was it auto-approved? */
 export interface McpApprovalObservation {
   readonly agent: string;
-  readonly provider: string;
+  readonly provider: Provider;
   readonly tool: string;
   /** Raw pane text around the tool call (where a prompt would render). */
   readonly paneExcerpt: string;
@@ -57,7 +57,7 @@ export interface ClaudeStatusLineObservation {
 
 /** One usage sample observation: the snapshot the dispatcher placed against. */
 export interface UsageSampleObservation {
-  readonly provider: string;
+  readonly provider: Provider;
   readonly account: string;
   readonly source: string;
   readonly raw: unknown;
@@ -121,13 +121,22 @@ export function fileCaptureSink(
     append: (file, record) => {
       try {
         if (!ensuredDir) {
-          mkdirSync(dir, { recursive: true });
+          // 0o700 — captured pane bytes can include secrets, so the capture tree must not be
+          // group/other-readable on a multi-user host (see docs/host-proof.md).
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
           ensuredDir = true;
         }
-        appendFileSync(
-          join(dir, file),
-          JSON.stringify({ at: new Date().toISOString(), ...asObject(record) }) + '\n',
-        );
+        // Open with an explicit 0o600 create-mode and append through the fd: appendFileSync's mode
+        // only applies on create and is masked by umask, so the fd form is the robust restriction.
+        const fd = openSync(join(dir, file), 'a', 0o600);
+        try {
+          appendFileSync(
+            fd,
+            JSON.stringify({ at: new Date().toISOString(), ...asObject(record) }) + '\n',
+          );
+        } finally {
+          closeSync(fd);
+        }
       } catch (cause) {
         reportWriteFailure(cause);
       }
@@ -219,7 +228,7 @@ export function openHostLiveCapture(
 }
 
 function probeCaptureDir(dir: string): void {
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 }); // captured bytes may include secrets — keep it owner-only
   const probe = join(dir, '.co-host-live-capture-probe');
   appendFileSync(probe, '');
   try {
