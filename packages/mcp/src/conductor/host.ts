@@ -1187,13 +1187,16 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
         'one project’s live set.',
     );
   }
+  let repoCwd: string;
   const registry = openRegistry();
   try {
-    if (registry.pathFor(projectId) == null) {
+    const registeredPath = registry.pathFor(projectId);
+    if (registeredPath == null) {
       throw new Error(
         `co-mcp serve: unknown project id '${projectId}'. Pass the registered project id for this repo.`,
       );
     }
+    repoCwd = registeredPath;
   } finally {
     registry.close();
   }
@@ -1216,7 +1219,7 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   // real run records the codex paste-preview bytes / MCP-approval prompt / status-line / usage sample
   // that finalize the PLACEHOLDER constants. INERT (zero overhead) when the env is unset.
   const hostLiveCapture = openHostLiveCapture(process.env, undefined, {
-    forbiddenRoot: process.cwd(),
+    forbiddenRoot: repoCwd,
     onError: (error) => console.error(`[co-mcp serve] ${error.message}`),
   });
   if (hostLiveCapture.armed) {

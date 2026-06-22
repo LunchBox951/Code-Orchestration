@@ -62,6 +62,7 @@ const ESC = String.fromCharCode(0x1b);
 const CLAUDE_READY = ESC + '[2J' + ESC + '[H' + '╭─ Welcome ─╮\r\n❯ \r\n  ? for shortcuts\r\n';
 
 const ORIGINAL_ENV = process.env;
+const ORIGINAL_CWD = process.cwd();
 let dataDirs: string[] = [];
 let engines: ConductorEngine[] = [];
 let registries: ProjectRegistry[] = [];
@@ -95,6 +96,7 @@ afterEach(async () => {
     }
   }
   process.env = ORIGINAL_ENV;
+  process.chdir(ORIGINAL_CWD);
   for (const dir of dataDirs) {
     try {
       rmSync(dir, { recursive: true, force: true });
@@ -939,6 +941,34 @@ describe('serveConductor — wires the full stack over injected seams (no real b
 
   it('runServeConductor fails loud on an unknown project id', async () => {
     await expect(runServeConductor(['missing-project-id'])).rejects.toThrow(/unknown project id/i);
+  });
+
+  it('runServeConductor rejects capture paths inside the registered repo even when launched elsewhere', async () => {
+    const { projectId, cwd } = makeProject();
+    const outsideCwd = mkdtempSync(join(tmpdir(), 'co-host-outside-cwd-'));
+    dataDirs.push(outsideCwd);
+    process.chdir(outsideCwd);
+    process.env.CO_HOST_LIVE_CAPTURE = join(cwd, 'captures');
+    process.env.CO_CLI_COMMAND = 'relative-co-cli'; // force a later launch-path error before a runner starts
+    const errors: string[] = [];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map((arg) => String(arg)).join(' '));
+    });
+    try {
+      await expect(runServeConductor([projectId])).rejects.toThrow(
+        /CO_CLI_COMMAND must be absolute/i,
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    expect(errors.some((msg) => msg.includes('GitHub auth:'))).toBe(true);
+    expect(
+      errors.some(
+        (msg) => msg.includes('refusing to write capture evidence inside') && msg.includes(cwd),
+      ),
+    ).toBe(true);
+    expect(errors.some((msg) => msg.includes('host-live capture: ARMED'))).toBe(false);
   });
 
   describe('GitHub auth provisioning (RC-2/3/4)', () => {
