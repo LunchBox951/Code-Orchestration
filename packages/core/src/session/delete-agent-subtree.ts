@@ -6,11 +6,14 @@
  *      INCLUDING the root last.
  *   2. Per agent:
  *      a. Find its live worktree (`!w.removed && w.agent === agentId`).
- *      b. If merged: `removeWorktree` + `git branch -d`.
+ *      b. If merged AND CLEAN: `removeWorktree` + `git branch -d`.
+ *         If merged BUT DIRTY (#76 — `isBranchMerged` is blind to working-dir dirtiness): snapshot +
+ *         `removeWorktree --force` + archive (branch ref KEPT) — git refuses a non-force remove of a
+ *         dirty sandbox, so this archive-then-force path preserves the handoff docs instead of wedging.
  *         If unmerged: (snapshot if dirty) + `removeWorktree --force` + archive — the branch ref is
  *         KEPT (no `git branch -D`) so the snapshot commit stays reachable until expiry; the reaper /
  *         `purgeArchive` delete it after the TTL. ORDER IS LOAD-BEARING: removeWorktree BEFORE any
- *         (merged-path) `git branch -d`.
+ *         (clean-merged-path) `git branch -d`.
  *      c. End the session if still active.
  *      d. Tombstone outstanding actionable mail addressed to the agent, plus non-review actionables
  *         sent by the agent to any surviving recipient.
@@ -359,23 +362,84 @@ export function deleteAgentSubtree(
                 }
               }
             } else {
-              // Merged: clean remove worktree + safe branch delete.
-              if (!wt.removed) {
-                try {
-                  worktrees.removeWorktree(wt.branch, { repoCwd, gitExec });
-                } catch (e) {
-                  recordAgentError(e);
-                }
-              }
+              // Merged BY REF-ANCESTRY (`isBranchMerged` only checks `merge-base --is-ancestor`; it is
+              // blind to working-dir dirtiness). A coordinator branch with no commits past base classifies
+              // MERGED even though its sandbox still holds uncommitted/untracked handoff docs (#76). Two
+              // sub-cases:
+              //   - DIRTY: a plain `git worktree remove` (no --force) is REFUSED by git ("contains modified
+              //     or untracked files"), wedging teardown. Preserve the work first: snapshot the dirty tree
+              //     onto the branch, force-remove the sandbox, and route through the SAME archive lifecycle
+              //     the unmerged path uses (appendRecord + KEEP the branch ref) so Restore has a ref and the
+              //     snapshot commit stays reachable until the reaper purges it at TTL. A snapshotted branch is
+              //     no longer trivially merged and carries novel work, so it must NOT be `git branch -d`'d.
+              //   - CLEAN: nothing to preserve — the historical fast path. Plain remove + safe `git branch -d`.
+              // The finder (`!w.removed || archive.getRecord == null`) only re-selects an already-removed
+              // worktree here when its archive write has NOT yet landed; reaching the merged arm with
+              // `wt.removed` set therefore means a prior pass force-removed-then-failed-to-archive — that
+              // residue belongs to the archive lifecycle (self-heal the missing record), never `branch -d`.
+              const needsArchive = wt.removed || isWorktreeDirty(wt.path, gitReader);
 
-              if (!agentTeardownFailed) {
-                try {
-                  gitExec(repoCwd, ['branch', '-d', wt.branch]);
-                  // Result-honesty: only record the branch as deleted once `git branch -d` actually
-                  // returned (mirrors how the unmerged path pushes `archivedBranches` inside its try).
-                  deletedBranches.push(wt.branch);
-                } catch (e) {
-                  if (!isMissingBranchDeleteError(e, wt.branch)) recordAgentError(e);
+              if (needsArchive) {
+                // Mirror the unmerged dirty path: snapshot → force-remove → archive (branch ref kept).
+                // Each step is gated on `!wt.removed` (skip work a prior pass already did) so a retry that
+                // only needs the missing archive record self-heals without re-snapshotting/-removing.
+                if (!wt.removed) {
+                  try {
+                    if (isWorktreeDirty(wt.path, gitReader)) {
+                      snapshotDirtyWorktree(
+                        wt.path,
+                        'co: archive snapshot before delete',
+                        gitExec,
+                        gitReader,
+                      );
+                    }
+                  } catch (e) {
+                    recordAgentError(e);
+                  }
+                }
+
+                if (!agentTeardownFailed && !wt.removed) {
+                  try {
+                    worktrees.removeWorktree(wt.branch, { repoCwd, gitExec, force: true });
+                  } catch (e) {
+                    recordAgentError(e);
+                  }
+                }
+
+                if (!agentTeardownFailed) {
+                  try {
+                    archive.appendRecord({
+                      id: wt.branch,
+                      name: agent.name ?? agentId,
+                      branch: wt.branch,
+                      baseRef: wt.baseRef,
+                      deletedAt: nowMs,
+                      expiresAt: nowMs + archiveTtlMs,
+                    });
+                    archivedBranches.push(wt.branch);
+                  } catch (e) {
+                    recordAgentError(e);
+                  }
+                }
+              } else {
+                // Clean + merged: plain remove worktree + safe branch delete.
+                if (!wt.removed) {
+                  try {
+                    worktrees.removeWorktree(wt.branch, { repoCwd, gitExec });
+                  } catch (e) {
+                    recordAgentError(e);
+                  }
+                }
+
+                if (!agentTeardownFailed) {
+                  try {
+                    gitExec(repoCwd, ['branch', '-d', wt.branch]);
+                    // Result-honesty: only record the branch as deleted once `git branch -d` actually
+                    // returned (mirrors how the unmerged path pushes `archivedBranches` inside its try).
+                    deletedBranches.push(wt.branch);
+                  } catch (e) {
+                    if (!isMissingBranchDeleteError(e, wt.branch)) recordAgentError(e);
+                  }
                 }
               }
             }

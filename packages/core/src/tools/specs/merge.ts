@@ -18,6 +18,7 @@ import {
   detectCurrentBranchTarget,
   resolveRefSha,
 } from '../../worktrees/detect-base.js';
+import { isWorktreeDirty, snapshotDirtyWorktree } from '../../worktrees/branch-state.js';
 import { resolveRepoMode } from '../../worktrees/repo-mode.js';
 import type { ToolSpec } from '../registry.js';
 import { assertToolCallerRole } from '../caller-auth.js';
@@ -196,6 +197,20 @@ function resolveMergeBaseSha(repoCwd: string, into: string, branch: string): str
 }
 
 /**
+ * A defensive `isWorktreeDirty` for the merge-time teardown closure (#76): returns false (rather than
+ * throwing) when the sandbox dir is gone/unreadable, so a half-torn-down or never-materialized sandbox
+ * falls through to the plain remove instead of becoming a new teardown failure. A genuinely
+ * present-but-dirty tree still reports dirty so its residue is snapshotted before a force-remove.
+ */
+function probeWorktreeDirty(sandboxPath: string): boolean {
+  try {
+    return isWorktreeDirty(sandboxPath);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * `co_merge` (AC-L5-1): the coordinator-or-lead verb that integrates a reviewed branch — GATED on a recorded
  * PASS. It refuses unless `ctx.reviews.getVerdict(target, branch)` is a recorded `PASS` (absent or
  * `ISSUES` ⇒ refuse, loud), except for the explicit `@operator` audited override path which requires
@@ -350,8 +365,24 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
       ...(operatorOverride ? {} : { parentResolver: roleParentResolver(ctx.roster) }),
       // Merge-time teardown trigger (AC-L5-7): the merge gate tears the merged branch's sandbox down
       // AFTER the merge is recorded + the slot released — never before (the review-finalize cure).
+      // #76: the just-merged sandbox can still hold uncommitted/untracked working files (handoff docs,
+      // build artifacts). A plain `git worktree remove` (no --force) is REFUSED by git on a dirty tree,
+      // so the teardown would fail and strand the sandbox. The branch's reviewed work is already merged
+      // into `into`, so snapshot any residue onto the branch first (lose nothing), then force-remove.
+      // The branch ref is left intact for the post-merge reaper. The dirty PROBE is defensive: if the
+      // sandbox dir is already gone/unreadable (a half-torn-down or never-materialized sandbox), fall
+      // through to the plain remove, which tolerates an absent dir idempotently — the snapshot path is a
+      // safety net for a present-but-dirty tree, never a new failure mode for an absent one.
       teardown: {
-        teardown: (branch) => void worktrees.removeWorktree(branch, { repoCwd }),
+        teardown: (branch): void => {
+          const wt = worktrees.getWorktree(branch);
+          if (wt != null && !wt.removed && probeWorktreeDirty(wt.path)) {
+            snapshotDirtyWorktree(wt.path, 'co: merge-time teardown snapshot before remove');
+            worktrees.removeWorktree(branch, { repoCwd, force: true });
+            return;
+          }
+          worktrees.removeWorktree(branch, { repoCwd });
+        },
       },
     });
     const result = gate.merge({

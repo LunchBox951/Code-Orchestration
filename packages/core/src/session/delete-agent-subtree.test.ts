@@ -84,8 +84,18 @@ function makeFakeRoster(agents: AgentRecord[]): RosterStore & { removed: string[
   };
 }
 
+/**
+ * @param dirtyPaths Sandbox paths whose dir holds uncommitted/untracked files. When `removeWorktree`
+ *   is asked to remove a worktree at one of these paths WITHOUT `force`, it THROWS — faithfully
+ *   modeling git's real refusal ("contains modified or untracked files, use --force to delete it").
+ *   This is the seam that lets the suite catch #76: the old fake recorded the branch unconditionally,
+ *   so a merged-but-dirty worktree's non-force removal "passed" in the test while failing in reality.
+ *   Caller must DROP a path from this set once its snapshot has committed the dirt away (so the
+ *   subsequent retry/clean remove no longer throws), mirroring git's post-snapshot clean tree.
+ */
 function makeFakeWorktrees(
   worktrees: WorktreeRecord[],
+  dirtyPaths: Set<string> = new Set(),
 ): WorktreeStore & { removedBranches: string[]; removeForce: string[] } {
   const wts = [...worktrees];
   const removedSet = new Set(wts.filter((w) => w.removed).map((w) => w.branch));
@@ -118,6 +128,13 @@ function makeFakeWorktrees(
     removeWorktree(branch: string, deps: RemoveWorktreeDeps): WorktreeRecord {
       const wt = wts.find((w) => w.branch === branch);
       if (!wt) throw new Error(`removeWorktree: branch '${branch}' not found`);
+      // Model git's real refusal: a dirty worktree cannot be removed without --force.
+      if (deps.force !== true && dirtyPaths.has(wt.path)) {
+        throw new Error(
+          `co worktrees: \`git worktree remove ${wt.path}\` failed: '${wt.path}' contains ` +
+            `modified or untracked files, use --force to delete it`,
+        );
+      }
       removedSet.add(branch);
       removedBranches.push(branch);
       if (deps.force === true) removeForce.push(branch);
@@ -404,6 +421,120 @@ describe('deleteAgentSubtree', () => {
     expect(calls.some((c) => c[1] === 'branch' && c[2] === '-D')).toBe(false);
     // archive store should be empty
     expect(archive.records).toHaveLength(0);
+  });
+
+  it('archives a merged-BUT-DIRTY worktree (snapshot + force-remove + keep branch) instead of wedging (#76)', () => {
+    // The #76 regression. A coordinator branch typically has no commits past base, so isBranchMerged()
+    // (which only checks `merge-base --is-ancestor`, blind to working-dir dirtiness) classifies it
+    // MERGED → it took the merged arm, which removed the worktree with NO --force. But the sandbox holds
+    // uncommitted/untracked handoff docs, so git's real `git worktree remove` REFUSES without --force —
+    // wedging teardown. The fake's removeWorktree now models that refusal (throws on a dirty path with no
+    // force), so this test FAILS against the old merged arm and PASSES with the archive-then-force fix.
+    const roster = makeFakeRoster([
+      {
+        agentId: 'coord-x',
+        role: 'coordinator',
+        parent: '@operator',
+        registeredTs: 1,
+        name: 'coord',
+      },
+    ]);
+    const sandboxPath = '/data/worktrees/co/coord-x';
+    const wt = worktree('co/coord-x', 'coord-x', 'main', sandboxPath);
+    const dirty = new Set([sandboxPath]);
+    // The store refuses a non-force remove of the dirty sandbox (git's real behavior); the reader
+    // reports the same path dirty so the fix's isWorktreeDirty branch fires.
+    const worktreeStore = makeFakeWorktrees([wt], dirty);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec, calls } = makeGitExecSpy();
+    // co/coord-x is MERGED by ref-ancestry, but its sandbox is DIRTY.
+    const gitReader = makeGitReader({
+      mergedBranches: new Set(['co/coord-x']),
+      dirtyPaths: new Set([sandboxPath]),
+    });
+    const NOW = 10_000;
+
+    const result = deleteAgentSubtree('proj', 'coord-x', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: NOW,
+      gitExec,
+      gitReader,
+    });
+
+    // Teardown COMPLETES (no AggregateError): the agent is removed.
+    expect(result.removed).toEqual(['coord-x']);
+    expect(roster.getAgent('coord-x')).toBeUndefined();
+    // The dirty work was snapshotted (add -A then commit -s) BEFORE removal — nothing is lost.
+    expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'add' && c[2] === '-A')).toBe(true);
+    expect(calls.some((c) => c[0] === sandboxPath && c[1] === 'commit')).toBe(true);
+    // The worktree was FORCE-removed (the only way git removes a dirty tree).
+    expect(worktreeStore.removedBranches).toContain('co/coord-x');
+    expect(worktreeStore.removeForce).toContain('co/coord-x');
+    // It is routed through the archive lifecycle (NOT the clean `branch -d` path): a record is appended
+    // and the branch ref is KEPT so the snapshot stays reachable + Restore works.
+    expect(result.archivedBranches).toContain('co/coord-x');
+    expect(result.deletedBranches).toHaveLength(0);
+    expect(archive.records).toHaveLength(1);
+    expect(archive.records[0]!.id).toBe('co/coord-x');
+    expect(archive.records[0]!.branch).toBe('co/coord-x');
+    expect(archive.records[0]!.name).toBe('coord');
+    expect(archive.records[0]!.deletedAt).toBe(NOW);
+    expect(archive.records[0]!.expiresAt).toBe(NOW + ARCHIVE_TTL_MS);
+    // The branch ref must SURVIVE — a snapshotted branch holds novel work, so NEITHER `branch -d` NOR
+    // `branch -D` is issued for it at delete time (the reaper / purgeArchive delete it after TTL).
+    const deletesBranch = (flag: string): boolean =>
+      calls.some((c) => c[1] === 'branch' && c[2] === flag && c[3] === 'co/coord-x');
+    expect(deletesBranch('-d')).toBe(false);
+    expect(deletesBranch('-D')).toBe(false);
+  });
+
+  it('still uses the clean `branch -d` fast path for a merged-AND-clean worktree (#76 no regression)', () => {
+    // Guard the other half of the #76 split: a genuinely clean+merged worktree must keep the historical
+    // plain-remove + `git branch -d` behavior (no snapshot, no archive).
+    const roster = makeFakeRoster([
+      { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+    ]);
+    const sandboxPath = '/data/worktrees/co/coord-x';
+    const wt = worktree('co/coord-x', 'coord-x', 'main', sandboxPath);
+    // No dirty paths: the store does NOT refuse a non-force remove.
+    const worktreeStore = makeFakeWorktrees([wt]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec, calls } = makeGitExecSpy();
+    // Merged AND clean (sandbox path not in dirtyPaths).
+    const gitReader = makeGitReader({
+      mergedBranches: new Set(['co/coord-x']),
+      dirtyPaths: new Set(),
+    });
+
+    const result = deleteAgentSubtree('proj', 'coord-x', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    expect(result.deletedBranches).toContain('co/coord-x');
+    expect(result.archivedBranches).toHaveLength(0);
+    expect(archive.records).toHaveLength(0);
+    // Clean path: a plain (non-force) remove, no snapshot, then `git branch -d`.
+    expect(worktreeStore.removedBranches).toContain('co/coord-x');
+    expect(worktreeStore.removeForce).not.toContain('co/coord-x');
+    expect(calls.some((c) => c[1] === 'add' && c[2] === '-A')).toBe(false);
+    expect(calls.some((c) => c[1] === 'commit')).toBe(false);
+    const deletesBranch = calls.some(
+      (c) => c[1] === 'branch' && c[2] === '-d' && c[3] === 'co/coord-x',
+    );
+    expect(deletesBranch).toBe(true);
   });
 
   it('does NOT record a merged branch as deleted when its `git branch -d` throws (result-honesty)', () => {
