@@ -626,6 +626,50 @@ describe('ConductorEngine — transient-overload backoff (#68)', () => {
   });
 });
 
+// ── #73: concurrent-launch + mid-turn release safety ───────────────────────────────────────────
+describe('ConductorEngine — concurrent-launch + mid-turn release safety (#73)', () => {
+  it('collapses concurrent ensureHosted for one agent to a single launch (no double-spawn)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+
+    const p1 = engine.ensureHosted(identity);
+    const p2 = engine.ensureHosted(identity); // shares the in-flight launch — must NOT spawn a 2nd pane
+    expect(pty.panes.length).toBe(1);
+    pty.panes[0]!.emit(CLAUDE_READY);
+    const [h1, h2] = await Promise.all([p1, p2]);
+    expect(h1).toBe(h2); // same hosted handle
+    expect(pty.panes.length).toBe(1); // still exactly one live pane
+  });
+
+  it('defers the pane kill to the turn boundary when release() arrives mid-turn', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty, clock, qw } = makeEngine();
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    let killed = false;
+    const origKill = pane.kill.bind(pane);
+    (pane as unknown as { kill: () => void }).kill = () => {
+      killed = true;
+      origKill();
+    };
+
+    const item = outstandingItem(projectId, 'impl-x');
+    const turnP = engine.runOneTurn(hosted, item);
+    await tick(); // turn is in flight (injectMail awaiting echo) → turnInFlight=true
+    await engine.release(projectId, 'impl-x'); // deferred — must NOT kill the pane mid-turn
+    expect(killed).toBe(false);
+
+    await driveTurnToIdle(pane, item, clock, qw);
+    await turnP; // the turn's finally finalizes the deferred release
+    expect(killed).toBe(true); // killed only after the turn yielded
+  });
+});
+
 // ── completion stays verb-keyed (turn-end ≠ work-end) ──────────────────────────
 describe('ConductorEngine — turn-end is a liveness signal only; completion stays verb-keyed', () => {
   it('reflects a co_finish verb in the trace but STILL yields on byte-quiescence (never on the verb)', async () => {

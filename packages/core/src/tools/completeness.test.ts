@@ -102,6 +102,24 @@ describe('AC-L2-3 — completeness gate: RED for a stub/partial tool', () => {
     expect(violations.every((v) => v.tool === BOGUS)).toBe(true);
   });
 
+  it('(d) a valid-ZodObject schema that cannot project to JSON Schema is flagged not mountable', () => {
+    // The shape check passes (it IS a ZodObject), but z.toJSONSchema() — what the live MCP tools/list
+    // runs — throws on a Map. Exercising the projection in the gate catches it here instead of letting
+    // the tool mount and then break the WHOLE co_* surface at list time (F1: zero tools listable).
+    const violations = checkToolCompleteness(
+      realPlus(
+        bogus({
+          inputSchema: z.object({
+            m: z.map(z.string(), z.string()).describe('an unprojectable map'),
+          }),
+        }),
+      ),
+    );
+    const forBogus = violations.filter((v) => v.tool === BOGUS);
+    expect(forBogus.some((v) => v.reason.startsWith('not mountable'))).toBe(true);
+    expect(violations.every((v) => v.tool === BOGUS)).toBe(true);
+  });
+
   it('(a) a tool with an undescribed input field is flagged for self-describing input', () => {
     const violations = checkToolCompleteness(
       realPlus(bogus({ inputSchema: z.object({ x: z.number() }) })), // ← field lacks .describe()

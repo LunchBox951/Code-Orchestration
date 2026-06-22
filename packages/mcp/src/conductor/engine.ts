@@ -379,6 +379,23 @@ export class ConductorEngine {
    */
   private readonly overloadBackoff = new Map<string, { nextRewakeAt: number; attempt: number }>();
   /**
+   * Per-agent in-flight launch latch (#73), keyed `${projectId}:${agent}`. Holds the pending
+   * {@link ensureHosted} promise so a concurrent caller (a daemon tick + an operator rewake) shares
+   * the one launch instead of racing the check-then-act MNR-5 guard into a duplicate live pane.
+   */
+  private readonly launching = new Map<string, Promise<HostedPane>>();
+  /**
+   * Deferred-release state (#73), keyed `${projectId}:${agent}`. When {@link release} is called while
+   * a turn is in flight, the agent is removed from the live maps immediately (never re-selected) but
+   * the pane kill + session close are deferred to the turn boundary, so the in-flight inject/observe
+   * completes against a LIVE pane (MNR-2 — its mail stays outstanding for clean re-injection rather
+   * than being torn out from under a dead pane).
+   */
+  private readonly releasePending = new Map<
+    string,
+    { hosted: HostedPane; options: { readonly onPaneKillError?: (error: unknown) => void } }
+  >();
+  /**
    * GLOBAL transcript listeners (Stage 12 C-P1), fired with `(projectId, agent, chunk)` on every new
    * pane chunk from any hosted agent — the fan-out the operator-IPC live push subscribes to. A plain
    * subscriber set; never an agent surface (Principle D4 — the Conductor registers zero MCP tools).
@@ -549,6 +566,25 @@ export class ConductorEngine {
    *          binding fails (fail-loud, Principle 9 — `driveToReady` rejects on a pty exit).
    */
   async ensureHosted(identity: HostedIdentity, spec?: SpawnSpec): Promise<HostedPane> {
+    // Per-agent in-flight launch latch (#73). ensureHosted is reached from runCycle (getHosted ??
+    // ensureHosted) AND from operator-IPC (rewake), which interleave with the daemon tick. The MNR-5
+    // `this.hosted.has` guard is check-then-act: between the check and the post-startup
+    // `this.hosted.set`, a second concurrent call passes the guard and spawns a SECOND live pane (a
+    // duplicate provider process + co-mcp server) for one agent. Collapse concurrent launches to a
+    // single in-flight promise so a second caller shares the first launch instead of double-spawning.
+    const agentKey = ConductorEngine.agentKey(identity.projectId, identity.agent);
+    const inFlight = this.launching.get(agentKey);
+    if (inFlight != null) return inFlight;
+    const launch = this.doEnsureHosted(identity, spec);
+    this.launching.set(agentKey, launch);
+    try {
+      return await launch;
+    } finally {
+      this.launching.delete(agentKey);
+    }
+  }
+
+  private async doEnsureHosted(identity: HostedIdentity, spec?: SpawnSpec): Promise<HostedPane> {
     const agentKey = ConductorEngine.agentKey(identity.projectId, identity.agent);
     const paneKey = ConductorEngine.paneKey(identity.projectId, identity.pane);
     if (this.hosted.has(agentKey)) {
@@ -722,6 +758,19 @@ export class ConductorEngine {
       return { errored: true, error };
     } finally {
       this.turnInFlight.set(agentKey, false); // P6: turn yielded (success or error) — reset flag
+      // #73: a release() that arrived mid-turn was deferred — finalize it now that the pane is idle,
+      // so the kill + session close never tore the pane out from under this turn. Best-effort: a
+      // finalize failure must not mask the turn's own outcome.
+      const pendingRelease = this.releasePending.get(agentKey);
+      if (pendingRelease != null) {
+        this.releasePending.delete(agentKey);
+        this.dropExitTracking(agentKey);
+        try {
+          await this.finalizeRelease(pendingRelease.hosted, pendingRelease.options);
+        } catch {
+          /* deferred teardown is best-effort; the turn result stands */
+        }
+      }
     }
   }
 
@@ -1122,9 +1171,25 @@ export class ConductorEngine {
     const agentKey = ConductorEngine.agentKey(projectId, agent);
     const hosted = this.hosted.get(agentKey);
     if (hosted == null) return;
+    // Remove from the live maps NOW so the agent is never re-selected. If a turn is in flight, defer
+    // the pane kill + session close to the turn boundary (#73): killing mid-turn would tear the pane
+    // out from under an in-flight inject/observe, so the in-flight turn must finish against a live
+    // pane (it then yields with its mail still outstanding for clean re-injection — MNR-2).
     this.hosted.delete(agentKey);
     this.hostedPanes.delete(ConductorEngine.paneKey(projectId, hosted.identity.pane));
+    if (this.turnInFlight.get(agentKey) === true) {
+      this.releasePending.set(agentKey, { hosted, options });
+      return; // runOneTurn's finally finalizes once the turn yields
+    }
     this.dropExitTracking(agentKey);
+    await this.finalizeRelease(hosted, options);
+  }
+
+  /** Kill the pane (best-effort) + close its session. Shared by immediate and deferred release. */
+  private async finalizeRelease(
+    hosted: HostedPane,
+    options: { readonly onPaneKillError?: (error: unknown) => void },
+  ): Promise<void> {
     try {
       hosted.pane.kill();
     } catch (error) {
@@ -1143,7 +1208,20 @@ export class ConductorEngine {
     const all = [...this.hosted.entries()];
     this.hosted.clear();
     this.hostedPanes.clear();
+    // #73: also drain any deferred releases — panes removed from `hosted` by a mid-turn release()
+    // whose finalize is still pending. They are no longer in `hosted`, so the loop below would miss
+    // them; kill them here so teardown leaves no live pane behind.
+    const deferred = [...this.releasePending.values()];
+    this.releasePending.clear();
+    this.launching.clear();
     for (const [agentKey] of all) this.dropExitTracking(agentKey);
+    for (const { hosted, options } of deferred) {
+      try {
+        await this.finalizeRelease(hosted, options);
+      } catch {
+        /* best-effort teardown */
+      }
+    }
     for (const [, hosted] of all) {
       try {
         hosted.pane.kill();

@@ -1,7 +1,12 @@
 import { z } from 'zod';
 import type { ToolRegistry } from './registry.js';
 import { notImplemented } from './registry.js';
-import { toolInputShape, toolOutputShape } from './schema.js';
+import {
+  toolInputShape,
+  toolOutputShape,
+  toolInputJsonSchema,
+  toolOutputJsonSchema,
+} from './schema.js';
 
 /**
  * The L2 completeness gate (AC-L2-3; MC-1, Principle 4 — declared-not-stubbed). It is the heir to
@@ -119,14 +124,21 @@ export function checkToolCompleteness(registry: ToolRegistry): ToolViolation[] {
     }
 
     // (d) reachable / mountable — the MCP-facing input/output shapes resolve via core's schema.ts
-    // helpers (loud-fail on a non-ZodObject), so the adapter can mount the tool.
+    // helpers (loud-fail on a non-ZodObject), AND project to JSON Schema. The live MCP `tools/list`
+    // serializes every tool's schema with `z.toJSONSchema()`; a ZodObject that is valid as a shape
+    // but unsupported by that projection (e.g. an unprojectable construct) would pass the shape check
+    // yet break the whole tool surface at mount time. Exercising the projection here catches it at the
+    // completeness gate instead — directly protecting the F1 bring-up (a tools/list that throws leaves
+    // zero co_* tools mounted).
     try {
       toolInputShape(spec);
+      toolInputJsonSchema(spec);
     } catch (err) {
       violations.push({ tool, reason: `not mountable: ${messageOf(err)}` });
     }
     try {
       toolOutputShape(spec);
+      toolOutputJsonSchema(spec);
     } catch (err) {
       violations.push({ tool, reason: `not mountable: ${messageOf(err)}` });
     }
