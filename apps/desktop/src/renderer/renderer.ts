@@ -551,13 +551,13 @@ function renderLimitsPopover(state: LimitsCostState): void {
       const bars = g.rows
         .map((row) => {
           if (row.headroom.kind === 'unknown') {
-            return `<div class="bar-row"><div class="bar-meta"><span class="lbl">${esc(row.windowKind)}</span><span class="val" style="color:var(--text-faint)">no data</span></div></div>`;
+            return `<div class="bar-row"><div class="bar-meta"><span class="lbl">${esc(row.displayLabel)}</span><span class="val" style="color:var(--text-faint)">${esc(row.headroom.reason)}</span></div></div>`;
           }
           const pct = Math.min(100, Math.round(row.headroom.used_pct));
           return `
             <div class="bar-row">
               <div class="bar-meta">
-                <span class="lbl">${esc(row.windowKind)}</span>
+                <span class="lbl">${esc(row.displayLabel)}</span>
                 <span class="val" style="color:${color}">${pct}% · resets ${esc(resetEta(row.headroom.reset_at))}</span>
               </div>
               <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${fillColor(pct)}"></div></div>
@@ -1831,15 +1831,14 @@ function renderUsage(state: LimitsCostState): void {
             const windows = g.rows
               .map((row) => {
                 const known = row.headroom.kind === 'known';
-                const pct =
-                  known && row.headroom.kind === 'known' ? Math.round(row.headroom.used_pct) : 0;
+                const pct = row.headroom.kind === 'known' ? Math.round(row.headroom.used_pct) : 0;
                 const reset =
-                  known && row.headroom.kind === 'known'
+                  row.headroom.kind === 'known'
                     ? `resets in ${resetEta(row.headroom.reset_at)}`
-                    : 'no data';
+                    : row.headroom.reason;
                 return `
                 <div class="prov-window">
-                  <div class="big"><span class="num" style="color:${color}">${known ? `${pct}%` : '—'}</span><span class="unit">${esc(row.windowKind)}</span></div>
+                  <div class="big"><span class="num" style="color:${color}">${known ? `${pct}%` : '—'}</span><span class="unit">${esc(row.displayLabel)}</span></div>
                   <div class="track"><div class="fill" style="width:${pct}%;background:${color}"></div></div>
                   <div class="reset">${esc(reset)}</div>
                 </div>`;
@@ -1922,7 +1921,7 @@ function renderUsage(state: LimitsCostState): void {
       <div class="panel" style="padding:16px 17px">
         <div class="ttl" style="font-size:13px;font-weight:600;color:oklch(0.92 0.004 262);margin-bottom:16px">Throughput</div>
         <div class="throughput">${throughput}
-          <div class="note">The balancer pins roles to providers and paces when a 5-hour window runs low. Subscription-only — no spend caps, just headroom.</div>
+          <div class="note">The balancer pins roles to providers and paces when session or weekly headroom runs low. Subscription-only — no spend caps, just headroom.</div>
         </div>
       </div>
     </div>`;
