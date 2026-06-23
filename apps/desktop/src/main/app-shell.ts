@@ -32,6 +32,7 @@ import {
   validateSettingValue,
 } from '@co/core';
 import { ConductorUnavailableError, OperatorIpcClient } from '@co/mcp';
+import type { OperatorIpcClientDeps } from '@co/mcp';
 import { NavVM } from '../shared/nav-vm.js';
 import { ConnectionVM } from '../shared/connection-vm.js';
 import { DashboardVM } from '../shared/dashboard-vm.js';
@@ -63,6 +64,8 @@ export interface AppShellDeps {
   readonly socketPath?: string;
   /** Injectable for tests — production leaves this undefined (creates a real client). */
   readonly client?: OperatorIpcClient;
+  /** Injectable for tests that need to observe the internally wired OperatorIpcClient callbacks. */
+  readonly clientFactory?: (clientDeps: OperatorIpcClientDeps) => OperatorIpcClient;
   /** Injectable for tests — production opens a real MailStore. */
   readonly actionablesReader?: () => readonly DeliveredMail[];
   /** Injectable for tests — reads a recipient's inbox (default: real MailStore). */
@@ -320,15 +323,31 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   // refactor-safe: the handler always resolves through the ref, not the variable.
   const connVmRef: { current?: ConnectionVM } = {};
 
+  // A fire-and-forget refresh of the connection VM. `ConnectionVM.refresh()` awaits `client.observe()`,
+  // which can reject (e.g. "database is locked" under contention, #126) — a bare `void …refresh()` would
+  // leak that rejection as an UnhandledPromiseRejectionWarning that can kill the main process under
+  // strict mode. Route any rejection to the VISIBLE connection-error surface instead (Principle 9 —
+  // fail visibly, not silently); the next tick/observe re-attempt recovers the live state.
+  const safeRefresh = (): void => {
+    connVmRef.current
+      ?.refresh()
+      .catch((e: unknown) =>
+        publishError(deps.onConnectionError, `operator IPC refresh failed: ${safeError(e)}`),
+      );
+  };
+
+  const makeClient =
+    deps.clientFactory ??
+    ((clientDeps: OperatorIpcClientDeps) => new OperatorIpcClient(clientDeps));
   const client =
     deps.client ??
-    new OperatorIpcClient({
+    makeClient({
       projectId: deps.projectId,
       socketPath,
       onState: (s) => {
         if (closed) return;
         if (s === 'disconnected') {
-          void connVmRef.current?.refresh();
+          safeRefresh();
         }
       },
       onError: (e) => {
@@ -380,7 +399,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
         await client.approve(approvalSeq, reply);
         doRefreshMail();
         // Refresh dashboard to update outstandingCount after actionable clears.
-        void connVmRef.current?.refresh();
+        safeRefresh();
       } catch (e: unknown) {
         publishError(
           deps.onMailError,
@@ -422,7 +441,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       try {
         await client.reply(target, draft);
         doRefreshReviews();
-        void connVmRef.current?.refresh();
+        safeRefresh();
       } catch (e) {
         publishError(
           deps.onReviewError,

@@ -108,6 +108,25 @@ function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
   return rows.some((row) => row.name === column);
 }
 
+function tableColumns(db: DatabaseSync, table: string): ReadonlySet<string> {
+  if (!tableExists(db, table)) return new Set();
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ readonly name: string }>;
+  return new Set(rows.map((row) => row.name));
+}
+
+function requireColumns(
+  table: string,
+  columns: ReadonlySet<string>,
+  required: readonly string[],
+): void {
+  const missing = required.filter((column) => !columns.has(column));
+  if (missing.length > 0) {
+    throw new Error(
+      `usage-projector: ${table} is missing required column(s): ${missing.join(', ')}`,
+    );
+  }
+}
+
 function migrateLegacyUsageBuckets(db: DatabaseSync): void {
   const canCopy = hasColumn(db, 'usage_buckets', 'provider');
   if (!canCopy) assertProviderlessLegacyAccountsAreInferable(db, 'usage_buckets');
@@ -207,6 +226,10 @@ export function rowToUsageAccountStatus(row: Record<string, unknown>): UsageAcco
 const BUCKET_COLUMNS = 'provider, account, window_kind, used_pct, reset_at, source, sampled_at, ts';
 const ACCOUNT_COLUMNS = 'provider, account, available, reason, source, sampled_at, ts';
 
+function providerColumnSql(columns: ReadonlySet<string>): string {
+  return columns.has('provider') ? 'provider' : inferredProviderSql('account');
+}
+
 /** The latest known window bucket for `(provider, account, window_kind)`, or undefined. */
 export function selectUsageBucket(
   db: DatabaseSync,
@@ -232,6 +255,30 @@ export function selectAllUsageBuckets(db: DatabaseSync): UsageBucket[] {
   return rows.map((r) => rowToUsageBucket(r as Record<string, unknown>));
 }
 
+/** Every known window bucket without creating or repairing projection tables. */
+export function selectAllUsageBucketsReadOnly(db: DatabaseSync): UsageBucket[] {
+  if (!tableExists(db, 'usage_buckets')) return [];
+  const columns = tableColumns(db, 'usage_buckets');
+  requireColumns('usage_buckets', columns, [
+    'account',
+    'window_kind',
+    'used_pct',
+    'reset_at',
+    'source',
+    'sampled_at',
+    'ts',
+  ]);
+  if (!columns.has('provider')) assertProviderlessLegacyAccountsAreInferable(db, 'usage_buckets');
+  const rows = db
+    .prepare(
+      `SELECT ${providerColumnSql(columns)} AS provider, account, window_kind, used_pct, reset_at, source, sampled_at, ts
+       FROM usage_buckets
+       ORDER BY provider, account, window_kind`,
+    )
+    .all();
+  return rows.map((r) => rowToUsageBucket(r as Record<string, unknown>));
+}
+
 /** The latest availability status for `account`, or undefined (no sample yet). */
 export function selectUsageAccount(
   db: DatabaseSync,
@@ -250,6 +297,29 @@ export function selectAllUsageAccounts(db: DatabaseSync): UsageAccountStatus[] {
   ensureUsageTables(db);
   const rows = db
     .prepare(`SELECT ${ACCOUNT_COLUMNS} FROM usage_accounts ORDER BY provider, account`)
+    .all();
+  return rows.map((r) => rowToUsageAccountStatus(r as Record<string, unknown>));
+}
+
+/** Every provider-account status without creating or repairing projection tables. */
+export function selectAllUsageAccountsReadOnly(db: DatabaseSync): UsageAccountStatus[] {
+  if (!tableExists(db, 'usage_accounts')) return [];
+  const columns = tableColumns(db, 'usage_accounts');
+  requireColumns('usage_accounts', columns, [
+    'account',
+    'available',
+    'reason',
+    'source',
+    'sampled_at',
+    'ts',
+  ]);
+  if (!columns.has('provider')) assertProviderlessLegacyAccountsAreInferable(db, 'usage_accounts');
+  const rows = db
+    .prepare(
+      `SELECT ${providerColumnSql(columns)} AS provider, account, available, reason, source, sampled_at, ts
+       FROM usage_accounts
+       ORDER BY provider, account`,
+    )
     .all();
   return rows.map((r) => rowToUsageAccountStatus(r as Record<string, unknown>));
 }

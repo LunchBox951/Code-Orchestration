@@ -78,7 +78,10 @@ const CREATE_COST_TABLES = `
  * Defensive create of the cost read-model tables. Called from the projector's reset/apply AND every
  * read path, so a freshly opened store can be queried before any write has happened.
  */
-export function ensureCostTables(db: DatabaseSync): void {
+export function ensureCostTables(
+  db: DatabaseSync,
+  opts: { readonly backfillLegacy?: boolean } = {},
+): void {
   db.exec(CREATE_COST_TABLES);
   ensureColumn(db, 'cost_rollup', 'cost_usd_observations', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'cost_rollup', 'token_observations', 'INTEGER NOT NULL DEFAULT 0');
@@ -95,7 +98,10 @@ export function ensureCostTables(db: DatabaseSync): void {
   `);
   ensureColumn(db, 'cost_rollup', 'cache_read_tokens', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'cost_rollup', 'cache_creation_tokens', 'INTEGER NOT NULL DEFAULT 0');
-  backfillCostObservationState(db);
+  // `backfillLegacy` re-derives observation-count columns (and, on an old store, re-folds the cost log)
+  // — a WRITE. The operator dashboard READ path opts out (#126: writing on read contends with the
+  // daemon writer → "database is locked"); a read only needs the idempotent CREATE + column migrations.
+  if (opts.backfillLegacy ?? true) backfillCostObservationState(db);
 }
 
 function ensureColumn(db: DatabaseSync, table: string, column: string, definition: string): void {
@@ -109,6 +115,29 @@ function tableExists(db: DatabaseSync, table: string): boolean {
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !==
     undefined
   );
+}
+
+function tableColumns(db: DatabaseSync, table: string): ReadonlySet<string> {
+  if (!tableExists(db, table)) return new Set();
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ readonly name: string }>;
+  return new Set(rows.map((row) => row.name));
+}
+
+function columnOrDefault(columns: ReadonlySet<string>, column: string, defaultSql: string): string {
+  return columns.has(column) ? column : `${defaultSql} AS ${column}`;
+}
+
+function requireColumns(
+  table: string,
+  columns: ReadonlySet<string>,
+  required: readonly string[],
+): void {
+  const missing = required.filter((column) => !columns.has(column));
+  if (missing.length > 0) {
+    throw new Error(
+      `cost-projector: ${table} is missing required column(s): ${missing.join(', ')}`,
+    );
+  }
 }
 
 function countRows(db: DatabaseSync, table: string): number {
@@ -215,6 +244,208 @@ export function rowToCostRollup(row: Record<string, unknown>): CostRollup {
   };
 }
 
+interface CostRollupAccumulator {
+  totalCostUsd: number;
+  costUsdObservations: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  tokenObservations: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  usedPct: number;
+  usedPctObservations: number;
+  observations: number;
+}
+
+function emptyRollupAccumulator(): CostRollupAccumulator {
+  return {
+    totalCostUsd: 0,
+    costUsdObservations: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    tokenObservations: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    usedPct: 0,
+    usedPctObservations: 0,
+    observations: 0,
+  };
+}
+
+function accumulatorToRollup(
+  kind: CostRollupKind,
+  id: string,
+  acc: CostRollupAccumulator,
+): CostRollup {
+  return {
+    kind,
+    id,
+    totalCostUsd: acc.totalCostUsd,
+    costUsdObservations: acc.costUsdObservations,
+    inputTokens: acc.inputTokens,
+    outputTokens: acc.outputTokens,
+    totalTokens: acc.totalTokens,
+    tokenObservations: acc.tokenObservations,
+    cacheReadTokens: acc.cacheReadTokens,
+    cacheCreationTokens: acc.cacheCreationTokens,
+    usedPct: acc.usedPct,
+    usedPctObservations: acc.usedPctObservations,
+    observations: acc.observations,
+  };
+}
+
+function addObservedCost(acc: CostRollupAccumulator, obs: NormalizedCostObservation): void {
+  acc.totalCostUsd += obs.costUsd ?? 0;
+  if (obs.costUsd !== null) acc.costUsdObservations += 1;
+  acc.inputTokens += obs.inputTokens ?? 0;
+  acc.outputTokens += obs.outputTokens ?? 0;
+  acc.totalTokens += obs.totalTokens ?? 0;
+  if (obs.totalTokens !== null) acc.tokenObservations += 1;
+  acc.cacheReadTokens += obs.cacheReadTokens ?? 0;
+  acc.cacheCreationTokens += obs.cacheCreationTokens ?? 0;
+  acc.usedPct += obs.usedPct ?? 0;
+  if (obs.usedPct !== null) acc.usedPctObservations += 1;
+  acc.observations += 1;
+}
+
+function observationTurnIdentity(obs: NormalizedCostObservation): string {
+  return `${obs.provider}\0${obs.agent}\0${obs.task}\0turn:${obs.turn}`;
+}
+
+function observationSourceIdentity(obs: NormalizedCostObservation): string | undefined {
+  return obs.sourceId != null
+    ? `${obs.provider}\0${obs.agent}\0${obs.task}\0source:${obs.sourceId}`
+    : undefined;
+}
+
+function rememberReadOnlyObservation(
+  byTurn: Map<string, NormalizedCostObservation>,
+  bySource: Map<string, NormalizedCostObservation>,
+  obs: NormalizedCostObservation,
+): boolean {
+  const turnKey = observationTurnIdentity(obs);
+  const sameTurn = byTurn.get(turnKey);
+  if (sameTurn != null) {
+    if (observationsMatch(sameTurn, obs)) return false;
+    throw new Error(
+      `cost-projector: conflicting duplicate cost observation for ` +
+        `${obs.provider}/${obs.agent}/${obs.task}/turn-${obs.turn}`,
+    );
+  }
+
+  const sourceKey = observationSourceIdentity(obs);
+  if (sourceKey != null) {
+    const sameSource = bySource.get(sourceKey);
+    if (sameSource != null) {
+      if (observationsMatchIgnoringTurn(sameSource, obs)) return false;
+      throw new Error(
+        `cost-projector: conflicting duplicate cost observation for ` +
+          `${obs.provider}/${obs.agent}/${obs.task}/turn-${obs.turn}`,
+      );
+    }
+  }
+
+  byTurn.set(turnKey, obs);
+  if (sourceKey != null) bySource.set(sourceKey, obs);
+  return true;
+}
+
+function readOnlyRollupsFromEvents(db: DatabaseSync): CostRollup[] {
+  if (!tableExists(db, 'events')) return [];
+  const rows = db
+    .prepare('SELECT payload FROM events WHERE type = ? ORDER BY seq')
+    .all(EVENT_COST_RECORDED) as Array<{ readonly payload: unknown }>;
+  const byTurn = new Map<string, NormalizedCostObservation>();
+  const bySource = new Map<string, NormalizedCostObservation>();
+  const byKey = new Map<string, CostRollupAccumulator>();
+  const apply = (kind: CostRollupKind, id: string, obs: NormalizedCostObservation) => {
+    const key = `${kind}\0${id}`;
+    let acc = byKey.get(key);
+    if (acc == null) {
+      acc = emptyRollupAccumulator();
+      byKey.set(key, acc);
+    }
+    addObservedCost(acc, obs);
+  };
+
+  for (const row of rows) {
+    const obs = normalizeCostObservation(costRecordedSchema.parse(JSON.parse(String(row.payload))));
+    if (!rememberReadOnlyObservation(byTurn, bySource, obs)) continue;
+    apply('agent', obs.agent, obs);
+    apply('task', obs.task, obs);
+  }
+
+  return [...byKey.entries()]
+    .map(([key, acc]) => {
+      const [kind, id] = key.split('\0') as [CostRollupKind, string];
+      return accumulatorToRollup(kind, id, acc);
+    })
+    .sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+}
+
+function selectPersistedRollupsWithReadOnlyCounts(db: DatabaseSync): CostRollup[] {
+  if (!tableExists(db, 'cost_rollup')) return [];
+  const rollupColumns = tableColumns(db, 'cost_rollup');
+  if (!rollupColumns.has('kind') || !rollupColumns.has('id')) {
+    throw new Error('cost-projector: cost_rollup is missing required kind/id columns');
+  }
+  const observationColumns = tableColumns(db, 'cost_observations');
+  const canCountObservations =
+    observationColumns.has('agent') &&
+    observationColumns.has('task') &&
+    tableExists(db, 'cost_observations');
+  const countObservationColumn = (column: string): string =>
+    canCountObservations && observationColumns.has(column)
+      ? `(
+           SELECT COUNT(*)
+             FROM cost_observations AS o
+            WHERE o.${column} IS NOT NULL
+              AND (
+                (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
+                OR
+                (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
+              )
+         )`
+      : '0';
+  const readColumns = [
+    'kind',
+    'id',
+    columnOrDefault(rollupColumns, 'total_cost_usd', '0'),
+    columnOrDefault(rollupColumns, 'cost_usd_observations', '0'),
+    columnOrDefault(rollupColumns, 'input_tokens', '0'),
+    columnOrDefault(rollupColumns, 'output_tokens', '0'),
+    columnOrDefault(rollupColumns, 'total_tokens', '0'),
+    columnOrDefault(rollupColumns, 'token_observations', '0'),
+    columnOrDefault(rollupColumns, 'cache_read_tokens', '0'),
+    columnOrDefault(rollupColumns, 'cache_creation_tokens', '0'),
+    columnOrDefault(rollupColumns, 'used_pct', '0'),
+    columnOrDefault(rollupColumns, 'used_pct_observations', '0'),
+    columnOrDefault(rollupColumns, 'observations', '0'),
+  ].join(', ');
+  const rows = db
+    .prepare(
+      `SELECT
+         ${readColumns},
+         ${countObservationColumn('cost_usd')} AS read_cost_usd_observations,
+         ${countObservationColumn('total_tokens')} AS read_token_observations,
+         ${countObservationColumn('used_pct')} AS read_used_pct_observations
+       FROM cost_rollup
+       ORDER BY kind, id`,
+    )
+    .all() as Array<Record<string, unknown>>;
+
+  return rows.map((row) =>
+    rowToCostRollup({
+      ...row,
+      cost_usd_observations: row.read_cost_usd_observations,
+      token_observations: row.read_token_observations,
+      used_pct_observations: row.read_used_pct_observations,
+    }),
+  );
+}
+
 /** Map a raw `cost_near_budget` row to a {@link NearBudgetRecord}. */
 export function rowToNearBudgetRecord(row: Record<string, unknown>): NearBudgetRecord {
   return {
@@ -248,8 +479,21 @@ export function selectCostRollup(
 }
 
 /** Every rollup total, in a deterministic order (kind, then id). */
-export function selectAllCostRollups(db: DatabaseSync): CostRollup[] {
-  ensureCostTables(db);
+export function selectAllCostRollups(
+  db: DatabaseSync,
+  opts: { readonly backfillLegacy?: boolean } = {},
+): CostRollup[] {
+  if (opts.backfillLegacy === false) {
+    const observationCount = tableExists(db, 'cost_observations')
+      ? countRows(db, 'cost_observations')
+      : 0;
+    const rollupCount = tableExists(db, 'cost_rollup') ? countRows(db, 'cost_rollup') : 0;
+    if (observationCount === 0 && rollupCount > 0 && tableExists(db, 'events')) {
+      return readOnlyRollupsFromEvents(db);
+    }
+    return selectPersistedRollupsWithReadOnlyCounts(db);
+  }
+  ensureCostTables(db, opts);
   const rows = db.prepare(`SELECT ${ROLLUP_COLUMNS} FROM cost_rollup ORDER BY kind, id`).all();
   return rows.map((r) => rowToCostRollup(r as Record<string, unknown>));
 }
@@ -302,8 +546,26 @@ export function selectNearBudgetBySeq(db: DatabaseSync, seq: number): NearBudget
 }
 
 /** Every recorded near-budget crossing in seq order; optionally filtered to one task. */
-export function selectNearBudgetEvents(db: DatabaseSync, task?: string): NearBudgetRecord[] {
-  ensureCostTables(db);
+export function selectNearBudgetEvents(
+  db: DatabaseSync,
+  task?: string,
+  opts: { readonly backfillLegacy?: boolean } = {},
+): NearBudgetRecord[] {
+  if (opts.backfillLegacy === false) {
+    if (!tableExists(db, 'cost_near_budget')) return [];
+    requireColumns('cost_near_budget', tableColumns(db, 'cost_near_budget'), [
+      'seq',
+      'task',
+      'agent',
+      'provider',
+      'total_cost_usd',
+      'cap_cents',
+      'threshold_pct',
+      'ts',
+    ]);
+  } else {
+    ensureCostTables(db);
+  }
   const rows =
     task === undefined
       ? db.prepare(`SELECT ${NEAR_BUDGET_COLUMNS} FROM cost_near_budget ORDER BY seq`).all()
