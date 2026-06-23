@@ -11,6 +11,7 @@ import { ISSUE_CAPTURE_KEY } from '../../issues/opt-in.js';
 import { buildCoreRegistry } from '../core-registry.js';
 import { checkToolCompleteness } from '../completeness.js';
 import { invokeTool } from '../invoke.js';
+import { toolsForRole } from '../scoping.js';
 import type { ToolContext } from '../context.js';
 
 // L6b G — co_issue_capture / co_issue_list / co_issue_diagnose: the local pipeline verbs.
@@ -214,24 +215,38 @@ describe('co_issue_diagnose — the researcher:diagnostic verb', () => {
     expect(issue['probable_cause']).toMatch(/delivery seam/);
   });
 
-  it('refuses a non-researcher caller', async () => {
-    const id = 'p-it-diag-role';
-    enableCapture(id);
-    const stores = openStores(id);
-    stores.issues.recordCapture({
-      issueId: 'iss-1',
-      summary: 's',
-      detail: 'd',
-      destination: 'co',
-      capturedBy: 'impl-1',
-    });
-    const ctx = makeCtx(id, stores, { agent: 'impl-1' });
-    await expect(
-      invokeTool(buildCoreRegistry(), ctx, 'co_issue_diagnose', {
-        issue_id: 'iss-1',
-        probable_cause: 'x',
-      }),
-    ).rejects.toThrow(/researcher/i);
+  it.each(['coord-1', 'lead-1', 'impl-1'] as const)(
+    'refuses non-researcher caller %s',
+    async (agent) => {
+      const id = `p-it-diag-role-${agent}`;
+      enableCapture(id);
+      const stores = openStores(id);
+      stores.issues.recordCapture({
+        issueId: 'iss-1',
+        summary: 's',
+        detail: 'd',
+        destination: 'co',
+        capturedBy: 'impl-1',
+      });
+      const ctx = makeCtx(id, stores, { agent });
+      await expect(
+        invokeTool(buildCoreRegistry(), ctx, 'co_issue_diagnose', {
+          issue_id: 'iss-1',
+          probable_cause: 'x',
+        }),
+      ).rejects.toThrow(/researcher/i);
+    },
+  );
+});
+
+describe('issue tools — role scoping anti-drift', () => {
+  it('keeps standalone co_issue_diagnose researcher-only', () => {
+    for (const role of ['coordinator', 'lead'] as const) {
+      const scoped = toolsForRole(role).map((tool) => tool.name);
+      expect(scoped).toContain('co_issue_file');
+      expect(scoped).not.toContain('co_issue_diagnose');
+    }
+    expect(toolsForRole('researcher').map((tool) => tool.name)).toContain('co_issue_diagnose');
   });
 });
 

@@ -477,12 +477,80 @@ describe('co_issue_file — inline owner-tier diagnosis (#130)', () => {
     >;
     expect(result['status']).toBe('approval_requested');
     expect(gh).not.toHaveBeenCalled();
+    const outputIssue = result['issue'] as Record<string, unknown>;
+    expect(outputIssue['diagnosed_by']).toBe('coord-1');
+    expect(outputIssue['probable_cause']).toBe('coordinator-supplied probable cause');
 
     // The capture advanced to diagnosed, attributed to the owner-tier caller (not a researcher).
     const issue = stores.issues.getIssue('iss-1');
     expect(issue?.state).toBe('diagnosed');
     expect(issue?.diagnosedBy).toBe('coord-1');
     expect(issue?.probableCause).toBe('coordinator-supplied probable cause');
+  });
+
+  it('lets a lead inline-diagnose and file the lead’s own captured issue', async () => {
+    const id = 'p-if-inline-diagnose-lead';
+    configure(id);
+    const stores = openStores(id);
+    stores.issues.recordCapture({
+      issueId: 'iss-1',
+      summary: 'lead capture',
+      detail: 'lead repro detail',
+      destination: 'co',
+      capturedBy: 'lead-1',
+    });
+    const gh = fakeGh('https://github.com/acme/co/issues/14');
+    const ctx = { ...makeCtx(id, stores, gh), agent: 'lead-1' };
+
+    const req = (await fileWithCause(ctx, 'lead-supplied probable cause')) as Record<
+      string,
+      unknown
+    >;
+    expect(req['status']).toBe('approval_requested');
+    const outputIssue = req['issue'] as Record<string, unknown>;
+    expect(outputIssue['diagnosed_by']).toBe('lead-1');
+    expect(outputIssue['probable_cause']).toBe('lead-supplied probable cause');
+
+    const held = stores.mail
+      .inbox(OPERATOR)
+      .find((m) => m.seq === (req['approval_seq'] as number))!;
+    stores.mail.reply(held, {
+      type: MAIL_APPROVAL_RESPONSE,
+      subject: 're',
+      body: 'approved',
+      decision: 'approve',
+    });
+
+    const filed = (await fileWithCause(ctx, 'lead-supplied probable cause')) as Record<
+      string,
+      unknown
+    >;
+    expect(filed['status']).toBe('filed');
+    expect(filed['posted_ref']).toBe('https://github.com/acme/co/issues/14');
+    expect(createCallCount(gh)).toBe(1);
+    expect(stores.issues.getIssue('iss-1')?.diagnosedBy).toBe('lead-1');
+    expect(stores.issues.getIssue('iss-1')?.state).toBe('filed');
+  });
+
+  it('refuses inline diagnosis for a capture owned by another agent', async () => {
+    const id = 'p-if-inline-diagnose-other-capture';
+    configure(id);
+    const stores = openStores(id);
+    stores.issues.recordCapture({
+      issueId: 'iss-1',
+      summary: 'implementer capture',
+      detail: 'implementer repro detail',
+      destination: 'co',
+      capturedBy: 'impl-1',
+    });
+    const gh = vi.fn<GhExec>();
+
+    await expect(fileWithCause(makeCtx(id, stores, gh), 'coordinator diagnosis')).rejects.toThrow(
+      /captured by 'impl-1'/,
+    );
+    expect(gh).not.toHaveBeenCalled();
+    expect(stores.issues.getIssue('iss-1')?.state).toBe('captured');
+    expect(stores.issues.getIssue('iss-1')?.probableCause).toBeUndefined();
   });
 
   it('files after the operator approves the inline-diagnosed capture', async () => {

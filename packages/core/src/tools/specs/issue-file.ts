@@ -16,7 +16,12 @@ import { issueRecordOutputSchema, issueRecordToOutput } from './issue-record-out
 
 const issueFileInput = z
   .object({
-    issue_id: z.string().min(1).describe('The diagnosed issue to file outward.'),
+    issue_id: z
+      .string()
+      .min(1)
+      .describe(
+        'The issue to file outward: already diagnosed, or still captured when filing your own capture with an inline probable_cause.',
+      ),
     title: z
       .string()
       .min(1)
@@ -27,10 +32,10 @@ const issueFileInput = z
       .min(1)
       .optional()
       .describe(
-        'An inline probable-cause report. When the issue is still captured, supplying this ' +
-          'auto-diagnoses it under the owner-tier caller (coordinator/lead) before filing — the ' +
-          "escape from the diagnose step's researcher-only gate when no researcher is in play. " +
-          'Ignored once the issue is already diagnosed. The per-post @operator approval still backstops.',
+        'An inline probable-cause report. When your own issue is still captured, supplying this ' +
+          "auto-diagnoses it under you before filing — the escape from the diagnose step's " +
+          'researcher-only gate when no researcher is in play. Ignored once the issue is already ' +
+          'diagnosed. The per-post @operator approval still backstops.',
       ),
   })
   .strict();
@@ -58,13 +63,13 @@ type IssueFileOutput = z.infer<typeof issueFileOutput>;
 
 /**
  * `co_issue_file` (L6b G, the `file` step — the only OUTWARD verb in the pipeline): post a
- * diagnosed issue to GitHub under a recorded **per-post approval**. The first invocation sends
- * ONE idempotency-keyed `approval` mail to @operator carrying the scrubbed artifact (what the
- * operator approves is what posts) and reports `approval_requested`. Re-invocations route the
- * recorded decision through `gateOutwardAction`: BLOCKED loud while pending, REFUSED loud on
- * decline, and `gh issue create` on approve — then the `issue.filed` event records the approval
- * seq + posted ref for the audit trail. Once that durable filing record exists, re-invocation is
- * idempotent and never re-runs `gh`.
+ * diagnosed issue, or the caller's own still-captured issue with an inline probable cause, to
+ * GitHub under a recorded **per-post approval**. The first invocation sends ONE idempotency-keyed
+ * `approval` mail to @operator carrying the scrubbed artifact (what the operator approves is what
+ * posts) and reports `approval_requested`. Re-invocations route the recorded decision through
+ * `gateOutwardAction`: BLOCKED loud while pending, REFUSED loud on decline, and `gh issue create`
+ * on approve — then the `issue.filed` event records the approval seq + posted ref for the audit
+ * trail. Once that durable filing record exists, re-invocation is idempotent and never re-runs `gh`.
  *
  * Gates, in order: coordinator/lead caller → `issues.publish` opt-in (OFF by default) →
  * pipeline order (diagnosed only — an owner-tier caller may pass an inline `probable_cause` to
@@ -76,11 +81,11 @@ export const issueFileTool: ToolSpec<IssueFileInput, IssueFileOutput> = {
   name: 'co_issue_file',
   title: 'File an issue outward (per-post approved)',
   description:
-    'File a diagnosed issue as a real GitHub issue — gated on the issues.publish opt-in AND a ' +
-    'per-post @operator approval. The first call sends the approval request (scrubbed preview) and ' +
-    'returns approval_requested; once the operator approves, calling again posts via gh and records ' +
-    'the filing. A pending approval blocks; a declined approval refuses. Only a coordinator or lead ' +
-    'may file.',
+    'File a diagnosed issue, or your own captured issue with an inline probable cause, as a real ' +
+    'GitHub issue — gated on the issues.publish opt-in AND a per-post @operator approval. The ' +
+    'first call sends the approval request (scrubbed preview) and returns approval_requested; once ' +
+    'the operator approves, calling again posts via gh and records the filing. A pending approval ' +
+    'blocks; a declined approval refuses. Only a coordinator or lead may file.',
   inputSchema: issueFileInput,
   outputSchema: issueFileOutput,
   handler: (ctx, input): IssueFileOutput => {
@@ -135,6 +140,13 @@ export const issueFileTool: ToolSpec<IssueFileInput, IssueFileOutput> = {
     // own captures are not dead-ended. We record the diagnosis under the caller, then fall through
     // into the same per-post operator approval — that human approval is the real backstop.
     if (issue.state === 'captured' && input.probable_cause != null) {
+      if (issue.capturedBy !== ctx.agent) {
+        throw new Error(
+          `co_issue_file: issue '${input.issue_id}' was captured by '${issue.capturedBy}', so ` +
+            `caller '${ctx.agent}' cannot inline-diagnose it. Dispatch a researcher to run ` +
+            'co_issue_diagnose, or have the capturing owner-tier agent file it with a probable_cause.',
+        );
+      }
       issue = ctx.issues.recordDiagnosis({
         issueId: issue.issueId,
         probableCause: input.probable_cause,
