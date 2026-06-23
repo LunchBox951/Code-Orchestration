@@ -1,4 +1,4 @@
-import { deriveHeadroom } from '@co/core';
+import { ACCOUNT_STATUS_SEED_SOURCE, deriveHeadroom } from '@co/core';
 import type { CostRollup, Headroom, UsageAccountStatus, UsageBucket } from '@co/core';
 
 export type { Headroom };
@@ -64,6 +64,11 @@ function deriveState(inputs: LimitsCostInputs): LimitsCostState {
   for (const s of inputs.accountStatuses) {
     statusMap.set(`${s.provider}:${s.account}`, s);
   }
+  const providersWithRealUsage = new Set<string>();
+  for (const bucket of inputs.buckets) providersWithRealUsage.add(bucket.provider);
+  for (const status of inputs.accountStatuses) {
+    if (status.source !== ACCOUNT_STATUS_SEED_SOURCE) providersWithRealUsage.add(status.provider);
+  }
 
   // Rows derive from the UNION of buckets and account statuses. Buckets carry a window, so each
   // yields a row directly. An account that has a STATUS but no bucket yet (e.g. a Claude account
@@ -81,6 +86,12 @@ function deriveState(inputs: LimitsCostInputs): LimitsCostState {
   for (const status of inputs.accountStatuses) {
     const key = `${status.provider}:${status.account}`;
     if (accountsWithBuckets.has(key)) continue;
+    if (
+      status.source === ACCOUNT_STATUS_SEED_SOURCE &&
+      providersWithRealUsage.has(status.provider)
+    ) {
+      continue;
+    }
     headroomRows.push({
       provider: status.provider,
       account: status.account,

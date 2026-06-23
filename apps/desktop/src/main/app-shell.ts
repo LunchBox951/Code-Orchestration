@@ -164,9 +164,11 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   const readOutbox: (s: string) => readonly DeliveredMail[] =
     deps.outboxReader ?? (ownedStore != null ? (s) => ownedStore.sentBy(s) : () => []);
 
-  // Open the dispatch store for usage/cost static reads (D5: daemon-down-safe pure reads).
-  // Opened when no readers are injected (production mode); tests inject reader fns directly.
-  const ownedDispatchStore = deps.bucketsReader == null ? openDispatchStore(deps.projectId) : null;
+  // Open the dispatch store for usage/cost static reads (D5: daemon-down-safe pure reads). Open only
+  // when no dispatch readers are injected; partial test readers must not trigger real-store writes.
+  const hasDispatchReaderOverride =
+    deps.bucketsReader != null || deps.accountStatusesReader != null || deps.rollupsReader != null;
+  const ownedDispatchStore = !hasDispatchReaderOverride ? openDispatchStore(deps.projectId) : null;
   const readBuckets: () => readonly UsageBucket[] =
     deps.bucketsReader ??
     (ownedDispatchStore != null ? () => ownedDispatchStore.readBuckets() : () => []);
@@ -187,10 +189,17 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   // "headroom / no data" card instead of the empty "No usage recorded yet" state (#122/#125/#88).
   // Production only: guarded on ownedDispatchStore so test-injected readers (no real store) skip it.
   // The seed is idempotent and non-destructive — a later real provider read upserts over it.
-  if (ownedDispatchStore != null) {
-    const providers =
-      configStore != null ? resolveEnabledProviders(deps.projectId, configStore) : undefined;
-    seedInitialAccountStatuses(ownedDispatchStore, providers);
+  try {
+    if (ownedDispatchStore != null) {
+      const providers =
+        configStore != null ? resolveEnabledProviders(deps.projectId, configStore) : undefined;
+      seedInitialAccountStatuses(ownedDispatchStore, providers);
+    }
+  } catch (cause) {
+    ownedStore?.close();
+    ownedDispatchStore?.close();
+    ownedConfigStore?.close();
+    throw cause;
   }
 
   let closed = false;

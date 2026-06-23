@@ -23,9 +23,11 @@ import type {
 import type { ProjectId } from '@co/core';
 import { MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE, OPERATOR, projectDataDir } from '@co/core';
 import {
+  accountForProvider,
   openConfigStore,
   openDispatchStore,
   ACCOUNT_STATUS_SEED_SOURCE,
+  DISPATCH_ENABLED_PROVIDERS_KEY,
   MAX_ACTIVE_CHILDREN_KEY,
   DISPATCH_MAXED_THRESHOLD_PCT_KEY,
   type ConfigStore,
@@ -1478,6 +1480,18 @@ describe('createAppShell — seeds initial account statuses on a fresh box (#122
       } finally {
         store.close();
       }
+      shell.refreshLimitsCost();
+      const rowsByKey = new Map(
+        shell.limitsCost.state.headroomRows.map((row) => [`${row.provider}:${row.account}`, row]),
+      );
+      expect(rowsByKey.get(`claude:${accountForProvider('claude')}`)?.headroom).toEqual({
+        kind: 'unknown',
+        reason: 'no usage observed yet',
+      });
+      expect(rowsByKey.get(`codex:${accountForProvider('codex')}`)?.headroom).toEqual({
+        kind: 'unknown',
+        reason: 'no usage observed yet',
+      });
     } finally {
       await shell.close();
     }
@@ -1500,6 +1514,61 @@ describe('createAppShell — seeds initial account statuses on a fresh box (#122
     } finally {
       store.close();
       void shell.close();
+    }
+  });
+
+  it('skips seeding when only accountStatusesReader is injected', async () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+      accountStatusesReader: () => [],
+    });
+    const store = openDispatchStore(FAKE_PROJECT_ID);
+    try {
+      expect(store.readAccountStatuses()).toHaveLength(0);
+    } finally {
+      store.close();
+      await shell.close();
+    }
+  });
+
+  it('cleans up owned stores and rethrows when provider config is malformed during startup seeding', async () => {
+    const cfg = openConfigStore();
+    try {
+      cfg.setProjectOverride(FAKE_PROJECT_ID, DISPATCH_ENABLED_PROVIDERS_KEY, []);
+    } finally {
+      cfg.close();
+    }
+
+    expect(() =>
+      createAppShell({
+        projectId: FAKE_PROJECT_ID,
+        socketPath: FAKE_SOCKET,
+        client: makeClient(),
+        actionablesReader: () => [],
+      }),
+    ).toThrow(/dispatch\.enabledProviders/);
+
+    const fixedCfg = openConfigStore();
+    try {
+      fixedCfg.clearProjectOverride(FAKE_PROJECT_ID, DISPATCH_ENABLED_PROVIDERS_KEY);
+    } finally {
+      fixedCfg.close();
+    }
+
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+    });
+    try {
+      shell.refreshLimitsCost();
+      expect(shell.limitsCost.state.headroomRows).toHaveLength(2);
+    } finally {
+      await shell.close();
     }
   });
 });

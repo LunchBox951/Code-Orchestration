@@ -23,16 +23,15 @@ import type { Provider, ProviderUsageSource, UsageSnapshot, UsageWindow } from '
 import { isStale, USAGE_BUCKET_TTL_MS_DEFAULT } from './policy.js';
 import { observeUsage, type DispatchStore } from './dispatch-store.js';
 import type { ProviderAccount } from './balancer.js';
+import { accountForProvider } from './provider-account.js';
 import {
   ClaudeUsageSource,
-  CLAUDE_DEFAULT_ACCOUNT,
   defaultClaudeDeps,
   type ClaudeUsageSourceOptions,
   type DefaultClaudeDepsOptions,
 } from './claude-source.js';
 import {
   CodexUsageSource,
-  CODEX_DEFAULT_ACCOUNT,
   defaultCodexDeps,
   type CodexUsageSourceOptions,
   type DefaultCodexDepsOptions,
@@ -44,17 +43,7 @@ export interface ClaudeSourceConfig extends DefaultClaudeDepsOptions, ClaudeUsag
 /** Construction config for the Codex adapter: its I/O-seam overrides plus its static options. */
 export interface CodexSourceConfig extends DefaultCodexDepsOptions, CodexUsageSourceOptions {}
 
-/** The default per-account label a provider maps to (per-account tracking, Principle 13). */
-export function accountForProvider(provider: Provider): string {
-  switch (provider) {
-    case 'claude':
-      return CLAUDE_DEFAULT_ACCOUNT;
-    case 'codex':
-      return CODEX_DEFAULT_ACCOUNT;
-    default:
-      return assertNever(provider);
-  }
-}
+export { accountForProvider } from './provider-account.js';
 
 export function createProviderUsageSource(
   provider: 'claude',

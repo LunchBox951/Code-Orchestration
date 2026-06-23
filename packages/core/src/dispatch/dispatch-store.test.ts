@@ -275,6 +275,41 @@ describe('seedInitialAccountStatuses — seeds a no-data status per configured p
       store.close();
     }
   });
+
+  it('does NOT seed a default-account placeholder when the provider already has real custom-account usage', () => {
+    const store = openDispatchStore('p-seed-custom-existing');
+    try {
+      store.recordSnapshot({
+        ...claudeSnap,
+        account: 'claude:team',
+      });
+      seedInitialAccountStatuses(store, ['claude']);
+      const statuses = store.readAccountStatuses().filter((s) => s.provider === 'claude');
+      expect(statuses.map((s) => s.account)).toEqual(['claude:team']);
+      expect(statuses[0]?.source).not.toBe(ACCOUNT_STATUS_SEED_SOURCE);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('removes a seeded default-account placeholder when a real custom-account read later arrives', () => {
+    const store = openDispatchStore('p-seed-custom-later');
+    try {
+      seedInitialAccountStatuses(store, ['claude']);
+      expect(store.getAccountStatus('claude', 'claude:max')?.source).toBe(
+        ACCOUNT_STATUS_SEED_SOURCE,
+      );
+      store.recordSnapshot({
+        ...claudeSnap,
+        account: 'claude:team',
+      });
+      const statuses = store.readAccountStatuses().filter((s) => s.provider === 'claude');
+      expect(statuses.map((s) => s.account)).toEqual(['claude:team']);
+      expect(store.getAccountStatus('claude', 'claude:max')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
 });
 
 // ── Proof #3: cost rollup per agent AND per task ─────────────────────────────────────────────────

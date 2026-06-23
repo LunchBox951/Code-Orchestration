@@ -27,6 +27,7 @@ import '../store/suppress-sqlite-warning.js';
 import { DatabaseSync } from 'node:sqlite';
 import type { Provider, ProviderUsageSource, UsageSnapshot, UsageWindow } from './usage-source.js';
 import { UsageUnavailableError } from './usage-source.js';
+import { CODEX_DEFAULT_ACCOUNT } from './provider-account.js';
 import {
   asRecord,
   boolish,
@@ -39,8 +40,7 @@ import {
   type UsageSourceAttempt,
 } from './usage-adapter-common.js';
 
-/** Default Codex account label when the preflight does not refine it (per-account, Principle 13). */
-export const CODEX_DEFAULT_ACCOUNT = 'codex:pro';
+export { CODEX_DEFAULT_ACCOUNT } from './provider-account.js';
 
 /** The metadata-only preflight argv — `codex doctor --json`. NEVER an inference invocation (AC11). */
 export const CODEX_DOCTOR_ARGS: readonly string[] = ['doctor', '--json'];

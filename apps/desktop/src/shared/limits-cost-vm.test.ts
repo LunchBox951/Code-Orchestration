@@ -284,6 +284,32 @@ describe('LimitsCostVM', () => {
     expect(row.headroom).toEqual({ kind: 'unknown', reason: 'no usage observed yet' });
   });
 
+  it('suppresses a stale seeded provider placeholder once real usage exists for another account', () => {
+    const vm = new LimitsCostVM();
+    vm.update({
+      buckets: [
+        makeBucket({
+          provider: 'claude',
+          account: 'claude:team',
+          windowKind: 'five_hour',
+          usedPct: 12,
+        }),
+      ],
+      accountStatuses: [
+        makeStatus({
+          provider: 'claude',
+          account: 'claude:max',
+          available: false,
+          reason: 'no usage observed yet',
+          source: 'seed',
+        }),
+        makeStatus({ provider: 'claude', account: 'claude:team', source: 'fake' }),
+      ],
+      rollups: [],
+    });
+    expect(vm.state.headroomRows.map((r) => r.account)).toEqual(['claude:team']);
+  });
+
   it('a Codex bucket + a Claude status-with-no-bucket yields TWO provider groups', () => {
     const vm = new LimitsCostVM();
     vm.update({

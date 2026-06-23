@@ -712,6 +712,7 @@ export {
   resolveBudgetCapCents,
   resolveBudgetCap,
 } from './dispatch/dispatch-store.js';
+export { accountForProvider } from './dispatch/provider-account.js';
 
 // L4-2 pure tier-matrix policy: (WorkSize × ReasoningBudget) → {model, effort, context} per
 // Provider. Routing vocabulary (WorkSize, ReasoningBudget + zod schemas) + default capability
@@ -907,7 +908,6 @@ export type {
   CachedUsageReadOptions,
 } from './dispatch/provider-source.js';
 export {
-  accountForProvider,
   createProviderUsageSource,
   defaultProviderUsageSource,
   defaultUsageSourceFactory,
