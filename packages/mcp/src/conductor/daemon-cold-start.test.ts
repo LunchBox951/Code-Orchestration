@@ -153,6 +153,12 @@ function makeQuietWindow(): {
   };
 }
 
+// #132 — deterministic codex handoff path (the fake writer returns it); the SHORT environment-variable
+// pointer command is what injectMail injects for a multiline codex kickoff, so driveTurnToIdle echoes
+// THAT for a codex pane instead of the rendered mail.
+const CODEX_HANDOFF_PATH = '/work/.co/kickoff-handoff.txt';
+const CODEX_HANDOFF_POINTER = 'Read $CO_KICKOFF_HANDOFF in full and act on it now.';
+
 function makeEngine(
   pty: FakePty,
   clock: ReturnType<typeof makeClock>,
@@ -165,6 +171,8 @@ function makeEngine(
     now: clock.now,
     quietWindow: qw.quietWindow,
     injectOptions: { retryDelay: () => new Promise<void>(() => {}) },
+    // #132 — a deterministic codex handoff writer (no real filesystem in the testable path).
+    writeCodexHandoff: () => CODEX_HANDOFF_PATH,
     ...(opts.mcpActivity != null
       ? {
           mcpActivity: (_pane, push) => {
@@ -196,7 +204,9 @@ async function driveTurnToIdle(
   qw: ReturnType<typeof makeQuietWindow>,
 ): Promise<void> {
   await tick();
-  pane.emit(defaultMailRenderer(item));
+  // #132 — a codex multiline kickoff is routed through the FILE-HANDOFF, so the engine injects the SHORT
+  // pointer command (not the rendered mail). Echo whatever was actually injected so the echo-verify passes.
+  pane.emit(pane.spec.command === 'codex' ? CODEX_HANDOFF_POINTER : defaultMailRenderer(item));
   await tick();
   clock.set(1000);
   pane.emit('⠋ working…\r\n');

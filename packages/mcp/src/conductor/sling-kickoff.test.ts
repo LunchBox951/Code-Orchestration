@@ -11,9 +11,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
@@ -25,6 +25,7 @@ import {
   invokeTool,
   openDispatchStore,
   openMailStore,
+  projectDataDir,
   openRegistry,
   openRosterStore,
   openWorktreeStore,
@@ -551,21 +552,33 @@ function makeInjectRetry(): {
   };
 }
 
+// #132 — a deterministic codex handoff path the fake writer returns; the SHORT environment-variable
+// pointer command is what injectMail injects for a multiline codex payload, so the drive helpers echo
+// THAT (not the collapsed paste) to verify a success turn.
+const CODEX_HANDOFF_PATH = '/work/impl-cx/.co/kickoff-handoff.txt';
+const CODEX_ENV_HANDOFF_POINTER = 'Read $CO_KICKOFF_HANDOFF in full and act on it now.';
+
 function makeCodexEngine(
   clock: ReturnType<typeof makeClock>,
   qw: ReturnType<typeof makeQuietWindow>,
   retry: ReturnType<typeof makeInjectRetry>,
-): { engine: ConductorEngine; pty: FakePty } {
+): { engine: ConductorEngine; pty: FakePty; handoffs: string[] } {
   const pty = new FakePty();
+  // #132 — capture handed-off bodies and return a deterministic path INSTEAD of touching the filesystem.
+  const handoffs: string[] = [];
   const engine = new ConductorEngine({
     pty,
     makeTransport: () => InMemoryTransport.createLinkedPair(),
     now: clock.now,
     quietWindow: qw.quietWindow,
     injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+    writeCodexHandoff: (_identity, body) => {
+      handoffs.push(body);
+      return CODEX_HANDOFF_PATH;
+    },
   });
   engines.push(engine);
-  return { engine, pty };
+  return { engine, pty, handoffs };
 }
 
 /** Drive ONE codex turn whose paste never echoes: settle the retry with no echo ⇒ inject THROWS. */
@@ -651,7 +664,21 @@ function outstandingFor(projectId: ProjectId, agent: string): readonly Delivered
   return store.outstanding(agent);
 }
 
-/** Drive ONE successful codex turn: emit the collapsed-paste preview (needle-matching), then idle. */
+function kickoffFailureNotices(projectId: ProjectId, recipient: string, kickoff: DeliveredMail) {
+  return outstandingFor(projectId, recipient).filter(
+    (item) =>
+      item.sender === 'impl-cx' &&
+      item.type === 'clarify_request' &&
+      item.causationId === String(kickoff.seq),
+  );
+}
+
+/**
+ * Drive ONE successful codex turn through the #132 FILE-HANDOFF: the engine routes the multiline kickoff
+ * to a handoff file and injects the SHORT pointer command; the composer echoes the pointer (literal-echo
+ * path), injectMail submits, and the turn runs to idle. No dependence on the unverified collapsed-paste
+ * preview bytes.
+ */
 async function driveCodexInjectSuccess(
   engine: ConductorEngine,
   hosted: ReturnType<ConductorEngine['getHosted']> & object,
@@ -662,9 +689,8 @@ async function driveCodexInjectSuccess(
 ): Promise<TurnOutcome> {
   const turnP = engine.runOneTurn(hosted, kickoff);
   await tick();
-  // The codex composer echoes a collapsed-paste preview matching CODEX_COLLAPSED_PASTE_NEEDLES
-  // (['pasted','lines']) — echoed() accepts it, injectMail submits, the turn runs to idle.
-  pane.emit('Pasted text — 12 lines collapsed\r\n');
+  // The SHORT pointer command echoes literally (single line) — echoed() matches, injectMail submits.
+  pane.emit(CODEX_ENV_HANDOFF_POINTER);
   await tick();
   clock.set(1000);
   pane.emit('⠋ working…\r\n');
@@ -708,6 +734,82 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     expect(pane.written.filter((w) => w === '\r')).toHaveLength(0); // never blind-fired Enter
   });
 
+  it('default FILE-HANDOFF writer scrubs failed attempts while keeping retries live', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const pty = new FakePty();
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+    });
+    engines.push(engine);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt');
+
+    let turnP = engine.runOneTurn(hosted, kickoff);
+    await tick();
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    retry.settle();
+    await turnP;
+    expect(existsSync(handoffPath)).toBe(false);
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
+
+    turnP = engine.runOneTurn(hosted, kickoff);
+    await tick();
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    retry.settle();
+    await turnP;
+    expect(existsSync(handoffPath)).toBe(false);
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
+
+    turnP = engine.runOneTurn(hosted, kickoff);
+    await tick();
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    retry.settle();
+    await turnP;
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    expect(existsSync(handoffPath)).toBe(false);
+  });
+
+  it('default FILE-HANDOFF writer scrubs an active handoff on closeAll before cap', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const pty = new FakePty();
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+    });
+    engines.push(engine);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt');
+
+    const turnP = engine.runOneTurn(hosted, kickoff);
+    await tick();
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+
+    await engine.closeAll();
+    expect(existsSync(handoffPath)).toBe(false);
+
+    retry.settle();
+    const turn = await turnP;
+    expect(turn.errored).toBe(true);
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
+  });
+
   it('NON-VACUOUS: the kickoff SURVIVES every failed turn strictly before the cap, then disappears at it', async () => {
     // Makes the consume-after-cap assertion real: the kickoff must persist at attempts 1 and 2 and
     // vanish exactly at attempt 3 — so the test fails if the cap is removed (never consumed) OR set
@@ -736,6 +838,7 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     const retry = makeInjectRetry();
     const { engine, pty } = makeCodexEngine(clock, qw, retry);
     const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo, '@operator');
+    // The pane printed its ready prompt, but emits NO fresh bytes during the failed turns.
     await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
     const hosted = engine.getHosted(projectId, 'impl-cx')!;
 
@@ -744,14 +847,14 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     await driveCodexInjectFailure(engine, hosted, kickoff, retry);
 
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
-    const [notice] = outstandingFor(projectId, '@operator').filter(
-      (item) =>
-        item.sender === 'impl-cx' &&
-        item.type === 'clarify_request' &&
-        item.subject === 'Kickoff injection failed for impl-cx',
-    );
-    expect(notice).toBeDefined();
-    expect(notice!.body).toContain('retracted after 3 failed injection attempt(s)');
+    // Startup bytes are stale; with no current-turn bytes the genuinely-stuck alarm still fires.
+    const notices = kickoffFailureNotices(projectId, '@operator', kickoff);
+    expect(notices).toHaveLength(1);
+    const [notice] = notices;
+    expect(notice!.subject).toBe('Kickoff injection failed for impl-cx');
+    expect(notice!.body).toContain('genuinely stuck');
+    expect(notice!.body).not.toContain('pane is LIVE');
+    // The provenance is still carried so the parent can recover if needed.
     expect(notice!.body).toContain(`Original kickoff seq: ${kickoff.seq}`);
     expect(notice!.body).toContain('Original kickoff body:');
   });
@@ -849,6 +952,209 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     // And B's own budget is honored end-to-end: ITS cap-th failed inject (not A's) retracts B.
     await driveCodexInjectFailure(engine, hosted, kickoffB, retry);
     expect(kickoffOutstanding(projectId, kickoffB.seq)).toBe(false);
+  });
+});
+
+// ── #93 / #132 (residual 4): the cap-retract notice is RECONCILED against pane liveness ─────────────
+//
+// The cap retracts the kickoff for loop-safety either way. But the surfaced clarify_request must NOT
+// blindly alarm "stranded" when the pane is LIVE and producing fresh output (the codex collapsed-paste
+// false-fail #132 case): the agent likely received the kickoff and is working. Engine consults the same
+// in-process liveness reads (paneExited + fresh lastByteAt) as livenessObservationFor before composing
+// the notice — a live pane gets the calm "delivery uncertain / resend via mail if idle" variant; an
+// exited / byte-silent pane keeps the genuinely-stuck alarm.
+
+/** Drive ONE failed codex turn that ALSO emits fresh pane bytes mid-turn (the agent reads live). */
+async function driveCodexInjectFailureLive(
+  engine: ConductorEngine,
+  hosted: ReturnType<ConductorEngine['getHosted']> & object,
+  kickoff: DeliveredMail,
+  pane: FakePty['panes'][number],
+  retry: ReturnType<typeof makeInjectRetry>,
+): Promise<TurnOutcome> {
+  const turnP = engine.runOneTurn(hosted, kickoff);
+  await tick();
+  pane.emit('⠋ reading kickoff…\r\n'); // FRESH output during the turn ⇒ lastByteAt >= turnStartedAt
+  await tick();
+  retry.settle(); // the inject still throws (the pointer never echo-verified this turn)
+  return turnP;
+}
+
+describe('#93/#132 cap-retract notice — reconciled against pane liveness', () => {
+  it('a LIVE pane producing fresh output gets the RECONCILED notice (NOT a bare "stranded" alarm)', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo, '@operator');
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Drive CAP failed turns, each emitting FRESH bytes mid-turn so the pane reads live across attempts.
+    for (let i = 0; i < 3; i++) {
+      clock.set(100 * (i + 1)); // advance so each turn's bytes are unambiguously fresh
+      const turn = await driveCodexInjectFailureLive(engine, hosted, kickoff, pane, retry);
+      expect(turn.errored).toBe(true);
+    }
+
+    // Retraction is preserved (loop-safety unchanged) and the pane stays warm.
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    expect(engine.isHosted(projectId, 'impl-cx')).toBe(true);
+
+    const notices = kickoffFailureNotices(projectId, '@operator', kickoff);
+    expect(notices).toHaveLength(1);
+    const [notice] = notices;
+    // RECONCILED variant: it tells the parent the agent is LIVE, not stranded.
+    expect(notice!.subject).toBe('Kickoff delivery uncertain for impl-cx (agent is live)');
+    expect(notice!.body).toContain('pane is LIVE');
+    expect(notice!.body).toContain('do NOT assume it is stranded');
+    expect(notice!.body).toContain('resend it via mail');
+    // It is NOT the bare alarm.
+    expect(notice!.subject).not.toMatch(/injection failed/i);
+    expect(notice!.body).not.toMatch(/genuinely stuck/i);
+  });
+
+  it('CONTRAST: an EXITED / byte-silent pane keeps the genuinely-stuck notice (no regression)', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo, '@operator');
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Advance the clock PAST the startup ready-prompt byte (at clock 0) and emit NO fresh bytes during
+    // the turns, then fire onExit before the cap turn — the pane is dead / byte-silent.
+    clock.set(5000);
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 1 (no fresh bytes)
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 2 (no fresh bytes)
+    pane.exit(1, null); // the process died — paneExited becomes true
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 3 == cap → retracted
+
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    const notices = kickoffFailureNotices(projectId, '@operator', kickoff);
+    expect(notices).toHaveLength(1);
+    const [notice] = notices;
+    // GENUINELY-STUCK variant — the original alarm still fires for a truly dead/silent pane.
+    expect(notice!.subject).toBe('Kickoff injection failed for impl-cx');
+    expect(notice!.body).toContain('retracted after 3 failed injection attempt(s)');
+    expect(notice!.body).toContain('genuinely stuck');
+    expect(notice!.body).not.toContain('pane is LIVE');
+  });
+
+  it('FILE-HANDOFF (#132): the multiline kickoff body is handed off and a SHORT pointer is injected', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty, handoffs } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Drive ONE successful turn: the engine routes the rendered (multiline) kickoff through the handoff
+    // file and injects the SHORT pointer command, which the composer echoes literally.
+    const turn = await driveCodexInjectSuccess(engine, hosted, kickoff, pane, clock, qw);
+    expect(turn.errored).toBe(false);
+
+    // The FULL rendered body was written to the handoff (NOT pasted into the composer).
+    expect(handoffs).toHaveLength(1);
+    expect(handoffs[0]).toBe(defaultMailRenderer(kickoff));
+    // ONLY the short pointer command (no bracketed paste) reached the pane, then exactly one submit.
+    expect(pane.written).toContain(CODEX_ENV_HANDOFF_POINTER);
+    expect(pane.written.some((w) => w.includes(ESC + '[200~'))).toBe(false); // no PASTE_START
+    expect(pane.written.some((w) => w.includes('Implement the feature per the spec'))).toBe(false);
+    // The kickoff was consumed by the successful turn.
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+  });
+
+  it('default FILE-HANDOFF writer stores kickoff mail privately, then scrubs it', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const pty = new FakePty();
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+    });
+    engines.push(engine);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    const turnP = engine.runOneTurn(hosted, kickoff);
+    await tick();
+    const injectedPointer = pane.written[0] ?? '';
+    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt');
+    expect(pane.spec.env.CO_KICKOFF_HANDOFF).toBe(handoffPath);
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    expect(statSync(dirname(handoffPath)).mode & 0o777).toBe(0o700);
+    expect(statSync(handoffPath).mode & 0o777).toBe(0o600);
+    pane.emit(injectedPointer);
+    await tick();
+    clock.set(1000);
+    pane.emit('⠋ working…\r\n');
+    await tick();
+    clock.set(1000 + WEDGE_MS + 1);
+    qw.settle();
+    const turn = await turnP;
+
+    expect(turn.errored).toBe(false);
+    expect(injectedPointer).toBe(CODEX_ENV_HANDOFF_POINTER);
+    expect(injectedPointer.length).toBeLessThan(256);
+    expect(injectedPointer).not.toContain(projectDataDir(projectId));
+    expect(existsSync(handoffPath)).toBe(false);
+    expect(existsSync(join(worktreePath, '.co'))).toBe(false);
+    expect(pane.written.some((w) => w.includes('Implement the feature per the spec'))).toBe(false);
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+  });
+
+  it('does not persist ordinary long codex mail through the kickoff handoff seam', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const pty = new FakePty();
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+    });
+    engines.push(engine);
+    const { worktreePath } = seedCodexKickoff(projectId, repo);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const ordinary = mail.send({
+      type: 'clarify_request',
+      from: 'lead-1',
+      to: 'impl-cx',
+      subject: 'ordinary long mail',
+      body: 'x'.repeat(400),
+    });
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    const turnP = engine.runOneTurn(hosted, ordinary);
+    await tick();
+    const firstWrite = pane.written[0] ?? '';
+    retry.settle();
+    const turn = await turnP;
+
+    expect(turn.errored).toBe(true);
+    expect(firstWrite).toContain(ESC + '[200~');
+    expect(firstWrite).toContain('ordinary long mail');
+    expect(firstWrite).not.toBe(CODEX_ENV_HANDOFF_POINTER);
+    expect(existsSync(join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt'))).toBe(
+      false,
+    );
   });
 });
 

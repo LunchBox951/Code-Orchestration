@@ -91,6 +91,13 @@ import {
   type LiveSessionHost,
 } from '../live-session-host.js';
 import type { ToolActivityEvent } from '../server.js';
+import {
+  CODEX_KICKOFF_HANDOFF_ENV,
+  codexKickoffHandoffPath,
+  codexKickoffHandoffPointer,
+  removeCodexKickoffHandoff,
+  writeCodexKickoffHandoff,
+} from './codex-handoff.js';
 
 /**
  * A linked transport pair for one MCP bind. The engine gives the SERVER side to
@@ -168,6 +175,20 @@ export interface ConductorEngineDeps {
   readonly spawnSpecFor?: (identity: HostedIdentity) => SpawnSpec;
   /** Extra options forwarded to {@link injectMail} (e.g. a controllable `retryDelay` in sandbox). */
   readonly injectOptions?: Omit<InjectMailOptions, 'provider'>;
+  /**
+   * #132 — codex multiline FILE-HANDOFF writer. Persists a codex agent's full kickoff `body` to a
+   * runtime handoff file and returns the absolute path; the engine then has `injectMail` inject a SHORT
+   * bare pointer command instead of a collapsing bracketed paste (sidestepping the unverified codex
+   * collapsed-paste echo race). Called ONLY for codex panes whose injected text would take the paste path.
+   * Default: {@link writeCodexKickoffHandoff} (under per-project program-data).
+   * Injected so the testable path needs no real filesystem.
+   */
+  readonly writeCodexHandoff?: (identity: HostedIdentity, body: string) => string;
+  /**
+   * Cleanup pair for {@link writeCodexHandoff}. The default is installed only with the default writer;
+   * custom writers can supply a matching cleanup seam when they persist kickoff bodies.
+   */
+  readonly removeCodexHandoff?: (identity: HostedIdentity) => void;
   /** Base {@link detectTurnEnd} config. `provider` is always taken from the hosted identity (authoritative). */
   readonly turnConfig?: Omit<TurnEndConfig, 'provider'>;
   /**
@@ -378,7 +399,12 @@ function isUnreadTurnWakeMail(mail: DeliveredMail): boolean {
 /** Default {@link SpawnSpec}: a minimal fresh spawn. Host-side hardening (isolation env, resume) is deferred. */
 function defaultSpawnSpec(identity: HostedIdentity): SpawnSpec {
   const env: Record<string, string> =
-    identity.resume.provider === 'codex' ? { CODEX_HOME: identity.resume.codexHome } : {};
+    identity.resume.provider === 'codex'
+      ? {
+          CODEX_HOME: identity.resume.codexHome,
+          [CODEX_KICKOFF_HANDOFF_ENV]: codexKickoffHandoffPath(identity),
+        }
+      : {};
   return { command: identity.provider, args: [], cwd: identity.cwd, env };
 }
 
@@ -414,7 +440,10 @@ export class ConductorEngine {
   private readonly openRoster: (projectId: ProjectId) => RosterStore;
   private readonly renderMail: MailRenderer;
   private readonly spawnSpecFor: (identity: HostedIdentity) => SpawnSpec;
+  private readonly writeCodexHandoff: (identity: HostedIdentity, body: string) => string;
+  private readonly removeCodexHandoff: (identity: HostedIdentity) => void;
   private readonly clarifyTimeoutSeconds: (projectId: ProjectId) => number;
+  private readonly activeCodexHandoffs = new Map<string, HostedIdentity>();
   /** Warm panes, keyed `${projectId}:${agent}` — the engine's launch-authority ledger (MNR-5). */
   private readonly hosted = new Map<string, HostedPane>();
   /** Pane-id occupancy, keyed `${projectId}:${pane}` — refuses two agents claiming one pane (MNR-5). */
@@ -494,6 +523,8 @@ export class ConductorEngine {
    * no bytes have been seen yet. Torn down on release (mirrors {@link paneExited}).
    */
   private readonly lastByteAt = new Map<string, number>();
+  /** P6 freshness counter: incremented once per pane output chunk, so equality cannot alias stale bytes. */
+  private readonly byteOrdinal = new Map<string, number>();
   /**
    * P6 (watchdog-seam) — whether a turn is currently in flight for each agent, keyed
    * `${projectId}:${agent}`. Set `true` at the start of {@link runOneTurn}, `false` on
@@ -508,6 +539,8 @@ export class ConductorEngine {
    * prove a hosted pane has actually had a turn injected before silent-stop classification is enabled.
    */
   private readonly turnStartedAt = new Map<string, number>();
+  /** The byte ordinal at turn start; fresh turn output requires a later ordinal. */
+  private readonly turnStartedByteOrdinal = new Map<string, number>();
   /** Per-hosted-agent MCP tool-call listeners feeding the current turn trace. */
   private readonly toolActivityListeners = new Map<string, Set<(ev: DetectorEvent) => void>>();
   /** Agents whose most recent driven turn errored before consuming their selected mail. */
@@ -542,6 +575,10 @@ export class ConductorEngine {
     this.openRoster = deps.openRoster ?? openRosterStore;
     this.renderMail = deps.renderMail ?? defaultMailRenderer;
     this.spawnSpecFor = deps.spawnSpecFor ?? defaultSpawnSpec;
+    this.writeCodexHandoff = deps.writeCodexHandoff ?? writeCodexKickoffHandoff;
+    this.removeCodexHandoff =
+      deps.removeCodexHandoff ??
+      (deps.writeCodexHandoff == null ? removeCodexKickoffHandoff : noop);
     this.clarifyTimeoutSeconds =
       deps.clarifyTimeoutSeconds ?? ((projectId) => defaultClarifyTimeoutSeconds(projectId));
   }
@@ -633,10 +670,15 @@ export class ConductorEngine {
     const turnActive = this.turnInFlight.get(agentKey) ?? false;
     const turnStartedAt = this.turnStartedAt.get(agentKey);
     const lastByte = this.lastByteAt.get(agentKey);
-    const trace: DetectorEvent[] =
-      lastByte !== undefined && (turnStartedAt == null || lastByte >= turnStartedAt)
-        ? [{ kind: 'bytes', at: lastByte, bytes: 1 }]
-        : [];
+    const byteOrdinal = this.byteOrdinal.get(agentKey);
+    const turnStartedByteOrdinal = this.turnStartedByteOrdinal.get(agentKey);
+    const hasCurrentTurnByte =
+      lastByte !== undefined &&
+      (turnStartedByteOrdinal == null ||
+        (byteOrdinal !== undefined && byteOrdinal > turnStartedByteOrdinal));
+    const trace: DetectorEvent[] = hasCurrentTurnByte
+      ? [{ kind: 'bytes', at: lastByte, bytes: 1 }]
+      : [];
     return {
       trace,
       exited,
@@ -839,6 +881,7 @@ export class ConductorEngine {
   ): Promise<TurnOutcome> {
     const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
     this.turnStartedAt.set(agentKey, this.deps.now());
+    this.turnStartedByteOrdinal.set(agentKey, this.byteOrdinal.get(agentKey) ?? 0);
     this.turnInFlight.set(agentKey, true); // P6: mark turn in flight so the reconcile watchdog sees turnActive
     // PR-B COLLECTION — the CURRENT turn ordinal (first turn is 0). The stored value reflects THIS turn
     // for its whole duration, so the cost observation AND any tool-activity forwarded mid-turn share the
@@ -847,14 +890,14 @@ export class ConductorEngine {
     this.turnOrdinal.set(agentKey, turnOrdinal);
     try {
       const text = this.renderMail(mail);
-      await injectMail(hosted.pane, text, {
-        provider: hosted.identity.provider,
-        ...this.deps.injectOptions,
-      });
+      await injectMail(hosted.pane, text, this.injectOptionsFor(hosted.identity, mail));
       opts.onInjected?.();
       const { turnEnd, trace, observedAt, sawMcpActivity, sawOverload } =
         await this.observeTurnEnd(hosted);
-      if (turnEnd.sawCompletionVerb) this.turnStartedAt.delete(agentKey);
+      if (turnEnd.sawCompletionVerb) {
+        this.turnStartedAt.delete(agentKey);
+        this.turnStartedByteOrdinal.delete(agentKey);
+      }
       // P1b: classify liveness over the SAME turn trace and surface it. The turn has yielded
       // (turnActive=false), so the classifier reads `dead` (pane exited) or a `silent_stop` break
       // (idle without a completion verb); otherwise the session is healthy and the pane stays WARM.
@@ -880,7 +923,7 @@ export class ConductorEngine {
         this.recordOverloadBackoff(agentKey);
       } else {
         this.clearOverloadBackoff(agentKey);
-        this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+        this.consumeOneShotKickoff(hosted.identity, mail);
         if (sawMcpActivity) {
           this.consumeUnreadTurnWakeMail(hosted.identity.projectId, mail);
         }
@@ -946,7 +989,7 @@ export class ConductorEngine {
               `Freeing the warm pane instead of re-pasting every tick. Last error: ${errorMessage(error)}`,
           );
           try {
-            this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+            this.consumeOneShotKickoff(hosted.identity, mail);
             this.surfaceCappedKickoffFailure(hosted, mail, attempts, error);
           } catch (retractErr) {
             // Best-effort cap cleanup must NOT mask the turn's own outcome (mirrors the finally below).
@@ -958,6 +1001,7 @@ export class ConductorEngine {
             this.kickoffInjectAttempts.delete(kickoffKey);
           }
         }
+        this.removeActiveCodexHandoff(hosted.identity, 'failed kickoff injection');
       }
       return { errored: true, error };
     } finally {
@@ -1201,13 +1245,42 @@ export class ConductorEngine {
     );
   }
 
-  private consumeOneShotKickoff(projectId: ProjectId, mail: DeliveredMail): void {
+  private consumeOneShotKickoff(identity: HostedIdentity, mail: DeliveredMail): void {
     if (!isTurnKickoffMail(mail)) return;
-    const store = this.openMail(projectId);
+    let store: MailStore | undefined;
     try {
+      store = this.openMail(identity.projectId);
       store.retract(mail.sender, mail.seq);
     } finally {
-      store.close();
+      try {
+        store?.close();
+      } finally {
+        this.removeActiveCodexHandoff(identity, 'consumed codex kickoff');
+      }
+    }
+  }
+
+  private recordActiveCodexHandoff(identity: HostedIdentity): void {
+    if (identity.provider !== 'codex') return;
+    this.activeCodexHandoffs.set(ConductorEngine.agentKey(identity.projectId, identity.agent), {
+      ...identity,
+    });
+  }
+
+  private removeActiveCodexHandoff(identity: HostedIdentity, reason: string): void {
+    if (identity.provider !== 'codex') return;
+    const agentKey = ConductorEngine.agentKey(identity.projectId, identity.agent);
+    const active = this.activeCodexHandoffs.get(agentKey);
+    if (active == null) return;
+    try {
+      this.removeCodexHandoff(active);
+    } catch (error) {
+      console.error(
+        `[ConductorEngine] failed to remove codex kickoff handoff (${reason}) for ` +
+          `'${active.agent}' in project '${active.projectId}': ${errorMessage(error)}`,
+      );
+    } finally {
+      this.activeCodexHandoffs.delete(agentKey);
     }
   }
 
@@ -1255,10 +1328,45 @@ export class ConductorEngine {
           'not-yet-hosted recipient from a PlacementRecord).',
       );
     }
-    await injectMail(hosted.pane, this.renderMail(mail), {
-      provider: hosted.identity.provider,
+    try {
+      await injectMail(
+        hosted.pane,
+        this.renderMail(mail),
+        this.injectOptionsFor(hosted.identity, mail),
+      );
+    } catch (error) {
+      if (isTurnKickoffMail(mail)) {
+        this.removeActiveCodexHandoff(hosted.identity, 'failed routed kickoff injection');
+      }
+      throw error;
+    }
+    this.consumeOneShotKickoff(hosted.identity, mail);
+  }
+
+  /**
+   * #132 — the {@link injectMail} options for `identity`: the injected base ({@link
+   * ConductorEngineDeps.injectOptions}) plus the pane's authoritative `provider`, and — for codex one-shot
+   * kickoffs ONLY — the multiline FILE-HANDOFF seam. Ordinary long/multiline routed mail keeps the
+   * existing paste/echo behavior so sensitive non-kickoff mail is not persisted to the stable kickoff
+   * handoff file.
+   */
+  private injectOptionsFor(identity: HostedIdentity, mail: DeliveredMail): InjectMailOptions {
+    const base: InjectMailOptions = {
+      provider: identity.provider,
       ...this.deps.injectOptions,
-    });
+    };
+    if (identity.provider !== 'codex' || !isTurnKickoffMail(mail)) return base;
+    return {
+      ...base,
+      codexHandoff: {
+        write: (body) => {
+          const path = this.writeCodexHandoff(identity, body);
+          this.recordActiveCodexHandoff(identity);
+          return path;
+        },
+        pointer: codexKickoffHandoffPointer,
+      },
+    };
   }
 
   /**
@@ -1447,6 +1555,7 @@ export class ConductorEngine {
     hosted: HostedPane,
     options: { readonly onPaneKillError?: (error: unknown) => void },
   ): Promise<void> {
+    this.removeActiveCodexHandoff(hosted.identity, 'pane release');
     try {
       hosted.pane.kill();
     } catch (error) {
@@ -1481,12 +1590,7 @@ export class ConductorEngine {
     }
     for (const [, hosted] of all) {
       try {
-        hosted.pane.kill();
-      } catch {
-        /* best-effort: pane may already be gone */
-      }
-      try {
-        await hosted.session.close();
+        await this.finalizeRelease(hosted, {});
       } catch {
         /* best-effort teardown */
       }
@@ -1512,6 +1616,7 @@ export class ConductorEngine {
     chunk: string,
   ): void {
     this.lastByteAt.set(agentKey, this.deps.now()); // P6: track last-byte time for liveness probe
+    this.byteOrdinal.set(agentKey, (this.byteOrdinal.get(agentKey) ?? 0) + 1);
     const accumulator = this.transcriptAccumulators.get(agentKey);
     const chunkOffset = accumulator?.snapshot().nextOffset ?? 0;
     const generation = this.transcriptGenerations.get(agentKey) ?? 0;
@@ -1525,25 +1630,72 @@ export class ConductorEngine {
     }
   }
 
+  /**
+   * #93 — is `agentKey`'s pane LIVE right now? Reads the SAME durable in-process liveness signals
+   * {@link livenessObservationFor} uses (P6 watchdog-seam): `paneExited` (the `dead` signal) and the
+   * last-byte timestamp ({@link lastByteAt}). The pane is "live and producing fresh output" when it has
+   * NOT exited AND it emitted at least one byte during the failing turn (`lastByteAt >= turnStartedAt`)
+   * — i.e. the agent is reading/working, not wedged or gone. NO I/O, never throws; a pure in-memory read.
+   */
+  private kickoffPaneLive(agentKey: string): boolean {
+    if (this.paneExited.get(agentKey) === true) return false; // `dead` — genuinely stuck
+    const lastByte = this.lastByteAt.get(agentKey);
+    if (lastByte === undefined) return false; // byte-silent — no fresh output to vouch for liveness
+    const byteOrdinal = this.byteOrdinal.get(agentKey);
+    const turnStartedByteOrdinal = this.turnStartedByteOrdinal.get(agentKey);
+    // Fresh = a byte landed after this turn's inject start (startup/prior-turn bytes do not count).
+    return (
+      turnStartedByteOrdinal === undefined ||
+      (byteOrdinal !== undefined && byteOrdinal > turnStartedByteOrdinal)
+    );
+  }
+
+  /**
+   * #93 / #132 (residual 4) — surface ONE truthful, actionable status when a kickoff is retracted at the
+   * inject-attempt cap, RECONCILED against the pane's liveness rather than blindly alarming "stranded".
+   *
+   * The cap retracts the kickoff for loop-safety whether or not the pane is alive (the warm pane must not
+   * stay stuck re-pasting). But the OLD notice unconditionally told the parent the agent was stranded —
+   * even when the pane was live and producing fresh output (a codex multiline kickoff whose real preview
+   * lacks the unverified collapsed-paste needles false-fails the echo scan, yet the agent IS reading the
+   * paste). That false "stranded" alarm is the #93 dual-signal bug. So we consult the already-computed
+   * liveness ({@link kickoffPaneLive}): a LIVE pane gets a calm "kickoff may be undelivered — resend via
+   * mail if it is idle" note; an exited / byte-silent pane keeps the genuinely-stuck alarm. The kickoff is
+   * retracted either way (the caller already did so); this only reconciles the SIGNAL.
+   */
   private surfaceCappedKickoffFailure(
     hosted: HostedPane,
     mail: DeliveredMail,
     attempts: number,
     error: unknown,
   ): void {
+    const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
+    const live = this.kickoffPaneLive(agentKey);
+    const provenance =
+      `Provider: ${hosted.identity.provider}. Original kickoff seq: ${mail.seq}. ` +
+      `Last inject error: ${errorMessage(error)}\n\nOriginal kickoff subject:\n${mail.subject}\n\n` +
+      `Original kickoff body:\n${mail.body}`;
+    const subject = live
+      ? `Kickoff delivery uncertain for ${hosted.identity.agent} (agent is live)`
+      : `Kickoff injection failed for ${hosted.identity.agent}`;
+    const lede = live
+      ? `${hosted.identity.agent}'s pane is LIVE and producing fresh output, but its one-shot kickoff ` +
+        `did not echo-verify after ${attempts} injection attempt(s), so it was retracted to free the ` +
+        `warm pane from re-pasting it every tick. The agent may already be acting on the kickoff (it ` +
+        `was likely delivered, only the composer echo could not be confirmed) — do NOT assume it is ` +
+        `stranded. If the agent appears IDLE and never picked the kickoff up, resend it via mail. `
+      : `The one-shot kickoff for ${hosted.identity.agent} was retracted after ${attempts} failed ` +
+        `injection attempt(s), so the warm pane is no longer stuck re-pasting it every tick. The pane ` +
+        `is NOT producing fresh output (exited or byte-silent), so the agent is likely genuinely stuck ` +
+        `and the kickoff was probably never delivered — re-kick or recover it. `;
     const store = this.openMail(hosted.identity.projectId);
     try {
       store.send({
         type: MAIL_CLARIFY_REQUEST,
         from: hosted.identity.agent,
         to: mail.sender,
-        subject: `Kickoff injection failed for ${hosted.identity.agent}`,
-        body:
-          `The one-shot kickoff for ${hosted.identity.agent} was retracted after ${attempts} ` +
-          `failed injection attempt(s), so the warm pane is no longer stuck re-pasting it every ` +
-          `tick. Provider: ${hosted.identity.provider}. Original kickoff seq: ${mail.seq}. ` +
-          `Last error: ${errorMessage(error)}\n\nOriginal kickoff subject:\n${mail.subject}\n\n` +
-          `Original kickoff body:\n${mail.body}`,
+        subject,
+        body: `${lede}\n\n${provenance}`,
         causationId: String(mail.seq),
         idempotencyKey:
           `kickoff-injection-failed:${hosted.identity.projectId}:` +
@@ -1563,8 +1715,10 @@ export class ConductorEngine {
     this.transcriptUnsub.delete(agentKey);
     this.transcriptAccumulators.delete(agentKey);
     this.lastByteAt.delete(agentKey); // P6
+    this.byteOrdinal.delete(agentKey); // P6
     this.turnInFlight.delete(agentKey); // P6
     this.turnStartedAt.delete(agentKey); // P6
+    this.turnStartedByteOrdinal.delete(agentKey); // P6
     this.lastTurnErrored.delete(agentKey);
     this.toolActivityListeners.delete(agentKey);
     this.turnOrdinal.delete(agentKey); // PR-B: a re-hosted agent restarts its turn ordinal at 0

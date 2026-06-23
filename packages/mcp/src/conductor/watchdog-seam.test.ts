@@ -1144,7 +1144,7 @@ describe('ConductorEngine.livenessObservationFor — the in-process observation 
     await engine.closeAll();
   });
 
-  it('scopes active-turn liveness to bytes at or after turnStartedAt', async () => {
+  it('scopes active-turn liveness to byte ordinals, not timestamps alone', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId);
 
@@ -1163,12 +1163,11 @@ describe('ConductorEngine.livenessObservationFor — the in-process observation 
     seedActionableMail(projectId, 'impl-stale');
     const pane = await hostPane(engine, pty, makeIdentity('impl-stale', projectId, cwd));
 
-    clock.set(1000);
+    clock.set(10_000);
     pane.emit('startup/prior-turn bytes\r\n');
 
     const hosted = engine.getHosted(projectId, 'impl-stale')!;
     const mail = outstandingItem(projectId, 'impl-stale');
-    clock.set(10_000);
     const turnP = engine.runOneTurn(hosted, mail);
     await tick();
 
@@ -1183,6 +1182,12 @@ describe('ConductorEngine.livenessObservationFor — the in-process observation 
     );
     expect(beforeWedge.liveness).toBe('alive');
     expect(beforeWedge.break).toBeUndefined();
+
+    pane.emit('fresh current-turn bytes at the same timestamp\r\n');
+    await tick();
+
+    const freshObs = engine.livenessObservationFor(projectId, 'impl-stale')!;
+    expect(freshObs.trace).toEqual([{ kind: 'bytes', at: 10_000, bytes: 1 }]);
 
     clock.set(10_000 + WEDGE_MS);
     qw.settle();

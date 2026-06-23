@@ -1484,7 +1484,7 @@ export { NodePtyHost } from './pty/node-pty-host.js';
 // once (bracketed-paste for multi-line + settle + echo-verify + continuous dialog-watcher). Plus the
 // reusable continuous permission/approval dialog-watcher it composes. Sandbox-tested over FakePty.
 export type { InjectMailOptions } from './pty/mail-injector.js';
-export { injectMail } from './pty/mail-injector.js';
+export { injectMail, defaultHandoffPointer } from './pty/mail-injector.js';
 export type { DialogName, DialogMatch, WatchDialogsOptions } from './pty/dialog-watcher.js';
 export { classifyDialog, watchDialogs } from './pty/dialog-watcher.js';
 

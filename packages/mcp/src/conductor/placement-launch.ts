@@ -28,6 +28,7 @@ import {
   CO_PROJECT_ID_ENV,
   CO_ROLE_ENV,
 } from '../context.js';
+import { CODEX_KICKOFF_HANDOFF_ENV, codexKickoffHandoffPath } from './codex-handoff.js';
 
 /** Co MCP + CLI command paths the pane needs for isolated config. Host-injected; always absolute. */
 export interface CoMcpPaths {
@@ -281,6 +282,9 @@ export function buildHostedLaunchSpec(
       LANG: 'C.UTF-8',
       // #127: web-research-gated GitHub token for the pane's own `gh`/REST calls (empty object otherwise).
       ...researchGhTokenEnv,
+      ...(provider === 'codex'
+        ? { [CODEX_KICKOFF_HANDOFF_ENV]: codexKickoffHandoffPath(identity) }
+        : {}),
     },
     prelaunchFiles: [
       ...(paneLaunchConfig.prelaunchFiles ?? []),

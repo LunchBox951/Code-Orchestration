@@ -114,6 +114,49 @@ export interface InjectMailOptions {
    * inject path; the harness wraps its own failures).
    */
   readonly onPasteEcho?: (chunk: string, multiline: boolean, pasted: boolean) => void;
+  /**
+   * #132 — codex multiline FILE-HANDOFF seam. The codex composer is believed to COLLAPSE a multi-line
+   * bracketed paste into a preview whose bytes are UNKNOWN (the {@link CODEX_COLLAPSED_PASTE_NEEDLES}
+   * are unverified placeholders), so a real multiline codex kickoff whose preview lacks those words
+   * false-fails the echo scan and is wrongly retracted. When this seam is supplied AND the codex payload
+   * would take the bracketed-paste path (multi-line OR ≥ {@link PASTE_LENGTH_THRESHOLD}), `injectMail`
+   * sidesteps the race ENTIRELY: it `write`s the full body to a runtime handoff file and injects
+   * a SHORT bare pointer command (which echo-verifies reliably on the literal-echo path) instead of the
+   * collapsing paste. Short single-line codex payloads, and ALL other providers, are unaffected (they
+   * keep the literal-echo / bracketed-paste path). Codex-only by construction — claude's collapsed-paste
+   * preview bytes are a verified contract, so it never needs the handoff.
+   */
+  readonly codexHandoff?: {
+    /** Persist the full kickoff `body` to a runtime handoff file; return its read path/handle. */
+    readonly write: (body: string) => string;
+    /**
+     * Render the SHORT single-line pointer command the agent reads, given the handoff file path.
+     * Defaults to {@link defaultHandoffPointer}. Kept short so it echo-verifies on the literal-echo path.
+     */
+    readonly pointer?: (handoffPath: string) => string;
+  };
+}
+
+/**
+ * #132 — default SHORT pointer command for the codex file-handoff. A single short line so it
+ * echo-verifies reliably (no bracketed paste, no collapsed-preview race). Points the agent at the
+ * handoff file that holds the full kickoff body.
+ */
+export function defaultHandoffPointer(handoffPath: string): string {
+  return `Your kickoff instructions are in ${handoffPath} — read that file in full and act on it now.`;
+}
+
+function assertShortSingleLineHandoffPointer(pointer: string): void {
+  const normalized = normalizeStartupOutput(pointer);
+  if (/[\r\n]/.test(pointer) || normalized.length >= PASTE_LENGTH_THRESHOLD) {
+    throw new Error(
+      `injectMail: codex handoff pointer must be a short single-line command/text (<${PASTE_LENGTH_THRESHOLD} chars) ` +
+        'so it never takes the collapsed-paste path',
+    );
+  }
+  if (normalized === '') {
+    throw new Error('injectMail: codex handoff pointer must not be empty');
+  }
 }
 
 /**
@@ -138,6 +181,24 @@ export async function injectMail(
   // composer and its reflowed echo no longer matches byte-for-byte — pasting it dodges that reflow.
   const hasNewline = /[\r\n]/.test(text);
   const usePaste = hasNewline || normalizedText.length >= PASTE_LENGTH_THRESHOLD;
+
+  // #132 — codex multiline FILE-HANDOFF. When a codex payload would take the collapsing bracketed-paste
+  // path AND a handoff seam is supplied, write the full body to a handoff file and inject a SHORT bare
+  // pointer command instead. The short pointer echo-verifies reliably on the literal-echo path, so we
+  // never depend on capturing the unverified codex collapsed-paste preview bytes (#77). Recurse with a
+  // single-line pointer and NO handoff seam so it takes the plain bare-write/echo-verify branch.
+  if (opts.provider === 'codex' && usePaste && opts.codexHandoff != null) {
+    const handoffPath = opts.codexHandoff.write(text);
+    const pointer = (opts.codexHandoff.pointer ?? defaultHandoffPointer)(handoffPath);
+    assertShortSingleLineHandoffPointer(pointer);
+    // Recurse with the handoff seam dropped so the SHORT single-line pointer takes the plain
+    // bare-write / echo-verify branch (never re-enters this divert). `codexHandoff` is intentionally
+    // omitted from the spread.
+    const { codexHandoff, ...rest } = opts;
+    void codexHandoff;
+    return injectMail(pane, pointer, rest);
+  }
+
   const payload = usePaste ? `${PASTE_START}${text}${PASTE_END}` : text;
 
   // The injected `retryDelay` test seam is authoritative (deterministic, no wall clock); the production
