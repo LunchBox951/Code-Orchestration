@@ -1856,6 +1856,163 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
     }
   });
 
+  it('refuses live agent reviewer dispatch when the dispatch store is not wired', async () => {
+    const repo = makeRepo();
+    const reg = buildCoreRegistry();
+    const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+    worktreeStore!.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        path: '/tmp/fake',
+        parent: 'lead-2',
+      },
+      { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+    );
+    const spawnGate: ReviewerSpawnGate = {
+      spawn() {
+        throw new Error('should not spawn without dispatch placement');
+      },
+    };
+
+    await expect(
+      invokeTool(reg, { ...ctx, reviewerSpawnGate: spawnGate }, 'co_merge', {
+        branch: 'co/feature',
+        into: 'main',
+        intent: { summary: 'trigger a review' },
+      }),
+    ).rejects.toThrow(/dispatch store.*live agent review/i);
+
+    expect(reviewStore!.getReviewRequest('main', 'co/feature')).toBeUndefined();
+  });
+
+  it('returns wait guidance when reviewer dispatch records a waiting placement', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      const spawned: string[] = [];
+      const toolCtx = {
+        ...ctx,
+        dispatch,
+        reviewerSpawnGate: {
+          spawn: async (_projectId, placement) => {
+            spawned.push(placement.agent);
+          },
+        } satisfies ReviewerSpawnGate,
+      };
+      try {
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'trigger a review' },
+        })) as {
+          merged: boolean;
+          review_pending?: boolean;
+          review_id?: string;
+          next_step?: string;
+        };
+        const request = reviewStore!.getReviewRequest('main', 'co/feature');
+        const placements = dispatch.readPlacements(`reviewer@${out.review_id}`);
+
+        expect(out.merged).toBe(false);
+        expect(out.review_pending).toBe(true);
+        expect(out.review_id).toBe(request!.reviewId);
+        expect(spawned).toHaveLength(0);
+        expect(placements).toHaveLength(1);
+        expect(placements[0]!.kind).toBe('waiting');
+        expect(out.next_step).toMatch(/reviewer dispatch is waiting/i);
+        expect(out.next_step).not.toMatch(/co_review_finalize/);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('routes live reviewer kickoff to the configured reviewer sub-role seat', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const cfg = openConfigStore();
+      try {
+        cfg.setProjectOverride('p-merge-tool', 'reviewer_profiles', {
+          worker_merge: 'reviewer:bugfix',
+        });
+      } finally {
+        cfg.close();
+      }
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const spawned: string[] = [];
+      const toolCtx = {
+        ...ctx,
+        dispatch,
+        reviewerSpawnGate: {
+          spawn: async (_projectId, placement) => {
+            spawned.push(placement.agent);
+          },
+        } satisfies ReviewerSpawnGate,
+      };
+      try {
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'trigger a review' },
+        })) as { review_id?: string };
+        const reviewer = `reviewer:bugfix@${out.review_id}`;
+        const kickoff = ctx.mail.outstanding(reviewer)[0];
+
+        expect(spawned).toEqual([reviewer]);
+        expect(kickoff).toMatchObject({
+          type: MAIL_CLARIFY_REQUEST,
+          sender: 'lead-2',
+          recipient: reviewer,
+          correlationId: turnKickoffCorrelationId(reviewer),
+        });
+        expect(kickoff!.body).toContain(out.review_id!);
+        expect(kickoff!.body).toContain("scope 'worker_merge'");
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('#94: full handshake — co_merge triggers review → seat placement → co_review_finalize PASS → re-call co_merge merges', async () => {
     vi.useFakeTimers({ now: 0 });
     try {
@@ -2352,6 +2509,7 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
         };
         const request = ctx.reviews!.getReviewRequest('main', 'co/feature');
         const placements = dispatch.readPlacements(`reviewer@${out.review_id}`);
+        const outstanding = ctx.mail.outstanding(`reviewer@${out.review_id}`);
 
         expect(out.merged).toBe(false);
         expect(out.review_pending).toBe(true);
@@ -2359,6 +2517,159 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
         expect(out.next_step).toContain(out.review_id!);
         expect(placements).toHaveLength(1);
         expect(placements[0]!.reviewId).toBe(out.review_id);
+        expect(outstanding).toHaveLength(1);
+        expect(outstanding[0]!.idempotencyKey).toBe(`reviewer-kickoff:${out.review_id}`);
+        expect(attempts).toBe(2);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the merge slot after reviewer kickoff mail fails so the same review can retry', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const mail = ctx.mail as MailStore & { send: MailStore['send'] };
+      const send = mail.send.bind(mail);
+      let failKickoff = true;
+      mail.send = (envelope) => {
+        if (failKickoff && envelope.idempotencyKey?.startsWith('reviewer-kickoff:')) {
+          throw new Error('kickoff mail failed');
+        }
+        return send(envelope);
+      };
+      let attempts = 0;
+      const toolCtx = {
+        ...ctx,
+        dispatch,
+        reviewerSpawnGate: {
+          spawn: async () => {
+            attempts += 1;
+          },
+        } satisfies ReviewerSpawnGate,
+      };
+      try {
+        await expect(
+          invokeTool(reg, toolCtx, 'co_merge', {
+            branch: 'co/feature',
+            into: 'main',
+            intent: { summary: 'trigger a review' },
+          }),
+        ).rejects.toThrow(/kickoff mail failed/);
+
+        const request = ctx.reviews!.getReviewRequest('main', 'co/feature');
+        expect(request?.reviewId).toMatch(/^rev-/);
+        expect(ctx.reviews!.activeSerialized('main')).toBe('co/feature');
+        failKickoff = false;
+
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'retry the same review placement' },
+        })) as { merged: boolean; review_pending?: boolean; review_id?: string };
+        const outstanding = ctx.mail.outstanding(`reviewer@${out.review_id}`);
+
+        expect(out.merged).toBe(false);
+        expect(out.review_pending).toBe(true);
+        expect(out.review_id).toBe(request!.reviewId);
+        expect(outstanding).toHaveLength(1);
+        expect(outstanding[0]!.idempotencyKey).toBe(`reviewer-kickoff:${out.review_id}`);
+        expect(attempts).toBe(1);
+      } finally {
+        mail.send = send;
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the merge slot after synchronous reviewer spawn failure so the same review can retry', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      let attempts = 0;
+      const toolCtx = {
+        ...ctx,
+        dispatch,
+        reviewerSpawnGate: {
+          spawn() {
+            attempts += 1;
+            if (attempts === 1) throw new Error('sync spawn failed');
+            return Promise.resolve();
+          },
+        } satisfies ReviewerSpawnGate,
+      };
+      try {
+        await expect(
+          invokeTool(reg, toolCtx, 'co_merge', {
+            branch: 'co/feature',
+            into: 'main',
+            intent: { summary: 'trigger a review' },
+          }),
+        ).rejects.toThrow(/sync spawn failed/);
+
+        const request = ctx.reviews!.getReviewRequest('main', 'co/feature');
+        expect(request?.reviewId).toMatch(/^rev-/);
+        expect(ctx.reviews!.activeSerialized('main')).toBe('co/feature');
+
+        const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'retry the same review placement' },
+        })) as { merged: boolean; review_pending?: boolean; review_id?: string };
+        const outstanding = ctx.mail.outstanding(`reviewer@${out.review_id}`);
+
+        expect(out.merged).toBe(false);
+        expect(out.review_pending).toBe(true);
+        expect(out.review_id).toBe(request!.reviewId);
+        expect(outstanding).toHaveLength(1);
+        expect(outstanding[0]!.idempotencyKey).toBe(`reviewer-kickoff:${out.review_id}`);
         expect(attempts).toBe(2);
       } finally {
         dispatch.close();

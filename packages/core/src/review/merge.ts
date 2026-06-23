@@ -264,6 +264,21 @@ function assertHumanReviewHasCriteria(
   );
 }
 
+function assertLiveAgentReviewCanDispatch(
+  deps: Pick<ReviewGateDeps, 'dispatch' | 'reviewerSpawnGate'>,
+  req: Pick<ReviewTriggerRequest, 'reviewId' | 'target' | 'branch'>,
+  projectId: string | undefined,
+  reviewerKind: 'agent' | 'human',
+): void {
+  if (projectId == null || reviewerKind !== 'agent' || deps.reviewerSpawnGate == null) return;
+  if (deps.dispatch != null) return;
+  throw new Error(
+    `co review: refused — dispatch store is required for live agent review '${req.reviewId}' ` +
+      `of '${req.branch}' into '${req.target}'. Without a dispatch placement, co cannot launch an ` +
+      'actionable reviewer turn (Principle 9 — no silent drop).',
+  );
+}
+
 function reviewerSeat(role: string, reviewId: string): string {
   return `${role}@${reviewId}`;
 }
@@ -760,6 +775,7 @@ export class CoReviewGate implements FinishReviewGate {
       if (existingVerdict?.reviewId === existing.reviewId) {
         return reviewTriggerResultFromRecord(existing);
       }
+      assertLiveAgentReviewCanDispatch(this.deps, req, projectId, existingReviewerKind);
       if (projectId != null && existingReviewerKind === 'human') {
         if (!this.deps.mail) {
           throw new Error(
@@ -826,6 +842,7 @@ export class CoReviewGate implements FinishReviewGate {
     const reviewerKind = resolveKind();
     const specRef = requestSpecRef(reviewerKind);
     assertHumanReviewHasCriteria(reviewerKind, specRef, req.branch, req.target);
+    assertLiveAgentReviewCanDispatch(this.deps, req, projectId, reviewerKind);
     const requested: ReviewRequested = {
       reviewId: req.reviewId,
       target: req.target,
@@ -893,7 +910,13 @@ export class CoReviewGate implements FinishReviewGate {
       // Default agent path: review.requested recorded above; no mail, no placement when no projectId.
       return result;
     } catch (cause) {
-      if (acquiredByThisCall && this.deps.reviews.activeSerialized(req.target) === req.branch) {
+      const requestPersisted =
+        this.deps.reviews.getReviewRequest(req.target, req.branch)?.reviewId === req.reviewId;
+      if (
+        acquiredByThisCall &&
+        !requestPersisted &&
+        this.deps.reviews.activeSerialized(req.target) === req.branch
+      ) {
         releaseMergeSlot(this.deps.reviews, req.target, req.branch);
       }
       throw cause;

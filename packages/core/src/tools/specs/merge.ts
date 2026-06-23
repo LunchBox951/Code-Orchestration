@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { OPERATOR } from '../../mail/events.js';
 import { roleParentResolver } from '../../mail/escalation.js';
+import type { PlacementRecord } from '../../dispatch/events.js';
 import {
   checkMergeCommitIdentity,
   checkPublishIdentities,
@@ -13,6 +14,8 @@ import {
   type GitConfigIdentityReader,
 } from '../../permissions/identity-guard.js';
 import { CoReviewGate } from '../../review/merge.js';
+import { reviewScopeValueSchema } from '../../review/events.js';
+import type { ReviewScope } from '../../review/ladder.js';
 import {
   defaultGitReader,
   detectCurrentBranchTarget,
@@ -151,8 +154,7 @@ const mergeOutput = z.object({
       'Present on a review_pending result (#94): the reviewed branch whose recorded PASS verdict is ' +
         'missing.',
     ),
-  review_scope: z
-    .string()
+  review_scope: reviewScopeValueSchema
     .optional()
     .describe(
       'Present on a review_pending result (#94): the review scope the verdict will be judged under.',
@@ -163,6 +165,13 @@ const mergeOutput = z.object({
     .describe(
       'Present on a review_pending result (#94): whether the pending review is routed to an agent ' +
         'reviewer or to the operator Review view.',
+    ),
+  reviewer_placement: z
+    .enum(['placed', 'waiting'])
+    .optional()
+    .describe(
+      'Present on an agent review_pending result (#94): whether the reviewer seat was placed or is ' +
+        'waiting for dispatch capacity.',
     ),
   next_step: z
     .string()
@@ -180,7 +189,8 @@ function reviewPendingNextStep(params: {
   readonly branch: string;
   readonly into: string;
   readonly reviewId: string;
-  readonly scope: string;
+  readonly scope: ReviewScope;
+  readonly reviewerPlacement?: 'placed' | 'waiting';
 }): string {
   if (params.reviewerKind === 'human') {
     return (
@@ -190,12 +200,41 @@ function reviewPendingNextStep(params: {
       'after the operator records PASS. A mailed PASS is not a recorded verdict.'
     );
   }
+  if (params.reviewerPlacement !== 'placed') {
+    return (
+      `No recorded PASS verdict exists for '${params.branch}' into '${params.into}'. ` +
+      `Reviewer dispatch is waiting for review_id '${params.reviewId}' (target '${params.into}', ` +
+      `branch '${params.branch}', scope '${params.scope}'); no reviewer has been launched yet. ` +
+      'Re-call co_merge after capacity recovers and the reviewer records PASS. A mailed PASS is ' +
+      'not a recorded verdict.'
+    );
+  }
   return (
     `No recorded PASS verdict exists for '${params.branch}' into '${params.into}'. The reviewer ` +
     `must call co_review_finalize with review_id '${params.reviewId}' (target '${params.into}', ` +
     `branch '${params.branch}', scope '${params.scope}'; a PASS requires a verification marker). ` +
     'Re-call co_merge after the PASS is recorded. A mailed PASS is not a recorded verdict.'
   );
+}
+
+function latestReviewerPlacementKind(
+  placements: readonly PlacementRecord[],
+  params: {
+    readonly reviewId: string;
+    readonly target: string;
+    readonly branch: string;
+    readonly scope: ReviewScope;
+  },
+): 'placed' | 'waiting' | undefined {
+  return placements
+    .filter(
+      (placement) =>
+        placement.reviewId === params.reviewId &&
+        placement.reviewTarget === params.target &&
+        placement.reviewBranch === params.branch &&
+        placement.reviewScope === params.scope,
+    )
+    .at(-1)?.kind;
 }
 
 function assertMergeIdentities(
@@ -398,7 +437,7 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         const existingReq = ctx.reviews.getReviewRequest(into, input.branch);
         const reviewId =
           existingReq != null && verdict == null ? existingReq.reviewId : `rev-${randomUUID()}`;
-        const scope = 'worker_merge';
+        const scope: ReviewScope = 'worker_merge';
         const trigger = triggerGate.triggerReview({
           reviewId,
           target: into,
@@ -416,6 +455,15 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         const recordedReviewId = trigger.reviewId;
         const recordedReq = ctx.reviews.getReviewRequest(into, input.branch);
         const reviewerKind = recordedReq?.reviewerKind ?? 'agent';
+        const reviewerPlacement =
+          reviewerKind === 'agent' && ctx.dispatch != null
+            ? latestReviewerPlacementKind(ctx.dispatch.readPlacements(), {
+                reviewId: recordedReviewId,
+                target: into,
+                branch: input.branch,
+                scope,
+              })
+            : undefined;
         return {
           merged: false,
           // The merge hasn't happened yet — the review is pending — so there is no commit to report.
@@ -428,12 +476,14 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
           review_branch: input.branch,
           review_scope: scope,
           reviewer_kind: reviewerKind,
+          ...(reviewerPlacement != null ? { reviewer_placement: reviewerPlacement } : {}),
           next_step: reviewPendingNextStep({
             reviewerKind,
             branch: input.branch,
             into,
             reviewId: recordedReviewId,
             scope,
+            ...(reviewerPlacement != null ? { reviewerPlacement } : {}),
           }),
         };
       }
