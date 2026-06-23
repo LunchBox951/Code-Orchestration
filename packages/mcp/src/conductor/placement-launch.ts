@@ -252,8 +252,8 @@ export function buildHostedLaunchSpec(
       // #127: web-research-gated GitHub token for the pane MCP server env.
       ...researchGhTokenEnv,
       // RC-1: carry ELECTRON_RUN_AS_NODE=1 (and any other host-required server env) so the provider
-      // runs the co-mcp bridge as Node when `coMcpCommand` is the Electron binary. Last so an explicit
-      // host override wins; the values here never collide with the CO_* / GH_TOKEN keys above.
+      // runs the co-mcp bridge as Node when `coMcpCommand` is the Electron binary. Reserved
+      // token/identity/bridge keys are rejected before this merge; extra env cannot override them.
       ...(coMcpPaths.coMcpExtraEnv ?? {}),
     },
     ...(coMcpPaths.coCliExtraEnv != null ? { coCliEnv: coMcpPaths.coCliExtraEnv } : {}),
