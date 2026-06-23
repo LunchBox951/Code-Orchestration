@@ -385,6 +385,54 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
     }
   });
 
+  it('preserves surviving phase status and verification metadata during replan', () => {
+    const store = openPlanStore('p-plans-replan-preserves-state');
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      store.changePhaseStatus('task-1', 'ph-1', 'building', ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a', true, ACTOR);
+
+      const after = store.recordReplan(
+        'task-1',
+        'scope changed',
+        [
+          {
+            phaseId: 'ph-1',
+            name: 'Phase One Updated',
+            deps: [],
+            criteria: [WIRED_CRITERION],
+          },
+          {
+            phaseId: 'ph-new',
+            name: 'New Phase',
+            deps: ['ph-1'],
+            criteria: [WIRED_CRITERION],
+          },
+        ],
+        ACTOR,
+      );
+
+      const preserved = after.phases.find((p) => p.phaseId === 'ph-1');
+      expect(preserved).toMatchObject({
+        name: 'Phase One Updated',
+        status: 'building',
+        verifiedPass: true,
+        baselineSha: 'base-a',
+      });
+      expect(after.phases.find((p) => p.phaseId === 'ph-new')).toMatchObject({
+        status: 'planned',
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it('multiple replans accumulate replanCount', () => {
     const store = openPlanStore('p-plans-replan-multi');
     try {

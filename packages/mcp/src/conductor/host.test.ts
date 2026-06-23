@@ -1239,6 +1239,30 @@ describe('serveConductor — wires the full stack over injected seams (no real b
           '--version',
         ]);
       });
+
+      it('returns undefined when every candidate exits non-zero', () => {
+        const calls: string[] = [];
+        const spawn: GhSpawnSync = (command) => {
+          calls.push(command);
+          return { status: 1 };
+        };
+
+        expect(makeGhCommandResolver(spawn)({})).toBeUndefined();
+        expect(calls).toEqual([...GH_AUTH_TOKEN_COMMANDS]);
+      });
+
+      it('continues after bare gh throws and resolves a later absolute candidate', () => {
+        const calls: string[] = [];
+        const laterCandidate = GH_AUTH_TOKEN_COMMANDS[1]!;
+        const spawn: GhSpawnSync = (command) => {
+          calls.push(command);
+          if (command === 'gh') throw new Error('ENOENT');
+          return command === laterCandidate ? { status: 0 } : { status: 127 };
+        };
+
+        expect(makeGhCommandResolver(spawn)({})).toBe(laterCandidate);
+        expect(calls).toEqual(['gh', laterCandidate]);
+      });
     });
 
     describe('makeGhAuthTokenRunner (real runner over an injectable spawn seam)', () => {

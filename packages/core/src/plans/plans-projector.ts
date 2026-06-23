@@ -143,12 +143,25 @@ function sameDraft(existing: PlanRecord, rec: PlanDrafted): boolean {
   );
 }
 
-function upsertPhases(db: DatabaseSync, taskId: string, phases: readonly PhaseNode[]): void {
+interface PreservedPhaseState {
+  readonly status: PhaseStatus;
+  readonly verifiedPass?: boolean;
+  readonly baselineSha?: string;
+}
+
+function upsertPhases(
+  db: DatabaseSync,
+  taskId: string,
+  phases: readonly PhaseNode[],
+  preservedPhaseState: ReadonlyMap<string, PreservedPhaseState> = new Map(),
+): void {
   db.prepare(`DELETE FROM plan_phases WHERE task_id = ?`).run(taskId);
   phases.forEach((phase, ordinal) => {
+    const preserved = preservedPhaseState.get(phase.phaseId);
     db.prepare(
-      `INSERT INTO plan_phases (task_id, phase_id, ordinal, name, owner, deps, criteria, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'planned')`,
+      `INSERT INTO plan_phases
+       (task_id, phase_id, ordinal, name, owner, deps, criteria, status, verified_pass, baseline_sha)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       taskId,
       phase.phaseId,
@@ -157,6 +170,9 @@ function upsertPhases(db: DatabaseSync, taskId: string, phases: readonly PhaseNo
       phase.owner ?? null,
       JSON.stringify(phase.deps),
       JSON.stringify(phase.criteria),
+      preserved?.status ?? 'planned',
+      preserved?.verifiedPass == null ? null : preserved.verifiedPass ? 1 : 0,
+      preserved?.baselineSha ?? null,
     );
   });
 }
@@ -300,7 +316,17 @@ export class PlansProjector implements Projector {
         db.prepare(`UPDATE plans SET replan_count = replan_count + 1 WHERE task_id = ?`).run(
           taskId,
         );
-        upsertPhases(db, taskId, phases);
+        const preservedPhaseState = new Map(
+          existing.phases.map((phase) => [
+            phase.phaseId,
+            {
+              status: phase.status,
+              ...(phase.verifiedPass != null ? { verifiedPass: phase.verifiedPass } : {}),
+              ...(phase.baselineSha != null ? { baselineSha: phase.baselineSha } : {}),
+            },
+          ]),
+        );
+        upsertPhases(db, taskId, phases, preservedPhaseState);
         return;
       }
       case EVENT_TASK_COMPLETED: {
