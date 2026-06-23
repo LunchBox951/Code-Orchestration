@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { BASE_ROLES, roleToolsets, toolsForRole } from '../tools/scoping.js';
+import { BASE_ROLES, roleToolsets, toolsForRole, type Role } from '../tools/scoping.js';
 import { checkToolCompleteness } from '../tools/completeness.js';
 import { buildCoreRegistry } from '../tools/core-registry.js';
 import {
@@ -75,21 +75,67 @@ describe('ROLE_PROFILES — five authoritative profiles', () => {
 
 // #128 — a slung lead/coordinator never sees its co_* lifecycle verbs up front (the provider
 // harness defers them behind tool_search), so it stalls. The only reliable lever is a prompt nudge:
-// name THIS role's lifecycle verbs and tell the agent to load/search them before acting. The named
-// list is DERIVED from ROLE_PROFILES[role].toolset (minus UNIVERSAL) so the two prompt layers
-// (roleBasePrompt + orientContent) never drift from the authoritative profile.
+// name THIS role's lifecycle/workflow verbs and tell the agent to load/search them before acting.
+// The named list is explicit and tested against ROLE_PROFILES[role].toolset so read-only/status
+// utilities do not get mislabeled as lifecycle verbs.
 
-describe('lifecycleVerbsFor — role-specific verbs derived from the authoritative profile', () => {
-  it('is the toolset minus the universal verbs every agent already carries', () => {
+const EXPECTED_LIFECYCLE_VERBS: Readonly<Record<Role, readonly string[]>> = {
+  coordinator: [
+    'co_spec_draft',
+    'co_spec_archive',
+    'co_plan_ingest',
+    'co_phase_update',
+    'co_task_complete',
+    'co_sling',
+    'co_kickback',
+    'co_merge',
+    'co_push',
+    'co_pr_merge',
+    'co_issue_file',
+  ],
+  lead: [
+    'co_sling',
+    'co_finish',
+    'co_merge',
+    'co_kickback',
+    'co_push',
+    'co_pr_merge',
+    'co_issue_file',
+  ],
+  implementer: ['co_finish', 'co_sling'],
+  reviewer: ['co_review_finalize'],
+  researcher: ['co_issue_diagnose', 'co_research_finalize'],
+};
+
+function lifecycleNudgeVerbs(text: string): string[] {
+  const match = text.match(/Your lifecycle verbs \(([^)]*)\) may be deferred[^\n]*/);
+  expect(match, 'expected a lifecycle tool_search nudge').not.toBeNull();
+  return match![1]!.split(', ');
+}
+
+describe('lifecycleVerbsFor — role-specific workflow verbs surfaced up front', () => {
+  it('returns the exact lifecycle/workflow verbs for every base role', () => {
+    for (const role of BASE_ROLES) {
+      expect(lifecycleVerbsFor(role)).toEqual(EXPECTED_LIFECYCLE_VERBS[role]);
+    }
+  });
+
+  it('names only real tools from the authoritative role profile', () => {
+    for (const role of BASE_ROLES) {
+      const toolset = new Set(ROLE_PROFILES[role].toolset);
+      for (const verb of lifecycleVerbsFor(role)) expect(toolset.has(verb)).toBe(true);
+    }
+  });
+
+  it('excludes universal and read-only/status utility helpers from the lifecycle nudge', () => {
     for (const role of BASE_ROLES) {
       const verbs = lifecycleVerbsFor(role);
-      const toolset = new Set(ROLE_PROFILES[role].toolset);
-      // every named verb is a real toolset member…
-      for (const verb of verbs) expect(toolset.has(verb)).toBe(true);
-      // …and the universal verbs (carried by ALL roles) are excluded, so the nudge stays role-specific.
       expect(verbs).not.toContain('co_orient');
       expect(verbs).not.toContain('co_mail_send');
       expect(verbs).not.toContain('co_status');
+      expect(verbs).not.toContain('co_mail_retract');
+      expect(verbs).not.toContain('co_worktree_info');
+      expect(verbs).not.toContain('co_phase_status');
     }
   });
 
@@ -102,25 +148,22 @@ describe('lifecycleVerbsFor — role-specific verbs derived from the authoritati
 });
 
 describe('#128 — roleBasePrompt surfaces this role’s deferred lifecycle verbs up front', () => {
-  it('names each lead/coordinator/reviewer lifecycle verb and says to load them before acting', () => {
-    for (const role of ['lead', 'coordinator', 'reviewer'] as const) {
+  it('the lifecycle nudge names the exact role lifecycle verbs and says to load them before acting', () => {
+    for (const role of BASE_ROLES) {
       const prompt = roleBasePrompt(role);
-      for (const verb of lifecycleVerbsFor(role)) {
-        expect(prompt, `${role} base prompt should name ${verb}`).toContain(verb);
-      }
+      expect(lifecycleNudgeVerbs(prompt)).toEqual(lifecycleVerbsFor(role));
       // The nudge: these verbs may be deferred behind tool_search — load/search them up front.
-      expect(prompt).toMatch(/tool_search/);
-      expect(prompt).toMatch(/deferred/i);
-      expect(prompt).toMatch(/load.*(before acting|up front)|(before acting|up front).*load/is);
+      const nudge = prompt.split('\n').find((line) => line.startsWith('Your lifecycle verbs '))!;
+      expect(nudge).toMatch(/tool_search/);
+      expect(nudge).toMatch(/deferred/i);
+      expect(nudge).toMatch(/load.*(before acting|up front)|(before acting|up front).*load/is);
     }
   });
 
   it('drift-guard: the named verb list is exactly lifecycleVerbsFor(role), nothing invented', () => {
     for (const role of BASE_ROLES) {
       const prompt = roleBasePrompt(role);
-      for (const verb of lifecycleVerbsFor(role)) {
-        expect(prompt).toContain(verb);
-      }
+      expect(lifecycleNudgeVerbs(prompt)).toEqual(lifecycleVerbsFor(role));
       // No OTHER role's exclusive verb leaks in (e.g. a reviewer prompt must not name co_sling).
       const ownVerbs = new Set(lifecycleVerbsFor(role));
       for (const other of BASE_ROLES) {

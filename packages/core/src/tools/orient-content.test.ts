@@ -8,6 +8,7 @@ import { buildCoreRegistry } from './core-registry.js';
 import { orientContent } from './orient-content.js';
 import { BASE_ROLES } from './scoping.js';
 import { lifecycleVerbsFor } from '../roles/profile.js';
+import { SUB_ROLES } from '../roles/sub-roles.js';
 
 // AC-L2-4: `co_orient` is workflow-only + role-scoped, and `co` never bakes project memory. Two
 // assertions, mirroring the GREEN/RED discipline of mail/no-stub.test.ts:
@@ -40,6 +41,28 @@ function fieldRestatementsIn(text: string, fields: readonly string[]): string[] 
   return fields.filter((f) => text.includes(f));
 }
 
+const ORIENT_TOPICS = [undefined, 'finish', 'mail', 'review', 'escalate', 'escalation'] as const;
+
+function orientRoleInputs(): Array<string | undefined> {
+  return [
+    undefined,
+    ...BASE_ROLES,
+    ...SUB_ROLES.map((subRole) => `${subRole.baseRole}:${subRole.name}`),
+  ];
+}
+
+function lifecycleNudgeVerbs(text: string): string[] {
+  const match = text.match(/Your lifecycle verbs \(([^)]*)\) may be deferred[^\n]*/);
+  expect(match, 'expected a lifecycle tool_search nudge').not.toBeNull();
+  return match![1]!.split(', ');
+}
+
+function lifecycleNudgeText(text: string): string {
+  const match = text.match(/Your lifecycle verbs \([^)]*\) may be deferred[^\n]*/);
+  expect(match, 'expected a lifecycle tool_search nudge').not.toBeNull();
+  return match![0]!;
+}
+
 describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas are the syntax source)', () => {
   const distinctive = distinctiveFieldIdentifiers();
 
@@ -49,13 +72,12 @@ describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas
     expect(new Set(distinctive).size).toBe(distinctive.length);
   });
 
-  it('GREEN: every base role’s orient content restates none of them', () => {
-    for (const role of BASE_ROLES) {
-      expect(fieldRestatementsIn(orientContent(role), distinctive)).toEqual([]);
+  it('GREEN: every shipped orient variant restates none of them', () => {
+    for (const role of orientRoleInputs()) {
+      for (const topic of ORIENT_TOPICS) {
+        expect(fieldRestatementsIn(orientContent(role, topic), distinctive)).toEqual([]);
+      }
     }
-    // …and the generic (no-role) and topic-focused content too.
-    expect(fieldRestatementsIn(orientContent(), distinctive)).toEqual([]);
-    expect(fieldRestatementsIn(orientContent('implementer', 'finish'), distinctive)).toEqual([]);
   });
 
   it('RED: the SAME checker flags an injected field-list restatement', () => {
@@ -180,17 +202,14 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
     expect(out).not.toContain('You do not finish through the gate yourself');
   });
 
-  it('#128 — each role’s arc says its lifecycle verbs may be DEFERRED behind tool_search, load them now', () => {
-    for (const role of ['coordinator', 'lead', 'reviewer'] as const) {
+  it('#128 — each role’s lifecycle nudge names its exact verbs and says to load them now', () => {
+    for (const role of BASE_ROLES) {
       const out = orientContent(role);
-      // The arc already names the verbs (asserted above / below); the new nudge tells the agent the
-      // co_* verbs may be deferred behind the provider's tool_search gate and to load them up front.
-      for (const verb of lifecycleVerbsFor(role)) {
-        expect(out, `${role} orient should name ${verb}`).toContain(verb);
-      }
-      expect(out).toMatch(/tool_search/);
-      expect(out).toMatch(/deferred/i);
-      expect(out).toMatch(
+      const nudge = lifecycleNudgeText(out);
+      expect(lifecycleNudgeVerbs(out)).toEqual(lifecycleVerbsFor(role));
+      expect(nudge).toMatch(/tool_search/);
+      expect(nudge).toMatch(/deferred/i);
+      expect(nudge).toMatch(
         /load.*(before acting|up front|now)|(before acting|up front|now).*load/is,
       );
     }

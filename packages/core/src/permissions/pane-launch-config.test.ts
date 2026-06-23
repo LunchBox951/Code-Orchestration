@@ -27,6 +27,7 @@ import {
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
 import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
+import { SUB_ROLES } from '../roles/sub-roles.js';
 import type { SpawnSpec } from '../pty/pty-host.js';
 
 const ISOLATED_HOME = '/tmp/co-pane-isolated-test';
@@ -914,7 +915,7 @@ describe('role base-prompt injection into builder args', () => {
     expect(prompt).toMatch(/mailed PASS is not a recorded verdict/i);
   });
 
-  it('the base prompt is repo-agnostic: no project-memory / CLAUDE.md leakage, and stays short', () => {
+  it('role prompts are repo-agnostic: no project-memory / CLAUDE.md leakage, and stay short', () => {
     for (const role of ['coordinator', 'lead', 'implementer', 'reviewer', 'researcher'] as const) {
       const prompt = roleBasePrompt(role);
       expect(prompt).toContain(role);
@@ -930,6 +931,16 @@ describe('role base-prompt injection into builder args', () => {
       expect(prompt).not.toMatch(/CLAUDE\.md|AGENTS\.md/);
       // ~5-8 lines — short enough not to crowd out co orient + the schemas.
       expect(prompt.split('\n').length).toBeLessThanOrEqual(role === 'reviewer' ? 9 : 8);
+    }
+
+    for (const subRole of SUB_ROLES) {
+      const prompt = roleBasePrompt(subRole.baseRole, {
+        subRole: subRole.name,
+        subRoleApproach: subRole.approach,
+      });
+      expect(prompt.split('\n').length).toBeLessThanOrEqual(
+        subRole.baseRole === 'reviewer' ? 9 : 8,
+      );
     }
   });
 

@@ -126,17 +126,44 @@ export function profileFor(role: Role): RoleProfile {
   return ROLE_PROFILES[role];
 }
 
+const ROLE_LIFECYCLE_VERBS: Readonly<Record<Role, readonly string[]>> = {
+  coordinator: [
+    'co_spec_draft',
+    'co_spec_archive',
+    'co_plan_ingest',
+    'co_phase_update',
+    'co_task_complete',
+    'co_sling',
+    'co_kickback',
+    'co_merge',
+    'co_push',
+    'co_pr_merge',
+    'co_issue_file',
+  ],
+  lead: [
+    'co_sling',
+    'co_finish',
+    'co_merge',
+    'co_kickback',
+    'co_push',
+    'co_pr_merge',
+    'co_issue_file',
+  ],
+  implementer: ['co_finish', 'co_sling'],
+  reviewer: ['co_review_finalize'],
+  researcher: ['co_issue_diagnose', 'co_research_finalize'],
+};
+
 /**
- * The role-SPECIFIC lifecycle verbs for `role`: its toolset minus the {@link UNIVERSAL} set every
- * agent already carries. These are the co_* verbs a launched pane must drive its mandate with (e.g.
- * co_sling / co_merge / co_finish / co_issue_file) — but the provider harness defers the co_* tools
- * behind its tool_search gate, so a slung lead/coordinator never sees them up front and can stall
- * (#128). Both prompt layers (roleBasePrompt + orientContent) derive their "load these now" nudge
- * from this single helper so the named verb list never drifts from the authoritative profile.
+ * The role-SPECIFIC lifecycle/workflow verbs for `role`: the co_* verbs a launched pane must drive
+ * its mandate with (e.g. co_sling / co_merge / co_finish / co_issue_file). Read-only/status/utility
+ * helpers stay out of this list: they are callable when needed, but not part of the up-front
+ * lifecycle nudge. The provider harness defers the co_* tools behind its tool_search gate, so a
+ * slung lead/coordinator never sees them up front and can stall (#128). Both prompt layers
+ * (roleBasePrompt + orientContent) derive their "load these now" nudge from this single helper.
  */
 export function lifecycleVerbsFor(role: Role): readonly string[] {
-  const universal = new Set(UNIVERSAL);
-  return ROLE_PROFILES[role].toolset.filter((tool) => !universal.has(tool));
+  return ROLE_LIFECYCLE_VERBS[role];
 }
 
 /**
@@ -163,8 +190,7 @@ export function roleBasePrompt(role: Role, options: RoleBasePromptOptions = {}):
     'agent’s behalf. Start by reading your inbox and acknowledging what you read.',
     'Call `co_orient` for your role’s lifecycle, and trust the tool schemas as the only syntax',
     'reference. When you are blocked or intent is genuinely ambiguous, ask the agent above you and',
-    'wait — do not guess, and do not drop a blocker silently. When you are waiting on a reply,',
-    'end your turn; the response arrives in your next inbox.',
+    'wait — do not guess, and do not drop a blocker silently; end your turn when waiting so replies arrive in your next inbox.',
   ];
   const lifecycle = lifecycleVerbsFor(role);
   if (lifecycle.length > 0) {
