@@ -93,10 +93,15 @@ import {
 import type { ToolActivityEvent } from '../server.js';
 import {
   CODEX_KICKOFF_HANDOFF_ENV,
+  CODEX_ROUTED_HANDOFF_ENV,
   codexKickoffHandoffPath,
   codexKickoffHandoffPointer,
+  codexRoutedHandoffPath,
+  codexRoutedHandoffPointer,
   removeCodexKickoffHandoff,
+  removeCodexRoutedHandoff,
   writeCodexKickoffHandoff,
+  writeCodexRoutedHandoff,
 } from './codex-handoff.js';
 
 /**
@@ -189,6 +194,18 @@ export interface ConductorEngineDeps {
    * custom writers can supply a matching cleanup seam when they persist kickoff bodies.
    */
   readonly removeCodexHandoff?: (identity: HostedIdentity) => void;
+  /**
+   * #155 — codex multiline FILE-HANDOFF writer for over-threshold ROUTED (non-kickoff) mail. Persists
+   * the full body to a SEPARATE per-agent handoff file (distinct from the stable kickoff.txt, #145) and
+   * returns its path; the engine then injects a SHORT pointer command and scrubs the file at turn end.
+   * Default: {@link writeCodexRoutedHandoff}. Injected so the testable path needs no real filesystem.
+   */
+  readonly writeCodexRoutedHandoff?: (identity: HostedIdentity, body: string) => string;
+  /**
+   * Cleanup pair for {@link writeCodexRoutedHandoff}. The default is installed only with the default
+   * writer; custom writers can supply a matching cleanup seam when they persist routed bodies.
+   */
+  readonly removeCodexRoutedHandoff?: (identity: HostedIdentity) => void;
   /** Base {@link detectTurnEnd} config. `provider` is always taken from the hosted identity (authoritative). */
   readonly turnConfig?: Omit<TurnEndConfig, 'provider'>;
   /**
@@ -403,6 +420,7 @@ function defaultSpawnSpec(identity: HostedIdentity): SpawnSpec {
       ? {
           CODEX_HOME: identity.resume.codexHome,
           [CODEX_KICKOFF_HANDOFF_ENV]: codexKickoffHandoffPath(identity),
+          [CODEX_ROUTED_HANDOFF_ENV]: codexRoutedHandoffPath(identity),
         }
       : {};
   return { command: identity.provider, args: [], cwd: identity.cwd, env };
@@ -442,8 +460,15 @@ export class ConductorEngine {
   private readonly spawnSpecFor: (identity: HostedIdentity) => SpawnSpec;
   private readonly writeCodexHandoff: (identity: HostedIdentity, body: string) => string;
   private readonly removeCodexHandoff: (identity: HostedIdentity) => void;
+  private readonly writeCodexRoutedHandoff: (identity: HostedIdentity, body: string) => string;
+  private readonly removeCodexRoutedHandoff: (identity: HostedIdentity) => void;
   private readonly clarifyTimeoutSeconds: (projectId: ProjectId) => number;
   private readonly activeCodexHandoffs = new Map<string, HostedIdentity>();
+  /**
+   * #155 — codex ROUTED handoffs still readable for the current turn, scrubbed at turn end (parallel to
+   * {@link activeCodexHandoffs} but tracking the separate routed.txt file).
+   */
+  private readonly activeCodexRoutedHandoffs = new Map<string, HostedIdentity>();
   /** Warm panes, keyed `${projectId}:${agent}` — the engine's launch-authority ledger (MNR-5). */
   private readonly hosted = new Map<string, HostedPane>();
   /** Pane-id occupancy, keyed `${projectId}:${pane}` — refuses two agents claiming one pane (MNR-5). */
@@ -581,6 +606,10 @@ export class ConductorEngine {
     this.removeCodexHandoff =
       deps.removeCodexHandoff ??
       (deps.writeCodexHandoff == null ? removeCodexKickoffHandoff : noop);
+    this.writeCodexRoutedHandoff = deps.writeCodexRoutedHandoff ?? writeCodexRoutedHandoff;
+    this.removeCodexRoutedHandoff =
+      deps.removeCodexRoutedHandoff ??
+      (deps.writeCodexRoutedHandoff == null ? removeCodexRoutedHandoff : noop);
     this.clarifyTimeoutSeconds =
       deps.clarifyTimeoutSeconds ?? ((projectId) => defaultClarifyTimeoutSeconds(projectId));
   }
@@ -1017,6 +1046,9 @@ export class ConductorEngine {
       }
       return { errored: true, error };
     } finally {
+      // #155: a routed (non-kickoff) codex handoff stays readable for the WHOLE turn, then is scrubbed
+      // here at turn end (success or error) so over-threshold non-kickoff mail never lingers on disk.
+      this.removeActiveCodexRoutedHandoff(hosted.identity, 'turn end');
       this.turnInFlight.set(agentKey, false); // P6: turn yielded (success or error) — reset flag
       // PR-B: advance the per-agent turn ordinal so the NEXT runOneTurn records under turn+1. Done in
       // the finally so an errored turn still advances (its ordinal was already consumed).
@@ -1296,6 +1328,35 @@ export class ConductorEngine {
     }
   }
 
+  private recordActiveCodexRoutedHandoff(identity: HostedIdentity): void {
+    if (identity.provider !== 'codex') return;
+    this.activeCodexRoutedHandoffs.set(
+      ConductorEngine.agentKey(identity.projectId, identity.agent),
+      { ...identity },
+    );
+  }
+
+  /**
+   * #155 — scrub the routed handoff file at turn end (the lifecycle the #145 stance requires: routed.txt
+   * outlives the inject, then is removed). Best-effort: a cleanup error is logged, never thrown.
+   */
+  private removeActiveCodexRoutedHandoff(identity: HostedIdentity, reason: string): void {
+    if (identity.provider !== 'codex') return;
+    const agentKey = ConductorEngine.agentKey(identity.projectId, identity.agent);
+    const active = this.activeCodexRoutedHandoffs.get(agentKey);
+    if (active == null) return;
+    try {
+      this.removeCodexRoutedHandoff(active);
+    } catch (error) {
+      console.error(
+        `[ConductorEngine] failed to remove codex routed handoff (${reason}) for ` +
+          `'${active.agent}' in project '${active.projectId}': ${errorMessage(error)}`,
+      );
+    } finally {
+      this.activeCodexRoutedHandoffs.delete(agentKey);
+    }
+  }
+
   private consumeUnreadTurnWakeMail(projectId: ProjectId, mail: DeliveredMail): void {
     if (!isUnreadTurnWakeMail(mail)) return;
     const store = this.openMail(projectId);
@@ -1354,6 +1415,11 @@ export class ConductorEngine {
           this.removeActiveCodexHandoff(hosted.identity, 'failed routed kickoff injection');
         }
         throw error;
+      } finally {
+        // #155: routeInject has no full turn, so scrub the routed handoff right after injectMail
+        // returns/throws — the pointer was already submitted, so the agent already has the path. This
+        // keeps over-threshold routed mail off disk past the inject (the #145 lifecycle guarantee).
+        this.removeActiveCodexRoutedHandoff(hosted.identity, 'routed inject end');
       }
       this.consumeOneShotKickoff(hosted.identity, mail);
     } finally {
@@ -1364,27 +1430,44 @@ export class ConductorEngine {
   }
 
   /**
-   * #132 — the {@link injectMail} options for `identity`: the injected base ({@link
-   * ConductorEngineDeps.injectOptions}) plus the pane's authoritative `provider`, and — for codex one-shot
-   * kickoffs ONLY — the multiline FILE-HANDOFF seam. Ordinary long/multiline routed mail keeps the
-   * existing paste/echo behavior so sensitive non-kickoff mail is not persisted to the stable kickoff
-   * handoff file.
+   * #132 / #155 — the {@link injectMail} options for `identity`: the injected base ({@link
+   * ConductorEngineDeps.injectOptions}) plus the pane's authoritative `provider`, and — for ALL codex
+   * mail whose text would take the collapsing bracketed-paste path — the multiline FILE-HANDOFF seam.
+   * The writer/pointer BRANCH by {@link isTurnKickoffMail}: a one-shot kickoff uses the stable kickoff.txt
+   * file (consumed by {@link consumeOneShotKickoff}); over-threshold ROUTED (non-kickoff) mail uses a
+   * SEPARATE routed.txt file (#155) that the engine scrubs at turn end — so sensitive non-kickoff mail is
+   * never persisted to the stable, predictable kickoff path (#145). The injectMail divert only fires when
+   * the payload would paste (multiline OR over the length threshold), so SHORT single-line routed mail is
+   * unaffected and keeps the literal-echo path.
    */
   private injectOptionsFor(identity: HostedIdentity, mail: DeliveredMail): InjectMailOptions {
     const base: InjectMailOptions = {
       provider: identity.provider,
       ...this.deps.injectOptions,
     };
-    if (identity.provider !== 'codex' || !isTurnKickoffMail(mail)) return base;
+    if (identity.provider !== 'codex') return base;
+    if (isTurnKickoffMail(mail)) {
+      return {
+        ...base,
+        codexHandoff: {
+          write: (body) => {
+            const path = this.writeCodexHandoff(identity, body);
+            this.recordActiveCodexHandoff(identity);
+            return path;
+          },
+          pointer: codexKickoffHandoffPointer,
+        },
+      };
+    }
     return {
       ...base,
       codexHandoff: {
         write: (body) => {
-          const path = this.writeCodexHandoff(identity, body);
-          this.recordActiveCodexHandoff(identity);
+          const path = this.writeCodexRoutedHandoff(identity, body);
+          this.recordActiveCodexRoutedHandoff(identity);
           return path;
         },
-        pointer: codexKickoffHandoffPointer,
+        pointer: codexRoutedHandoffPointer,
       },
     };
   }
@@ -1576,6 +1659,7 @@ export class ConductorEngine {
     options: { readonly onPaneKillError?: (error: unknown) => void },
   ): Promise<void> {
     this.removeActiveCodexHandoff(hosted.identity, 'pane release');
+    this.removeActiveCodexRoutedHandoff(hosted.identity, 'pane release');
     try {
       hosted.pane.kill();
     } catch (error) {

@@ -556,16 +556,28 @@ function makeInjectRetry(): {
 // pointer command is what injectMail injects for a multiline codex payload, so the drive helpers echo
 // THAT (not the collapsed paste) to verify a success turn.
 const CODEX_HANDOFF_PATH = '/work/impl-cx/.co/kickoff-handoff.txt';
+const CODEX_ROUTED_HANDOFF_PATH = '/work/impl-cx/.co/routed-handoff.txt';
 const CODEX_ENV_HANDOFF_POINTER = 'Read $CO_KICKOFF_HANDOFF in full and act on it now.';
+// #155 — the SHORT pointer injected for an over-threshold ROUTED (non-kickoff) codex mail.
+const CODEX_ENV_ROUTED_POINTER = 'Read $CO_ROUTED_HANDOFF in full and act on it now.';
 
 function makeCodexEngine(
   clock: ReturnType<typeof makeClock>,
   qw: ReturnType<typeof makeQuietWindow>,
   retry: ReturnType<typeof makeInjectRetry>,
-): { engine: ConductorEngine; pty: FakePty; handoffs: string[] } {
+): {
+  engine: ConductorEngine;
+  pty: FakePty;
+  handoffs: string[];
+  routedHandoffs: string[];
+  routedRemovals: number;
+} {
   const pty = new FakePty();
   // #132 — capture handed-off bodies and return a deterministic path INSTEAD of touching the filesystem.
   const handoffs: string[] = [];
+  // #155 — capture routed (non-kickoff) handed-off bodies + count scrubs separately.
+  const routedHandoffs: string[] = [];
+  let routedRemovals = 0;
   const engine = new ConductorEngine({
     pty,
     makeTransport: () => InMemoryTransport.createLinkedPair(),
@@ -576,9 +588,24 @@ function makeCodexEngine(
       handoffs.push(body);
       return CODEX_HANDOFF_PATH;
     },
+    writeCodexRoutedHandoff: (_identity, body) => {
+      routedHandoffs.push(body);
+      return CODEX_ROUTED_HANDOFF_PATH;
+    },
+    removeCodexRoutedHandoff: () => {
+      routedRemovals += 1;
+    },
   });
   engines.push(engine);
-  return { engine, pty, handoffs };
+  return {
+    engine,
+    pty,
+    handoffs,
+    routedHandoffs,
+    get routedRemovals() {
+      return routedRemovals;
+    },
+  };
 }
 
 /** Drive ONE codex turn whose paste never echoes: settle the retry with no echo ⇒ inject THROWS. */
@@ -1115,7 +1142,60 @@ describe('#93/#132 cap-retract notice — reconciled against pane liveness', () 
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
   });
 
-  it('does not persist ordinary long codex mail through the kickoff handoff seam', async () => {
+  it('routes an over-threshold ROUTED codex mail through the file-handoff and injects ONLY a short pointer', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const codex = makeCodexEngine(clock, qw, retry);
+    const { engine, pty, handoffs, routedHandoffs } = codex;
+    const { worktreePath } = seedCodexKickoff(projectId, repo);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const longBody = 'x'.repeat(400);
+    const routed = mail.send({
+      type: 'clarify_request',
+      from: 'lead-1',
+      to: 'impl-cx',
+      subject: 'routed long mail',
+      body: longBody,
+    });
+    expect(isTurnKickoffMail(routed)).toBe(false);
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Drive ONE successful turn: the engine routes the rendered body through the ROUTED handoff file and
+    // injects the SHORT routed pointer, which the composer echoes literally.
+    const turnP = engine.runOneTurn(hosted, routed);
+    await tick();
+    pane.emit(CODEX_ENV_ROUTED_POINTER);
+    await tick();
+    clock.set(1000);
+    pane.emit('⠋ working…\r\n');
+    await tick();
+    clock.set(1000 + WEDGE_MS + 1);
+    qw.settle();
+    const turn = await turnP;
+
+    expect(turn.errored).toBe(false);
+    // The FULL rendered body went to the ROUTED handoff (not the kickoff handoff).
+    expect(routedHandoffs).toHaveLength(1);
+    expect(routedHandoffs[0]).toBe(defaultMailRenderer(routed));
+    expect(handoffs).toHaveLength(0);
+    // ONLY the short routed pointer reached the pane — no bracketed paste of the 400-char body.
+    expect(pane.written).toContain(CODEX_ENV_ROUTED_POINTER);
+    expect(pane.written.some((w) => w.includes(ESC + '[200~'))).toBe(false); // no PASTE_START
+    expect(pane.written.some((w) => w.includes(longBody))).toBe(false);
+    // Exactly one submit (one trailing \r) for the single pointer injection.
+    expect(pane.written.filter((w) => w === '\r')).toHaveLength(1);
+    // The routed pointer is a short, single-line, newline-free command (passes the handoff-pointer guard).
+    expect(CODEX_ENV_ROUTED_POINTER.length).toBeLessThan(256);
+    expect(CODEX_ENV_ROUTED_POINTER).not.toMatch(/[\r\n]/);
+    // The routed handoff was scrubbed at turn end (no stable-path persistence past the turn).
+    expect(codex.routedRemovals).toBe(1);
+  });
+
+  it('routes an over-threshold ROUTED codex mail through a separate routed file that is scrubbed after the turn', async () => {
     const { projectId, repo } = makeProject();
     const clock = makeClock();
     const qw = makeQuietWindow();
@@ -1132,6 +1212,52 @@ describe('#93/#132 cap-retract notice — reconciled against pane liveness', () 
     const { worktreePath } = seedCodexKickoff(projectId, repo);
     const mail = openMailStore(projectId);
     mailStores.push(mail);
+    const routed = mail.send({
+      type: 'clarify_request',
+      from: 'lead-1',
+      to: 'impl-cx',
+      subject: 'routed long mail',
+      body: 'x'.repeat(400),
+    });
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    const routedPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'routed.txt');
+    const kickoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt');
+
+    const turnP = engine.runOneTurn(hosted, routed);
+    await tick();
+    const injectedPointer = pane.written[0] ?? '';
+    // The default writer persisted the FULL body to the SEPARATE routed file (not kickoff.txt).
+    expect(pane.spec.env.CO_ROUTED_HANDOFF).toBe(routedPath);
+    expect(readFileSync(routedPath, 'utf8')).toBe(defaultMailRenderer(routed));
+    expect(statSync(routedPath).mode & 0o777).toBe(0o600);
+    pane.emit(injectedPointer);
+    await tick();
+    clock.set(1000);
+    pane.emit('⠋ working…\r\n');
+    await tick();
+    clock.set(1000 + WEDGE_MS + 1);
+    qw.settle();
+    const turn = await turnP;
+
+    expect(turn.errored).toBe(false);
+    expect(injectedPointer).toBe(CODEX_ENV_ROUTED_POINTER);
+    expect(injectedPointer).not.toContain('x'.repeat(400));
+    // Routed file scrubbed at turn end; the stable kickoff.txt is NEVER written for routed mail (#145).
+    expect(existsSync(routedPath)).toBe(false);
+    expect(existsSync(kickoffPath)).toBe(false);
+  });
+
+  it('routed codex mail uses the ROUTED handoff and never writes the stable kickoff.txt (#145)', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty, handoffs, routedHandoffs } = makeCodexEngine(clock, qw, retry);
+    const { worktreePath } = seedCodexKickoff(projectId, repo);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
     const ordinary = mail.send({
       type: 'clarify_request',
       from: 'lead-1',
@@ -1145,13 +1271,23 @@ describe('#93/#132 cap-retract notice — reconciled against pane liveness', () 
     const turnP = engine.runOneTurn(hosted, ordinary);
     await tick();
     const firstWrite = pane.written[0] ?? '';
-    retry.settle();
+    pane.emit(CODEX_ENV_ROUTED_POINTER);
+    await tick();
+    clock.set(1000);
+    pane.emit('⠋ working…\r\n');
+    await tick();
+    clock.set(1000 + WEDGE_MS + 1);
+    qw.settle();
     const turn = await turnP;
 
-    expect(turn.errored).toBe(true);
-    expect(firstWrite).toContain(ESC + '[200~');
-    expect(firstWrite).toContain('ordinary long mail');
-    expect(firstWrite).not.toBe(CODEX_ENV_HANDOFF_POINTER);
+    // Routed mail now succeeds via the ROUTED handoff seam (the old bug pasted the body and errored).
+    expect(turn.errored).toBe(false);
+    expect(firstWrite).toBe(CODEX_ENV_ROUTED_POINTER);
+    expect(firstWrite).not.toContain(ESC + '[200~');
+    expect(firstWrite).not.toContain('ordinary long mail');
+    // The body went to the ROUTED handoff, never the kickoff handoff seam (#145 stable-path guarantee).
+    expect(routedHandoffs).toHaveLength(1);
+    expect(handoffs).toHaveLength(0);
     expect(existsSync(join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt'))).toBe(
       false,
     );
