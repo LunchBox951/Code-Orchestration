@@ -117,6 +117,10 @@ describe('AC-L2-4 — the prompting split: orientContent never bakes a target re
     const text = orientContent('reviewer');
 
     expect(text).toMatch(/co_review_finalize/);
+    expect(text).toMatch(/review id/i);
+    expect(text).toMatch(/PASS requires\s+a verification marker/i);
+    expect(text).toMatch(/ISSUES requires at least one named blocker/i);
+    expect(text).toMatch(/mailed PASS is not a recorded verdict/i);
     expect(text).not.toMatch(/verdict[^.]*by mail/i);
   });
 });

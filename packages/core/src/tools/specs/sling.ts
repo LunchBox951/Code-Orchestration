@@ -76,9 +76,12 @@ const slingInput = z
       .min(1)
       .optional()
       .describe(
-        'The role of the agent being dispatched (e.g. "implementer", "reviewer"). ' +
-          'Dispatch is always resolved before sandbox creation; placed decisions are recorded after successful sandbox creation. This overrides ' +
-          'the default role.',
+        'The role of the agent being dispatched (e.g. "implementer", "implementer:test", ' +
+          '"researcher"). Reviewer dispatch is gate-internal: do not sling "reviewer" or ' +
+          '"reviewer:*" ad-hoc; finish the branch and call co_merge so the review gate records ' +
+          'review.requested, places the reviewer seat, and supplies the review_id. Dispatch is ' +
+          'always resolved before sandbox creation; placed decisions are recorded after successful ' +
+          'sandbox creation. This overrides the default role.',
       ),
     work_size: workSizeSchema
       .optional()
@@ -311,6 +314,23 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     if (violation != null) {
       throw new Error(`co_sling: illegal spawn plan — ${violation.reason}.`);
     }
+    // #94: an ad-hoc reviewer dispatch establishes a worktree + placement with NO `review.requested`
+    // event, no shared review_id, and no `${role}@${reviewId}` seat — so the reviewer can never record
+    // a verdict via co_review_finalize (it refuses without a matching review request + reviewer
+    // placement), and co_merge stalls forever at review_pending. Reviewer dispatch is GATE-INTERNAL:
+    // it must flow through co_merge, which calls CoReviewGate.triggerReview to record the
+    // review.requested + the seat placement + spawn the reviewer under the deterministic seat id, and
+    // supplies the review_id that co_review_finalize names. Reject it loud, BEFORE any side effect.
+    if (childRole === 'reviewer') {
+      throw new Error(
+        'co_sling: refused — reviewer dispatch is gate-internal and may not be slung ad-hoc. ' +
+          'An ad-hoc reviewer worktree has no review.requested event, no review_id, and no ' +
+          '`${role}@${reviewId}` seat placement, so co_review_finalize can never record its verdict ' +
+          'and co_merge stalls at review_pending. Finish the reviewed branch and call co_merge — it ' +
+          'triggers the reviewer, records the review.requested + reviewer placement, spawns the ' +
+          'reviewer under the seat id, and supplies the review_id co_review_finalize needs.',
+      );
+    }
 
     // ── L6b E4 child-cap: queue-as-WAITING when the parent is at its active-children cap ──
     // Active children are this parent's NON-REVIEWER children whose branch is NOT yet merged
@@ -329,9 +349,10 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
         role: a.role,
         branch: resolveAgentBranch(worktrees, a.agentId),
       }));
-    // Reviewers are exempt from the cap (AC-L6b-8): they never occupy a slot, so a reviewer
-    // dispatched while at-cap must not be queued → WAITING.
-    if (childRole !== 'reviewer' && children.some((c) => c.role !== 'reviewer')) {
+    // Reviewers are exempt from the cap (AC-L6b-8): they never occupy a slot. Reviewer dispatch is
+    // now rejected outright above (#94 — gate-internal only), so the dispatched child is always a
+    // non-reviewer here; the cap counts only this parent's existing non-reviewer children.
+    if (children.some((c) => c.role !== 'reviewer')) {
       const cap = resolveMaxActiveChildren(ctx.projectId);
       const target = reviews != null ? readWorktreeInfo(ctx.cwd).branch : undefined;
       const disposition = childCapDisposition(

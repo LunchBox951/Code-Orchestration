@@ -103,7 +103,11 @@ export const ROLE_PROFILES: Readonly<Record<Role, RoleProfile>> = {
   },
   reviewer: {
     baseRole: 'reviewer',
-    mandate: 'the gate; inspects a target and returns a verdict.',
+    mandate:
+      'the gate. Inspect the reviewed branch and RECORD your verdict via co_review_finalize using ' +
+      'the review_id from your kickoff (PASS requires a verification marker; ISSUES requires at least ' +
+      'one named blocker). Recording the verdict is your PRIMARY deliverable — a mailed PASS is NOT a ' +
+      'recorded verdict and leaves co_merge stalled. Mail is secondary, for context only.',
     writeScope: 'read-only-for-code',
     toolset: [...UNIVERSAL, 'co_worktree_info', 'co_review_finalize'],
     capabilities: new Set<Capability>(),
@@ -151,6 +155,11 @@ export function roleBasePrompt(role: Role, options: RoleBasePromptOptions = {}):
   ];
   if (options.subRole != null && options.subRoleApproach != null) {
     lines.push(`Sub-role focus (${role}:${options.subRole}): ${options.subRoleApproach}.`);
+  }
+  if (role === 'reviewer') {
+    lines.push(
+      'Reviewer verdicts are recorded with co_review_finalize using the review id from your kickoff; PASS requires a verification marker, ISSUES requires at least one named blocker, and a mailed PASS is not a recorded verdict.',
+    );
   }
   return lines.join('\n');
 }

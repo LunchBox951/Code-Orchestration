@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { escalate, type ParentResolver } from '../mail/escalation.js';
-import { OPERATOR } from '../mail/events.js';
+import { MAIL_CLARIFY_REQUEST, OPERATOR, turnKickoffCorrelationId } from '../mail/events.js';
 import type { MailStore } from '../mail/mail-store.js';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
 import { defaultProviderAccounts, type ProviderAccount } from '../dispatch/balancer.js';
@@ -229,6 +229,19 @@ function reviewTriggerResultFromRecord(rec: {
   };
 }
 
+function reviewerKickoffBody(
+  req: Pick<ReviewTriggerRequest, 'reviewId' | 'target' | 'branch'>,
+  scope: ReviewScope,
+): string {
+  return (
+    `Review '${req.reviewId}' is assigned to you. Inspect branch '${req.branch}' for target ` +
+    `'${req.target}' under scope '${scope}', then record your verdict with co_review_finalize ` +
+    `using review_id '${req.reviewId}', target '${req.target}', branch '${req.branch}', and ` +
+    `scope '${scope}'. PASS requires a verification marker; ISSUES requires at least one named ` +
+    'blocker. A mailed PASS is not a recorded verdict.'
+  );
+}
+
 function specRefEquals(
   actual: ReviewSpecRef,
   expected: { readonly kind: ReviewSpecRef['kind']; readonly ref?: string },
@@ -248,6 +261,21 @@ function assertHumanReviewHasCriteria(
     `co review: refused — human review of '${branch}' into '${target}' requires locked ` +
       'acceptance criteria. Pass spec_ref as `spec:<taskId>#locked` so the Review view can ' +
       'display evidence before PASS or ISSUES.',
+  );
+}
+
+function assertLiveAgentReviewCanDispatch(
+  deps: Pick<ReviewGateDeps, 'dispatch' | 'reviewerSpawnGate'>,
+  req: Pick<ReviewTriggerRequest, 'reviewId' | 'target' | 'branch'>,
+  projectId: string | undefined,
+  reviewerKind: 'agent' | 'human',
+): void {
+  if (projectId == null || reviewerKind !== 'agent' || deps.reviewerSpawnGate == null) return;
+  if (deps.dispatch != null) return;
+  throw new Error(
+    `co review: refused — dispatch store is required for live agent review '${req.reviewId}' ` +
+      `of '${req.branch}' into '${req.target}'. Without a dispatch placement, co cannot launch an ` +
+      'actionable reviewer turn (Principle 9 — no silent drop).',
   );
 }
 
@@ -747,6 +775,7 @@ export class CoReviewGate implements FinishReviewGate {
       if (existingVerdict?.reviewId === existing.reviewId) {
         return reviewTriggerResultFromRecord(existing);
       }
+      assertLiveAgentReviewCanDispatch(this.deps, req, projectId, existingReviewerKind);
       if (projectId != null && existingReviewerKind === 'human') {
         if (!this.deps.mail) {
           throw new Error(
@@ -813,6 +842,7 @@ export class CoReviewGate implements FinishReviewGate {
     const reviewerKind = resolveKind();
     const specRef = requestSpecRef(reviewerKind);
     assertHumanReviewHasCriteria(reviewerKind, specRef, req.branch, req.target);
+    assertLiveAgentReviewCanDispatch(this.deps, req, projectId, reviewerKind);
     const requested: ReviewRequested = {
       reviewId: req.reviewId,
       target: req.target,
@@ -880,7 +910,13 @@ export class CoReviewGate implements FinishReviewGate {
       // Default agent path: review.requested recorded above; no mail, no placement when no projectId.
       return result;
     } catch (cause) {
-      if (acquiredByThisCall && this.deps.reviews.activeSerialized(req.target) === req.branch) {
+      const requestPersisted =
+        this.deps.reviews.getReviewRequest(req.target, req.branch)?.reviewId === req.reviewId;
+      if (
+        acquiredByThisCall &&
+        !requestPersisted &&
+        this.deps.reviews.activeSerialized(req.target) === req.branch
+      ) {
         releaseMergeSlot(this.deps.reviews, req.target, req.branch);
       }
       throw cause;
@@ -915,6 +951,7 @@ export class CoReviewGate implements FinishReviewGate {
       .at(-1);
     if (compatiblePlaced != null) {
       if (this.deps.reviewerSpawnGate != null) {
+        this.seedReviewerKickoff(compatiblePlaced.agent, req, scope);
         this.fireSpawn(compatiblePlaced.agent, projectId, compatiblePlaced);
       }
       return undefined;
@@ -932,6 +969,7 @@ export class CoReviewGate implements FinishReviewGate {
     const seatPlaced = seatPlacements.filter((placement) => placement.kind === 'placed').at(-1);
     if (seatPlaced != null) {
       if (this.deps.reviewerSpawnGate != null) {
+        this.seedReviewerKickoff(seatPlaced.agent, req, scope);
         this.fireSpawn(seatPlaced.agent, projectId, seatPlaced);
       }
       return undefined;
@@ -965,15 +1003,34 @@ export class CoReviewGate implements FinishReviewGate {
     if (request != null) {
       const result = this.deps.dispatch.recordPlacementWithReviewRequest(seat, placement, request);
       if (placement.kind === 'placed' && this.deps.reviewerSpawnGate != null) {
+        this.seedReviewerKickoff(result.placement.agent, req, scope);
         this.fireSpawn(result.placement.agent, projectId, result.placement);
       }
       return { request: result.request };
     }
     const record = this.deps.dispatch.recordPlacement(seat, placement);
     if (placement.kind === 'placed' && this.deps.reviewerSpawnGate != null) {
+      this.seedReviewerKickoff(record.agent, req, scope);
       this.fireSpawn(record.agent, projectId, record);
     }
     return undefined;
+  }
+
+  private seedReviewerKickoff(
+    agentId: string,
+    req: ReviewTriggerRequest,
+    scope: ReviewScope,
+  ): void {
+    if (this.deps.mail == null) return;
+    this.deps.mail.send({
+      type: MAIL_CLARIFY_REQUEST,
+      to: agentId,
+      from: req.requestedBy,
+      subject: `Review requested: '${req.branch}' into '${req.target}'`,
+      body: reviewerKickoffBody(req, scope),
+      correlationId: turnKickoffCorrelationId(agentId),
+      idempotencyKey: `reviewer-kickoff:${req.reviewId}`,
+    });
   }
 
   private fireSpawn(agentId: string, projectId: string, record: PlacementRecord): void {
