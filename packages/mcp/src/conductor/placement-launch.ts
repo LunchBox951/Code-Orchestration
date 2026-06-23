@@ -17,7 +17,7 @@ import type {
   SpawnSpec,
   WorktreeRecord,
 } from '@co/core';
-import { buildPaneLaunchConfig, parseSubRoleId, profileFor } from '@co/core';
+import { buildPaneLaunchConfig, paneMayResearchWeb, parseSubRoleId } from '@co/core';
 import type { Role } from '@co/core';
 import { dirname } from 'node:path';
 import type { HostedIdentity } from '../live-session-host.js';
@@ -54,19 +54,11 @@ export interface CoMcpPaths {
   /** Optional host-copied Codex auth file contents for the isolated CODEX_HOME. */
   readonly codexAuthJson?: string;
   /**
-   * Optional GitHub token (F3) to provision into each hosted pane's co MCP server env as
-   * `GH_TOKEN`, so the gated publish path (`co_push`/`co_pr_merge` → `gh`) authenticates under
-   * self-hosting. The pane CLI runs under a sanitized env that does NOT carry the daemon's
-   * process.env, so the MCP server's explicit env block is the ONLY channel that reaches `gh`.
-   * Sourced from `CO_GH_TOKEN` (then `GITHUB_TOKEN`/`GH_TOKEN`) by {@link defaultCoMcpPaths}; the
-   * desktop "Connect GitHub" UI (issue #71) is a convenience that sets `CO_GH_TOKEN` on the daemon.
-   * Never written to the repo; lives only in the isolated home's 0o600 MCP config.
-   *
-   * NOTE: the gated publish (`co_push`/`co_pr_merge`) and remote detection actually run DAEMON-side
-   * (the pane's `co-mcp bridge` is a dumb stdio↔socket relay that runs no `git`/`gh`), so the
-   * AUTHORITATIVE GitHub auth is provisioned onto the daemon's own env at `co-mcp serve` boot
-   * (see {@link import('./host.js').resolveAndApplyDaemonGithubAuth}). This pane-level token is kept
-   * as defense-in-depth for any future agent-side `gh` use; it is harmless when unused.
+   * Optional GitHub token resolved by {@link defaultCoMcpPaths}. Authoritative publish auth stays
+   * daemon-side; pane-level auth is only provisioned for a web-research pane
+   * ({@link import('@co/core').paneMayResearchWeb}: today `researcher:external`) so authenticated
+   * agent-side `gh` / api.github.com research works in the same pane whose outbound network is opened.
+   * Code workers and non-web researcher sub-roles receive neither MCP-server nor shell `GH_TOKEN`.
    */
   readonly ghToken?: string;
   /**
@@ -102,6 +94,28 @@ const CLAUDE_STATE_ALLOWLIST = [
   'opusProMigrationComplete',
   'sonnet1m45MigrationComplete',
 ] as const;
+
+const RESERVED_EXTRA_ENV_KEYS = new Set([
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'CO_GH_TOKEN',
+  CO_AGENT_ENV,
+  CO_ROLE_ENV,
+  CO_PARENT_ENV,
+  CO_PROJECT_ID_ENV,
+  CO_MCP_BRIDGE_LOG_ENV,
+]);
+
+function assertNoReservedExtraEnv(
+  label: 'coMcpExtraEnv' | 'coCliExtraEnv',
+  env: Readonly<Record<string, string>> | undefined,
+): void {
+  for (const key of Object.keys(env ?? {})) {
+    if (RESERVED_EXTRA_ENV_KEYS.has(key)) {
+      throw new Error(`buildHostedLaunchSpec: ${label} key '${key}' is reserved.`);
+    }
+  }
+}
 
 export function sanitizeClaudeStateJson(raw: string): string | undefined {
   const parsed = JSON.parse(raw) as unknown;
@@ -194,6 +208,9 @@ export function buildHostedLaunchSpec(
   isolatedHomeDir: string,
   coMcpPaths: CoMcpPaths,
 ): SpawnSpec {
+  assertNoReservedExtraEnv('coMcpExtraEnv', coMcpPaths.coMcpExtraEnv);
+  assertNoReservedExtraEnv('coCliExtraEnv', coMcpPaths.coCliExtraEnv);
+
   const provider = identity.provider;
   const mountedRole =
     identity.subRole != null ? `${identity.role}:${identity.subRole}` : identity.role;
@@ -202,7 +219,7 @@ export function buildHostedLaunchSpec(
     bridgeSocketPath == null
       ? coMcpPaths.coMcpArgs
       : [...(coMcpPaths.coMcpArgs ?? []), 'bridge', bridgeSocketPath];
-  const paneIdentity: PaneIdentity = {
+  const paneIdentityBase = {
     cwd: identity.cwd,
     isolatedHomeDir,
     // Thread the role/sub-role so buildPaneLaunchConfig injects the repo-agnostic base system prompt
@@ -216,33 +233,40 @@ export function buildHostedLaunchSpec(
         }
       : {}),
     coMcpCommand: coMcpPaths.coMcpCommand,
-    coMcpArgs,
+    ...(coMcpArgs != null ? { coMcpArgs } : {}),
+    coCliCommand: coMcpPaths.coCliCommand,
+    ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),
+  };
+  const webResearchPane = paneMayResearchWeb(paneIdentityBase);
+  const ghToken = coMcpPaths.ghToken?.trim();
+  const researchGhTokenEnv: Record<string, string> =
+    webResearchPane && ghToken != null && ghToken.length > 0 ? { GH_TOKEN: ghToken } : {};
+  const paneIdentity: PaneIdentity = {
+    ...paneIdentityBase,
     coMcpEnv: {
       [CO_AGENT_ENV]: identity.agent,
       [CO_ROLE_ENV]: mountedRole,
       [CO_PARENT_ENV]: identity.parent,
       [CO_PROJECT_ID_ENV]: identity.projectId,
       ...bridgeDiagnosticEnv(isolatedHomeDir, bridgeSocketPath),
-      // F3 (defense-in-depth): the GitHub token in the pane MCP server env. The publish path itself
-      // runs daemon-side (this `co-mcp bridge` child is a pure relay), so this is NOT the authoritative
-      // auth — that is provisioned onto the daemon env at serve boot. Only emitted when configured.
-      ...(coMcpPaths.ghToken != null && coMcpPaths.ghToken.length > 0
-        ? { GH_TOKEN: coMcpPaths.ghToken }
-        : {}),
+      // #127: web-research-gated GitHub token for the pane MCP server env.
+      ...researchGhTokenEnv,
       // RC-1: carry ELECTRON_RUN_AS_NODE=1 (and any other host-required server env) so the provider
-      // runs the co-mcp bridge as Node when `coMcpCommand` is the Electron binary. Last so an explicit
-      // host override wins; the values here never collide with the CO_* / GH_TOKEN keys above.
+      // runs the co-mcp bridge as Node when `coMcpCommand` is the Electron binary. Reserved
+      // token/identity/bridge keys are rejected before this merge; extra env cannot override them.
       ...(coMcpPaths.coMcpExtraEnv ?? {}),
     },
-    coCliCommand: coMcpPaths.coCliCommand,
-    ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),
     ...(coMcpPaths.coCliExtraEnv != null ? { coCliEnv: coMcpPaths.coCliExtraEnv } : {}),
-    // Thread the role's capabilities so the built-in web-tool decision is explicit at launch
-    // (#7 §5 #3). Sub-roles may only narrow, so the base-role set is the capability ceiling.
-    capabilities: profileFor(identity.role).capabilities,
   };
   const paneLaunchConfig = buildPaneLaunchConfig(provider, paneIdentity);
 
+  // #127: the AGENT-SHELL half of the web-research gate. A web-research pane (researcher:external)
+  // gets outbound network re-opened in its codex sandbox by buildPaneLaunchConfig; here we ALSO put
+  // the resolved GitHub token into the pane's OWN shell env so authenticated `gh` / api.github.com
+  // works inside that sandbox (the MCP-server env block above only reaches the daemon-side relay, not
+  // the agent's interactive shell). Gated to the SAME web-research sub-role as the network opening —
+  // a live token + open egress is a data-exfil surface — and only when a non-empty token is configured
+  // (never an empty/blank credential).
   return {
     command: provider,
     args: [...paneLaunchConfig.args, ...codexBridgeSocketArgs(provider, bridgeSocketPath)],
@@ -255,6 +279,8 @@ export function buildHostedLaunchSpec(
       // `~` falls back to the operator home. RC-6: a deterministic UTF-8 locale for the same reason.
       HOME: isolatedHomeDir,
       LANG: 'C.UTF-8',
+      // #127: web-research-gated GitHub token for the pane's own `gh`/REST calls (empty object otherwise).
+      ...researchGhTokenEnv,
     },
     prelaunchFiles: [
       ...(paneLaunchConfig.prelaunchFiles ?? []),

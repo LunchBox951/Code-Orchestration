@@ -4,12 +4,10 @@
  * permission profile and may narrow it, never widen it"). Most specialization is prompt-shaped
  * (soft); only researcher sub-roles carry a permission delta (web-search gating).
  *
- * NOTE (enforcement scope): the web-search capability delta is DECLARED and integrity-checked by
- * narrow-only.ts (a sub-role may only narrow it), but it is NOT yet enforced at pane launch —
- * buildPaneLaunchConfig does not gate the provider's native WebSearch/WebFetch tools per capability,
- * so today the narrowing is declarative, not a hard runtime boundary. Wiring the resolved profile
- * into the launch builder (and deciding whether the non-researcher base roles, which all have empty
- * capabilities, should likewise lose the native web tools) is a deliberate follow-up.
+ * NOTE (enforcement scope): the web-search capability delta is integrity-checked by narrow-only.ts
+ * and is enforced at pane launch for provider-native web tools, GH_TOKEN placement, and Codex sandbox
+ * egress (`[sandbox_workspace_write] network_access`); Claude shell network is not yet a hard sandbox
+ * boundary (#127).
  *
  * Coordinator and Lead have no sub-roles — they are owner-tier roles.
  */
@@ -46,8 +44,7 @@ const researcherNoWebProfile: RoleProfile = {
  * - **Reviewer** sub-roles (`feature`, `bugfix`, `pr`) are soft/posture specializations — same
  *   profile as the base reviewer (writeScope `read-only-for-code`).
  * - **Researcher** sub-roles carry a declared permission delta: only `external` retains the base
- *   researcher's `web-search` capability; `codebase`, `diagnostic`, and `decision` narrow it away
- *   (declared + integrity-checked, but not yet enforced at launch — see the header note).
+ *   researcher's `web-search` capability; `codebase`, `diagnostic`, and `decision` narrow it away.
  */
 export const SUB_ROLES: readonly SubRoleSpec[] = [
   // ── Implementer sub-roles (soft/approach, writeScope: code) ──────────────────

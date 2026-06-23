@@ -29,7 +29,7 @@ import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import { CO_CLAUDE_STATUSLINE_PATH_ENV } from '../dispatch/statusline-env.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
-import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
+import { ROLE_PROFILES, roleBasePrompt } from '../roles/profile.js';
 import { findSubRole } from '../roles/sub-roles.js';
 import type { Role } from '../tools/scoping.js';
 import type { BlockRule } from './block-list.js';
@@ -59,11 +59,6 @@ export interface PaneIdentity {
   readonly coCliArgs?: readonly string[];
   /** Environment variables prefixed onto the Codex hook command itself. */
   readonly coCliEnv?: Readonly<Record<string, string>>;
-  /**
-   * The pane role's effective capability set (#7 §5 #3). Drives the explicit built-in web-tool
-   * decision below. Absent ⇒ empty set. Threaded from the role profile by the placement launcher.
-   */
-  readonly capabilities?: ReadonlySet<Capability>;
   /**
    * The pane's base role. When set, the repo-agnostic {@link roleBasePrompt} is injected into the
    * launch args (Claude `--append-system-prompt`, Codex `developer_instructions` config override).
@@ -187,20 +182,31 @@ function rolePromptFor(identity: PaneIdentity): string | undefined {
 }
 
 /**
- * Whether a pane with these capabilities may use the built-in web tools (#7 §5 #3).
+ * Whether a pane may use provider-native web tools (#7 §5 #3).
  *
  * Closes the finding that, under `--permission-mode bypassPermissions`, `WebSearch`/`WebFetch`
  * were neither allowed NOR denied — an undefined posture. The launch config now ALWAYS states the
  * decision explicitly (the tools appear in `--allowedTools` or `--disallowedTools`).
- *
- * POLICY (operator decision): GRANT to all roles. The decision is intentionally routed through the
- * capability set so tightening to least-privilege is a one-line change — return
- * `capabilities.has('web-search')` here and only the Researcher (the sole `web-search` holder)
- * keeps web access.
  */
-export function paneMayUseWebTools(capabilities: ReadonlySet<Capability>): boolean {
-  void capabilities; // grant-all today; flip to `capabilities.has('web-search')` to enforce
-  return true;
+export function paneMayUseWebTools(identity: PaneIdentity): boolean {
+  return paneMayResearchWeb(identity);
+}
+
+/**
+ * Whether a pane may research the web (#127). Strictly least-privilege: true iff its RESOLVED
+ * sub-role profile carries the `web-search` capability — today the sole holder is
+ * `researcher:external` (research.md §"Sub-roles"). Code workers, bare researchers, and the non-web
+ * researcher sub-roles (`codebase`/`diagnostic`/`decision`, which narrow `web-search` away) are denied.
+ *
+ * This drives all launch-time web gates: provider-native WebSearch/WebFetch, the Codex
+ * `[sandbox_workspace_write] network_access` opening, and GH_TOKEN injection into the pane MCP/shell
+ * envs (placement-launch.ts). Gating on the narrow-only-checked `web-search` capability keeps a live
+ * token + explicit web affordances confined to the one sub-role that documents needing them.
+ */
+export function paneMayResearchWeb(identity: PaneIdentity): boolean {
+  if (identity.role == null || identity.subRole == null) return false;
+  const profile = findSubRole(identity.role, identity.subRole)?.profile;
+  return profile?.capabilities.has('web-search') ?? false;
 }
 
 function claudeDisallowedPatterns(blockList: readonly BlockRule[]): string[] {
@@ -314,6 +320,14 @@ export const CODEX_NON_INTERACTIVE_APPROVAL_ARGS: readonly string[] = [
   'never',
 ];
 
+/**
+ * #127 — the Codex config section that re-opens outbound network under `sandbox_mode =
+ * "workspace-write"` (which otherwise default-denies egress). Emitted with `network_access = true`
+ * ONLY for a web-research pane ({@link paneMayResearchWeb}); omitted entirely for everyone else so the
+ * default-deny posture holds.
+ */
+export const CODEX_SANDBOX_NETWORK_SECTION = 'sandbox_workspace_write';
+
 interface CodexConfigArtifacts {
   readonly codexConfigToml: string;
   readonly codexMcpCommand: string;
@@ -360,10 +374,19 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
   const mcpEnvLines = sortedEnvEntries(identity.coMcpEnv, 'coMcpEnv').flatMap(([key, value]) => [
     `${key} = "${tomlStringEscape(value)}"`,
   ]);
+  // #127: re-open outbound network ONLY for a web-research pane — Codex's workspace-write sandbox
+  // default-denies egress, so a `researcher:external` pane cannot reach api.github.com / the web
+  // without this. Default-deny holds for every other pane (the block is simply absent). Emitted after
+  // the top-level policy scalars so `sandbox_mode`/`approval_policy` stay at the document root where
+  // the drift check reads them.
+  const networkLines = paneMayResearchWeb(identity)
+    ? [`[${CODEX_SANDBOX_NETWORK_SECTION}]`, 'network_access = true', '']
+    : [];
   const lines: string[] = [
     'sandbox_mode = "workspace-write"',
     'approval_policy = "never"',
     '',
+    ...networkLines,
     '[features]',
     'hooks = true',
     '',
@@ -483,7 +506,7 @@ function buildClaudeLaunchConfig(
   }
   // Built-in web tools (#7 §5 #3): state the decision EXPLICITLY rather than leaving it undefined
   // under bypassPermissions — allow when the role may browse, hard-deny otherwise.
-  const webAllowed = paneMayUseWebTools(identity.capabilities ?? new Set<Capability>());
+  const webAllowed = paneMayUseWebTools(identity);
   const allowedTools = [...CLAUDE_ALLOWED_CO_MCP_TOOLS, ...(webAllowed ? WEB_SEARCH_TOOLS : [])];
   if (allowedTools.length > 0) {
     args.push('--allowedTools', allowedTools.join(','));

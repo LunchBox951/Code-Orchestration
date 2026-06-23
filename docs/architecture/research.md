@@ -17,8 +17,19 @@ sub-role grants them:
 |---|---|---|---|
 | **`codebase`** | the repo (read-only) | no | the **locator/navigator**: *"what's relevant to X?"* → a focused map (files + one-line *why* each + key symbols + suggested read order). **Pointers, not a content dump.** |
 | **`external`** | the web + docs | **yes** | web research: library behavior, API docs, prior art — fan-out searches, fetch sources, cite. |
-| **`diagnostic`** | source (repo + `co`'s public repo) | optional | bug-cause analysis for the issue pipeline ([SPECS-and-ISSUES](specs-and-issues.md)). |
-| **`decision`** | codebase and/or web, as the question needs | as needed | a cited answer to a specific question. |
+| **`diagnostic`** | source (repo + `co`'s public repo) | no | bug-cause analysis for the issue pipeline ([SPECS-and-ISSUES](specs-and-issues.md)). |
+| **`decision`** | codebase/local evidence | no | a cited answer to a specific question; route web-backed questions to `external`. |
+
+Web access is **enforced at pane launch**, not just declared (#127): only a pane whose resolved
+sub-role carries the `web-search` capability — today `external` — gets Codex sandbox egress
+re-opened (a `[sandbox_workspace_write] network_access = true` block; `workspace-write`
+default-denies egress), provider-native web tools (`WebSearch`/`WebFetch`) allowed, and the resolved
+`GH_TOKEN` injected into its agent shell/MCP env so authenticated `gh` / `api.github.com` research
+works. Every other pane (code workers, and the `codebase` / `diagnostic` / `decision` sub-roles that
+narrow `web-search` away) gets no `GH_TOKEN`, no Codex egress opening, and no provider-native web
+tools. Claude shell network is not yet a hard sandbox boundary; only Codex has the explicit sandbox
+egress switch today. A live token plus open egress is a data-exfil surface, so the gate is
+intentionally the narrowest, integrity-checked one.
 
 ### Why the locator matters most
 

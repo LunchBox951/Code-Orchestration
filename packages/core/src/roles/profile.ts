@@ -15,8 +15,8 @@ export type WriteScope = 'delegates' | 'code' | 'read-only-for-code' | 'nothing'
 
 /**
  * Sub-role-gated capabilities; `web-search` is Phase B's narrowing point per researcher sub-role.
- * Integrity-checked by narrow-only.ts (sub-roles may only narrow), but NOT yet enforced at pane
- * launch — see the sub-roles.ts header note on enforcement scope.
+ * Integrity-checked by narrow-only.ts (sub-roles may only narrow) and enforced at pane launch for
+ * web affordances, Codex network, and GH_TOKEN placement.
  */
 export type Capability = 'web-search';
 

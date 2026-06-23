@@ -48,6 +48,7 @@ const TEST_MCP_PATHS: CoMcpPaths = {
   coMcpCommand: '/usr/local/bin/co-mcp',
   coCliCommand: '/usr/local/bin/co',
 };
+const NON_WEB_RESEARCHER_SUB_ROLES = ['codebase', 'diagnostic', 'decision'] as const;
 
 // Cleanup state
 const ORIGINAL_ENV = process.env;
@@ -330,7 +331,31 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(parsed.mcpServers?.co?.env).not.toHaveProperty('GH_TOKEN');
   });
 
-  it('F3: a configured ghToken is provisioned into the pane MCP env as GH_TOKEN (and only then)', () => {
+  it('F3/#127: a configured ghToken is provisioned only for a web-research pane', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-gh', 'researcher:external', 'claude');
+    const worktree = recordWorktree(projectId, 'res-gh', 'co/research-gh', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-gh');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: 'gho_test_token' },
+    );
+
+    const mcpConfig = spec.prelaunchFiles?.find((f) => f.path.endsWith('co-mcp.json'));
+    const parsed = JSON.parse(mcpConfig!.contents) as {
+      mcpServers?: { co?: { env?: Record<string, string> } };
+    };
+    // Web research is the only pane class that receives the token, in both the MCP relay env and
+    // the pane shell env used by agent-side `gh` / api.github.com calls.
+    expect(parsed.mcpServers?.co?.env?.['GH_TOKEN']).toBe('gho_test_token');
+    expect(spec.env['GH_TOKEN']).toBe('gho_test_token');
+  });
+
+  it('#127: GH_TOKEN is absent from a non-web pane MCP env even when ghToken is configured', () => {
     const { projectId, cwd, dataDir } = makeProject();
     const placement = recordPlacement(projectId, 'impl-gh', 'implementer', 'claude');
     const worktree = recordWorktree(projectId, 'impl-gh', 'co/feat-gh', cwd);
@@ -348,10 +373,148 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     const parsed = JSON.parse(mcpConfig!.contents) as {
       mcpServers?: { co?: { env?: Record<string, string> } };
     };
-    // The token reaches the co MCP server (which runs the gated `gh` publish) — the only channel
-    // that survives the pane's sanitized env. It must NOT leak into the pane process env itself.
-    expect(parsed.mcpServers?.co?.env?.['GH_TOKEN']).toBe('gho_test_token');
+    expect(parsed.mcpServers?.co?.env).not.toHaveProperty('GH_TOKEN');
     expect(spec.env).not.toHaveProperty('GH_TOKEN');
+  });
+
+  // #127 — the AGENT-SHELL half of the gate: a configured GH_TOKEN reaches the research pane's own
+  // shell env (spec.env) so authenticated api.github.com / `gh` works inside the codex sandbox — but
+  // ONLY for a web-research pane (researcher:external). A live token + open egress is a data-exfil
+  // surface, so it is gated to the same sub-role as the network opening and never empty-valued.
+  it('#127: a configured ghToken reaches the researcher:external pane agent shell env (spec.env.GH_TOKEN)', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-ext', 'researcher:external', 'codex');
+    const worktree = recordWorktree(projectId, 'res-ext', 'co/research-ext', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-ext');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: 'gho_research_token' },
+    );
+
+    // The token lands in the pane's interactive shell env so `gh`/`curl api.github.com` authenticate.
+    expect(spec.env['GH_TOKEN']).toBe('gho_research_token');
+    // And the codex sandbox has outbound network re-opened for this web-research pane.
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).toMatch(/\[sandbox_workspace_write\]\nnetwork_access = true/u);
+    expect(configToml!.contents).toMatch(
+      /\[mcp_servers\.co\.env\][\s\S]*\nGH_TOKEN = "gho_research_token"/u,
+    );
+  });
+
+  it('#127: GH_TOKEN is ABSENT from a code worker pane shell env even when ghToken is configured', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-noweb', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-noweb', 'co/feat-noweb', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-noweb');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: 'gho_research_token' },
+    );
+
+    // A code worker never researches the web → no live token in its shell, no open egress.
+    expect(spec.env).not.toHaveProperty('GH_TOKEN');
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).not.toContain('network_access');
+    expect(configToml!.contents).not.toContain('GH_TOKEN');
+  });
+
+  it.each(NON_WEB_RESEARCHER_SUB_ROLES)(
+    '#127: GH_TOKEN is ABSENT from a non-web researcher sub-role (researcher:%s) shell and MCP env',
+    (subRole) => {
+      const { projectId, cwd, dataDir } = makeProject();
+      const agent = `res-${subRole}`;
+      const placement = recordPlacement(projectId, agent, `researcher:${subRole}`, 'codex');
+      const worktree = recordWorktree(projectId, agent, `co/research-${subRole}`, cwd);
+      const isolatedHomeDir = join(dataDir, 'isolated', agent);
+
+      const { spec } = buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        { ...TEST_MCP_PATHS, ghToken: 'gho_research_token' },
+      );
+
+      expect(spec.env).not.toHaveProperty('GH_TOKEN');
+      const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+      expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
+      expect(configToml!.contents).not.toContain('GH_TOKEN');
+    },
+  );
+
+  it('#127: GH_TOKEN and network are absent from a bare researcher role without a web sub-role', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-bare', 'researcher', 'codex');
+    const worktree = recordWorktree(projectId, 'res-bare', 'co/research-bare', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-bare');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: 'gho_research_token' },
+    );
+
+    expect(spec.env).not.toHaveProperty('GH_TOKEN');
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).not.toContain('network_access');
+    expect(configToml!.contents).not.toContain('GH_TOKEN');
+  });
+
+  it('#127: GH_TOKEN is never empty-valued on a web pane when no ghToken is configured', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-ext2', 'researcher:external', 'codex');
+    const worktree = recordWorktree(projectId, 'res-ext2', 'co/research-ext2', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-ext2');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    // No token configured → never an empty/blank credential in the shell env.
+    expect(spec.env).not.toHaveProperty('GH_TOKEN');
+    // The network opening is still emitted (egress is sub-role-gated, not token-gated).
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).toContain('[mcp_servers.co.env]');
+    expect(configToml!.contents).not.toMatch(/\nGH_TOKEN\s*=/u);
+  });
+
+  it('#127: GH_TOKEN is never whitespace-valued on a web pane when ghToken is blank', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-ext-blank', 'researcher:external', 'codex');
+    const worktree = recordWorktree(projectId, 'res-ext-blank', 'co/research-ext-blank', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-ext-blank');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: '   ' },
+    );
+
+    expect(spec.env).not.toHaveProperty('GH_TOKEN');
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).toContain('[mcp_servers.co.env]');
+    expect(configToml!.contents).not.toMatch(/\nGH_TOKEN\s*=/u);
   });
 
   it('RC-1: coMcpExtraEnv (ELECTRON_RUN_AS_NODE) reaches the Claude MCP server env block', () => {
@@ -422,6 +585,57 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
       'command = "ELECTRON_RUN_AS_NODE=\\"1\\" \\"/electron\\" \\"/repo/packages/cli/dist/index.js\\" hook codex-block-list',
     );
     expect(spec.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+  });
+
+  it('#127: rejects reserved token keys in coMcpExtraEnv before they can bypass the web-research gate', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-reserved-token', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-reserved-token', 'co/reserved-token', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-reserved-token');
+
+    expect(() =>
+      buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        { ...TEST_MCP_PATHS, coMcpExtraEnv: { GH_TOKEN: 'gho_bypass' } },
+      ),
+    ).toThrow(/coMcpExtraEnv.*GH_TOKEN.*reserved/i);
+  });
+
+  it('#127: rejects reserved identity keys in coMcpExtraEnv before they can override mounted identity', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-reserved-role', 'implementer', 'claude');
+    const worktree = recordWorktree(projectId, 'impl-reserved-role', 'co/reserved-role', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-reserved-role');
+
+    expect(() =>
+      buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        { ...TEST_MCP_PATHS, coMcpExtraEnv: { CO_ROLE: 'researcher:external' } },
+      ),
+    ).toThrow(/coMcpExtraEnv.*CO_ROLE.*reserved/i);
+  });
+
+  it('#127: rejects reserved keys in coCliExtraEnv before they can alter hook identity or credentials', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-reserved-cli', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-reserved-cli', 'co/reserved-cli', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-reserved-cli');
+
+    expect(() =>
+      buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        { ...TEST_MCP_PATHS, coCliExtraEnv: { CO_MCP_BRIDGE_LOG: '/tmp/override.log' } },
+      ),
+    ).toThrow(/coCliExtraEnv.*CO_MCP_BRIDGE_LOG.*reserved/i);
   });
 
   it('RC-5: the pane HOME is the ISOLATED home dir, never the operator home', () => {
