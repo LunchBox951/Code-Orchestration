@@ -21,6 +21,7 @@ import {
   ReconcileLoop,
   accountForProvider,
   buildCoreRegistry,
+  defaultHandoffPointer,
   defaultMailRenderer,
   invokeTool,
   openDispatchStore,
@@ -551,21 +552,33 @@ function makeInjectRetry(): {
   };
 }
 
+// #132 — a deterministic codex handoff path the fake writer returns; the SHORT pointer command derived
+// from it (defaultHandoffPointer) is what injectMail now injects for a multiline codex payload, so the
+// drive helpers echo THAT (not the collapsed paste) to verify a success turn.
+const CODEX_HANDOFF_PATH = '/work/impl-cx/.co/kickoff-handoff.txt';
+const CODEX_HANDOFF_POINTER = defaultHandoffPointer(CODEX_HANDOFF_PATH);
+
 function makeCodexEngine(
   clock: ReturnType<typeof makeClock>,
   qw: ReturnType<typeof makeQuietWindow>,
   retry: ReturnType<typeof makeInjectRetry>,
-): { engine: ConductorEngine; pty: FakePty } {
+): { engine: ConductorEngine; pty: FakePty; handoffs: string[] } {
   const pty = new FakePty();
+  // #132 — capture handed-off bodies and return a deterministic path INSTEAD of touching the filesystem.
+  const handoffs: string[] = [];
   const engine = new ConductorEngine({
     pty,
     makeTransport: () => InMemoryTransport.createLinkedPair(),
     now: clock.now,
     quietWindow: qw.quietWindow,
     injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+    writeCodexHandoff: (_identity, body) => {
+      handoffs.push(body);
+      return CODEX_HANDOFF_PATH;
+    },
   });
   engines.push(engine);
-  return { engine, pty };
+  return { engine, pty, handoffs };
 }
 
 /** Drive ONE codex turn whose paste never echoes: settle the retry with no echo ⇒ inject THROWS. */
@@ -651,7 +664,12 @@ function outstandingFor(projectId: ProjectId, agent: string): readonly Delivered
   return store.outstanding(agent);
 }
 
-/** Drive ONE successful codex turn: emit the collapsed-paste preview (needle-matching), then idle. */
+/**
+ * Drive ONE successful codex turn through the #132 FILE-HANDOFF: the engine routes the multiline kickoff
+ * to a handoff file and injects the SHORT pointer command; the composer echoes the pointer (literal-echo
+ * path), injectMail submits, and the turn runs to idle. No dependence on the unverified collapsed-paste
+ * preview bytes.
+ */
 async function driveCodexInjectSuccess(
   engine: ConductorEngine,
   hosted: ReturnType<ConductorEngine['getHosted']> & object,
@@ -662,9 +680,8 @@ async function driveCodexInjectSuccess(
 ): Promise<TurnOutcome> {
   const turnP = engine.runOneTurn(hosted, kickoff);
   await tick();
-  // The codex composer echoes a collapsed-paste preview matching CODEX_COLLAPSED_PASTE_NEEDLES
-  // (['pasted','lines']) — echoed() accepts it, injectMail submits, the turn runs to idle.
-  pane.emit('Pasted text — 12 lines collapsed\r\n');
+  // The SHORT pointer command echoes literally (single line) — echoed() matches, injectMail submits.
+  pane.emit(CODEX_HANDOFF_POINTER);
   await tick();
   clock.set(1000);
   pane.emit('⠋ working…\r\n');
@@ -736,6 +753,7 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     const retry = makeInjectRetry();
     const { engine, pty } = makeCodexEngine(clock, qw, retry);
     const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo, '@operator');
+    // The pane printed its ready prompt (CODEX_READY) — a live, byte-producing pane (#93 reconcile).
     await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
     const hosted = engine.getHosted(projectId, 'impl-cx')!;
 
@@ -744,14 +762,19 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     await driveCodexInjectFailure(engine, hosted, kickoff, retry);
 
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    // #93/#132 — the pane is LIVE (fresh ready-prompt bytes, never exited), so the notice is the
+    // RECONCILED "delivery uncertain / agent is live" variant, NOT the bare "stranded" alarm.
     const [notice] = outstandingFor(projectId, '@operator').filter(
       (item) =>
         item.sender === 'impl-cx' &&
         item.type === 'clarify_request' &&
-        item.subject === 'Kickoff injection failed for impl-cx',
+        item.subject === 'Kickoff delivery uncertain for impl-cx (agent is live)',
     );
     expect(notice).toBeDefined();
-    expect(notice!.body).toContain('retracted after 3 failed injection attempt(s)');
+    expect(notice!.body).toContain('pane is LIVE');
+    expect(notice!.body).toContain('do NOT assume it is stranded');
+    expect(notice!.body).toContain('resend it via mail');
+    // The provenance is still carried so the parent can recover if needed.
     expect(notice!.body).toContain(`Original kickoff seq: ${kickoff.seq}`);
     expect(notice!.body).toContain('Original kickoff body:');
   });
@@ -849,6 +872,124 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     // And B's own budget is honored end-to-end: ITS cap-th failed inject (not A's) retracts B.
     await driveCodexInjectFailure(engine, hosted, kickoffB, retry);
     expect(kickoffOutstanding(projectId, kickoffB.seq)).toBe(false);
+  });
+});
+
+// ── #93 / #132 (residual 4): the cap-retract notice is RECONCILED against pane liveness ─────────────
+//
+// The cap retracts the kickoff for loop-safety either way. But the surfaced clarify_request must NOT
+// blindly alarm "stranded" when the pane is LIVE and producing fresh output (the codex collapsed-paste
+// false-fail #132 case): the agent likely received the kickoff and is working. Engine consults the same
+// in-process liveness reads (paneExited + fresh lastByteAt) as livenessObservationFor before composing
+// the notice — a live pane gets the calm "delivery uncertain / resend via mail if idle" variant; an
+// exited / byte-silent pane keeps the genuinely-stuck alarm.
+
+/** Drive ONE failed codex turn that ALSO emits fresh pane bytes mid-turn (the agent reads live). */
+async function driveCodexInjectFailureLive(
+  engine: ConductorEngine,
+  hosted: ReturnType<ConductorEngine['getHosted']> & object,
+  kickoff: DeliveredMail,
+  pane: FakePty['panes'][number],
+  retry: ReturnType<typeof makeInjectRetry>,
+): Promise<TurnOutcome> {
+  const turnP = engine.runOneTurn(hosted, kickoff);
+  await tick();
+  pane.emit('⠋ reading kickoff…\r\n'); // FRESH output during the turn ⇒ lastByteAt >= turnStartedAt
+  await tick();
+  retry.settle(); // the inject still throws (the pointer never echo-verified this turn)
+  return turnP;
+}
+
+describe('#93/#132 cap-retract notice — reconciled against pane liveness', () => {
+  it('a LIVE pane producing fresh output gets the RECONCILED notice (NOT a bare "stranded" alarm)', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo, '@operator');
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Drive CAP failed turns, each emitting FRESH bytes mid-turn so the pane reads live across attempts.
+    for (let i = 0; i < 3; i++) {
+      clock.set(100 * (i + 1)); // advance so each turn's bytes are unambiguously fresh
+      const turn = await driveCodexInjectFailureLive(engine, hosted, kickoff, pane, retry);
+      expect(turn.errored).toBe(true);
+    }
+
+    // Retraction is preserved (loop-safety unchanged) and the pane stays warm.
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    expect(engine.isHosted(projectId, 'impl-cx')).toBe(true);
+
+    const [notice] = outstandingFor(projectId, '@operator').filter(
+      (item) => item.sender === 'impl-cx' && item.type === 'clarify_request',
+    );
+    expect(notice).toBeDefined();
+    // RECONCILED variant: it tells the parent the agent is LIVE, not stranded.
+    expect(notice!.subject).toBe('Kickoff delivery uncertain for impl-cx (agent is live)');
+    expect(notice!.body).toContain('pane is LIVE');
+    expect(notice!.body).toContain('do NOT assume it is stranded');
+    expect(notice!.body).toContain('resend it via mail');
+    // It is NOT the bare alarm.
+    expect(notice!.subject).not.toMatch(/injection failed/i);
+    expect(notice!.body).not.toMatch(/genuinely stuck/i);
+  });
+
+  it('CONTRAST: an EXITED / byte-silent pane keeps the genuinely-stuck notice (no regression)', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo, '@operator');
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Advance the clock PAST the startup ready-prompt byte (at clock 0) and emit NO fresh bytes during
+    // the turns, then fire onExit before the cap turn — the pane is dead / byte-silent.
+    clock.set(5000);
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 1 (no fresh bytes)
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 2 (no fresh bytes)
+    pane.exit(1, null); // the process died — paneExited becomes true
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry); // attempt 3 == cap → retracted
+
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    const [notice] = outstandingFor(projectId, '@operator').filter(
+      (item) => item.sender === 'impl-cx' && item.type === 'clarify_request',
+    );
+    expect(notice).toBeDefined();
+    // GENUINELY-STUCK variant — the original alarm still fires for a truly dead/silent pane.
+    expect(notice!.subject).toBe('Kickoff injection failed for impl-cx');
+    expect(notice!.body).toContain('retracted after 3 failed injection attempt(s)');
+    expect(notice!.body).toContain('genuinely stuck');
+    expect(notice!.body).not.toContain('pane is LIVE');
+  });
+
+  it('FILE-HANDOFF (#132): the multiline kickoff body is handed off and a SHORT pointer is injected', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const { engine, pty, handoffs } = makeCodexEngine(clock, qw, retry);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    // Drive ONE successful turn: the engine routes the rendered (multiline) kickoff through the handoff
+    // file and injects the SHORT pointer command, which the composer echoes literally.
+    const turn = await driveCodexInjectSuccess(engine, hosted, kickoff, pane, clock, qw);
+    expect(turn.errored).toBe(false);
+
+    // The FULL rendered body was written to the handoff (NOT pasted into the composer).
+    expect(handoffs).toHaveLength(1);
+    expect(handoffs[0]).toBe(defaultMailRenderer(kickoff));
+    // ONLY the short pointer command (no bracketed paste) reached the pane, then exactly one submit.
+    expect(pane.written).toContain(CODEX_HANDOFF_POINTER);
+    expect(pane.written.some((w) => w.includes(ESC + '[200~'))).toBe(false); // no PASTE_START
+    expect(pane.written.some((w) => w.includes('Implement the feature per the spec'))).toBe(false);
+    // The kickoff was consumed by the successful turn.
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
   });
 });
 

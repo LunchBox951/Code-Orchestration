@@ -152,6 +152,142 @@ describe('injectMail — codex collapsed-paste preview (#77)', () => {
   });
 });
 
+// ── #132: codex multiline FILE-HANDOFF — sidestep the unverified collapsed-paste race entirely ──────
+//
+// The collapsed-paste needles above are UNVERIFIED placeholders, so a real codex multiline kickoff
+// whose composer preview lacks 'pasted'/'lines' false-fails the echo scan and is retracted after the
+// engine's cap. The fix: when a `codexHandoff` seam is supplied, a multiline (or over-threshold) codex
+// payload is written to a handoff file in the worktree and a SHORT bare pointer command — which
+// echo-verifies reliably on the literal-echo path — is injected instead. No dependence on capturing the
+// real codex preview bytes.
+describe('injectMail — codex multiline file-handoff (#132)', () => {
+  const multiline = 'first line\nsecond line\nthird line';
+  const shortLine = 'do the thing'; // single-line, under the 256-char threshold
+
+  it('routes a MULTILINE codex payload through the handoff: full body to a file, SHORT pointer injected', async () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const { delay } = controllableDelay();
+    let written: { path: string; body: string } | undefined;
+    const pointer = (path: string): string => `Read your kickoff in ${path} and act on it.`;
+    const handoffPath = '/work/agent/.co/kickoff-handoff.txt';
+    const p = injectMail(pane, multiline, {
+      provider: 'codex',
+      retryDelay: delay,
+      codexHandoff: {
+        write: (body) => {
+          written = { path: handoffPath, body };
+          return handoffPath;
+        },
+        pointer,
+      },
+    });
+
+    // The pointer is a short single line, so it takes the literal-echo path: the composer echoes it.
+    pane.emit(pointer(handoffPath));
+    await p;
+
+    // The FULL body was handed off to the file, byte-exact.
+    expect(written).toEqual({ path: handoffPath, body: multiline });
+    // ONLY the short pointer command (bare, no paste markers) + one submit was injected.
+    expect(pane.written).toEqual([pointer(handoffPath), '\r']);
+    expect(pane.written.some((w) => w.includes(PASTE_START))).toBe(false);
+    expect(pane.written.some((w) => w.includes(multiline))).toBe(false);
+  });
+
+  it('routes an OVER-THRESHOLD single-line codex payload through the handoff too', async () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const { delay } = controllableDelay();
+    const longLine = 'y'.repeat(400); // single line but ≥ the 256-char paste threshold
+    let body: string | undefined;
+    const handoffPath = '/work/agent/.co/kickoff-handoff.txt';
+    const pointer = (path: string): string => `cat ${path}`;
+    const p = injectMail(pane, longLine, {
+      provider: 'codex',
+      retryDelay: delay,
+      codexHandoff: {
+        write: (b) => {
+          body = b;
+          return handoffPath;
+        },
+        pointer,
+      },
+    });
+
+    pane.emit(pointer(handoffPath));
+    await p;
+
+    expect(body).toBe(longLine);
+    expect(pane.written).toEqual([pointer(handoffPath), '\r']);
+  });
+
+  it('does NOT use the handoff for a SHORT single-line codex payload (literal-echo path stands)', async () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const { delay } = controllableDelay();
+    let handoffCalled = false;
+    const p = injectMail(pane, shortLine, {
+      provider: 'codex',
+      retryDelay: delay,
+      codexHandoff: {
+        write: () => {
+          handoffCalled = true;
+          return '/unused';
+        },
+      },
+    });
+
+    pane.emit(shortLine); // the short line echoes directly
+    await p;
+
+    expect(handoffCalled).toBe(false);
+    expect(pane.written).toEqual([shortLine, '\r']); // bare write of the original text, no handoff
+  });
+
+  it('does NOT use the handoff for a multiline CLAUDE payload (handoff is codex-only)', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const { delay } = controllableDelay();
+    let handoffCalled = false;
+    const p = injectMail(pane, multiline, {
+      provider: 'claude',
+      retryDelay: delay,
+      codexHandoff: {
+        write: () => {
+          handoffCalled = true;
+          return '/unused';
+        },
+      },
+    });
+
+    pane.emit(multiline); // claude renders the pasted content directly
+    await p;
+
+    expect(handoffCalled).toBe(false);
+    expect(pane.written).toEqual([PASTE_START + multiline + PASTE_END, '\r']);
+  });
+
+  it('surfaces a failure only if even the SHORT pointer never echoes', async () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const { delay, release } = controllableDelay();
+    const handoffPath = '/work/agent/.co/kickoff-handoff.txt';
+    const pointer = (path: string): string => `cat ${path}`;
+    const p = injectMail(pane, multiline, {
+      provider: 'codex',
+      retryDelay: delay,
+      maxEchoAttempts: 1,
+      codexHandoff: {
+        write: () => handoffPath,
+        pointer,
+      },
+    });
+    const rejection = expect(p).rejects.toThrow(/did not echo|blind-fire/i);
+
+    release(); // the settle window elapses with no echo of the pointer command
+    await rejection;
+
+    // The pointer was written (bare) but never submitted — no blind-fire Enter.
+    expect(pane.written).toEqual([pointer(handoffPath)]);
+  });
+});
+
 describe('injectMail — long single-line payloads paste-wrap (#92)', () => {
   // A single line with NO newlines but long enough to soft-wrap in the composer (the reported
   // failure was ~400 chars). The bare-write path fails the echo scan on reflow; pasting dodges it.

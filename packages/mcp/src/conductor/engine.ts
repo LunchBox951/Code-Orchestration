@@ -83,6 +83,8 @@ import {
   type ReviewerSpawnGate,
   transcriptTailFrom,
 } from '@co/core';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   LiveSessionHostImpl,
@@ -168,6 +170,15 @@ export interface ConductorEngineDeps {
   readonly spawnSpecFor?: (identity: HostedIdentity) => SpawnSpec;
   /** Extra options forwarded to {@link injectMail} (e.g. a controllable `retryDelay` in sandbox). */
   readonly injectOptions?: Omit<InjectMailOptions, 'provider'>;
+  /**
+   * #132 — codex multiline FILE-HANDOFF writer. Persists a codex agent's full kickoff `body` to a
+   * handoff file inside its worktree and returns the absolute path; the engine then has `injectMail`
+   * inject a SHORT bare pointer command at that path instead of a collapsing bracketed paste (sidestepping
+   * the unverified codex collapsed-paste echo race). Called ONLY for codex panes whose injected text would
+   * take the paste path. Default: {@link defaultWriteCodexHandoff} (writes `<cwd>/.co/kickoff-handoff.txt`).
+   * Injected so the testable path needs no real filesystem.
+   */
+  readonly writeCodexHandoff?: (identity: HostedIdentity, body: string) => string;
   /** Base {@link detectTurnEnd} config. `provider` is always taken from the hosted identity (authoritative). */
   readonly turnConfig?: Omit<TurnEndConfig, 'provider'>;
   /**
@@ -382,6 +393,25 @@ function defaultSpawnSpec(identity: HostedIdentity): SpawnSpec {
   return { command: identity.provider, args: [], cwd: identity.cwd, env };
 }
 
+/** The codex file-handoff filename, written under `<cwd>/.co/` (#132). */
+const CODEX_HANDOFF_DIR = '.co';
+const CODEX_HANDOFF_FILE = 'kickoff-handoff.txt';
+
+/**
+ * #132 — default codex FILE-HANDOFF writer: persist the agent's full kickoff `body` to
+ * `<cwd>/.co/kickoff-handoff.txt` inside its worktree and return the absolute path. Synchronous (the
+ * inject path awaits the pointer write right after, so the file must exist first) and host-side; the
+ * testable engine path injects a fake writer instead. Overwrites any prior handoff for the agent — the
+ * pointer the agent reads always names the current kickoff.
+ */
+function defaultWriteCodexHandoff(identity: HostedIdentity, body: string): string {
+  const dir = join(identity.cwd, CODEX_HANDOFF_DIR);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, CODEX_HANDOFF_FILE);
+  writeFileSync(path, body, 'utf8');
+  return path;
+}
+
 /**
  * Default clarify-timeout: the project's effective `clarify_timeout_seconds` config, else
  * {@link CLARIFY_TIMEOUT_SECONDS_DEFAULT}. Reads program-data config ONLY (never the repo); the
@@ -414,6 +444,7 @@ export class ConductorEngine {
   private readonly openRoster: (projectId: ProjectId) => RosterStore;
   private readonly renderMail: MailRenderer;
   private readonly spawnSpecFor: (identity: HostedIdentity) => SpawnSpec;
+  private readonly writeCodexHandoff: (identity: HostedIdentity, body: string) => string;
   private readonly clarifyTimeoutSeconds: (projectId: ProjectId) => number;
   /** Warm panes, keyed `${projectId}:${agent}` — the engine's launch-authority ledger (MNR-5). */
   private readonly hosted = new Map<string, HostedPane>();
@@ -542,6 +573,7 @@ export class ConductorEngine {
     this.openRoster = deps.openRoster ?? openRosterStore;
     this.renderMail = deps.renderMail ?? defaultMailRenderer;
     this.spawnSpecFor = deps.spawnSpecFor ?? defaultSpawnSpec;
+    this.writeCodexHandoff = deps.writeCodexHandoff ?? defaultWriteCodexHandoff;
     this.clarifyTimeoutSeconds =
       deps.clarifyTimeoutSeconds ?? ((projectId) => defaultClarifyTimeoutSeconds(projectId));
   }
@@ -847,10 +879,7 @@ export class ConductorEngine {
     this.turnOrdinal.set(agentKey, turnOrdinal);
     try {
       const text = this.renderMail(mail);
-      await injectMail(hosted.pane, text, {
-        provider: hosted.identity.provider,
-        ...this.deps.injectOptions,
-      });
+      await injectMail(hosted.pane, text, this.injectOptionsFor(hosted.identity));
       opts.onInjected?.();
       const { turnEnd, trace, observedAt, sawMcpActivity, sawOverload } =
         await this.observeTurnEnd(hosted);
@@ -1255,10 +1284,28 @@ export class ConductorEngine {
           'not-yet-hosted recipient from a PlacementRecord).',
       );
     }
-    await injectMail(hosted.pane, this.renderMail(mail), {
-      provider: hosted.identity.provider,
+    await injectMail(hosted.pane, this.renderMail(mail), this.injectOptionsFor(hosted.identity));
+  }
+
+  /**
+   * #132 — the {@link injectMail} options for `identity`: the injected base ({@link
+   * ConductorEngineDeps.injectOptions}) plus the pane's authoritative `provider`, and — for codex panes
+   * ONLY — the multiline FILE-HANDOFF seam. The handoff seam fires inside `injectMail` ONLY when the
+   * injected text would take the collapsing bracketed-paste path (multi-line OR over the paste
+   * threshold), so a short single-line codex payload still echo-verifies on the literal path. The
+   * `write` closure persists the full body to the codex agent's worktree via {@link writeCodexHandoff}
+   * and returns the path; `injectMail` then injects only a short bare pointer command at it.
+   */
+  private injectOptionsFor(identity: HostedIdentity): InjectMailOptions {
+    const base: InjectMailOptions = {
+      provider: identity.provider,
       ...this.deps.injectOptions,
-    });
+    };
+    if (identity.provider !== 'codex') return base;
+    return {
+      ...base,
+      codexHandoff: { write: (body) => this.writeCodexHandoff(identity, body) },
+    };
   }
 
   /**
@@ -1525,25 +1572,68 @@ export class ConductorEngine {
     }
   }
 
+  /**
+   * #93 — is `agentKey`'s pane LIVE right now? Reads the SAME durable in-process liveness signals
+   * {@link livenessObservationFor} uses (P6 watchdog-seam): `paneExited` (the `dead` signal) and the
+   * last-byte timestamp ({@link lastByteAt}). The pane is "live and producing fresh output" when it has
+   * NOT exited AND it emitted at least one byte during the failing turn (`lastByteAt >= turnStartedAt`)
+   * — i.e. the agent is reading/working, not wedged or gone. NO I/O, never throws; a pure in-memory read.
+   */
+  private kickoffPaneLive(agentKey: string): boolean {
+    if (this.paneExited.get(agentKey) === true) return false; // `dead` — genuinely stuck
+    const lastByte = this.lastByteAt.get(agentKey);
+    if (lastByte === undefined) return false; // byte-silent — no fresh output to vouch for liveness
+    const turnStartedAt = this.turnStartedAt.get(agentKey);
+    // Fresh = a byte landed at/after this turn's inject start (the agent is actively reading the paste).
+    return turnStartedAt === undefined || lastByte >= turnStartedAt;
+  }
+
+  /**
+   * #93 / #132 (residual 4) — surface ONE truthful, actionable status when a kickoff is retracted at the
+   * inject-attempt cap, RECONCILED against the pane's liveness rather than blindly alarming "stranded".
+   *
+   * The cap retracts the kickoff for loop-safety whether or not the pane is alive (the warm pane must not
+   * stay stuck re-pasting). But the OLD notice unconditionally told the parent the agent was stranded —
+   * even when the pane was live and producing fresh output (a codex multiline kickoff whose real preview
+   * lacks the unverified collapsed-paste needles false-fails the echo scan, yet the agent IS reading the
+   * paste). That false "stranded" alarm is the #93 dual-signal bug. So we consult the already-computed
+   * liveness ({@link kickoffPaneLive}): a LIVE pane gets a calm "kickoff may be undelivered — resend via
+   * mail if it is idle" note; an exited / byte-silent pane keeps the genuinely-stuck alarm. The kickoff is
+   * retracted either way (the caller already did so); this only reconciles the SIGNAL.
+   */
   private surfaceCappedKickoffFailure(
     hosted: HostedPane,
     mail: DeliveredMail,
     attempts: number,
     error: unknown,
   ): void {
+    const agentKey = ConductorEngine.agentKey(hosted.identity.projectId, hosted.identity.agent);
+    const live = this.kickoffPaneLive(agentKey);
+    const provenance =
+      `Provider: ${hosted.identity.provider}. Original kickoff seq: ${mail.seq}. ` +
+      `Last inject error: ${errorMessage(error)}\n\nOriginal kickoff subject:\n${mail.subject}\n\n` +
+      `Original kickoff body:\n${mail.body}`;
+    const subject = live
+      ? `Kickoff delivery uncertain for ${hosted.identity.agent} (agent is live)`
+      : `Kickoff injection failed for ${hosted.identity.agent}`;
+    const lede = live
+      ? `${hosted.identity.agent}'s pane is LIVE and producing fresh output, but its one-shot kickoff ` +
+        `did not echo-verify after ${attempts} injection attempt(s), so it was retracted to free the ` +
+        `warm pane from re-pasting it every tick. The agent may already be acting on the kickoff (it ` +
+        `was likely delivered, only the composer echo could not be confirmed) — do NOT assume it is ` +
+        `stranded. If the agent appears IDLE and never picked the kickoff up, resend it via mail. `
+      : `The one-shot kickoff for ${hosted.identity.agent} was retracted after ${attempts} failed ` +
+        `injection attempt(s), so the warm pane is no longer stuck re-pasting it every tick. The pane ` +
+        `is NOT producing fresh output (exited or byte-silent), so the agent is likely genuinely stuck ` +
+        `and the kickoff was probably never delivered — re-kick or recover it. `;
     const store = this.openMail(hosted.identity.projectId);
     try {
       store.send({
         type: MAIL_CLARIFY_REQUEST,
         from: hosted.identity.agent,
         to: mail.sender,
-        subject: `Kickoff injection failed for ${hosted.identity.agent}`,
-        body:
-          `The one-shot kickoff for ${hosted.identity.agent} was retracted after ${attempts} ` +
-          `failed injection attempt(s), so the warm pane is no longer stuck re-pasting it every ` +
-          `tick. Provider: ${hosted.identity.provider}. Original kickoff seq: ${mail.seq}. ` +
-          `Last error: ${errorMessage(error)}\n\nOriginal kickoff subject:\n${mail.subject}\n\n` +
-          `Original kickoff body:\n${mail.body}`,
+        subject,
+        body: `${lede}\n\n${provenance}`,
         causationId: String(mail.seq),
         idempotencyKey:
           `kickoff-injection-failed:${hosted.identity.projectId}:` +
