@@ -11,17 +11,19 @@
  * fixtures, the pane is driven by emitting scripted bytes right after each async step is launched.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
+  type DeliveryFactory,
   MAIL_APPROVAL_RESPONSE,
   MAIL_CLARIFY_RESPONSE,
   MAIL_WORKER_DONE,
   defaultMailRenderer,
+  projectDataDir,
   turnKickoffCorrelationId,
   openMailStore,
   openRegistry,
@@ -37,6 +39,7 @@ import {
   type RosterStore,
   type UsageSourceFactory,
 } from '@co/core';
+import { CODEX_KICKOFF_HANDOFF_ENV, codexKickoffHandoffPointer } from './codex-handoff.js';
 import {
   ConductorEngine,
   selectEligible,
@@ -53,12 +56,14 @@ import type {
   HostSessionOptions,
   LiveSessionHost,
 } from '../live-session-host.js';
+import { LiveSessionHostImpl } from '../live-session-host.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 // ── Scripted startup fixture: a claude session that is ready immediately (no interstitial). ──
 // ESC authored as a `\u` escape so the SOURCE holds no raw control byte (the C2 pristine-repo rule).
 const ESC = '\u001B';
 const CLAUDE_READY = ESC + '[2J' + ESC + '[H' + '╭─ Welcome ─╮\r\n❯ \r\n  ? for shortcuts\r\n';
+const CODEX_READY = ESC + '[2J' + ESC + '[H' + '› \r\n  send · newline\r\n';
 const CLEAR_SCREEN = ESC + '[2J' + ESC + '[H';
 const CLAUDE_PERMISSION =
   CLEAR_SCREEN +
@@ -294,6 +299,18 @@ async function hostPane(
   const ensureP = engine.ensureHosted(identity);
   const pane = pty.panes[pty.panes.length - 1]!; // spawned synchronously before the first await
   pane.emit(CLAUDE_READY);
+  const hosted = await ensureP;
+  return { hosted, pane };
+}
+
+async function hostCodexPane(
+  engine: ConductorEngine,
+  pty: FakePty,
+  identity: HostedIdentity,
+): Promise<{ hosted: HostedPane; pane: FakePty['panes'][number] }> {
+  const ensureP = engine.ensureHosted(identity);
+  const pane = pty.panes[pty.panes.length - 1]!;
+  pane.emit(CODEX_READY);
   const hosted = await ensureP;
   return { hosted, pane };
 }
@@ -1119,6 +1136,65 @@ describe('ConductorEngine — P1b routes emitted mail via LiveDelivery (wake + i
     expect(wakes).toContainEqual({ projectId, recipient: 'impl-b' });
     expect(bPane.written.join('')).toContain('route me');
     expect(bPane.written.filter((w) => w === '\r')).toHaveLength(1);
+  });
+
+  it('scrubs routed warm Codex kickoff handoffs after successful injection', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const wakes: Array<{ projectId: string; recipient: string }> = [];
+    const deliveryFactories: DeliveryFactory[] = [];
+    const delegateHost = new LiveSessionHostImpl();
+    const host: LiveSessionHost = {
+      hostSession: (identity, transport, opts) => {
+        if (opts?.deliveryFactory != null) deliveryFactories.push(opts.deliveryFactory);
+        return delegateHost.hostSession(identity, transport, opts);
+      },
+    };
+    const { engine, pty } = makeEngine({
+      onRecipientWake: (pid, recipient) => wakes.push({ projectId: pid, recipient }),
+      host,
+    });
+    const { pane: bPane } = await hostCodexPane(
+      engine,
+      pty,
+      makeIdentity({
+        agent: 'impl-b',
+        projectId,
+        cwd,
+        provider: 'codex',
+        resume: { provider: 'codex', codexHome: join(cwd, '.codex-home') },
+      }),
+    );
+    const [deliveryFactory] = deliveryFactories;
+    if (deliveryFactory == null)
+      throw new Error('expected hosted session to capture deliveryFactory');
+    const routedMail = openMailStore(projectId, { deliveryFactory });
+    mailStores.push(routedMail);
+
+    const sent = routedMail.send({
+      type: 'clarify_request',
+      to: 'impl-b',
+      from: 'lead-1',
+      subject: 'routed kickoff',
+      body: 'please start now',
+      correlationId: turnKickoffCorrelationId('impl-b'),
+    });
+    await flush();
+    const item = outstandingItem(projectId, 'impl-b');
+    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-b', 'kickoff.txt');
+
+    expect(sent.seq).toBe(item.seq);
+    expect(wakes).toContainEqual({ projectId, recipient: 'impl-b' });
+    expect(bPane.spec.env[CODEX_KICKOFF_HANDOFF_ENV]).toBe(handoffPath);
+    expect(bPane.written).toContain(codexKickoffHandoffPointer());
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(item));
+
+    bPane.emit(codexKickoffHandoffPointer());
+    await flush();
+
+    expect(bPane.written.filter((w) => w === '\r')).toHaveLength(1);
+    expect(outstandingCount(projectId, 'impl-b')).toBe(0);
+    expect(existsSync(handoffPath)).toBe(false);
   });
 
   it('an emitted INFORMATIONAL mail wakes the recipient but does NOT inject (and never fails)', async () => {

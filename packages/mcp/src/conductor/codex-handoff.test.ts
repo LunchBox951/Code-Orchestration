@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -74,5 +76,24 @@ describe('codex kickoff handoff path', () => {
       /symbolic link|symlink|ELOOP|too many/i,
     );
     expect(readFileSync(outsideFile, 'utf8')).toBe('outside');
+  });
+
+  it('repairs lax existing handoff directory and file modes', () => {
+    const target = identity('impl-cx');
+    const handoffPath = codexKickoffHandoffPath(target);
+    const root = dirname(dirname(handoffPath));
+    const agentDir = dirname(handoffPath);
+    mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+    chmodSync(root, 0o777);
+    chmodSync(agentDir, 0o777);
+    writeFileSync(handoffPath, 'old', { encoding: 'utf8', mode: 0o600 });
+    chmodSync(handoffPath, 0o666);
+
+    writeCodexKickoffHandoff(target, 'fresh kickoff');
+
+    expect(readFileSync(handoffPath, 'utf8')).toBe('fresh kickoff');
+    expect(statSync(root).mode & 0o777).toBe(0o700);
+    expect(statSync(agentDir).mode & 0o777).toBe(0o700);
+    expect(statSync(handoffPath).mode & 0o777).toBe(0o600);
   });
 });

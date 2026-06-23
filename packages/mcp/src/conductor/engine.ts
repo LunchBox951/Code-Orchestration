@@ -1315,6 +1315,7 @@ export class ConductorEngine {
       this.renderMail(mail),
       this.injectOptionsFor(hosted.identity, mail),
     );
+    this.consumeOneShotKickoff(hosted.identity, mail);
   }
 
   /**
