@@ -17,7 +17,7 @@ import type {
   SpawnSpec,
   WorktreeRecord,
 } from '@co/core';
-import { buildPaneLaunchConfig, parseSubRoleId, profileFor } from '@co/core';
+import { buildPaneLaunchConfig, paneMayResearchWeb, parseSubRoleId, profileFor } from '@co/core';
 import type { Role } from '@co/core';
 import { dirname } from 'node:path';
 import type { HostedIdentity } from '../live-session-host.js';
@@ -67,6 +67,12 @@ export interface CoMcpPaths {
    * AUTHORITATIVE GitHub auth is provisioned onto the daemon's own env at `co-mcp serve` boot
    * (see {@link import('./host.js').resolveAndApplyDaemonGithubAuth}). This pane-level token is kept
    * as defense-in-depth for any future agent-side `gh` use; it is harmless when unused.
+   *
+   * #127: this token is ALSO injected into the pane's OWN shell env (`SpawnSpec.env.GH_TOKEN`) — but
+   * ONLY for a web-research pane ({@link import('@co/core').paneMayResearchWeb}: `researcher:external`),
+   * so a Researcher's authenticated `gh` / api.github.com calls work inside the codex sandbox whose
+   * outbound network is opened for the same sub-role. Gated tight (a live token + open egress is a
+   * data-exfil surface) and never empty-valued; code workers / non-web sub-roles get neither.
    */
   readonly ghToken?: string;
   /**
@@ -243,6 +249,18 @@ export function buildHostedLaunchSpec(
   };
   const paneLaunchConfig = buildPaneLaunchConfig(provider, paneIdentity);
 
+  // #127: the AGENT-SHELL half of the web-research gate. A web-research pane (researcher:external)
+  // gets outbound network re-opened in its codex sandbox by buildPaneLaunchConfig; here we ALSO put
+  // the resolved GitHub token into the pane's OWN shell env so authenticated `gh` / api.github.com
+  // works inside that sandbox (the MCP-server env block above only reaches the daemon-side relay, not
+  // the agent's interactive shell). Gated to the SAME web-research sub-role as the network opening —
+  // a live token + open egress is a data-exfil surface — and only when a non-empty token is configured
+  // (never an empty/blank credential).
+  const researchGhTokenEnv: Record<string, string> =
+    paneMayResearchWeb(paneIdentity) && coMcpPaths.ghToken != null && coMcpPaths.ghToken.length > 0
+      ? { GH_TOKEN: coMcpPaths.ghToken }
+      : {};
+
   return {
     command: provider,
     args: [...paneLaunchConfig.args, ...codexBridgeSocketArgs(provider, bridgeSocketPath)],
@@ -255,6 +273,8 @@ export function buildHostedLaunchSpec(
       // `~` falls back to the operator home. RC-6: a deterministic UTF-8 locale for the same reason.
       HOME: isolatedHomeDir,
       LANG: 'C.UTF-8',
+      // #127: web-research-gated GitHub token for the pane's own `gh`/REST calls (empty object otherwise).
+      ...researchGhTokenEnv,
     },
     prelaunchFiles: [
       ...(paneLaunchConfig.prelaunchFiles ?? []),

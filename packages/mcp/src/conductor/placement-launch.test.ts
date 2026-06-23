@@ -354,6 +354,93 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(spec.env).not.toHaveProperty('GH_TOKEN');
   });
 
+  // #127 — the AGENT-SHELL half of the gate: a configured GH_TOKEN reaches the research pane's own
+  // shell env (spec.env) so authenticated api.github.com / `gh` works inside the codex sandbox — but
+  // ONLY for a web-research pane (researcher:external). A live token + open egress is a data-exfil
+  // surface, so it is gated to the same sub-role as the network opening and never empty-valued.
+  it('#127: a configured ghToken reaches the researcher:external pane agent shell env (spec.env.GH_TOKEN)', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-ext', 'researcher:external', 'codex');
+    const worktree = recordWorktree(projectId, 'res-ext', 'co/research-ext', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-ext');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: 'gho_research_token' },
+    );
+
+    // The token lands in the pane's interactive shell env so `gh`/`curl api.github.com` authenticate.
+    expect(spec.env['GH_TOKEN']).toBe('gho_research_token');
+    // And the codex sandbox has outbound network re-opened for this web-research pane.
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).toContain('network_access = true');
+  });
+
+  it('#127: GH_TOKEN is ABSENT from a code worker pane shell env even when ghToken is configured', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-noweb', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-noweb', 'co/feat-noweb', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-noweb');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: 'gho_research_token' },
+    );
+
+    // A code worker never researches the web → no live token in its shell, no open egress.
+    expect(spec.env).not.toHaveProperty('GH_TOKEN');
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).not.toContain('network_access');
+  });
+
+  it('#127: GH_TOKEN is ABSENT from a non-web researcher sub-role (researcher:codebase) shell env', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-cb', 'researcher:codebase', 'codex');
+    const worktree = recordWorktree(projectId, 'res-cb', 'co/research-cb', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-cb');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: 'gho_research_token' },
+    );
+
+    expect(spec.env).not.toHaveProperty('GH_TOKEN');
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
+  });
+
+  it('#127: GH_TOKEN is never empty-valued on a web pane when no ghToken is configured', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-ext2', 'researcher:external', 'codex');
+    const worktree = recordWorktree(projectId, 'res-ext2', 'co/research-ext2', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-ext2');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    // No token configured → never an empty/blank credential in the shell env.
+    expect(spec.env).not.toHaveProperty('GH_TOKEN');
+    // The network opening is still emitted (egress is sub-role-gated, not token-gated).
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+  });
+
   it('RC-1: coMcpExtraEnv (ELECTRON_RUN_AS_NODE) reaches the Claude MCP server env block', () => {
     const { projectId, cwd, dataDir } = makeProject();
     const placement = recordPlacement(projectId, 'impl-el', 'implementer', 'claude');

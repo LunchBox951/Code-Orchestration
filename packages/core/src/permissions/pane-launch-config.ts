@@ -29,7 +29,7 @@ import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import { CO_CLAUDE_STATUSLINE_PATH_ENV } from '../dispatch/statusline-env.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
-import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
+import { ROLE_PROFILES, profileFor, roleBasePrompt, type Capability } from '../roles/profile.js';
 import { findSubRole } from '../roles/sub-roles.js';
 import type { Role } from '../tools/scoping.js';
 import type { BlockRule } from './block-list.js';
@@ -203,6 +203,28 @@ export function paneMayUseWebTools(capabilities: ReadonlySet<Capability>): boole
   return true;
 }
 
+/**
+ * Whether a pane may make OUTBOUND NETWORK calls (#127) — the data-egress axis, distinct from the
+ * provider built-in web-tool axis above ({@link paneMayUseWebTools}). Strictly least-privilege: a
+ * pane may research the web iff its RESOLVED sub-role profile carries the `web-search` capability —
+ * today the sole holder is `researcher:external` (research.md §"Sub-roles"). Code workers and the
+ * non-web researcher sub-roles (`codebase`/`diagnostic`/`decision`, which narrow `web-search` away)
+ * stay default-deny; an unthreaded role is likewise denied.
+ *
+ * This drives BOTH halves of the gate: the Codex `[sandbox_workspace_write] network_access` opening
+ * here, AND the GH_TOKEN injection into the pane's agent shell env (placement-launch.ts). Gating on
+ * the narrow-only-checked `web-search` capability keeps a live token + open egress confined to the
+ * one sub-role that documents needing them.
+ */
+export function paneMayResearchWeb(identity: PaneIdentity): boolean {
+  if (identity.role == null) return false;
+  const profile =
+    identity.subRole != null
+      ? findSubRole(identity.role, identity.subRole)?.profile
+      : profileFor(identity.role);
+  return profile != null && profile.capabilities.has('web-search');
+}
+
 function claudeDisallowedPatterns(blockList: readonly BlockRule[]): string[] {
   const patterns: string[] = [];
   for (const rule of blockList) {
@@ -314,6 +336,14 @@ export const CODEX_NON_INTERACTIVE_APPROVAL_ARGS: readonly string[] = [
   'never',
 ];
 
+/**
+ * #127 — the Codex config section that re-opens outbound network under `sandbox_mode =
+ * "workspace-write"` (which otherwise default-denies egress). Emitted with `network_access = true`
+ * ONLY for a web-research pane ({@link paneMayResearchWeb}); omitted entirely for everyone else so the
+ * default-deny posture holds.
+ */
+export const CODEX_SANDBOX_NETWORK_SECTION = 'sandbox_workspace_write';
+
 interface CodexConfigArtifacts {
   readonly codexConfigToml: string;
   readonly codexMcpCommand: string;
@@ -360,10 +390,19 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
   const mcpEnvLines = sortedEnvEntries(identity.coMcpEnv, 'coMcpEnv').flatMap(([key, value]) => [
     `${key} = "${tomlStringEscape(value)}"`,
   ]);
+  // #127: re-open outbound network ONLY for a web-research pane — Codex's workspace-write sandbox
+  // default-denies egress, so a `researcher:external` pane cannot reach api.github.com / the web
+  // without this. Default-deny holds for every other pane (the block is simply absent). Emitted after
+  // the top-level policy scalars so `sandbox_mode`/`approval_policy` stay at the document root where
+  // the drift check reads them.
+  const networkLines = paneMayResearchWeb(identity)
+    ? [`[${CODEX_SANDBOX_NETWORK_SECTION}]`, 'network_access = true', '']
+    : [];
   const lines: string[] = [
     'sandbox_mode = "workspace-write"',
     'approval_policy = "never"',
     '',
+    ...networkLines,
     '[features]',
     'hooks = true',
     '',

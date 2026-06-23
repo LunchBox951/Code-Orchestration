@@ -1072,7 +1072,13 @@ export {
   CODEX_MCP_PRE_GRANT_VIOLATION_ID,
 } from './permissions/drift.js';
 export type { PaneIdentity, PaneLaunchConfig } from './permissions/pane-launch-config.js';
-export { buildPaneLaunchConfig } from './permissions/pane-launch-config.js';
+export {
+  buildPaneLaunchConfig,
+  // #127 — the web-research egress gate (Codex sandbox network + GH_TOKEN into the agent shell). The
+  // MCP adapter reuses this pure predicate so the gate lives in core, never duplicated in the adapter.
+  paneMayResearchWeb,
+  CODEX_SANDBOX_NETWORK_SECTION,
+} from './permissions/pane-launch-config.js';
 export type { NudgeRule } from './permissions/nudges.js';
 export { NUDGE_CATALOG, nudgeFor, injectNudge } from './permissions/nudges.js';
 

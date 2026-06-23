@@ -19,11 +19,13 @@ import {
   buildPaneLaunchConfig,
   buildClaudeStatusLineCommand,
   paneMayUseWebTools,
+  paneMayResearchWeb,
   CO_CLAUDE_STATUSLINE_PATH_ENV,
   CODEX_BASE_PROMPT_CONFIG_KEY,
   CODEX_MCP_DEFAULT_TOOLS_APPROVAL_KEY,
   CODEX_MCP_DEFAULT_TOOLS_APPROVAL_VALUE,
   CODEX_NON_INTERACTIVE_APPROVAL_ARGS,
+  CODEX_SANDBOX_NETWORK_SECTION,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
 import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
@@ -623,6 +625,75 @@ describe('#78 codex MCP-tool pre-approval', () => {
         },
       }),
     ).toThrow(/coCliEnv key 'BAD KEY'.*environment variable name/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #127 — gated outbound network for web-research codex panes
+// ---------------------------------------------------------------------------
+//
+// Codex's `sandbox_mode = "workspace-write"` disables outbound network by default; a
+// `[sandbox_workspace_write]` block with `network_access = true` re-opens it. We gate that on the
+// resolved sub-role's `web-search` capability (the integrity-checked least-privilege lever): only a
+// `researcher:external` pane (the sole web-search holder) gets egress; code workers and non-web
+// researcher sub-roles stay default-deny.
+
+describe('#127 codex gated outbound network for web-research panes', () => {
+  it('paneMayResearchWeb is true ONLY for the web-search-holding sub-role (researcher:external)', () => {
+    expect(paneMayResearchWeb({ ...BASE_IDENTITY, role: 'researcher', subRole: 'external' })).toBe(
+      true,
+    );
+    // Non-web researcher sub-roles narrow web-search away → no egress.
+    expect(paneMayResearchWeb({ ...BASE_IDENTITY, role: 'researcher', subRole: 'codebase' })).toBe(
+      false,
+    );
+    expect(paneMayResearchWeb({ ...BASE_IDENTITY, role: 'researcher', subRole: 'decision' })).toBe(
+      false,
+    );
+    // Code workers never research the web.
+    expect(paneMayResearchWeb({ ...BASE_IDENTITY, role: 'implementer' })).toBe(false);
+    // No role threaded → default-deny (the production no-op posture).
+    expect(paneMayResearchWeb(BASE_IDENTITY)).toBe(false);
+  });
+
+  it('emits [sandbox_workspace_write] network_access=true for a web-enabled researcher:external pane', () => {
+    const config = buildPaneLaunchConfig('codex', {
+      ...BASE_IDENTITY,
+      role: 'researcher',
+      subRole: 'external',
+    });
+    const toml = config.codexConfigToml ?? '';
+    expect(toml).toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
+    expect(toml).toContain('network_access = true');
+    // The top-level policy scalars the drift check reads stay at the document root (no regression).
+    expect(toml).toContain('sandbox_mode = "workspace-write"');
+    expect(toml).toContain('approval_policy = "never"');
+    // The network block does not disturb the block-list drift roundtrip.
+    expect(checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config))).toEqual([]);
+  });
+
+  it('OMITS the network block (egress stays off) for a code worker', () => {
+    const config = buildPaneLaunchConfig('codex', { ...BASE_IDENTITY, role: 'implementer' });
+    const toml = config.codexConfigToml ?? '';
+    expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
+    expect(toml).not.toContain('network_access');
+  });
+
+  it('OMITS the network block for a non-web researcher sub-role (researcher:codebase)', () => {
+    const config = buildPaneLaunchConfig('codex', {
+      ...BASE_IDENTITY,
+      role: 'researcher',
+      subRole: 'codebase',
+    });
+    const toml = config.codexConfigToml ?? '';
+    expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
+    expect(toml).not.toContain('network_access');
+  });
+
+  it('OMITS the network block when no role is threaded (default-deny no-op posture)', () => {
+    const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
+    const toml = config.codexConfigToml ?? '';
+    expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
   });
 });
 
