@@ -2,7 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { BASE_ROLES, roleToolsets, toolsForRole } from '../tools/scoping.js';
 import { checkToolCompleteness } from '../tools/completeness.js';
 import { buildCoreRegistry } from '../tools/core-registry.js';
-import { ROLE_PROFILES, checkRoleProfileCompleteness, type RoleProfile } from './profile.js';
+import {
+  ROLE_PROFILES,
+  checkRoleProfileCompleteness,
+  lifecycleVerbsFor,
+  roleBasePrompt,
+  type RoleProfile,
+} from './profile.js';
 
 // AC-L6a-1 + AC-L6a-8 — authoritative role profiles: five distinct permission profiles; roleToolsets
 // is derived from them; checkRoleProfileCompleteness is green for real profiles and red for crafted
@@ -64,6 +70,70 @@ describe('ROLE_PROFILES — five authoritative profiles', () => {
   it('implementer can request scoped researcher dispatch through co_sling only', () => {
     expect(ROLE_PROFILES.implementer.toolset).toContain('co_sling');
     expect(ROLE_PROFILES.implementer.mandate).toMatch(/researcher/i);
+  });
+});
+
+// #128 — a slung lead/coordinator never sees its co_* lifecycle verbs up front (the provider
+// harness defers them behind tool_search), so it stalls. The only reliable lever is a prompt nudge:
+// name THIS role's lifecycle verbs and tell the agent to load/search them before acting. The named
+// list is DERIVED from ROLE_PROFILES[role].toolset (minus UNIVERSAL) so the two prompt layers
+// (roleBasePrompt + orientContent) never drift from the authoritative profile.
+
+describe('lifecycleVerbsFor — role-specific verbs derived from the authoritative profile', () => {
+  it('is the toolset minus the universal verbs every agent already carries', () => {
+    for (const role of BASE_ROLES) {
+      const verbs = lifecycleVerbsFor(role);
+      const toolset = new Set(ROLE_PROFILES[role].toolset);
+      // every named verb is a real toolset member…
+      for (const verb of verbs) expect(toolset.has(verb)).toBe(true);
+      // …and the universal verbs (carried by ALL roles) are excluded, so the nudge stays role-specific.
+      expect(verbs).not.toContain('co_orient');
+      expect(verbs).not.toContain('co_mail_send');
+      expect(verbs).not.toContain('co_status');
+    }
+  });
+
+  it('surfaces the lead and coordinator lifecycle verbs the stall (#128) is about', () => {
+    expect(lifecycleVerbsFor('lead')).toEqual(expect.arrayContaining(['co_sling', 'co_finish']));
+    expect(lifecycleVerbsFor('coordinator')).toEqual(
+      expect.arrayContaining(['co_sling', 'co_merge']),
+    );
+  });
+});
+
+describe('#128 — roleBasePrompt surfaces this role’s deferred lifecycle verbs up front', () => {
+  it('names each lead/coordinator/reviewer lifecycle verb and says to load them before acting', () => {
+    for (const role of ['lead', 'coordinator', 'reviewer'] as const) {
+      const prompt = roleBasePrompt(role);
+      for (const verb of lifecycleVerbsFor(role)) {
+        expect(prompt, `${role} base prompt should name ${verb}`).toContain(verb);
+      }
+      // The nudge: these verbs may be deferred behind tool_search — load/search them up front.
+      expect(prompt).toMatch(/tool_search/);
+      expect(prompt).toMatch(/deferred/i);
+      expect(prompt).toMatch(/load.*(before acting|up front)|(before acting|up front).*load/is);
+    }
+  });
+
+  it('drift-guard: the named verb list is exactly lifecycleVerbsFor(role), nothing invented', () => {
+    for (const role of BASE_ROLES) {
+      const prompt = roleBasePrompt(role);
+      for (const verb of lifecycleVerbsFor(role)) {
+        expect(prompt).toContain(verb);
+      }
+      // No OTHER role's exclusive verb leaks in (e.g. a reviewer prompt must not name co_sling).
+      const ownVerbs = new Set(lifecycleVerbsFor(role));
+      for (const other of BASE_ROLES) {
+        if (other === role) continue;
+        for (const verb of lifecycleVerbsFor(other)) {
+          if (ownVerbs.has(verb)) continue; // shared verbs are fine
+          expect(
+            prompt,
+            `${role} base prompt must not name ${other}-only verb ${verb}`,
+          ).not.toContain(verb);
+        }
+      }
+    }
   });
 });
 

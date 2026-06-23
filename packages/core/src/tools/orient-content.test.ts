@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { buildCoreRegistry } from './core-registry.js';
 import { orientContent } from './orient-content.js';
 import { BASE_ROLES } from './scoping.js';
+import { lifecycleVerbsFor } from '../roles/profile.js';
 
 // AC-L2-4: `co_orient` is workflow-only + role-scoped, and `co` never bakes project memory. Two
 // assertions, mirroring the GREEN/RED discipline of mail/no-stub.test.ts:
@@ -177,6 +178,22 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
     }
     expect(out).toContain('finish only your own phase branch');
     expect(out).not.toContain('You do not finish through the gate yourself');
+  });
+
+  it('#128 — each role’s arc says its lifecycle verbs may be DEFERRED behind tool_search, load them now', () => {
+    for (const role of ['coordinator', 'lead', 'reviewer'] as const) {
+      const out = orientContent(role);
+      // The arc already names the verbs (asserted above / below); the new nudge tells the agent the
+      // co_* verbs may be deferred behind the provider's tool_search gate and to load them up front.
+      for (const verb of lifecycleVerbsFor(role)) {
+        expect(out, `${role} orient should name ${verb}`).toContain(verb);
+      }
+      expect(out).toMatch(/tool_search/);
+      expect(out).toMatch(/deferred/i);
+      expect(out).toMatch(
+        /load.*(before acting|up front|now)|(before acting|up front|now).*load/is,
+      );
+    }
   });
 
   it('the implementer arc NAMES co_finish as the verb that advances the gate (F4)', () => {

@@ -127,6 +127,19 @@ export function profileFor(role: Role): RoleProfile {
 }
 
 /**
+ * The role-SPECIFIC lifecycle verbs for `role`: its toolset minus the {@link UNIVERSAL} set every
+ * agent already carries. These are the co_* verbs a launched pane must drive its mandate with (e.g.
+ * co_sling / co_merge / co_finish / co_issue_file) — but the provider harness defers the co_* tools
+ * behind its tool_search gate, so a slung lead/coordinator never sees them up front and can stall
+ * (#128). Both prompt layers (roleBasePrompt + orientContent) derive their "load these now" nudge
+ * from this single helper so the named verb list never drifts from the authoritative profile.
+ */
+export function lifecycleVerbsFor(role: Role): readonly string[] {
+  const universal = new Set(UNIVERSAL);
+  return ROLE_PROFILES[role].toolset.filter((tool) => !universal.has(tool));
+}
+
+/**
  * The repo-AGNOSTIC base system prompt injected into a launched pane for `role` (the "how to be an
  * orchestrated agent" half of the prompting split, prompts-and-memory.md). It is universal behavior
  * only — never a target repo's conventions, test commands, or memory (the provider auto-loads
@@ -153,6 +166,12 @@ export function roleBasePrompt(role: Role, options: RoleBasePromptOptions = {}):
     'wait — do not guess, and do not drop a blocker silently. When you are waiting on a reply,',
     'end your turn; the response arrives in your next inbox.',
   ];
+  const lifecycle = lifecycleVerbsFor(role);
+  if (lifecycle.length > 0) {
+    lines.push(
+      `Your lifecycle verbs (${lifecycle.join(', ')}) may be deferred behind tool_search — tool_search and load them up front before acting.`,
+    );
+  }
   if (options.subRole != null && options.subRoleApproach != null) {
     lines.push(`Sub-role focus (${role}:${options.subRole}): ${options.subRoleApproach}.`);
   }

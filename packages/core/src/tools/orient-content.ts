@@ -1,4 +1,5 @@
 import { assertNever } from '../assert-never.js';
+import { lifecycleVerbsFor } from '../roles/profile.js';
 import { findSubRole, parseSubRoleId } from '../roles/sub-roles.js';
 import type { Role } from './scoping.js';
 
@@ -215,6 +216,20 @@ function topicFocus(topic: string, role: Role | undefined): string {
   }
 }
 
+/**
+ * The #128 nudge: name THIS role's lifecycle verbs and tell the agent the co_* tools may be deferred
+ * behind the provider harness's tool_search gate, so load them up front before acting. The verb list
+ * is DERIVED from the authoritative profile via {@link lifecycleVerbsFor} so it can never drift from
+ * the base prompt's identical nudge. Names verbs ONLY — never their fields (P5). '' for an unknown
+ * role (no scoped toolset to surface).
+ */
+function lifecycleVerbsNudge(role: Role | undefined): string {
+  if (role == null) return '';
+  const verbs = lifecycleVerbsFor(role);
+  if (verbs.length === 0) return '';
+  return `Your lifecycle verbs (${verbs.join(', ')}) may be deferred behind the provider's tool_search gate — tool_search and load them up front before acting (names only; the schemas remain the syntax source).`;
+}
+
 function subRoleFocus(resolved: ResolvedRole): string {
   if (resolved.role == null || resolved.subRole == null || resolved.subRoleApproach == null) {
     return '';
@@ -240,9 +255,11 @@ function header(role: string | undefined, topic: string | undefined): string {
 export function orientContent(role?: string, topic?: string): string {
   const resolved = resolveRole(role);
   const arc = resolved.role === undefined ? GENERIC_GUIDANCE : roleGuidance(resolved.role);
+  const verbs = lifecycleVerbsNudge(resolved.role);
   const subRole = subRoleFocus(resolved);
   const focus = topic != null ? topicFocus(topic, resolved.role) : '';
   const sections = [SHARED_PREAMBLE, arc];
+  if (verbs.length > 0) sections.push(verbs);
   if (subRole.length > 0) sections.push(subRole);
   if (focus.length > 0) sections.push(focus);
   sections.push(CLOSING);
