@@ -487,6 +487,8 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     // The network opening is still emitted (egress is sub-role-gated, not token-gated).
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
     expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).toContain('[mcp_servers.co.env]');
+    expect(configToml!.contents).not.toMatch(/\nGH_TOKEN\s*=/u);
   });
 
   it('RC-1: coMcpExtraEnv (ELECTRON_RUN_AS_NODE) reaches the Claude MCP server env block', () => {

@@ -1046,8 +1046,8 @@ export { escalationDisposition, lowestCompetentResolver } from './roles/authorit
 // (AC-L6a-2, AC-L6a-8 partial, AC-L6a-9). Sub-roles specialize a base role's approach (soft) and
 // may narrow but never widen its permission profile (hard). Researcher sub-roles carry the only
 // declared permission delta: `researcher:external` retains web-search; `codebase`/`diagnostic`/
-// `decision` narrow it away (integrity-checked by narrow-only; launch-time enforcement of the web
-// tools is a deferred seam — see the sub-roles.ts header). Coordinator and Lead have no sub-roles
+// `decision` narrow it away (integrity-checked by narrow-only; enforced at pane launch for web
+// affordances, Codex network, and GH_TOKEN placement). Coordinator and Lead have no sub-roles
 // (owner tiers). All checks are pure — no I/O, no clock.
 export type { SubRoleSpec } from './roles/sub-roles.js';
 export { SUB_ROLES, subRolesFor, findSubRole, parseSubRoleId } from './roles/sub-roles.js';

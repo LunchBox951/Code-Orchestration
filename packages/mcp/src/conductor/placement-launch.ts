@@ -17,7 +17,7 @@ import type {
   SpawnSpec,
   WorktreeRecord,
 } from '@co/core';
-import { buildPaneLaunchConfig, paneMayResearchWeb, parseSubRoleId, profileFor } from '@co/core';
+import { buildPaneLaunchConfig, paneMayResearchWeb, parseSubRoleId } from '@co/core';
 import type { Role } from '@co/core';
 import { dirname } from 'node:path';
 import type { HostedIdentity } from '../live-session-host.js';
@@ -258,9 +258,6 @@ export function buildHostedLaunchSpec(
       ...(coMcpPaths.coMcpExtraEnv ?? {}),
     },
     ...(coMcpPaths.coCliExtraEnv != null ? { coCliEnv: coMcpPaths.coCliExtraEnv } : {}),
-    // Thread the role's capabilities so the built-in web-tool decision is explicit at launch
-    // (#7 §5 #3). Sub-roles may only narrow, so the base-role set is the capability ceiling.
-    capabilities: profileFor(identity.role).capabilities,
   };
   const paneLaunchConfig = buildPaneLaunchConfig(provider, paneIdentity);
 

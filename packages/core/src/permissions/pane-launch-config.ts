@@ -29,7 +29,7 @@ import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import { CO_CLAUDE_STATUSLINE_PATH_ENV } from '../dispatch/statusline-env.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
-import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
+import { ROLE_PROFILES, roleBasePrompt } from '../roles/profile.js';
 import { findSubRole } from '../roles/sub-roles.js';
 import type { Role } from '../tools/scoping.js';
 import type { BlockRule } from './block-list.js';
@@ -59,11 +59,6 @@ export interface PaneIdentity {
   readonly coCliArgs?: readonly string[];
   /** Environment variables prefixed onto the Codex hook command itself. */
   readonly coCliEnv?: Readonly<Record<string, string>>;
-  /**
-   * The pane role's effective capability set (#7 §5 #3). Drives the explicit built-in web-tool
-   * decision below. Absent ⇒ empty set. Threaded from the role profile by the placement launcher.
-   */
-  readonly capabilities?: ReadonlySet<Capability>;
   /**
    * The pane's base role. When set, the repo-agnostic {@link roleBasePrompt} is injected into the
    * launch args (Claude `--append-system-prompt`, Codex `developer_instructions` config override).
@@ -198,17 +193,15 @@ export function paneMayUseWebTools(identity: PaneIdentity): boolean {
 }
 
 /**
- * Whether a pane may make OUTBOUND NETWORK calls (#127) — the data-egress axis, distinct from the
- * provider built-in web-tool axis above ({@link paneMayUseWebTools}). Strictly least-privilege: a
- * pane may research the web iff its RESOLVED sub-role profile carries the `web-search` capability —
- * today the sole holder is `researcher:external` (research.md §"Sub-roles"). Code workers and the
- * non-web researcher sub-roles (`codebase`/`diagnostic`/`decision`, which narrow `web-search` away)
- * stay default-deny; an unthreaded role is likewise denied.
+ * Whether a pane may research the web (#127). Strictly least-privilege: true iff its RESOLVED
+ * sub-role profile carries the `web-search` capability — today the sole holder is
+ * `researcher:external` (research.md §"Sub-roles"). Code workers, bare researchers, and the non-web
+ * researcher sub-roles (`codebase`/`diagnostic`/`decision`, which narrow `web-search` away) are denied.
  *
- * This drives BOTH halves of the gate: the Codex `[sandbox_workspace_write] network_access` opening
- * here, AND the GH_TOKEN injection into the pane's agent shell env (placement-launch.ts). Gating on
- * the narrow-only-checked `web-search` capability keeps a live token + open egress confined to the
- * one sub-role that documents needing them.
+ * This drives all launch-time web gates: provider-native WebSearch/WebFetch, the Codex
+ * `[sandbox_workspace_write] network_access` opening, and GH_TOKEN injection into the pane MCP/shell
+ * envs (placement-launch.ts). Gating on the narrow-only-checked `web-search` capability keeps a live
+ * token + explicit web affordances confined to the one sub-role that documents needing them.
  */
 export function paneMayResearchWeb(identity: PaneIdentity): boolean {
   if (identity.role == null || identity.subRole == null) return false;
