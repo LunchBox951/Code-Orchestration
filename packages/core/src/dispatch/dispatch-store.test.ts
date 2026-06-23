@@ -1085,6 +1085,108 @@ describe('fail-loud (AC6, Principle 9) — unavailable usage never reads as heal
     expect(tableExists(pid, 'usage_accounts_legacy')).toBe(false);
   });
 
+  it('readBuckets and readAccountStatuses infer providerless legacy usage rows without repairing schema', () => {
+    const pid = 'p-providerless-usage-readonly';
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        db.exec(`
+          CREATE TABLE usage_buckets (
+            account     TEXT NOT NULL,
+            window_kind TEXT NOT NULL,
+            used_pct    REAL NOT NULL,
+            reset_at    TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            sampled_at  TEXT NOT NULL,
+            ts          INTEGER NOT NULL,
+            PRIMARY KEY (account, window_kind)
+          );
+          CREATE TABLE usage_accounts (
+            account    TEXT PRIMARY KEY,
+            available  INTEGER NOT NULL,
+            reason     TEXT,
+            source     TEXT NOT NULL,
+            sampled_at TEXT NOT NULL,
+            ts         INTEGER NOT NULL
+          );
+          INSERT INTO usage_buckets
+            (account, window_kind, used_pct, reset_at, source, sampled_at, ts)
+          VALUES
+            ('claude:max', 'five_hour', 42, '2026-06-03T05:00:00.000Z', 'legacy', '2026-06-03T00:00:00.000Z', 1);
+          INSERT INTO usage_accounts
+            (account, available, reason, source, sampled_at, ts)
+          VALUES
+            ('claude:max', 1, NULL, 'legacy', '2026-06-03T00:00:00.000Z', 1);
+        `);
+      });
+    } finally {
+      project.close();
+    }
+    expect(hasColumn(pid, 'usage_buckets', 'provider')).toBe(false);
+    expect(hasColumn(pid, 'usage_accounts', 'provider')).toBe(false);
+
+    const store = openDispatchStore(pid);
+    try {
+      expect(store.readBuckets()).toEqual([
+        expect.objectContaining({
+          provider: 'claude',
+          account: 'claude:max',
+          windowKind: 'five_hour',
+          usedPct: 42,
+        }),
+      ]);
+      expect(store.readAccountStatuses()).toEqual([
+        expect.objectContaining({ provider: 'claude', account: 'claude:max', available: true }),
+      ]);
+    } finally {
+      store.close();
+    }
+
+    expect(hasColumn(pid, 'usage_buckets', 'provider')).toBe(false);
+    expect(hasColumn(pid, 'usage_accounts', 'provider')).toBe(false);
+    expect(primaryKeyColumns(pid, 'usage_buckets')).toEqual(['account', 'window_kind']);
+    expect(primaryKeyColumns(pid, 'usage_accounts')).toEqual(['account']);
+  });
+
+  it('readBuckets fails loud for ambiguous providerless legacy usage rows without repairing schema', () => {
+    const pid = 'p-providerless-usage-readonly-ambiguous';
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        db.exec(`
+          CREATE TABLE usage_buckets (
+            account     TEXT NOT NULL,
+            window_kind TEXT NOT NULL,
+            used_pct    REAL NOT NULL,
+            reset_at    TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            sampled_at  TEXT NOT NULL,
+            ts          INTEGER NOT NULL,
+            PRIMARY KEY (account, window_kind)
+          );
+          INSERT INTO usage_buckets
+            (account, window_kind, used_pct, reset_at, source, sampled_at, ts)
+          VALUES
+            ('team', 'five_hour', 42, '2026-06-03T05:00:00.000Z', 'legacy', '2026-06-03T00:00:00.000Z', 1);
+        `);
+      });
+    } finally {
+      project.close();
+    }
+
+    const store = openDispatchStore(pid);
+    try {
+      expect(() => store.readBuckets()).toThrow(/cannot be safely migrated/i);
+    } finally {
+      store.close();
+    }
+
+    expect(hasColumn(pid, 'usage_buckets', 'provider')).toBe(false);
+    expect(primaryKeyColumns(pid, 'usage_buckets')).toEqual(['account', 'window_kind']);
+  });
+
   it('a source THROW with an account marks that account unavailable and shadows stale healthy buckets', async () => {
     const store = openDispatchStore('p-transient');
     try {
