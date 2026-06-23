@@ -28,6 +28,7 @@ import {
   CO_PROJECT_ID_ENV,
   CO_ROLE_ENV,
 } from '../context.js';
+import { CODEX_KICKOFF_HANDOFF_ENV, codexKickoffHandoffPath } from './codex-handoff.js';
 
 /** Co MCP + CLI command paths the pane needs for isolated config. Host-injected; always absolute. */
 export interface CoMcpPaths {
@@ -255,6 +256,9 @@ export function buildHostedLaunchSpec(
       // `~` falls back to the operator home. RC-6: a deterministic UTF-8 locale for the same reason.
       HOME: isolatedHomeDir,
       LANG: 'C.UTF-8',
+      ...(provider === 'codex'
+        ? { [CODEX_KICKOFF_HANDOFF_ENV]: codexKickoffHandoffPath(identity) }
+        : {}),
     },
     prelaunchFiles: [
       ...(paneLaunchConfig.prelaunchFiles ?? []),

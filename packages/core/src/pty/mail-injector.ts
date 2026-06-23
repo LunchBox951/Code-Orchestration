@@ -120,14 +120,14 @@ export interface InjectMailOptions {
    * are unverified placeholders), so a real multiline codex kickoff whose preview lacks those words
    * false-fails the echo scan and is wrongly retracted. When this seam is supplied AND the codex payload
    * would take the bracketed-paste path (multi-line OR ≥ {@link PASTE_LENGTH_THRESHOLD}), `injectMail`
-   * sidesteps the race ENTIRELY: it `write`s the full body to a handoff file in the worktree and injects
+   * sidesteps the race ENTIRELY: it `write`s the full body to a runtime handoff file and injects
    * a SHORT bare pointer command (which echo-verifies reliably on the literal-echo path) instead of the
    * collapsing paste. Short single-line codex payloads, and ALL other providers, are unaffected (they
    * keep the literal-echo / bracketed-paste path). Codex-only by construction — claude's collapsed-paste
    * preview bytes are a verified contract, so it never needs the handoff.
    */
   readonly codexHandoff?: {
-    /** Persist the full kickoff `body` to a handoff file in the worktree; return its absolute path. */
+    /** Persist the full kickoff `body` to a runtime handoff file; return its read path/handle. */
     readonly write: (body: string) => string;
     /**
      * Render the SHORT single-line pointer command the agent reads, given the handoff file path.
@@ -144,6 +144,19 @@ export interface InjectMailOptions {
  */
 export function defaultHandoffPointer(handoffPath: string): string {
   return `Your kickoff instructions are in ${handoffPath} — read that file in full and act on it now.`;
+}
+
+function assertShortSingleLineHandoffPointer(pointer: string): void {
+  const normalized = normalizeStartupOutput(pointer);
+  if (/[\r\n]/.test(pointer) || normalized.length >= PASTE_LENGTH_THRESHOLD) {
+    throw new Error(
+      `injectMail: codex handoff pointer must be a short single-line command/text (<${PASTE_LENGTH_THRESHOLD} chars) ` +
+        'so it never takes the collapsed-paste path',
+    );
+  }
+  if (normalized === '') {
+    throw new Error('injectMail: codex handoff pointer must not be empty');
+  }
 }
 
 /**
@@ -177,6 +190,7 @@ export async function injectMail(
   if (opts.provider === 'codex' && usePaste && opts.codexHandoff != null) {
     const handoffPath = opts.codexHandoff.write(text);
     const pointer = (opts.codexHandoff.pointer ?? defaultHandoffPointer)(handoffPath);
+    assertShortSingleLineHandoffPointer(pointer);
     // Recurse with the handoff seam dropped so the SHORT single-line pointer takes the plain
     // bare-write / echo-verify branch (never re-enters this divert). `codexHandoff` is intentionally
     // omitted from the spread.

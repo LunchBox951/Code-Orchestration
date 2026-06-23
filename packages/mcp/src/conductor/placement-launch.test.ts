@@ -20,6 +20,7 @@ import {
   FakePty,
   openDispatchStore,
   openRegistry,
+  projectDataDir,
   openRosterStore,
   openSessionStore,
   openWorktreeStore,
@@ -444,7 +445,7 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     }
   });
 
-  it('codex spec: env has ONLY CODEX_HOME set to the isolated dir; prelaunch has approval_policy=never', () => {
+  it('codex spec: env has isolated home plus program-data kickoff handoff; prelaunch has approval_policy=never', () => {
     const { projectId, cwd, dataDir } = makeProject();
     const placement = recordPlacement(projectId, 'impl-d', 'implementer', 'codex');
     const worktree = recordWorktree(projectId, 'impl-d', 'co/feat-d', cwd);
@@ -458,13 +459,17 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
       TEST_MCP_PATHS,
     );
 
-    // MNR-6: only the isolated dir in env (+ isolated HOME for RC-5 and a static LANG for RC-6).
+    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-d', 'kickoff.txt');
+    // MNR-6: provider config points at the isolated home; kickoff handoff points at program-data.
     expect(spec.env).toEqual({
       CODEX_HOME: isolatedHomeDir,
+      CO_KICKOFF_HANDOFF: handoffPath,
       HOME: isolatedHomeDir,
       LANG: 'C.UTF-8',
     });
     expect(spec.env).not.toHaveProperty('CLAUDE_CONFIG_DIR');
+    expect(spec.env['CO_KICKOFF_HANDOFF']).not.toContain(worktree.path);
+    expect(spec.env['CO_KICKOFF_HANDOFF']).not.toContain(isolatedHomeDir);
     // prelaunch files carry the isolated config.toml (approval_policy = "never")
     expect(spec.prelaunchFiles).toBeDefined();
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));

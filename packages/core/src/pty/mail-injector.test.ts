@@ -220,6 +220,25 @@ describe('injectMail — codex multiline file-handoff (#132)', () => {
     expect(pane.written).toEqual([pointer(handoffPath), '\r']);
   });
 
+  it('rejects a handoff pointer that would itself take the codex paste path', async () => {
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const handoffPath = '/work/agent/kickoff-handoff.txt';
+    const longPointer = `read ${'x'.repeat(400)} ${handoffPath}`;
+
+    await expect(
+      injectMail(pane, multiline, {
+        provider: 'codex',
+        retryDelay: async () => {},
+        codexHandoff: {
+          write: () => handoffPath,
+          pointer: () => longPointer,
+        },
+      }),
+    ).rejects.toThrow(/handoff pointer.*short single-line/i);
+
+    expect(pane.written).toEqual([]);
+  });
+
   it('does NOT use the handoff for a SHORT single-line codex payload (literal-echo path stands)', async () => {
     const pane = new FakePty().spawn(CODEX_SPEC);
     const { delay } = controllableDelay();

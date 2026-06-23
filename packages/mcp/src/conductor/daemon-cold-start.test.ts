@@ -29,7 +29,6 @@ import {
   ReconcileLoop,
   DISPATCH_ENABLED_PROVIDERS_KEY,
   accountForProvider,
-  defaultHandoffPointer,
   defaultMailRenderer,
   type DetectorEvent,
   openConfigStore,
@@ -154,11 +153,11 @@ function makeQuietWindow(): {
   };
 }
 
-// #132 — deterministic codex handoff path (the fake writer returns it); the SHORT pointer command
-// derived from it is what injectMail injects for a multiline codex kickoff, so driveTurnToIdle echoes
+// #132 — deterministic codex handoff path (the fake writer returns it); the SHORT environment-variable
+// pointer command is what injectMail injects for a multiline codex kickoff, so driveTurnToIdle echoes
 // THAT for a codex pane instead of the rendered mail.
 const CODEX_HANDOFF_PATH = '/work/.co/kickoff-handoff.txt';
-const CODEX_HANDOFF_POINTER = defaultHandoffPointer(CODEX_HANDOFF_PATH);
+const CODEX_HANDOFF_POINTER = 'Read $CO_KICKOFF_HANDOFF in full and act on it now.';
 
 function makeEngine(
   pty: FakePty,
