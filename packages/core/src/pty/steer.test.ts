@@ -102,6 +102,20 @@ describe('steerPane — answer / redirect: write the operator text, exactly one 
     expect(life.exited()).toBe(false);
   });
 
+  it('long single-line answer steer paste-wraps through injectMail (#92) + one submit', async () => {
+    const pane = new FakePty().spawn(CLAUDE_SPEC);
+    const life = trackLifecycle(pane);
+    const { delay } = controllableDelay();
+    const text = 'y'.repeat(400); // no newline, but long enough to soft-wrap → paste-wrapped
+
+    const p = steerPane(pane, { kind: 'answer', text }, { provider: 'claude', retryDelay: delay });
+    pane.emit(text);
+    await p;
+
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END, SUBMIT]);
+    expect(life.exited()).toBe(false);
+  });
+
   it('a text steer with empty/whitespace-only text fails loud and never submits (pane stays alive)', async () => {
     const pane = new FakePty().spawn(CLAUDE_SPEC);
     const life = trackLifecycle(pane);

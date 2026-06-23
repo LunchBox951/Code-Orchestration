@@ -90,11 +90,11 @@ describe('openHostLiveCapture — armed when CO_HOST_LIVE_CAPTURE=<dir>', () => 
     expect(records).toHaveLength(1);
     expect(records[0]!.file).toBe(CAPTURE_FILES.pasteEcho);
     const rec = records[0]!.record as {
-      multiline?: boolean;
+      pasted?: boolean;
       chunk?: string;
       chunkEscaped?: string;
     };
-    expect(rec.multiline).toBe(true);
+    expect(rec.pasted).toBe(true);
     expect(rec.chunk).toBe('[Pasted preview +12 lines]');
     // The escape-visible rendering round-trips through JSON (so a captured control byte is readable).
     expect(rec.chunkEscaped).toBe(JSON.stringify('[Pasted preview +12 lines]'));
