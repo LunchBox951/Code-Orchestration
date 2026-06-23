@@ -1806,6 +1806,7 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
           review_branch?: string;
           review_scope?: string;
           reviewer_kind?: string;
+          reviewer_placement?: string;
           next_step?: string;
         };
         expect(out.merged).toBe(false);
@@ -1823,6 +1824,7 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
         expect(out.review_branch).toBe('co/feature');
         expect(out.review_scope).toBe('worker_merge');
         expect(out.reviewer_kind).toBe('agent');
+        expect(out.reviewer_placement).toBe('placed');
         expect(out.next_step).toMatch(/co_review_finalize/);
         expect(out.next_step).toContain(out.review_id!);
         // The seat the reviewer is spawned under matches the named review_id (so co_review_finalize's
@@ -1923,6 +1925,7 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
           merged: boolean;
           review_pending?: boolean;
           review_id?: string;
+          reviewer_placement?: string;
           next_step?: string;
         };
         const request = reviewStore!.getReviewRequest('main', 'co/feature');
@@ -1931,11 +1934,103 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
         expect(out.merged).toBe(false);
         expect(out.review_pending).toBe(true);
         expect(out.review_id).toBe(request!.reviewId);
+        expect(out.reviewer_placement).toBe('waiting');
         expect(spawned).toHaveLength(0);
         expect(placements).toHaveLength(1);
         expect(placements[0]!.kind).toBe('waiting');
         expect(out.next_step).toMatch(/reviewer dispatch is waiting/i);
         expect(out.next_step).not.toMatch(/co_review_finalize/);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a waiting reviewer placement after capacity recovers and reports placed', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      const spawned: string[] = [];
+      const toolCtx = {
+        ...ctx,
+        dispatch,
+        reviewerSpawnGate: {
+          spawn: async (_projectId, placement) => {
+            spawned.push(placement.agent);
+          },
+        } satisfies ReviewerSpawnGate,
+      };
+      try {
+        const waiting = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'trigger a review' },
+        })) as {
+          merged: boolean;
+          review_pending?: boolean;
+          review_id?: string;
+          reviewer_placement?: string;
+          next_step?: string;
+        };
+        expect(waiting.merged).toBe(false);
+        expect(waiting.review_pending).toBe(true);
+        expect(waiting.reviewer_placement).toBe('waiting');
+        expect(waiting.next_step).toMatch(/reviewer dispatch is waiting/i);
+        expect(spawned).toHaveLength(0);
+        expect(dispatch.readPlacements(`reviewer@${waiting.review_id}`).map((p) => p.kind)).toEqual(
+          ['waiting'],
+        );
+
+        dispatch.recordSnapshot({
+          provider: 'claude',
+          account: accountForProvider('claude'),
+          available: true,
+          source: 'test',
+          sampled_at: '1970-01-01T00:00:00.000Z',
+          windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+        });
+
+        const placed = (await invokeTool(reg, toolCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'retry after capacity recovers' },
+        })) as {
+          merged: boolean;
+          review_pending?: boolean;
+          review_id?: string;
+          reviewer_placement?: string;
+          next_step?: string;
+        };
+        const request = reviewStore!.getReviewRequest('main', 'co/feature');
+        const reviewer = `reviewer@${waiting.review_id}`;
+        const kickoff = ctx.mail.outstanding(reviewer);
+
+        expect(placed.merged).toBe(false);
+        expect(placed.review_pending).toBe(true);
+        expect(placed.review_id).toBe(waiting.review_id);
+        expect(placed.review_id).toBe(request!.reviewId);
+        expect(placed.reviewer_placement).toBe('placed');
+        expect(placed.next_step).toMatch(/co_review_finalize/);
+        expect(placed.next_step).toContain(placed.review_id!);
+        expect(dispatch.readPlacements(reviewer).map((p) => p.kind)).toEqual(['waiting', 'placed']);
+        expect(spawned).toEqual([reviewer]);
+        expect(kickoff).toHaveLength(1);
+        expect(kickoff[0]!.idempotencyKey).toBe(`reviewer-kickoff:${placed.review_id}`);
       } finally {
         dispatch.close();
       }
