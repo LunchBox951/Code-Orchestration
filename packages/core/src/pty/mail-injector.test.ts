@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { FakePty } from './fake-pty.js';
 import type { SpawnSpec } from './pty-host.js';
 import { injectMail, adaptiveSettleMs } from './mail-injector.js';
@@ -7,6 +7,7 @@ const ESC = '\u001B';
 const PASTE_START = ESC + '[200~';
 const PASTE_END = ESC + '[201~';
 const CLEAR_COMPOSER = '\u0015';
+const SUBMIT = '\r';
 
 const CLAUDE_SPEC: SpawnSpec = {
   command: 'claude',
@@ -46,6 +47,10 @@ function controllableDelay(): { delay: () => Promise<void>; release: () => void 
 }
 /** Drain the microtask + macrotask queue so the async injector advances to its next await. */
 const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('injectMail — single-line: write, echo-verify, exactly one submit', () => {
   it('writes the text, then exactly one Enter once the composer echoes it (one turn, no fan-out)', async () => {
@@ -177,15 +182,17 @@ describe('injectMail — long single-line payloads paste-wrap (#92)', () => {
     expect(pane.written).toEqual([shortLine, '\r']); // bare write, no paste markers
   });
 
-  it('accepts a codex collapsed-paste preview for a long single line (usePaste, not just newline)', async () => {
+  it('does NOT accept the unverified codex placeholder preview for a long single line', async () => {
     const pane = new FakePty().spawn(CODEX_SPEC);
-    const { delay } = controllableDelay();
+    const { delay, release } = controllableDelay();
     const p = injectMail(pane, longLine, { provider: 'codex', retryDelay: delay });
+    const rejection = expect(p).rejects.toThrow(/uncertain paste retry/i);
 
     pane.emit('Pasted text — 1 lines collapsed'); // codex needles, NO literal echo of the long line
-    await p;
+    release();
+    await rejection;
 
-    expect(pane.written).toEqual([PASTE_START + longLine + PASTE_END, '\r']);
+    expect(pane.written).toEqual([PASTE_START + longLine + PASTE_END]);
   });
 
   it('accepts a Claude paste-preview collapse of a long single line', async () => {
@@ -199,30 +206,42 @@ describe('injectMail — long single-line payloads paste-wrap (#92)', () => {
     expect(pane.written).toEqual([PASTE_START + longLine + PASTE_END, '\r']);
   });
 
-  it('reports onPasteEcho `pasted` = true for a long single line, false for a short one', async () => {
+  it('reports onPasteEcho legacy `multiline` plus additive `pasted` state', async () => {
     const longPane = new FakePty().spawn(CODEX_SPEC);
     const d1 = controllableDelay();
-    const longFlags: boolean[] = [];
+    const longFlags: Array<{ multiline: boolean; pasted: boolean | undefined }> = [];
     const longP = injectMail(longPane, longLine, {
       provider: 'codex',
       retryDelay: d1.delay,
-      onPasteEcho: (_chunk, pasted) => longFlags.push(pasted),
+      onPasteEcho: (_chunk, multiline, pasted) => longFlags.push({ multiline, pasted }),
     });
     longPane.emit(longLine);
     await longP;
-    expect(longFlags).toEqual([true]);
+    expect(longFlags).toEqual([{ multiline: false, pasted: true }]);
 
     const shortPane = new FakePty().spawn(CLAUDE_SPEC);
     const d2 = controllableDelay();
-    const shortFlags: boolean[] = [];
+    const shortFlags: Array<{ multiline: boolean; pasted: boolean | undefined }> = [];
     const shortP = injectMail(shortPane, shortLine, {
       provider: 'claude',
       retryDelay: d2.delay,
-      onPasteEcho: (_chunk, pasted) => shortFlags.push(pasted),
+      onPasteEcho: (_chunk, multiline, pasted) => shortFlags.push({ multiline, pasted }),
     });
     shortPane.emit(shortLine);
     await shortP;
-    expect(shortFlags).toEqual([false]);
+    expect(shortFlags).toEqual([{ multiline: false, pasted: false }]);
+
+    const multilinePane = new FakePty().spawn(CLAUDE_SPEC);
+    const d3 = controllableDelay();
+    const multilineFlags: Array<{ multiline: boolean; pasted: boolean | undefined }> = [];
+    const multilineP = injectMail(multilinePane, 'line one\nline two', {
+      provider: 'claude',
+      retryDelay: d3.delay,
+      onPasteEcho: (_chunk, multiline, pasted) => multilineFlags.push({ multiline, pasted }),
+    });
+    multilinePane.emit('line one\nline two');
+    await multilineP;
+    expect(multilineFlags).toEqual([{ multiline: true, pasted: true }]);
   });
 
   it('failure-path throw message does NOT say "multiline" for a single-line payload', async () => {
@@ -249,22 +268,45 @@ describe('adaptiveSettleMs — pure length→window scaler (#92)', () => {
   });
 });
 
+describe('injectMail — production default settle window', () => {
+  it('uses the adaptive fallback when no retryDelay seam is injected', async () => {
+    vi.useFakeTimers();
+    const pane = new FakePty().spawn(CODEX_SPEC);
+    const text = 'z'.repeat(400);
+    const payloadLength = PASTE_START.length + text.length + PASTE_END.length;
+    const p = injectMail(pane, text, { provider: 'codex' });
+
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END]);
+
+    await vi.advanceTimersByTimeAsync(adaptiveSettleMs(0));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END]);
+
+    pane.emit(text);
+    await p;
+    expect(pane.written).toEqual([PASTE_START + text + PASTE_END, SUBMIT]);
+    expect(adaptiveSettleMs(payloadLength)).toBeGreaterThan(adaptiveSettleMs(0));
+  });
+});
+
 describe('injectMail — onPasteEcho observation tap', () => {
   it('invokes onPasteEcho with each emitted chunk and the real paste flag', async () => {
     const pane = new FakePty().spawn(CODEX_SPEC);
     const { delay } = controllableDelay();
-    const observed: Array<{ chunk: string; pasted: boolean }> = [];
+    const observed: Array<{ chunk: string; multiline: boolean; pasted: boolean | undefined }> = [];
     const text = 'first line\nsecond line';
     const p = injectMail(pane, text, {
       provider: 'codex',
       retryDelay: delay,
-      onPasteEcho: (chunk, pasted) => observed.push({ chunk, pasted }),
+      onPasteEcho: (chunk, multiline, pasted) => observed.push({ chunk, multiline, pasted }),
     });
 
     pane.emit('Pasted text — 2 lines collapsed');
     await p;
 
-    expect(observed).toEqual([{ chunk: 'Pasted text — 2 lines collapsed', pasted: true }]);
+    expect(observed).toEqual([
+      { chunk: 'Pasted text — 2 lines collapsed', multiline: true, pasted: true },
+    ]);
   });
 
   it('swallows an onPasteEcho that throws — echo-verify and submit are unaffected', async () => {

@@ -214,10 +214,12 @@ CO_HOST_LIVE_CAPTURE=/tmp/co-host-live-capture co-mcp serve <projectId>
 
 When armed, the daemon logs the resolved capture directory and writes JSONL files such as
 `paste-echo.jsonl`, `mcp-approval.jsonl`, `claude-status-line.jsonl`, and `usage-sample.jsonl`.
-These files contain raw, unredacted pane bytes that may include secrets, tokens, or environment
-values, so treat them as sensitive (the capture dir is created owner-only, `0o700`/`0o600`). Inspect
-and attach the relevant excerpts to the issue or PR, but do not commit them to the repo. Relative
-paths and paths inside the repo are rejected to preserve Principle 12 — pristine-repo.
+`paste-echo.jsonl` keeps the legacy `multiline` field and adds `pasted` so long single-line paste
+captures are distinguishable without changing old evidence semantics. These files contain raw,
+unredacted pane bytes that may include secrets, tokens, or environment values, so treat them as
+sensitive (the capture dir is created owner-only, `0o700`/`0o600`). Inspect and attach the relevant
+excerpts to the issue or PR, but do not commit them to the repo. Relative paths and paths inside the
+repo are rejected to preserve Principle 12 — pristine-repo.
 
 ## Troubleshooting
 

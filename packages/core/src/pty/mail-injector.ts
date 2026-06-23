@@ -105,14 +105,15 @@ export interface InjectMailOptions {
   readonly allowUnverifiedSubmit?: boolean;
   /**
    * [host-live capture] OPTIONAL observation tap: invoked with each composer echo chunk seen during
-   * the inject phase (and whether the inject was delivered as a bracketed PASTE — true for multi-line
-   * OR long single-line payloads, see {@link PASTE_LENGTH_THRESHOLD}). Inert by default; the host-live
-   * capture harness (`CO_HOST_LIVE_CAPTURE`) wires it to RECORD a real provider's composer echo so the
-   * codex collapsed-paste preview bytes (#77 `CODEX_COLLAPSED_PASTE_NEEDLES`) can be identified from a
-   * real run. NEVER affects echo-verify, submit, or timing — it is a pure observer (never throws into
-   * the inject path; the harness wraps its own failures).
+   * the inject phase. The second argument preserves the legacy `multiline` semantic for compatibility;
+   * the third reports whether the inject was delivered as a bracketed PASTE (true for multi-line OR long
+   * single-line payloads, see {@link PASTE_LENGTH_THRESHOLD}). Inert by default; the host-live capture
+   * harness (`CO_HOST_LIVE_CAPTURE`) wires it to RECORD a real provider's composer echo so the codex
+   * collapsed-paste preview bytes (#77 `CODEX_COLLAPSED_PASTE_NEEDLES`) can be identified from a real
+   * run. NEVER affects echo-verify, submit, or timing — it is a pure observer (never throws into the
+   * inject path; the harness wraps its own failures).
    */
-  readonly onPasteEcho?: (chunk: string, pasted: boolean) => void;
+  readonly onPasteEcho?: (chunk: string, multiline: boolean, pasted: boolean) => void;
 }
 
 /**
@@ -162,12 +163,14 @@ export async function injectMail(
     ) {
       return true;
     }
-    // [host-live · PLACEHOLDER] Codex is believed to collapse a bracketed paste the same way (#77).
+    // [host-live · PLACEHOLDER] Codex is believed to collapse a multiline paste the same way (#77).
     // Accept its composer-side preview as a landed paste once ALL placeholder needles appear. The real
     // bytes are pending the capture harness; this fast-path is purely an accelerator and is NEVER the
     // loop-safety guarantee (the engine's #77 attempt cap is). See CODEX_COLLAPSED_PASTE_NEEDLES.
+    // Keep this tied to explicit newlines until host-live capture verifies the real Codex preview bytes;
+    // long single-line pastes must prove landing by literal echo rather than unverified common words.
     return (
-      usePaste &&
+      hasNewline &&
       opts.provider === 'codex' &&
       CODEX_COLLAPSED_PASTE_NEEDLES.every((needle) =>
         normalizedEcho.toLowerCase().includes(needle.toLowerCase()),
@@ -184,7 +187,7 @@ export async function injectMail(
     // provider's paste preview (#77). Pure observer — guarded so it never disturbs echo-verify.
     if (opts.onPasteEcho != null) {
       try {
-        opts.onPasteEcho(chunk, usePaste);
+        opts.onPasteEcho(chunk, hasNewline, usePaste);
       } catch {
         /* capture is best-effort; never let it break the inject path */
       }

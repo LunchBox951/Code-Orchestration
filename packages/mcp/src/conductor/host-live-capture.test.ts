@@ -86,14 +86,16 @@ describe('openHostLiveCapture — armed when CO_HOST_LIVE_CAPTURE=<dir>', () => 
     expect(capture.armed).toBe(true);
     expect(typeof capture.onPasteEcho).toBe('function');
 
-    capture.onPasteEcho!('[Pasted preview +12 lines]', true);
+    capture.onPasteEcho!('[Pasted preview +12 lines]', true, true);
     expect(records).toHaveLength(1);
     expect(records[0]!.file).toBe(CAPTURE_FILES.pasteEcho);
     const rec = records[0]!.record as {
+      multiline?: boolean;
       pasted?: boolean;
       chunk?: string;
       chunkEscaped?: string;
     };
+    expect(rec.multiline).toBe(true);
     expect(rec.pasted).toBe(true);
     expect(rec.chunk).toBe('[Pasted preview +12 lines]');
     // The escape-visible rendering round-trips through JSON (so a captured control byte is readable).
@@ -124,11 +126,33 @@ describe('openHostLiveCapture — armed when CO_HOST_LIVE_CAPTURE=<dir>', () => 
     ]);
   });
 
-  it('injectCaptureOptions yields { onPasteEcho } for an armed capture', () => {
-    const capture = openHostLiveCapture(env, recordingSink().sink);
+  it('injectCaptureOptions yields { onPasteEcho } for an armed capture and records through it', () => {
+    const { sink, records } = recordingSink();
+    const capture = openHostLiveCapture(env, sink);
     const spread = injectCaptureOptions(capture);
     expect('onPasteEcho' in spread).toBe(true);
     expect(typeof (spread as { onPasteEcho?: unknown }).onPasteEcho).toBe('function');
+
+    const tap = spread.onPasteEcho!;
+    tap('[Pasted preview +12 lines]', true, true);
+    tap('short line echo', false, false);
+
+    expect(records).toHaveLength(2);
+    expect(records.map((r) => r.file)).toEqual([CAPTURE_FILES.pasteEcho, CAPTURE_FILES.pasteEcho]);
+    expect(records.map((r) => r.record)).toEqual([
+      {
+        multiline: true,
+        pasted: true,
+        chunk: '[Pasted preview +12 lines]',
+        chunkEscaped: JSON.stringify('[Pasted preview +12 lines]'),
+      },
+      {
+        multiline: false,
+        pasted: false,
+        chunk: 'short line echo',
+        chunkEscaped: JSON.stringify('short line echo'),
+      },
+    ]);
   });
 });
 
