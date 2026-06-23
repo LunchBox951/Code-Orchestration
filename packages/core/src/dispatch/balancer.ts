@@ -2,7 +2,7 @@ import { assertNever } from '../assert-never.js';
 import { openConfigStore } from '../config/config-store.js';
 import { z } from 'zod';
 import type { ConfigStore } from '../config/config-store.js';
-import { accountForProvider } from './provider-source.js';
+import { accountForProvider } from './provider-account.js';
 import { deriveHeadroom } from './policy.js';
 import type { Headroom } from './policy.js';
 import { isStale } from './policy.js';

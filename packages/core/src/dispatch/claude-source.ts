@@ -27,6 +27,7 @@ import { readFile } from 'node:fs/promises';
 import type { Provider, ProviderUsageSource, UsageSnapshot, UsageWindow } from './usage-source.js';
 import { UsageUnavailableError } from './usage-source.js';
 import { CO_CLAUDE_STATUSLINE_PATH_ENV } from './statusline-env.js';
+import { CLAUDE_DEFAULT_ACCOUNT } from './provider-account.js';
 import {
   asRecord,
   boolish,
@@ -39,8 +40,7 @@ import {
   type UsageSourceAttempt,
 } from './usage-adapter-common.js';
 
-/** Default Claude account label when the preflight does not refine it (per-account, Principle 13). */
-export const CLAUDE_DEFAULT_ACCOUNT = 'claude:max';
+export { CLAUDE_DEFAULT_ACCOUNT } from './provider-account.js';
 
 /** The metadata-only preflight argv — `claude auth status --json`. NEVER an inference invocation (AC11). */
 export const CLAUDE_AUTH_STATUS_ARGS: readonly string[] = ['auth', 'status', '--json'];

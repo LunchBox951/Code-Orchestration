@@ -23,7 +23,11 @@ import type {
 import type { ProjectId } from '@co/core';
 import { MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE, OPERATOR, projectDataDir } from '@co/core';
 import {
+  accountForProvider,
   openConfigStore,
+  openDispatchStore,
+  ACCOUNT_STATUS_SEED_SOURCE,
+  DISPATCH_ENABLED_PROVIDERS_KEY,
   MAX_ACTIVE_CHILDREN_KEY,
   DISPATCH_MAXED_THRESHOLD_PCT_KEY,
   type ConfigStore,
@@ -1437,5 +1441,199 @@ describe('createAppShell — settings ops (AC-SET-3/4/6)', () => {
     expect(shell.getSettingsState().activeLayer).toBe('project');
     shell.setSettingsLayer('global');
     expect(shell.getSettingsState().activeLayer).toBe('global');
+  });
+});
+
+describe('createAppShell — seeds initial account statuses on a fresh box (#122/#125/#88)', () => {
+  const ORIGINAL_ENV = process.env;
+  let dataDir: string;
+
+  beforeEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    dataDir = mkdtempSync(join(tmpdir(), 'co-shell-seed-'));
+    process.env.CO_DATA_DIR = dataDir;
+  });
+
+  afterEach(() => {
+    process.env = ORIGINAL_ENV;
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('production mode (no injected readers) seeds an unavailable status per provider at startup', async () => {
+    // No bucketsReader/accountStatusesReader → app-shell opens a REAL dispatch store and seeds it.
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+    });
+    try {
+      const store = openDispatchStore(FAKE_PROJECT_ID);
+      try {
+        const statuses = store.readAccountStatuses();
+        const providers = new Set(statuses.map((s) => s.provider));
+        expect(providers).toEqual(new Set(['claude', 'codex']));
+        const claude = statuses.find((s) => s.provider === 'claude');
+        expect(claude?.available).toBe(false);
+        expect(claude?.source).toBe(ACCOUNT_STATUS_SEED_SOURCE);
+        expect(claude?.reason).toMatch(/no usage observed/i);
+      } finally {
+        store.close();
+      }
+      shell.refreshLimitsCost();
+      const rowsByKey = new Map(
+        shell.limitsCost.state.headroomRows.map((row) => [`${row.provider}:${row.account}`, row]),
+      );
+      expect(rowsByKey.get(`claude:${accountForProvider('claude')}`)?.headroom).toEqual({
+        kind: 'unknown',
+        reason: 'no usage observed yet',
+      });
+      expect(rowsByKey.get(`codex:${accountForProvider('codex')}`)?.headroom).toEqual({
+        kind: 'unknown',
+        reason: 'no usage observed yet',
+      });
+    } finally {
+      await shell.close();
+    }
+  });
+
+  it('skips seeding when accountStatusesReader is injected (test mode leaves no real store)', () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+      bucketsReader: () => [],
+      accountStatusesReader: () => [],
+      rollupsReader: () => [],
+    });
+    // Injected readers ⇒ ownedDispatchStore is null ⇒ the seed never runs, so no store row was written.
+    const store = openDispatchStore(FAKE_PROJECT_ID);
+    try {
+      expect(store.readAccountStatuses()).toHaveLength(0);
+    } finally {
+      store.close();
+      void shell.close();
+    }
+  });
+
+  it('skips seeding when only accountStatusesReader is injected', async () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+      accountStatusesReader: () => [],
+    });
+    const store = openDispatchStore(FAKE_PROJECT_ID);
+    try {
+      expect(store.readAccountStatuses()).toHaveLength(0);
+    } finally {
+      store.close();
+      await shell.close();
+    }
+  });
+
+  it('cleans up owned stores and rethrows when provider config is malformed during startup seeding', async () => {
+    const cfg = openConfigStore();
+    try {
+      cfg.setProjectOverride(FAKE_PROJECT_ID, DISPATCH_ENABLED_PROVIDERS_KEY, []);
+    } finally {
+      cfg.close();
+    }
+
+    expect(() =>
+      createAppShell({
+        projectId: FAKE_PROJECT_ID,
+        socketPath: FAKE_SOCKET,
+        client: makeClient(),
+        actionablesReader: () => [],
+      }),
+    ).toThrow(/dispatch\.enabledProviders/);
+
+    const fixedCfg = openConfigStore();
+    try {
+      fixedCfg.clearProjectOverride(FAKE_PROJECT_ID, DISPATCH_ENABLED_PROVIDERS_KEY);
+    } finally {
+      fixedCfg.close();
+    }
+
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+    });
+    try {
+      shell.refreshLimitsCost();
+      expect(shell.limitsCost.state.headroomRows).toHaveLength(2);
+    } finally {
+      await shell.close();
+    }
+  });
+
+  it('keeps seed placeholders aligned with dispatch.enabledProviders changes in the current shell', async () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+    });
+    try {
+      shell.refreshLimitsCost();
+      expect(shell.limitsCost.state.headroomRows.map((row) => row.provider).sort()).toEqual([
+        'claude',
+        'codex',
+      ]);
+
+      const codexOnly = shell.setSetting('project', DISPATCH_ENABLED_PROVIDERS_KEY, ['codex']);
+      expect(codexOnly.ok).toBe(true);
+      expect(shell.limitsCost.state.headroomRows.map((row) => row.provider)).toEqual(['codex']);
+
+      const both = shell.setSetting('project', DISPATCH_ENABLED_PROVIDERS_KEY, ['claude', 'codex']);
+      expect(both.ok).toBe(true);
+      expect(shell.limitsCost.state.headroomRows.map((row) => row.provider).sort()).toEqual([
+        'claude',
+        'codex',
+      ]);
+    } finally {
+      await shell.close();
+    }
+  });
+
+  it('seeds a provider enabled after startup without requiring a restart', async () => {
+    const cfg = openConfigStore();
+    try {
+      cfg.setProjectOverride(FAKE_PROJECT_ID, DISPATCH_ENABLED_PROVIDERS_KEY, ['codex']);
+    } finally {
+      cfg.close();
+    }
+
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+    });
+    try {
+      shell.refreshLimitsCost();
+      expect(shell.limitsCost.state.headroomRows.map((row) => row.provider)).toEqual(['codex']);
+
+      const both = shell.setSetting('project', DISPATCH_ENABLED_PROVIDERS_KEY, ['claude', 'codex']);
+      expect(both.ok).toBe(true);
+      const rowsByKey = new Map(
+        shell.limitsCost.state.headroomRows.map((row) => [`${row.provider}:${row.account}`, row]),
+      );
+      expect(rowsByKey.get(`claude:${accountForProvider('claude')}`)?.headroom).toEqual({
+        kind: 'unknown',
+        reason: 'no usage observed yet',
+      });
+      expect(rowsByKey.get(`codex:${accountForProvider('codex')}`)?.headroom).toEqual({
+        kind: 'unknown',
+        reason: 'no usage observed yet',
+      });
+    } finally {
+      await shell.close();
+    }
   });
 });

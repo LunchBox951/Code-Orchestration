@@ -7,6 +7,7 @@ import type {
   OperatorIpcTick,
   OperatorMailRef,
   OperatorObservation,
+  Provider,
   ProjectId,
   RendererRegistry,
   ReplyDraft,
@@ -25,6 +26,8 @@ import {
   openDispatchStore,
   openMailStore,
   projectDataDir,
+  resolveEnabledProviders,
+  seedInitialAccountStatuses,
   settingsDescriptors,
   validateSettingValue,
 } from '@co/core';
@@ -162,9 +165,11 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   const readOutbox: (s: string) => readonly DeliveredMail[] =
     deps.outboxReader ?? (ownedStore != null ? (s) => ownedStore.sentBy(s) : () => []);
 
-  // Open the dispatch store for usage/cost static reads (D5: daemon-down-safe pure reads).
-  // Opened when no readers are injected (production mode); tests inject reader fns directly.
-  const ownedDispatchStore = deps.bucketsReader == null ? openDispatchStore(deps.projectId) : null;
+  // Open the dispatch store for usage/cost static reads (D5: daemon-down-safe pure reads). Open only
+  // when no dispatch readers are injected; partial test readers must not trigger real-store writes.
+  const hasDispatchReaderOverride =
+    deps.bucketsReader != null || deps.accountStatusesReader != null || deps.rollupsReader != null;
+  const ownedDispatchStore = !hasDispatchReaderOverride ? openDispatchStore(deps.projectId) : null;
   const readBuckets: () => readonly UsageBucket[] =
     deps.bucketsReader ??
     (ownedDispatchStore != null ? () => ownedDispatchStore.readBuckets() : () => []);
@@ -180,6 +185,28 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   // (resolveLayers reads both the global base and this project's overrides).
   const ownedConfigStore = deps.configStore == null ? openConfigStore() : null;
   const configStore: ConfigStore | null = deps.configStore ?? ownedConfigStore;
+
+  function resolveLimitsProviders(): readonly Provider[] | undefined {
+    return configStore != null ? resolveEnabledProviders(deps.projectId, configStore) : undefined;
+  }
+
+  function seedConfiguredAccountStatuses(): void {
+    if (ownedDispatchStore == null) return;
+    seedInitialAccountStatuses(ownedDispatchStore, resolveLimitsProviders());
+  }
+
+  // Seed an initial `available: false` status per configured provider so a FRESH box renders a
+  // "headroom / no data" card instead of the empty "No usage recorded yet" state (#122/#125/#88).
+  // Production only: guarded on ownedDispatchStore so test-injected readers (no real store) skip it.
+  // The seed is idempotent and non-destructive — a later real provider read upserts over it.
+  try {
+    seedConfiguredAccountStatuses();
+  } catch (cause) {
+    ownedStore?.close();
+    ownedDispatchStore?.close();
+    ownedConfigStore?.close();
+    throw cause;
+  }
 
   let closed = false;
   const shellSubscriptions: Array<() => void> = [];
@@ -224,6 +251,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     if (layer === 'global') configStore.setGlobal(key, value);
     else configStore.setProjectOverride(deps.projectId, key, value);
     doRefreshSettings();
+    doRefreshLimitsCost();
     return { ok: true };
   }
 
@@ -232,6 +260,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     if (layer === 'global') configStore.clearGlobal(key);
     else configStore.clearProjectOverride(deps.projectId, key);
     doRefreshSettings();
+    doRefreshLimitsCost();
     return { ok: true };
   }
   let transcriptRequestSeq = 0;
@@ -276,10 +305,13 @@ export function createAppShell(deps: AppShellDeps): AppShell {
 
   function doRefreshLimitsCost(): void {
     if (closed) return;
+    const enabledProviders = resolveLimitsProviders();
+    seedConfiguredAccountStatuses();
     limitsCostVm.update({
       buckets: readBuckets(),
       accountStatuses: readAccountStatuses(),
       rollups: readRollups(),
+      enabledProviders,
     });
     publish(deps.onLimitsCostState, limitsCostVm.state);
   }

@@ -8,6 +8,7 @@ import {
   type UsageBucket,
   type UsageObserved,
 } from './events.js';
+import { ACCOUNT_STATUS_SEED_SOURCE } from './provider-account.js';
 import type { Provider } from './usage-source.js';
 
 /**
@@ -324,6 +325,7 @@ export class UsageProjector implements Projector {
         payload.sampled_at,
         event.ts,
       );
+      removeSeedAccountsForProvider(db, payload.provider, payload.account, payload.source);
       return;
     }
 
@@ -338,6 +340,7 @@ export class UsageProjector implements Projector {
       payload.sampled_at,
       event.ts,
     );
+    removeSeedAccountsForProvider(db, payload.provider, payload.account, payload.source);
   }
 }
 
@@ -382,4 +385,18 @@ function upsertAccount(
        sampled_at = excluded.sampled_at,
        ts = excluded.ts`,
   ).run(provider, account, available, reason, source, sampledAt, ts);
+}
+
+function removeSeedAccountsForProvider(
+  db: DatabaseSync,
+  provider: Provider,
+  observedAccount: string,
+  source: string,
+): void {
+  if (source === ACCOUNT_STATUS_SEED_SOURCE) return;
+  db.prepare('DELETE FROM usage_accounts WHERE provider = ? AND account <> ? AND source = ?').run(
+    provider,
+    observedAccount,
+    ACCOUNT_STATUS_SEED_SOURCE,
+  );
 }

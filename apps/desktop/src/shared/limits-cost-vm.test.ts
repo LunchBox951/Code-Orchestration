@@ -259,6 +259,94 @@ describe('LimitsCostVM', () => {
     expect(row.headroom).toEqual({ kind: 'unknown', reason: 'API down' });
   });
 
+  it('a SEEDED unavailable Claude status (fresh box) yields a grouped Claude headroom card with its reason (#122/#125/#88)', () => {
+    const vm = new LimitsCostVM();
+    // Exactly what seedInitialAccountStatuses writes on a fresh box: an unavailable status, no bucket.
+    vm.update({
+      buckets: [],
+      accountStatuses: [
+        makeStatus({
+          provider: 'claude',
+          account: 'claude:max',
+          available: false,
+          reason: 'no usage observed yet',
+          source: 'seed',
+        }),
+      ],
+      rollups: [],
+    });
+    expect(vm.state.headroomRows).toHaveLength(1);
+    const row = vm.state.headroomRows[0]!;
+    expect(row.provider).toBe('claude');
+    expect(row.account).toBe('claude:max');
+    expect(row.displayLabel).toBe('headroom');
+    // The card shows the reason string, never a fabricated percentage.
+    expect(row.headroom).toEqual({ kind: 'unknown', reason: 'no usage observed yet' });
+  });
+
+  it('suppresses a stale seeded provider placeholder once real usage exists for another account', () => {
+    const vm = new LimitsCostVM();
+    vm.update({
+      buckets: [
+        makeBucket({
+          provider: 'claude',
+          account: 'claude:team',
+          windowKind: 'five_hour',
+          usedPct: 12,
+        }),
+      ],
+      accountStatuses: [
+        makeStatus({
+          provider: 'claude',
+          account: 'claude:max',
+          available: false,
+          reason: 'no usage observed yet',
+          source: 'seed',
+        }),
+        makeStatus({ provider: 'claude', account: 'claude:team', source: 'fake' }),
+      ],
+      rollups: [],
+    });
+    expect(vm.state.headroomRows.map((r) => r.account)).toEqual(['claude:team']);
+  });
+
+  it('filters seed-only placeholders for disabled providers while preserving real disabled-provider usage', () => {
+    const vm = new LimitsCostVM();
+    vm.update({
+      buckets: [
+        makeBucket({
+          provider: 'claude',
+          account: 'claude:team',
+          windowKind: 'five_hour',
+          usedPct: 12,
+        }),
+      ],
+      accountStatuses: [
+        makeStatus({
+          provider: 'claude',
+          account: 'claude:max',
+          available: false,
+          reason: 'no usage observed yet',
+          source: 'seed',
+        }),
+        makeStatus({ provider: 'claude', account: 'claude:team', source: 'fake' }),
+        makeStatus({
+          provider: 'codex',
+          account: 'codex:pro',
+          available: false,
+          reason: 'no usage observed yet',
+          source: 'seed',
+        }),
+      ],
+      rollups: [],
+      enabledProviders: ['codex'],
+    });
+    expect(vm.state.headroomRows.map((r) => `${r.provider}:${r.account}`)).toEqual([
+      'claude:claude:team',
+      'codex:codex:pro',
+    ]);
+  });
+
   it('a Codex bucket + a Claude status-with-no-bucket yields TWO provider groups', () => {
     const vm = new LimitsCostVM();
     vm.update({

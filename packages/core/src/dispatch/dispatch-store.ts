@@ -77,6 +77,10 @@ import {
   type ProviderUsageSource,
   type UsageSnapshot,
 } from './usage-source.js';
+import { ALL_PROVIDERS } from './dispatch-config.js';
+import { ACCOUNT_STATUS_SEED_SOURCE, accountForProvider } from './provider-account.js';
+
+export { ACCOUNT_STATUS_SEED_SOURCE } from './provider-account.js';
 
 /** The config-cascade key the per-project budget cap lives under (heir to the prototype's setting). */
 export const COST_BUDGET_CENTS_KEY = 'cost_budget_cents';
@@ -777,6 +781,53 @@ function markAccountUnavailable(
     source: 'usage-source',
     sampled_at: new Date(nowMs ?? Date.now()).toISOString(),
   });
+}
+
+/**
+ * Seed an initial `available: false` account status for every configured provider that has NO status
+ * row yet, so a FRESH box renders a "headroom / no data" card per provider instead of the empty
+ * "No usage recorded yet" state (#122 / #125 / #88). `usage_accounts` is otherwise populated only as a
+ * side effect of a real provider read on the dispatch/CLI path; nothing seeds a row at desktop startup.
+ *
+ * This is idempotent and NON-destructive: for each provider it writes the seed ONLY when that provider
+ * has no real bucket/status yet and no seed already exists for the default account. A later REAL read
+ * for the same default account upserts over the seed, and a real read for a custom account removes the
+ * provider's seed placeholder from the projection. Re-running it after a real read is a no-op. It writes
+ * an UNAVAILABLE sample (carrying a "no usage observed yet" reason) — never a fabricated 0% (AC6,
+ * Principle 9): the card shows the reason, never a made-up percentage.
+ *
+ * `providers` defaults to {@link ALL_PROVIDERS}; the desktop adapter passes the project's
+ * `resolveEnabledProviders` result. The write stays in core (the single source of truth); adapters call.
+ */
+export function seedInitialAccountStatuses(
+  store: DispatchStore,
+  providers: readonly Provider[] = ALL_PROVIDERS,
+  options: { readonly nowMs?: number } = {},
+): void {
+  const sampledAt = new Date(options.nowMs ?? Date.now()).toISOString();
+  const statuses = store.readAccountStatuses();
+  const buckets = store.readBuckets();
+  for (const provider of new Set(providers)) {
+    const providerHasRealUsage =
+      buckets.some((bucket) => bucket.provider === provider) ||
+      statuses.some(
+        (status) => status.provider === provider && status.source !== ACCOUNT_STATUS_SEED_SOURCE,
+      );
+    if (providerHasRealUsage) continue;
+
+    const account = accountForProvider(provider);
+    if (statuses.some((status) => status.provider === provider && status.account === account)) {
+      continue;
+    }
+    store.recordUsageObserved({
+      available: false,
+      provider,
+      account,
+      reason: 'no usage observed yet',
+      source: ACCOUNT_STATUS_SEED_SOURCE,
+      sampled_at: sampledAt,
+    });
+  }
 }
 
 /** Best-effort message extraction from an unknown thrown value (no `String(err)` `[object Object]`). */
