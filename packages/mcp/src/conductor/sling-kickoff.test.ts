@@ -1036,6 +1036,48 @@ describe('#93/#132 cap-retract notice — reconciled against pane liveness', () 
     expect(pane.written.some((w) => w.includes('Implement the feature per the spec'))).toBe(false);
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
   });
+
+  it('does not persist ordinary long codex mail through the kickoff handoff seam', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const pty = new FakePty();
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+    });
+    engines.push(engine);
+    const { worktreePath } = seedCodexKickoff(projectId, repo);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const ordinary = mail.send({
+      type: 'clarify_request',
+      from: 'lead-1',
+      to: 'impl-cx',
+      subject: 'ordinary long mail',
+      body: 'x'.repeat(400),
+    });
+    const pane = await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+
+    const turnP = engine.runOneTurn(hosted, ordinary);
+    await tick();
+    const firstWrite = pane.written[0] ?? '';
+    retry.settle();
+    const turn = await turnP;
+
+    expect(turn.errored).toBe(true);
+    expect(firstWrite).toContain(ESC + '[200~');
+    expect(firstWrite).toContain('ordinary long mail');
+    expect(firstWrite).not.toBe(CODEX_ENV_HANDOFF_POINTER);
+    expect(existsSync(join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt'))).toBe(
+      false,
+    );
+  });
 });
 
 // ── #77 cap-path resilience: a diagnostic mail-store throw must NOT mask the turn or abort the tick ──

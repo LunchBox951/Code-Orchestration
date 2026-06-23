@@ -879,7 +879,7 @@ export class ConductorEngine {
     this.turnOrdinal.set(agentKey, turnOrdinal);
     try {
       const text = this.renderMail(mail);
-      await injectMail(hosted.pane, text, this.injectOptionsFor(hosted.identity));
+      await injectMail(hosted.pane, text, this.injectOptionsFor(hosted.identity, mail));
       opts.onInjected?.();
       const { turnEnd, trace, observedAt, sawMcpActivity, sawOverload } =
         await this.observeTurnEnd(hosted);
@@ -1287,24 +1287,26 @@ export class ConductorEngine {
           'not-yet-hosted recipient from a PlacementRecord).',
       );
     }
-    await injectMail(hosted.pane, this.renderMail(mail), this.injectOptionsFor(hosted.identity));
+    await injectMail(
+      hosted.pane,
+      this.renderMail(mail),
+      this.injectOptionsFor(hosted.identity, mail),
+    );
   }
 
   /**
    * #132 — the {@link injectMail} options for `identity`: the injected base ({@link
-   * ConductorEngineDeps.injectOptions}) plus the pane's authoritative `provider`, and — for codex panes
-   * ONLY — the multiline FILE-HANDOFF seam. The handoff seam fires inside `injectMail` ONLY when the
-   * injected text would take the collapsing bracketed-paste path (multi-line OR over the paste
-   * threshold), so a short single-line codex payload still echo-verifies on the literal path. The
-   * `write` closure persists the full body to per-project program-data via {@link writeCodexHandoff}
-   * and returns the path; `injectMail` then injects only a short bare pointer command.
+   * ConductorEngineDeps.injectOptions}) plus the pane's authoritative `provider`, and — for codex one-shot
+   * kickoffs ONLY — the multiline FILE-HANDOFF seam. Ordinary long/multiline routed mail keeps the
+   * existing paste/echo behavior so sensitive non-kickoff mail is not persisted to the stable kickoff
+   * handoff file.
    */
-  private injectOptionsFor(identity: HostedIdentity): InjectMailOptions {
+  private injectOptionsFor(identity: HostedIdentity, mail: DeliveredMail): InjectMailOptions {
     const base: InjectMailOptions = {
       provider: identity.provider,
       ...this.deps.injectOptions,
     };
-    if (identity.provider !== 'codex') return base;
+    if (identity.provider !== 'codex' || !isTurnKickoffMail(mail)) return base;
     return {
       ...base,
       codexHandoff: {
