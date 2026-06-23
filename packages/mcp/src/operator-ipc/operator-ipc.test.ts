@@ -3668,6 +3668,38 @@ describe('B4 — deleteAgent + rewake operator-IPC verbs', () => {
     expect(mail.outstanding('impl-x').some((m) => m.seq === delivered.seq)).toBe(true);
   });
 
+  it('rewake refuses to reactivate a stopped child when that would exceed the active-child cap', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'impl-stopped', role: 'implementer', parent: 'lead-1' });
+    roster.recordAgent({ agentId: 'impl-active-a', role: 'implementer', parent: 'lead-1' });
+    roster.recordAgent({ agentId: 'impl-active-b', role: 'implementer', parent: 'lead-1' });
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { router, control } = makeControl(engine, projectId);
+    router.stop('impl-stopped');
+    expect(router.isStopped('impl-stopped')).toBe(true);
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.rewake('impl-stopped', 'resume')).rejects.toThrow(
+      /max active children|cap/i,
+    );
+
+    expect(router.isStopped('impl-stopped')).toBe(true);
+
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    expect(mail.outstanding('impl-stopped')).toHaveLength(0);
+  });
+
   it('rewake rejects whitespace-only messages before clearing suppression or posting mail', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);

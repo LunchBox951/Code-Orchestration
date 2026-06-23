@@ -26,6 +26,7 @@ import {
   GH_AUTH_TOKEN_COMMANDS,
   GH_AUTH_TOKEN_TIMEOUT_MS,
   NodePtyHost,
+  OPERATOR,
   ghCommandPathEnv,
   githubHttpsCredentialEnv,
   resolveGhTokenFromEnv,
@@ -1485,6 +1486,31 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       ),
   });
   const liveProvider = new EngineLiveStateProvider({ engine, projectId, router });
+  const assertReclaimableChildLeaf = (childId: string): void => {
+    assertDeleteAgentSubtreePreflight(projectId, childId);
+    const roster = openRosterStore(projectId);
+    try {
+      const agent = roster.getAgent(childId);
+      if (agent == null) {
+        throw new Error(`co-mcp serve: reclaimChild: child agent '${childId}' not found.`);
+      }
+      if (agent.parent === OPERATOR) {
+        throw new Error(
+          `co-mcp serve: reclaimChild: '${childId}' is a root/operator-owned agent — ` +
+            'refusing a granular child reclaim. Use deleteAgent to tear down a root subtree.',
+        );
+      }
+      const descendants = descendantsLeafFirst(roster.listAgents(), childId);
+      if (descendants.length > 0) {
+        throw new Error(
+          `co-mcp serve: reclaimChild: '${childId}' still has ${descendants.length} ` +
+            `descendant(s) — refusing a granular reclaim. Use deleteAgent to tear down the whole subtree.`,
+        );
+      }
+    } finally {
+      roster.close();
+    }
+  };
   const control: ConductorControlSurface = {
     router,
     observe: () => queryLiveObservability(projectId, liveProvider),
@@ -1622,24 +1648,9 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         registry.close();
       }
 
-      // Guard: refuse a non-leaf. A child with live descendants must go through deleteAgent (whole
-      // subtree) — reclaiming just the parent would orphan its children's worktrees/slots.
-      assertDeleteAgentSubtreePreflight(projectId, childId);
-      const roster = openRosterStore(projectId);
-      try {
-        if (roster.getAgent(childId) == null) {
-          throw new Error(`co-mcp serve: reclaimChild: child agent '${childId}' not found.`);
-        }
-        const descendants = descendantsLeafFirst(roster.listAgents(), childId);
-        if (descendants.length > 0) {
-          throw new Error(
-            `co-mcp serve: reclaimChild: '${childId}' still has ${descendants.length} ` +
-              `descendant(s) — refusing a granular reclaim. Use deleteAgent to tear down the whole subtree.`,
-          );
-        }
-      } finally {
-        roster.close();
-      }
+      // Guard: reclaim is only for non-root child leaves. A child with live descendants must go through
+      // deleteAgent (whole subtree) — reclaiming just the parent would orphan its children.
+      assertReclaimableChildLeaf(childId);
 
       // Suppress before releasing the pane so a failed teardown cannot cold-start the surviving row.
       router.recordStopped(childId);
@@ -1659,6 +1670,10 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
           ),
         );
       }
+
+      // A turn can finish work while release is being requested. Re-read the durable roster immediately
+      // before deletion so a child that stopped being a leaf is refused instead of cascade-deleted.
+      assertReclaimableChildLeaf(childId);
 
       // Durable leaf teardown via the core primitive. Runs REGARDLESS of pane-release failures.
       try {

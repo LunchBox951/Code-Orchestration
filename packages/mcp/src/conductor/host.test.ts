@@ -1451,7 +1451,7 @@ describe('serveConductor — wires the full stack over injected seams (no real b
   // #131 — control.reclaimChild REFUSES a non-leaf (a child that still has descendants): the operator
   // must use deleteAgent for a whole subtree. The refusal fires BEFORE any suppression/teardown.
   it('control.reclaimChild refuses a non-leaf agent (still has descendants)', async () => {
-    const { projectId } = makeProject();
+    const { projectId, cwd } = makeProject();
 
     // coord-x → mid → grandchild. `mid` is NOT a leaf.
     const roster = openRosterStore(projectId);
@@ -1472,6 +1472,17 @@ describe('serveConductor — wires the full stack over injected seams (no real b
       scheduler: new FakeScheduler(),
       autoStart: true,
     });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+
+    const ensureMid = engine.ensureHosted({
+      ...makeIdentity('mid', projectId, cwd),
+      agent: 'mid',
+      role: 'lead',
+      parent: 'coord-x',
+    });
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    await ensureMid;
+    expect(engine.isHosted(projectId, 'mid')).toBe(true);
 
     await expect(runner.control!.reclaimChild('mid')).rejects.toThrow(
       /still has 1 descendant\(s\)/,
@@ -1479,6 +1490,7 @@ describe('serveConductor — wires the full stack over injected seams (no real b
 
     // No suppression poisoning — the refusal fired before any router.recordStopped.
     expect(runner.control!.router.shouldSkip(projectId, 'mid')).toBe(false);
+    expect(engine.isHosted(projectId, 'mid')).toBe(true);
 
     // The roster is untouched: all three agents survive.
     const rosterCheck = openRosterStore(projectId);
@@ -1487,6 +1499,209 @@ describe('serveConductor — wires the full stack over injected seams (no real b
       expect(agents).toContain('coord-x');
       expect(agents).toContain('mid');
       expect(agents).toContain('grandchild');
+    } finally {
+      rosterCheck.close();
+    }
+
+    await runner.stop();
+  });
+
+  it('control.reclaimChild refuses a childless root coordinator', async () => {
+    const { projectId } = makeProject();
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const runner = await serveConductor({
+      projectId,
+      pty: new FakePty(),
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+
+    await expect(runner.control!.reclaimChild('coord-x')).rejects.toThrow(/root|operator|child/i);
+
+    expect(runner.control!.router.shouldSkip(projectId, 'coord-x')).toBe(false);
+
+    const rosterCheck = openRosterStore(projectId);
+    try {
+      expect(rosterCheck.getAgent('coord-x')).toBeDefined();
+    } finally {
+      rosterCheck.close();
+    }
+
+    await runner.stop();
+  });
+
+  it('control.reclaimChild rechecks leaf status after release before durable teardown', async () => {
+    const { projectId, cwd } = makeProject();
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+    roster.recordAgent({ agentId: 'leaf-a', role: 'implementer', parent: 'coord-x' });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+
+    const ensureLeaf = engine.ensureHosted({
+      ...makeIdentity('leaf-a', projectId, cwd),
+      agent: 'leaf-a',
+      role: 'implementer',
+      parent: 'coord-x',
+    });
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    await ensureLeaf;
+
+    const originalRelease = engine.release.bind(engine);
+    engine.release = async (pid, agent, options): Promise<void> => {
+      await originalRelease(pid, agent, options);
+      const liveRoster = openRosterStore(projectId);
+      try {
+        liveRoster.recordAgent({ agentId: 'grandchild', role: 'researcher', parent: agent });
+      } finally {
+        liveRoster.close();
+      }
+    };
+
+    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toThrow(
+      /still has 1 descendant\(s\)/,
+    );
+
+    expect(runner.control!.router.shouldSkip(projectId, 'leaf-a')).toBe(true);
+
+    const rosterCheck = openRosterStore(projectId);
+    try {
+      const agents = rosterCheck.listAgents().map((a) => a.agentId);
+      expect(agents).toContain('leaf-a');
+      expect(agents).toContain('grandchild');
+    } finally {
+      rosterCheck.close();
+    }
+
+    await runner.stop();
+  });
+
+  it('control.reclaimChild isolates pane-release failures: durable teardown still runs, error surfaced', async () => {
+    const { projectId, cwd } = makeProject();
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+    roster.recordAgent({ agentId: 'leaf-a', role: 'implementer', parent: 'coord-x' });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const errors: string[] = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+
+    const ensureLeaf = engine.ensureHosted({
+      ...makeIdentity('leaf-a', projectId, cwd),
+      agent: 'leaf-a',
+      role: 'implementer',
+      parent: 'coord-x',
+    });
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    await ensureLeaf;
+    const hostedLeaf = engine.getHosted(projectId, 'leaf-a')!;
+    (hostedLeaf.session as { close: () => Promise<void> }).close = async () => {
+      throw new Error('leaf session close failed');
+    };
+
+    runner.control!.router.pause('leaf-a');
+
+    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toBeInstanceOf(AggregateError);
+
+    expect(errors.some((e) => /leaf-a.*leaf session close failed/i.test(e))).toBe(true);
+    expect(runner.control!.router.shouldSkip(projectId, 'leaf-a')).toBe(false);
+
+    const rosterCheck = openRosterStore(projectId);
+    try {
+      expect(rosterCheck.getAgent('leaf-a')).toBeUndefined();
+      expect(rosterCheck.getAgent('coord-x')).toBeDefined();
+    } finally {
+      rosterCheck.close();
+    }
+
+    await runner.stop();
+  });
+
+  it('control.reclaimChild keeps router suppression when durable teardown fails', async () => {
+    const { projectId } = makeProject();
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+    roster.recordAgent({ agentId: 'leaf-a', role: 'implementer', parent: 'coord-x' });
+
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const sandboxPath = worktreePathFor(projectId, 'co/leaf-a');
+    worktrees.recordWorktree({
+      branch: 'co/leaf-a',
+      baseRef: 'main',
+      baseSha: 'abc123',
+      path: sandboxPath,
+      parent: 'coord-x',
+      agent: 'leaf-a',
+      role: 'implementer',
+    });
+    mkdirSync(sandboxPath, { recursive: true });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const runner = await serveConductor({
+      projectId,
+      pty: new FakePty(),
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+      gitExec: (_cwd, args) => {
+        if (args[0] === 'worktree' && args[1] === 'remove') {
+          throw new Error('simulated durable reclaim failure');
+        }
+      },
+    });
+
+    expect(runner.control!.router.shouldSkip(projectId, 'leaf-a')).toBe(false);
+
+    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toBeInstanceOf(AggregateError);
+
+    expect(runner.control!.router.shouldSkip(projectId, 'leaf-a')).toBe(true);
+
+    const rosterCheck = openRosterStore(projectId);
+    try {
+      expect(rosterCheck.getAgent('leaf-a')).toBeDefined();
     } finally {
       rosterCheck.close();
     }

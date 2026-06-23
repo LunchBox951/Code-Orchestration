@@ -47,10 +47,14 @@ Independent phases (no shared deps in the DAG) run **in parallel** under separat
 isolated worktrees. Parallelism is the point — but it burns provider rate limits and
 resources, so it's **bounded**:
 
-- **Max active children per parent** *(configurable setting; excludes reviewers).* A
-  Coordinator/Lead may have ≤ N active children at once; excess dispatches queue until a slot
-  frees. The primary throttle on fan-out (and on rate burn — see [DISPATCH](dispatch.md)/[COST](cost-and-usage.md) for the
-  rate-limit-aware routing that complements it).
+- **Max active children per parent** *(configurable setting).* A Coordinator/Lead may have ≤ N
+  active children at once; excess dispatches queue until a slot frees. "Active" means a non-reviewer
+  child whose branch is not merged and whose agent is not durably stopped/inactive. Operator Stop
+  releases the child slot; re-waking that stopped child must respect the cap again if another child
+  has taken the freed slot. A leaf-only `reclaimChild` operator control can tear down one childless
+  child to free its slot; `deleteAgent` remains the whole-subtree/root teardown control. This is the
+  primary throttle on fan-out (and on rate burn — see [DISPATCH](dispatch.md)/[COST](cost-and-usage.md)
+  for the rate-limit-aware routing that complements it).
 - **One active reviewer per merge target — serialize review+merge.** A review is bound to a
   base SHA; a *parallel* merge to the same target changes that SHA and invalidates a
   concurrent review (the prototype's second-merge re-review thrash). So reviews and
