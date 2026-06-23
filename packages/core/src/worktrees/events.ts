@@ -62,7 +62,8 @@ export function finishScope(branch: string): string {
  */
 export const worktreeProvisionedEntrySchema = z.object({
   path: z.string().min(1),
-  mechanism: z.enum(['symlink', 'copy', 'isolated-copy']),
+  // `workspace-node-modules` is the hybrid placement produced by pnpm-workspace expansion (#129).
+  mechanism: z.enum(['symlink', 'copy', 'isolated-copy', 'workspace-node-modules']),
 });
 export type WorktreeProvisionedEntry = z.infer<typeof worktreeProvisionedEntrySchema>;
 

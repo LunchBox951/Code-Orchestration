@@ -6,11 +6,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { assertRepoPristine } from '../config/pristine.js';
 import { openConfigStore, type ConfigStore } from '../config/config-store.js';
 import { WORKTREE_PROVISION_CONFIG_KEY } from './provision.js';
 import { slingWorktree } from './sling.js';
@@ -184,5 +187,128 @@ describe('sling + provision (isolated-copy override) — a private deps dir', ()
     // Mutating the private deps dir does NOT corrupt the shared source (parallel-agent safety).
     writeFileSync(join(nm, 'leftpad', 'INSTALLED'), 'new package\n');
     expect(existsSync(join(repo, 'node_modules', 'leftpad', 'INSTALLED'))).toBe(false);
+  });
+});
+
+// #129 (end-to-end, on a pnpm-WORKSPACE fixture): a real git repo laid out like the `co` monorepo —
+// a `pnpm-workspace.yaml`, a root `node_modules/.pnpm` store, and a workspace package whose
+// `node_modules` is a symlink farm with a RELATIVE dep link into the root store plus a `@scope/*`
+// self-link to a sibling package source. Sling + provision must make the SANDBOX runnable: the
+// package's bare dep resolves, writing under the worktree's node_modules never touches the source
+// repo (EROFS class fixed), and the relative/self-links resolve INTO the sandbox, not the source.
+
+/**
+ * A pnpm-workspace fixture repo. Tracked: `pnpm-workspace.yaml`, two package `package.json`s, and a
+ * test in pkg-a that imports the bare dep `widget` (→ pkg-a's node_modules) and the sibling `@scope/pkg-b`.
+ * Gitignored essentials (NOT committed): the root `.pnpm` store, the root + per-package node_modules
+ * symlink farms.
+ */
+function makeWorkspaceFixtureRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'co-prov-ws-repo-'));
+  tmpDirs.push(dir);
+  execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'ignore' });
+
+  writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n');
+  writeFileSync(join(dir, '.gitignore'), 'node_modules/\n');
+  for (const p of ['pkg-a', 'pkg-b']) {
+    mkdirSync(join(dir, 'packages', p), { recursive: true });
+    writeFileSync(
+      join(dir, 'packages', p, 'package.json'),
+      JSON.stringify({ name: `@scope/${p}`, type: 'module', main: 'index.js' }),
+    );
+  }
+  // pkg-b's runnable module (the workspace self-link target).
+  writeFileSync(
+    join(dir, 'packages', 'pkg-b', 'index.js'),
+    'export const sibling = "from-pkg-b";\n',
+  );
+  // pkg-a's OWN test: import the bare dep (→ node_modules/widget) AND the sibling via @scope self-link.
+  writeFileSync(
+    join(dir, 'packages', 'pkg-a', 'app-test.mjs'),
+    [
+      'import { widget } from "widget";',
+      'import { sibling } from "@scope/pkg-b";',
+      'if (widget() !== "ok" || sibling !== "from-pkg-b") { console.error("FAIL"); process.exit(1); }',
+      'console.log("OK");',
+      '',
+    ].join('\n'),
+  );
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-m', 'init workspace fixture');
+
+  // --- Gitignored essentials: the shared .pnpm store + the symlink farms. ---
+  // The real dep content of `widget` lives in the content-addressed store.
+  const widgetStore = join(dir, 'node_modules', '.pnpm', 'widget@1.0.0', 'node_modules', 'widget');
+  mkdirSync(widgetStore, { recursive: true });
+  writeFileSync(
+    join(widgetStore, 'package.json'),
+    JSON.stringify({ name: 'widget', version: '1.0.0', type: 'module', main: 'index.js' }),
+  );
+  writeFileSync(join(widgetStore, 'index.js'), 'export function widget() { return "ok"; }\n');
+  // Root node_modules: a top-level dep symlink into the store.
+  symlinkSync('.pnpm/widget@1.0.0/node_modules/widget', join(dir, 'node_modules', 'widget'));
+  // pkg-a node_modules: a RELATIVE dep link into the root store + a @scope self-link to pkg-b's source.
+  mkdirSync(join(dir, 'packages', 'pkg-a', 'node_modules', '@scope'), { recursive: true });
+  symlinkSync(
+    '../../../node_modules/.pnpm/widget@1.0.0/node_modules/widget',
+    join(dir, 'packages', 'pkg-a', 'node_modules', 'widget'),
+  );
+  // From `packages/pkg-a/node_modules/@scope/`, `../../../pkg-b` resolves to `packages/pkg-b` —
+  // mirroring how real pnpm writes `@co/core -> ../../../core` in this workspace.
+  symlinkSync('../../../pkg-b', join(dir, 'packages', 'pkg-a', 'node_modules', '@scope', 'pkg-b'));
+  return dir;
+}
+
+describe('sling + provision (pnpm WORKSPACE) — slung workers can run verify (#129)', () => {
+  it('provisions per-package node_modules, keeps the source pristine, and pkg-a test PASSES in the sandbox', () => {
+    const repo = makeWorkspaceFixtureRepo();
+    const store = openStore('p-ws-fixture');
+
+    // (2) PROVISIONING reads the source only (no write-through). Wrap the source's `packages/` and
+    //     `node_modules/` subtrees (the provisioning read targets) in assertRepoPristine across the
+    //     sling — scoped to those rather than the whole repo because `git worktree add` legitimately
+    //     writes git's own `.git/worktrees/…` bookkeeping into the source (git admin, not a
+    //     provisioning write). The per-package `packages/pkg-a/node_modules` is the #129 EROFS case.
+    const result = assertRepoPristine(join(repo, 'packages'), () =>
+      assertRepoPristine(join(repo, 'node_modules'), () =>
+        slingWorktree(store, {
+          parent: 'lead-7',
+          branch: 'co/ws-x',
+          repoCwd: repo,
+          projectId: 'p-ws-fixture',
+        }),
+      ),
+    );
+    const wt = result.worktreePath;
+
+    // (1) The worktree HAS packages/pkg-a/node_modules as a real writable dir (not a single root symlink).
+    const pkgNm = join(wt, 'packages', 'pkg-a', 'node_modules');
+    expect(existsSync(pkgNm)).toBe(true);
+    expect(lstatSync(pkgNm).isSymbolicLink()).toBe(false);
+    expect(lstatSync(join(wt, 'node_modules')).isSymbolicLink()).toBe(false);
+    // The heavy `.pnpm` store is shared by symlink.
+    expect(lstatSync(join(wt, 'node_modules', '.pnpm')).isSymbolicLink()).toBe(true);
+
+    // (3) The package's RELATIVE dep link resolves THROUGH the sandbox's own `.pnpm` (shared store),
+    //     and the @scope self-link resolves into the sandbox's OWN package source — NOT the source repo.
+    const depLink = join(pkgNm, 'widget');
+    expect(readFileSync(join(depLink, 'index.js'), 'utf8')).toContain('return "ok"');
+    expect(realpathSync(depLink)).toBe(
+      realpathSync(join(wt, 'node_modules', '.pnpm', 'widget@1.0.0', 'node_modules', 'widget')),
+    );
+    const self = join(pkgNm, '@scope', 'pkg-b');
+    expect(realpathSync(self)).toBe(realpathSync(join(wt, 'packages', 'pkg-b')));
+    expect(realpathSync(self).startsWith(realpathSync(wt))).toBe(true); // sandbox source, not the repo
+
+    // The proof: pkg-a's own test (bare dep + sibling self-link) runs and passes in the sandbox.
+    const out = execFileSync('node', ['app-test.mjs'], {
+      cwd: join(wt, 'packages', 'pkg-a'),
+      encoding: 'utf8',
+    }).trim();
+    expect(out).toBe('OK');
+
+    // (2 cont.) Writing under the worktree's node_modules does NOT appear in the source repo.
+    writeFileSync(join(pkgNm, '.vite-temp'), 'scratch\n');
+    expect(existsSync(join(repo, 'packages', 'pkg-a', 'node_modules', '.vite-temp'))).toBe(false);
   });
 });
