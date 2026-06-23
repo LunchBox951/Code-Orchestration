@@ -12,13 +12,10 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { openProjectStore } from '../store/sqlite-store.js';
-import { selectAllAgents } from '../roles/roster-projector.js';
-import { selectAllPlans } from '../plans/plans-projector.js';
 import { selectAllCostRollups } from '../dispatch/cost-projector.js';
-import { ensureReviewTables } from '../review/review-projector.js';
 import { EVENT_REVIEW_STRIKE, EVENT_REVIEW_VERDICT } from '../review/events.js';
 import type { AgentRecord } from '../roles/events.js';
-import type { PlanRecord } from '../plans/events.js';
+import type { PhaseRecord, PlanRecord } from '../plans/events.js';
 import type { CostRollup } from '../dispatch/events.js';
 import type { ReviewScope } from '../review/ladder.js';
 import type { Verdict } from '../review/verdict.js';
@@ -55,6 +52,27 @@ function rowToReviewSummary(row: Record<string, unknown>): ReviewSummary {
 function tableExists(db: DatabaseSync, name: string): boolean {
   const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
   return row != null;
+}
+
+function tableColumns(db: DatabaseSync, table: string): ReadonlySet<string> {
+  if (!tableExists(db, table)) return new Set();
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ readonly name: string }>;
+  return new Set(rows.map((row) => row.name));
+}
+
+function columnOrDefault(columns: ReadonlySet<string>, column: string, defaultSql: string): string {
+  return columns.has(column) ? column : `${defaultSql} AS ${column}`;
+}
+
+function requireColumns(
+  table: string,
+  columns: ReadonlySet<string>,
+  required: readonly string[],
+): void {
+  const missing = required.filter((column) => !columns.has(column));
+  if (missing.length > 0) {
+    throw new Error(`observability: ${table} is missing required column(s): ${missing.join(', ')}`);
+  }
 }
 
 function reviewKey(target: string, branch: string): string {
@@ -109,19 +127,113 @@ function selectReplayStrikeCounts(db: DatabaseSync): Map<string, number> {
   return counts;
 }
 
+function selectAllAgentsReadOnly(db: DatabaseSync): AgentRecord[] {
+  if (!tableExists(db, 'roster')) return [];
+  const columns = tableColumns(db, 'roster');
+  requireColumns('roster', columns, ['agent_id', 'role', 'parent', 'registered_ts']);
+  const rows = db
+    .prepare(
+      `SELECT
+         agent_id,
+         role,
+         ${columnOrDefault(columns, 'sub_role', 'NULL')},
+         ${columnOrDefault(columns, 'name', 'NULL')},
+         parent,
+         registered_ts
+       FROM roster
+       ORDER BY registered_ts, agent_id`,
+    )
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    agentId: String(row.agent_id),
+    role: String(row.role) as AgentRecord['role'],
+    ...(row.sub_role != null ? { subRole: String(row.sub_role) } : {}),
+    ...(row.name != null ? { name: String(row.name) } : {}),
+    parent: String(row.parent),
+    registeredTs: Number(row.registered_ts),
+  }));
+}
+
+function selectPhasesReadOnly(db: DatabaseSync, taskId: string): PhaseRecord[] {
+  if (!tableExists(db, 'plan_phases')) return [];
+  const columns = tableColumns(db, 'plan_phases');
+  requireColumns('plan_phases', columns, ['task_id', 'phase_id', 'name', 'deps', 'criteria']);
+  const rows = db
+    .prepare(
+      `SELECT
+         task_id,
+         phase_id,
+         ${columnOrDefault(columns, 'ordinal', '0')},
+         name,
+         ${columnOrDefault(columns, 'owner', 'NULL')},
+         deps,
+         criteria,
+         ${columnOrDefault(columns, 'status', "'planned'")},
+         ${columnOrDefault(columns, 'verified_pass', 'NULL')},
+         ${columnOrDefault(columns, 'baseline_sha', 'NULL')}
+       FROM plan_phases
+       WHERE task_id = ?
+       ORDER BY ordinal, phase_id`,
+    )
+    .all(taskId) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    phaseId: String(row.phase_id),
+    name: String(row.name),
+    ...(row.owner != null ? { owner: String(row.owner) } : {}),
+    deps: JSON.parse(String(row.deps)) as PhaseRecord['deps'],
+    criteria: JSON.parse(String(row.criteria)) as PhaseRecord['criteria'],
+    status: String(row.status) as PhaseRecord['status'],
+    ...(row.verified_pass != null ? { verifiedPass: Boolean(row.verified_pass) } : {}),
+    ...(row.baseline_sha != null ? { baselineSha: String(row.baseline_sha) } : {}),
+  }));
+}
+
+function selectAllPlansReadOnly(db: DatabaseSync): PlanRecord[] {
+  if (!tableExists(db, 'plans')) return [];
+  const columns = tableColumns(db, 'plans');
+  requireColumns('plans', columns, ['task_id', 'goal', 'task_criteria', 'drafted_ts']);
+  const rows = db
+    .prepare(
+      `SELECT
+         task_id,
+         goal,
+         task_criteria,
+         drafted_ts,
+         ${columnOrDefault(columns, 'replan_count', '0')},
+         ${columnOrDefault(columns, 'completed_ts', 'NULL')}
+       FROM plans
+       ORDER BY drafted_ts, task_id`,
+    )
+    .all() as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    taskId: String(row.task_id),
+    goal: String(row.goal),
+    taskCriteria: JSON.parse(String(row.task_criteria)) as PlanRecord['taskCriteria'],
+    phases: selectPhasesReadOnly(db, String(row.task_id)),
+    draftedTs: Number(row.drafted_ts),
+    replanCount: Number(row.replan_count),
+    ...(row.completed_ts != null ? { completedTs: Number(row.completed_ts) } : {}),
+  }));
+}
+
 /** All review rows in the projection table, in a deterministic order (target, branch). */
 function selectAllReviews(db: DatabaseSync): ReviewSummary[] {
-  // The operator dashboard polls this on every refresh tick. Skip the heavy legacy backfills
-  // (`backfillReviewRequestIds` / `backfillReviewVerdictSeq` / `backfillReviewStrikes` — each a
-  // full-table `INSERT ... SELECT` over the event log): they WRITE inside the read path's transaction,
-  // contending with the daemon writer → "database is locked" (#126). A read only needs the idempotent
-  // `CREATE TABLE IF NOT EXISTS` + column migrations, mirroring how the projector's reset/apply call it.
-  ensureReviewTables(db, { backfillStrikes: false, backfillLegacy: false });
+  if (!tableExists(db, 'reviews')) return [];
+  const columns = tableColumns(db, 'reviews');
+  requireColumns('reviews', columns, ['target', 'branch']);
   const strikeCounts = selectReplayStrikeCounts(db);
   const rows = db
     .prepare(
-      'SELECT target, branch, scope, verdict, strikes, serialized, overridden ' +
-        'FROM reviews ORDER BY target, branch',
+      `SELECT
+         target,
+         branch,
+         ${columnOrDefault(columns, 'scope', "'worker_merge'")},
+         ${columnOrDefault(columns, 'verdict', 'NULL')},
+         ${columnOrDefault(columns, 'strikes', '0')},
+         ${columnOrDefault(columns, 'serialized', '0')},
+         ${columnOrDefault(columns, 'overridden', '0')}
+       FROM reviews
+       ORDER BY target, branch`,
     )
     .all();
   return rows.map((r) => {
@@ -164,8 +276,8 @@ export function queryObservability(projectId: string): ObservabilitySnapshot {
     return store.transaction((tx) => {
       const db = tx.raw as DatabaseSync;
       return {
-        agents: selectAllAgents(db),
-        plans: selectAllPlans(db),
+        agents: selectAllAgentsReadOnly(db),
+        plans: selectAllPlansReadOnly(db),
         reviews: selectAllReviews(db),
         // Read path: skip the cost backfill (a WRITE) for the same #126 reason as selectAllReviews above.
         costRollups: selectAllCostRollups(db, { backfillLegacy: false }),

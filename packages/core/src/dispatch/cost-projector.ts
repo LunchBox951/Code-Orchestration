@@ -117,6 +117,16 @@ function tableExists(db: DatabaseSync, table: string): boolean {
   );
 }
 
+function tableColumns(db: DatabaseSync, table: string): ReadonlySet<string> {
+  if (!tableExists(db, table)) return new Set();
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ readonly name: string }>;
+  return new Set(rows.map((row) => row.name));
+}
+
+function columnOrDefault(columns: ReadonlySet<string>, column: string, defaultSql: string): string {
+  return columns.has(column) ? column : `${defaultSql} AS ${column}`;
+}
+
 function countRows(db: DatabaseSync, table: string): number {
   const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as
     | { readonly count?: unknown }
@@ -273,24 +283,60 @@ function accumulatorToRollup(
   };
 }
 
-function addObservedCost(acc: CostRollupAccumulator, obs: CostRecorded): void {
-  acc.totalCostUsd += obs.cost_usd ?? 0;
-  if (obs.cost_usd !== undefined) acc.costUsdObservations += 1;
-  acc.inputTokens += obs.input_tokens ?? 0;
-  acc.outputTokens += obs.output_tokens ?? 0;
-  acc.totalTokens += obs.total_tokens ?? 0;
-  if (obs.total_tokens !== undefined) acc.tokenObservations += 1;
-  acc.cacheReadTokens += obs.cache_read_input_tokens ?? 0;
-  acc.cacheCreationTokens += obs.cache_creation_input_tokens ?? 0;
-  acc.usedPct += obs.used_pct ?? 0;
-  if (obs.used_pct !== undefined) acc.usedPctObservations += 1;
+function addObservedCost(acc: CostRollupAccumulator, obs: NormalizedCostObservation): void {
+  acc.totalCostUsd += obs.costUsd ?? 0;
+  if (obs.costUsd !== null) acc.costUsdObservations += 1;
+  acc.inputTokens += obs.inputTokens ?? 0;
+  acc.outputTokens += obs.outputTokens ?? 0;
+  acc.totalTokens += obs.totalTokens ?? 0;
+  if (obs.totalTokens !== null) acc.tokenObservations += 1;
+  acc.cacheReadTokens += obs.cacheReadTokens ?? 0;
+  acc.cacheCreationTokens += obs.cacheCreationTokens ?? 0;
+  acc.usedPct += obs.usedPct ?? 0;
+  if (obs.usedPct !== null) acc.usedPctObservations += 1;
   acc.observations += 1;
 }
 
-function observationIdentity(obs: CostRecorded): string {
-  return obs.source_id != null
-    ? `${obs.provider}\0${obs.agent}\0${obs.task}\0source:${obs.source_id}`
-    : `${obs.provider}\0${obs.agent}\0${obs.task}\0turn:${obs.turn}`;
+function observationTurnIdentity(obs: NormalizedCostObservation): string {
+  return `${obs.provider}\0${obs.agent}\0${obs.task}\0turn:${obs.turn}`;
+}
+
+function observationSourceIdentity(obs: NormalizedCostObservation): string | undefined {
+  return obs.sourceId != null
+    ? `${obs.provider}\0${obs.agent}\0${obs.task}\0source:${obs.sourceId}`
+    : undefined;
+}
+
+function rememberReadOnlyObservation(
+  byTurn: Map<string, NormalizedCostObservation>,
+  bySource: Map<string, NormalizedCostObservation>,
+  obs: NormalizedCostObservation,
+): boolean {
+  const turnKey = observationTurnIdentity(obs);
+  const sameTurn = byTurn.get(turnKey);
+  if (sameTurn != null) {
+    if (observationsMatch(sameTurn, obs)) return false;
+    throw new Error(
+      `cost-projector: conflicting duplicate cost observation for ` +
+        `${obs.provider}/${obs.agent}/${obs.task}/turn-${obs.turn}`,
+    );
+  }
+
+  const sourceKey = observationSourceIdentity(obs);
+  if (sourceKey != null) {
+    const sameSource = bySource.get(sourceKey);
+    if (sameSource != null) {
+      if (observationsMatchIgnoringTurn(sameSource, obs)) return false;
+      throw new Error(
+        `cost-projector: conflicting duplicate cost observation for ` +
+          `${obs.provider}/${obs.agent}/${obs.task}/turn-${obs.turn}`,
+      );
+    }
+  }
+
+  byTurn.set(turnKey, obs);
+  if (sourceKey != null) bySource.set(sourceKey, obs);
+  return true;
 }
 
 function readOnlyRollupsFromEvents(db: DatabaseSync): CostRollup[] {
@@ -298,9 +344,10 @@ function readOnlyRollupsFromEvents(db: DatabaseSync): CostRollup[] {
   const rows = db
     .prepare('SELECT payload FROM events WHERE type = ? ORDER BY seq')
     .all(EVENT_COST_RECORDED) as Array<{ readonly payload: unknown }>;
-  const seen = new Set<string>();
+  const byTurn = new Map<string, NormalizedCostObservation>();
+  const bySource = new Map<string, NormalizedCostObservation>();
   const byKey = new Map<string, CostRollupAccumulator>();
-  const apply = (kind: CostRollupKind, id: string, obs: CostRecorded) => {
+  const apply = (kind: CostRollupKind, id: string, obs: NormalizedCostObservation) => {
     const key = `${kind}\0${id}`;
     let acc = byKey.get(key);
     if (acc == null) {
@@ -311,10 +358,8 @@ function readOnlyRollupsFromEvents(db: DatabaseSync): CostRollup[] {
   };
 
   for (const row of rows) {
-    const obs = costRecordedSchema.parse(JSON.parse(String(row.payload)));
-    const identity = observationIdentity(obs);
-    if (seen.has(identity)) continue;
-    seen.add(identity);
+    const obs = normalizeCostObservation(costRecordedSchema.parse(JSON.parse(String(row.payload))));
+    if (!rememberReadOnlyObservation(byTurn, bySource, obs)) continue;
     apply('agent', obs.agent, obs);
     apply('task', obs.task, obs);
   }
@@ -328,40 +373,51 @@ function readOnlyRollupsFromEvents(db: DatabaseSync): CostRollup[] {
 }
 
 function selectPersistedRollupsWithReadOnlyCounts(db: DatabaseSync): CostRollup[] {
+  if (!tableExists(db, 'cost_rollup')) return [];
+  const rollupColumns = tableColumns(db, 'cost_rollup');
+  if (!rollupColumns.has('kind') || !rollupColumns.has('id')) {
+    throw new Error('cost-projector: cost_rollup is missing required kind/id columns');
+  }
+  const observationColumns = tableColumns(db, 'cost_observations');
+  const canCountObservations =
+    observationColumns.has('agent') &&
+    observationColumns.has('task') &&
+    tableExists(db, 'cost_observations');
+  const countObservationColumn = (column: string): string =>
+    canCountObservations && observationColumns.has(column)
+      ? `(
+           SELECT COUNT(*)
+             FROM cost_observations AS o
+            WHERE o.${column} IS NOT NULL
+              AND (
+                (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
+                OR
+                (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
+              )
+         )`
+      : '0';
+  const readColumns = [
+    'kind',
+    'id',
+    columnOrDefault(rollupColumns, 'total_cost_usd', '0'),
+    columnOrDefault(rollupColumns, 'cost_usd_observations', '0'),
+    columnOrDefault(rollupColumns, 'input_tokens', '0'),
+    columnOrDefault(rollupColumns, 'output_tokens', '0'),
+    columnOrDefault(rollupColumns, 'total_tokens', '0'),
+    columnOrDefault(rollupColumns, 'token_observations', '0'),
+    columnOrDefault(rollupColumns, 'cache_read_tokens', '0'),
+    columnOrDefault(rollupColumns, 'cache_creation_tokens', '0'),
+    columnOrDefault(rollupColumns, 'used_pct', '0'),
+    columnOrDefault(rollupColumns, 'used_pct_observations', '0'),
+    columnOrDefault(rollupColumns, 'observations', '0'),
+  ].join(', ');
   const rows = db
     .prepare(
       `SELECT
-         ${ROLLUP_COLUMNS},
-         (
-           SELECT COUNT(*)
-             FROM cost_observations AS o
-            WHERE o.cost_usd IS NOT NULL
-              AND (
-                (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
-                OR
-                (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
-              )
-         ) AS read_cost_usd_observations,
-         (
-           SELECT COUNT(*)
-             FROM cost_observations AS o
-            WHERE o.total_tokens IS NOT NULL
-              AND (
-                (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
-                OR
-                (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
-              )
-         ) AS read_token_observations,
-         (
-           SELECT COUNT(*)
-             FROM cost_observations AS o
-            WHERE o.used_pct IS NOT NULL
-              AND (
-                (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
-                OR
-                (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
-              )
-         ) AS read_used_pct_observations
+         ${readColumns},
+         ${countObservationColumn('cost_usd')} AS read_cost_usd_observations,
+         ${countObservationColumn('total_tokens')} AS read_token_observations,
+         ${countObservationColumn('used_pct')} AS read_used_pct_observations
        FROM cost_rollup
        ORDER BY kind, id`,
     )
@@ -414,13 +470,17 @@ export function selectAllCostRollups(
   db: DatabaseSync,
   opts: { readonly backfillLegacy?: boolean } = {},
 ): CostRollup[] {
-  ensureCostTables(db, opts);
   if (opts.backfillLegacy === false) {
-    const observationCount = countRows(db, 'cost_observations');
-    const rollupCount = countRows(db, 'cost_rollup');
-    if (observationCount === 0 && rollupCount > 0) return readOnlyRollupsFromEvents(db);
+    const observationCount = tableExists(db, 'cost_observations')
+      ? countRows(db, 'cost_observations')
+      : 0;
+    const rollupCount = tableExists(db, 'cost_rollup') ? countRows(db, 'cost_rollup') : 0;
+    if (observationCount === 0 && rollupCount > 0 && tableExists(db, 'events')) {
+      return readOnlyRollupsFromEvents(db);
+    }
     return selectPersistedRollupsWithReadOnlyCounts(db);
   }
+  ensureCostTables(db, opts);
   const rows = db.prepare(`SELECT ${ROLLUP_COLUMNS} FROM cost_rollup ORDER BY kind, id`).all();
   return rows.map((r) => rowToCostRollup(r as Record<string, unknown>));
 }

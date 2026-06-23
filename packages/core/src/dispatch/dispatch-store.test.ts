@@ -474,25 +474,29 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
   it('readRollups returns legacy-deduped totals without writing observation identities', () => {
     const pid = 'p-rollup-readonly-legacy-dedupe';
     const obs = {
-      provider: 'codex' as const,
+      provider: 'claude' as const,
       agent: 'a1',
       task: 't1',
       turn: 0,
-      used_pct: 0,
-      total_tokens: 10,
+      source_id: 'claude-jsonl:v1:path:12',
+      input_tokens: 7,
+      output_tokens: 8,
     };
     const project = openProjectStore(pid);
     try {
       project.transaction((tx) => {
-        tx.append([makeCostRecordedEvent(pid, obs), makeCostRecordedEvent(pid, obs)]);
+        tx.append([
+          makeCostRecordedEvent(pid, obs),
+          makeCostRecordedEvent(pid, { ...obs, turn: 1 }),
+        ]);
         const db = tx.raw as DatabaseSync;
         ensureCostTables(db, { backfillLegacy: false });
         db.prepare(
           `INSERT INTO cost_rollup
              (kind, id, total_cost_usd, input_tokens, output_tokens, total_tokens, used_pct, observations)
            VALUES
-             ('agent', 'a1', 0, 0, 0, 20, 0, 2),
-             ('task', 't1', 0, 0, 0, 20, 0, 2)`,
+             ('agent', 'a1', 0, 14, 16, 0, 0, 2),
+             ('task', 't1', 0, 14, 16, 0, 0, 2)`,
         ).run();
       });
     } finally {
@@ -506,14 +510,18 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
         expect.objectContaining({
           kind: 'agent',
           id: 'a1',
-          totalTokens: 10,
+          inputTokens: 7,
+          outputTokens: 8,
+          totalTokens: 15,
           observations: 1,
           tokenObservations: 1,
         }),
         expect.objectContaining({
           kind: 'task',
           id: 't1',
-          totalTokens: 10,
+          inputTokens: 7,
+          outputTokens: 8,
+          totalTokens: 15,
           observations: 1,
           tokenObservations: 1,
         }),
@@ -534,6 +542,44 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
       ).toBe(0);
     } finally {
       audit.close();
+    }
+  });
+
+  it('readRollups fails loud on conflicting legacy duplicate cost observations', () => {
+    const pid = 'p-rollup-readonly-legacy-conflict';
+    const obs = {
+      provider: 'codex' as const,
+      agent: 'a1',
+      task: 't1',
+      turn: 0,
+      total_tokens: 10,
+    };
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        tx.append([
+          makeCostRecordedEvent(pid, obs),
+          makeCostRecordedEvent(pid, { ...obs, total_tokens: 99 }),
+        ]);
+        const db = tx.raw as DatabaseSync;
+        ensureCostTables(db, { backfillLegacy: false });
+        db.prepare(
+          `INSERT INTO cost_rollup
+             (kind, id, total_cost_usd, input_tokens, output_tokens, total_tokens, used_pct, observations)
+           VALUES
+             ('agent', 'a1', 0, 0, 0, 10, 0, 1),
+             ('task', 't1', 0, 0, 0, 10, 0, 1)`,
+        ).run();
+      });
+    } finally {
+      project.close();
+    }
+
+    const store = openDispatchStore(pid);
+    try {
+      expect(() => store.readRollups()).toThrow(/conflicting duplicate cost observation/);
+    } finally {
+      store.close();
     }
   });
 
