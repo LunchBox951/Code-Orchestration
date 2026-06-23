@@ -740,6 +740,67 @@ describe('ConductorEngine — concurrent-launch + mid-turn release safety (#73)'
     await turnP; // the turn's finally finalizes the deferred release
     expect(killed).toBe(true); // killed only after the turn yielded
   });
+
+  it('drains a deferred (mid-turn) release in closeAll so teardown leaves no live pane', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedActionableMail(projectId, 'impl-x');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    const { engine, pty } = makeEngine();
+    const { hosted, pane } = await hostPane(engine, pty, identity);
+
+    let killed = false;
+    const origKill = pane.kill.bind(pane);
+    (pane as unknown as { kill: () => void }).kill = () => {
+      killed = true;
+      origKill();
+    };
+
+    const item = outstandingItem(projectId, 'impl-x');
+    // The turn is in flight (injectMail awaiting a composer echo that never comes under the test's
+    // never-resolving retry seam); attach a catch so the killed-mid-flight turn cannot surface as an
+    // unhandled rejection, but do NOT await it (it intentionally never yields here).
+    const turnP = engine.runOneTurn(hosted, item);
+    void turnP.catch(() => {});
+    await tick(); // turn in flight → turnInFlight=true
+    await engine.release(projectId, 'impl-x'); // deferred: pane removed from `hosted`, kill stored in releasePending
+    expect(killed).toBe(false);
+
+    // Teardown arrives BEFORE the turn yields. The pane is no longer in `hosted`, so closeAll's main
+    // loop cannot see it — only the releasePending drain (#73) kills it. Without that drain a live pane
+    // would leak past teardown.
+    await engine.closeAll();
+    expect(killed).toBe(true);
+  });
+
+  it('clears the launch latch when a launch rejects, so a later ensureHosted can spawn a fresh pane', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const identity = makeIdentity({ agent: 'impl-x', projectId, cwd });
+    // First launch fails at the MCP-transport bind; doEnsureHosted kills the pane and re-throws. The
+    // `launching` latch MUST be cleared in ensureHosted's finally — otherwise the agent is wedged
+    // forever (every retry returns the same rejected in-flight promise).
+    let failNextTransport = true;
+    const { engine, pty } = makeEngine({
+      makeTransport: () => {
+        if (failNextTransport) {
+          failNextTransport = false;
+          throw new Error('transport bind failed (injected)');
+        }
+        return InMemoryTransport.createLinkedPair();
+      },
+    });
+
+    const firstP = engine.ensureHosted(identity);
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    await expect(firstP).rejects.toThrow(/transport bind failed/);
+
+    // The latch was cleared, so a retry spawns a fresh pane (not the stale rejected promise) and succeeds.
+    const retryP = engine.ensureHosted(identity);
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    const hosted = await retryP;
+    expect(hosted.identity.agent).toBe('impl-x');
+  });
 });
 
 // ── completion stays verb-keyed (turn-end ≠ work-end) ──────────────────────────

@@ -120,6 +120,24 @@ describe('AC-L2-3 — completeness gate: RED for a stub/partial tool', () => {
     expect(violations.every((v) => v.tool === BOGUS)).toBe(true);
   });
 
+  it('(d) a valid-ZodObject OUTPUT schema that cannot project to JSON Schema is flagged not mountable', () => {
+    // Mirror of the input case, for the OUTPUT projection: the shape check passes (it IS a described
+    // ZodObject), but toolOutputJsonSchema's z.toJSONSchema() throws on the Map. The gate must exercise
+    // the output projection too — otherwise an unprojectable output mounts and breaks tools/list.
+    const violations = checkToolCompleteness(
+      realPlus(
+        bogus({
+          outputSchema: z.object({
+            m: z.map(z.string(), z.string()).describe('an unprojectable map'),
+          }),
+        }),
+      ),
+    );
+    const forBogus = violations.filter((v) => v.tool === BOGUS);
+    expect(forBogus.some((v) => v.reason.startsWith('not mountable'))).toBe(true);
+    expect(violations.every((v) => v.tool === BOGUS)).toBe(true);
+  });
+
   it('(a) a tool with an undescribed input field is flagged for self-describing input', () => {
     const violations = checkToolCompleteness(
       realPlus(bogus({ inputSchema: z.object({ x: z.number() }) })), // ← field lacks .describe()
