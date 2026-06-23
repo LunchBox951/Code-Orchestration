@@ -38,6 +38,7 @@ import {
 import { branchMerged, resolveAgentBranch } from '../../plans/worker-branch.js';
 import type { WorktreeStore } from '../../worktrees/worktree-store.js';
 import { rollbackError, throwWithRollbackErrors } from '../../rollback-errors.js';
+import type { ToolContext } from '../context.js';
 
 // Every input field carries a .describe() (Principle 5 — the schemas are the single syntax source).
 // The caller never supplies its own identity; `parent` is the SPAWNER this sandbox is for, a
@@ -240,6 +241,50 @@ const slingOutput = z
   });
 type SlingOutput = z.infer<typeof slingOutput>;
 
+function childCapWaitingDisposition(
+  ctx: ToolContext & {
+    readonly roster: NonNullable<ToolContext['roster']>;
+    readonly worktrees: WorktreeStore;
+  },
+): SlingOutput | undefined {
+  const worktrees = ctx.worktrees;
+  const reviews = ctx.reviews;
+  const agentControl = ctx.agentControl;
+  const children: CapChild[] = ctx.roster
+    .listAgents()
+    .filter((a) => a.parent === ctx.agent)
+    .map((a) => ({
+      childId: a.agentId,
+      role: a.role,
+      branch: resolveAgentBranch(worktrees, a.agentId),
+    }));
+  if (!children.some((c) => c.role !== 'reviewer')) return undefined;
+  const cap = resolveMaxActiveChildren(ctx.projectId);
+  const target = reviews != null ? readWorktreeInfo(ctx.cwd).branch : undefined;
+  const disposition = childCapDisposition(
+    children,
+    (child) => branchMerged(reviews, target, child.branch),
+    cap,
+    // A durably STOPPED child (operator Stop, #131) no longer occupies a slot. With no control
+    // store injected, no child is treated as inactive — the count stays conservative (unchanged).
+    (child) => agentControl?.isStopped(child.childId) === true,
+  );
+  if (!disposition.queued) return undefined;
+  return {
+    status: 'waiting',
+    waiting: {
+      message:
+        `dispatch queued: parent '${ctx.agent}' already has ${disposition.activeCount} active ` +
+        `child(ren) at the cap of ${cap}. Wait for a child branch to merge before slinging another.`,
+      next_step:
+        'Integrate or land an active child branch to free a slot, then re-issue this co_sling.',
+      reason: `max active children reached (${disposition.activeCount}/${cap})`,
+      maxed_providers: [],
+      unavailable_providers: [],
+    },
+  };
+}
+
 function parseKnownSpawnRole(tool: string, roleId: string): Role {
   const parsed = parseSubRoleId(roleId.trim().toLowerCase());
   if (!(BASE_ROLES as readonly string[]).includes(parsed.baseRole)) {
@@ -298,6 +343,7 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     if (!ctx.roster) {
       throw new Error('co_sling: the mount did not inject a roster store (ctx.roster absent).');
     }
+    const checkedCtx = { ...ctx, roster: ctx.roster, worktrees: ctx.worktrees };
     assertToolCallerRole('co_sling', ctx.roster, ctx.agent, ['coordinator', 'lead', 'implementer']);
     if (ctx.roster.getAgent(input.agent) != null) {
       throw new Error(
@@ -342,47 +388,11 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     // exactly as before — a tool never opens its own control store (Principle 9). This gate fires
     // BEFORE dispatch placement, so an over-cap dispatch records no placement decision — there is no
     // placement to decide, just a queued WAITING (Principle 9 — never a silent overrun).
-    const worktrees = ctx.worktrees;
-    const reviews = ctx.reviews;
-    const agentControl = ctx.agentControl;
-    const children: CapChild[] = ctx.roster
-      .listAgents()
-      .filter((a) => a.parent === ctx.agent)
-      .map((a) => ({
-        childId: a.agentId,
-        role: a.role,
-        branch: resolveAgentBranch(worktrees, a.agentId),
-      }));
     // Reviewers are exempt from the cap (AC-L6b-8): they never occupy a slot. Reviewer dispatch is
     // now rejected outright above (#94 — gate-internal only), so the dispatched child is always a
     // non-reviewer here; the cap counts only this parent's existing non-reviewer children.
-    if (children.some((c) => c.role !== 'reviewer')) {
-      const cap = resolveMaxActiveChildren(ctx.projectId);
-      const target = reviews != null ? readWorktreeInfo(ctx.cwd).branch : undefined;
-      const disposition = childCapDisposition(
-        children,
-        (child) => branchMerged(reviews, target, child.branch),
-        cap,
-        // A durably STOPPED child (operator Stop, #131) no longer occupies a slot. With no control
-        // store injected, no child is treated as inactive — the count stays conservative (unchanged).
-        (child) => agentControl?.isStopped(child.childId) === true,
-      );
-      if (disposition.queued) {
-        return {
-          status: 'waiting',
-          waiting: {
-            message:
-              `dispatch queued: parent '${ctx.agent}' already has ${disposition.activeCount} active ` +
-              `child(ren) at the cap of ${cap}. Wait for a child branch to merge before slinging another.`,
-            next_step:
-              'Integrate or land an active child branch to free a slot, then re-issue this co_sling.',
-            reason: `max active children reached (${disposition.activeCount}/${cap})`,
-            maxed_providers: [],
-            unavailable_providers: [],
-          },
-        };
-      }
-    }
+    const earlyCapWait = childCapWaitingDisposition(checkedCtx);
+    if (earlyCapWait != null) return earlyCapWait;
 
     // Resolve the routing defaults over a single shared config store (one open, not two).
     const routingCfg = openConfigStore();
@@ -468,6 +478,13 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
           : {}),
       };
     }
+
+    // FINAL-A1 — re-check immediately before sandbox creation. Usage refresh / placement resolution
+    // above can await live metadata; during that window an operator re-wake may unstop a sibling and
+    // consume the slot this sling initially saw as free. If the parent is now at cap, queue loudly before
+    // any worktree, kickoff, live spawn, or placement side effect.
+    const lateCapWait = childCapWaitingDisposition(checkedCtx);
+    if (lateCapWait != null) return lateCapWait;
 
     // PLACED: create the sandbox and return placement + worktree facts.
     const result = slingWorktree(ctx.worktrees, {

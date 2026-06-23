@@ -913,6 +913,40 @@ describe('co_sling — L6b E4 child-cap (queue-as-WAITING for excess dispatches)
     expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(1);
   });
 
+  it('rechecks the child cap after async usage refresh before creating a sandbox', async () => {
+    const repo = makeMainRepo();
+    const base = makeContextWithDispatch('lead-7', repo, []);
+    base.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    base.roster!.recordAgent({ agentId: 'impl-stopped', role: 'implementer', parent: 'lead-7' });
+    const stopped = new Set(['impl-stopped']);
+    const ctx: ToolContext = {
+      ...base,
+      agentControl: {
+        isStopped: (agentId: string): boolean => stopped.has(agentId),
+        listStopped: (): readonly string[] => [...stopped],
+      },
+      usageSourceFactory: () => ({
+        read: async () => {
+          stopped.clear();
+          return healthySnapshot;
+        },
+      }),
+    };
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/late-cap-recheck',
+    })) as { status: string; waiting?: { reason: string } };
+
+    expect(out.status).toBe('waiting');
+    expect(out.waiting?.reason).toMatch(/max active children reached \(2\/2\)/);
+    expect(ctx.worktrees?.getWorktree('co/late-cap-recheck')).toBeUndefined();
+    expect(ctx.mail.outstanding('impl-c')).toHaveLength(0);
+    expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(0);
+    expect(() => git(repo, 'rev-parse', '--verify', 'co/late-cap-recheck')).toThrow();
+  });
+
   // #131 — WITHOUT the agentControl seam injected, behaviour is UNCHANGED: a stopped child cannot be
   // detected, so two children still occupy the cap and the 3rd sling QUEUES → WAITING (conservative).
   it('#131: without agentControl injected, the same two children still queue → WAITING', async () => {
