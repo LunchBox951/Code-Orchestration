@@ -208,7 +208,13 @@ describe('session start', () => {
   it('does not describe spec lock as a coordinator side effect', () => {
     expect(rendererSource).not.toContain('it locks the spec');
     expect(rendererSource).not.toContain('before it locks the spec');
-    expect(rendererSource).toContain('after you lock the spec with `co spec lock`');
+    expect(rendererSource).not.toContain('after you lock the spec with `co spec lock`');
+    expect(rendererSource).toContain('after you approve the spec-lock request in Mail');
+  });
+
+  it('labels approval actions generically because approvals can lock specs, file issues, or publish', () => {
+    expect(rendererSource).not.toContain('Approve &amp; merge');
+    expect(rendererSource).toContain('Approve request');
   });
 
   it('renderDashboard targets dashboard-content (not view-dashboard), preserving the session form', () => {

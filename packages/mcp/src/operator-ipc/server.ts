@@ -33,12 +33,15 @@ import {
   OPERATOR_IPC_METHODS,
   OPERATOR_IPC_TICK,
   OPERATOR_IPC_TRANSCRIPT,
+  applyApprovalLockSideEffect,
   buildHumanReviewVerdict,
+  isSpecLockApprovalKey,
   mintAvailableCoordinatorId,
   openMailStore,
   openRegistry,
   openReviewStore,
   openRosterStore,
+  openSpecStore,
   startCoordinatorSession,
   type ArchiveStore,
   type ApprovalDecision,
@@ -52,6 +55,7 @@ import {
   type RosterStore,
   type ReviewContext,
   type ReviewStore,
+  type SpecStore,
   type ReviewVerdictValue,
   type ReplyDraft,
   type StartSessionResult,
@@ -87,6 +91,8 @@ export interface OperatorIpcServerDeps {
   readonly openMail?: (projectId: ProjectId) => MailStore;
   /** Opens the project review store for human `review_response` replies. Default: {@link openReviewStore}. */
   readonly openReview?: (projectId: ProjectId) => ReviewStore;
+  /** Opens the project spec store for the #91 approve→spec-lock bridge. Default: {@link openSpecStore}. */
+  readonly openSpec?: (projectId: ProjectId) => SpecStore;
   /** Diagnostic seam for server-side errors (a push to a gone client, a transport error). Default: none. */
   readonly onError?: (error: unknown) => void;
   /** Locks the socket file after listen. Default: {@link chmodSync}. Injected for lifecycle tests. */
@@ -266,6 +272,7 @@ export class OperatorIpcServer {
   private readonly socketPath: string;
   private readonly openMail: (projectId: ProjectId) => MailStore;
   private readonly openReview: (projectId: ProjectId) => ReviewStore;
+  private readonly openSpec: (projectId: ProjectId) => SpecStore;
   private readonly onError: ((error: unknown) => void) | undefined;
   private readonly chmodSocket: (socketPath: string, mode: number) => void;
   private readonly openRegistryFn: () => ProjectRegistry;
@@ -284,6 +291,7 @@ export class OperatorIpcServer {
     this.socketPath = deps.socketPath;
     this.openMail = deps.openMail ?? openMailStore;
     this.openReview = deps.openReview ?? openReviewStore;
+    this.openSpec = deps.openSpec ?? openSpecStore;
     this.onError = deps.onError;
     this.chmodSocket = deps.chmodSocket ?? chmodSync;
     this.openRegistryFn = deps.openRegistryFn ?? openRegistry;
@@ -634,9 +642,32 @@ export class OperatorIpcServer {
       if (found.resolved) {
         throw new Error(`operator IPC reply: mail seq=${seq} is already resolved.`);
       }
+      if (draft.type === MAIL_APPROVAL_RESPONSE && draft.decision != null) {
+        const sender = draft.from ?? found.recipient;
+        if (sender !== found.recipient) {
+          throw new Error(
+            `operator IPC reply: approval_response sender '${sender}' must match holder ` +
+              `'${found.recipient}'.`,
+          );
+        }
+        this.applySpecLockApprovalSideEffectBeforeResponse(found, draft.decision);
+      }
       return mail.reply(found, draft);
     } finally {
       mail.close();
+    }
+  }
+
+  private applySpecLockApprovalSideEffectBeforeResponse(
+    approval: DeliveredMail,
+    decision: ApprovalDecision,
+  ): void {
+    if (approval.type !== MAIL_APPROVAL || !isSpecLockApprovalKey(approval.idempotencyKey)) return;
+    const specs = this.openSpec(this.projectId);
+    try {
+      applyApprovalLockSideEffect(specs, approval, decision);
+    } finally {
+      specs.close();
     }
   }
 
@@ -781,21 +812,27 @@ export class OperatorIpcServer {
     const subject = requireString(reply, 'subject');
     const body = requireString(reply, 'body');
     const mail = this.openMail(this.projectId);
+    let approval: DeliveredMail;
     try {
       // Approvals are operator-terminal (validateEnvelope: `approval` must be addressed to @operator),
       // so the approval always lives in @operator's inbox — the single place to resolve it from.
-      const approval = mail.inbox(OPERATOR).find((m) => m.seq === approvalSeq);
-      if (approval == null) {
+      const found = mail.inbox(OPERATOR).find((m) => m.seq === approvalSeq);
+      if (found == null) {
         throw new Error(`operator IPC approve: no mail seq=${approvalSeq} in '${OPERATOR}' inbox.`);
       }
-      if (approval.type !== MAIL_APPROVAL) {
+      if (found.type !== MAIL_APPROVAL) {
         throw new Error(
-          `operator IPC approve: mail seq=${approvalSeq} is '${approval.type}', not an approval.`,
+          `operator IPC approve: mail seq=${approvalSeq} is '${found.type}', not an approval.`,
         );
       }
-      if (approval.resolved) {
+      if (found.resolved) {
         throw new Error(`operator IPC approve: mail seq=${approvalSeq} is already resolved.`);
       }
+      approval = found;
+      // Issue #91 — bridge an approve of a `spec-lock:<taskId>` approval to the real lock path. Run
+      // the lock BEFORE recording the approval_response: if D3 refuses the lock, the operator action
+      // must remain unresolved/retryable instead of being consumed by a failed side effect.
+      this.applySpecLockApprovalSideEffectBeforeResponse(approval, decision);
       return mail.reply(approval, { type: MAIL_APPROVAL_RESPONSE, decision, subject, body });
     } finally {
       mail.close();

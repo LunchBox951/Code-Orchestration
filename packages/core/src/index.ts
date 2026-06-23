@@ -1136,6 +1136,18 @@ export { openSpecStore } from './specs/specs-store.js';
 // the public `co spec lock` operator CLI so the two surfaces cannot drift.
 export { lockSpec } from './specs/lock-spec.js';
 
+// Issue #91 — the operator-`approve` → spec-lock bridge: a self-identifying `spec-lock:<taskId>`
+// approval (mirrors issue-filing's `issue-file:<id>` idiom) and the single shared primitive that,
+// on an approve answering such a mail, runs the SAME `lockSpec` path (D3 gate then recordLock as
+// @operator). Adapters (packages/mcp) import these — they must not re-implement the bridge.
+export {
+  specLockApprovalKey,
+  isSpecLockApprovalKey,
+  taskIdFromSpecLockApprovalKey,
+  buildSpecLockApprovalEnvelope,
+  applyApprovalLockSideEffect,
+} from './specs/spec-lock-approval.js';
+
 // L6b F2 — the PURE criterion validator (D2): the structural acceptance-criteria gate. `validateCriteria`
 // returns one violation per failed criterion (`[]` ⇒ all valid); the PRIMARY check is a wired `verify`
 // command present (it never hard-codes a project command), the SECONDARY is a conservative `VACUOUS_PHRASES`

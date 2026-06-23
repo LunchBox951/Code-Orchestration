@@ -302,7 +302,7 @@ function coordinatorPhaseCopy(status: AgentStatus): CoordinatorPhaseCopy {
         title: 'Coordinator session is live',
         body:
           'The root coordinator is reading the handoff and may be waiting on operator approval; ' +
-          'it fans out after you lock the spec with `co spec lock`.',
+          'it fans out after you approve the spec-lock request in Mail.',
         subline: 'Conductor driving 1 agent · coordinator session live',
         pulse: true,
       };
@@ -769,7 +769,7 @@ function renderDashboard(): void {
         : `<div class="empty-inline">
            <span class="glyph">∅</span>
            <span class="lead">No agents yet.</span>
-          <span class="sub">Start a coordinator session — the fleet starts after you lock the spec with \`co spec lock\`.</span>
+          <span class="sub">Start a coordinator session — the fleet starts after you approve the spec-lock request in Mail.</span>
          </div>`;
 
   // Right column varies by phase
@@ -1330,7 +1330,7 @@ function renderMailDetail(state: MailState, prevState: MailState | null): void {
       <div class="mail-actions">
         <div class="lbl-row"><span class="lbl">Quick actions</span><span class="hint">one click sends a structured approval ack</span></div>
         <div class="btns">
-          <button class="btn btn-success" data-action="approve" data-seq="${selected.seq}"${pendingAttr}>Approve &amp; merge</button>
+          <button class="btn btn-success" data-action="approve" data-seq="${selected.seq}"${pendingAttr}>Approve request</button>
           <button class="btn btn-ghost" data-action="open-composer" data-seq="${selected.seq}" data-recipient="${esc(selected.recipient)}" data-type="approval_response" data-subject="${esc(`Re: ${selected.subject}`)}"${pendingAttr}>Add note</button>
           <button class="btn btn-danger" data-action="decline" data-seq="${selected.seq}"${pendingAttr}>Decline</button>
         </div>
