@@ -442,6 +442,10 @@ export class OperatorIpcServer {
         // B4 — cascade-delete the agent and its entire subtree via the daemon's control surface.
         await this.control.deleteAgent(requireString(params, 'agentId'));
         return {};
+      case OPERATOR_IPC_METHODS.reclaimChild:
+        // #131 — GRANULAR reclaim of a single leaf child (frees its dispatch slot). Refuses a non-leaf.
+        await this.control.reclaimChild(requireString(params, 'childId'));
+        return {};
       case OPERATOR_IPC_METHODS.rewake:
         // B4 — post actionable follow-up work, then clear suppression.
         return (await this.handleRewake(params)) as unknown as WirePayload;

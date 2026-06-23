@@ -70,27 +70,34 @@ export interface ChildCapDisposition {
 }
 
 /**
- * Count a parent's ACTIVE children: non-reviewer children whose branch is NOT merged. Reviewers are
- * EXCLUDED (they never occupy a slot); a child for which `isMerged` returns true has freed its slot.
- * Pure + deterministic over the injected `children` + `isMerged` predicate.
+ * Count a parent's ACTIVE children: non-reviewer children whose branch is NOT merged AND that are
+ * NOT inactive. Reviewers are EXCLUDED (they never occupy a slot); a child for which `isMerged`
+ * returns true has freed its slot; a child for which `isInactive` returns true (e.g. durably STOPPED
+ * by the operator — #131) no longer occupies a slot either. `isInactive` defaults to `() => false`,
+ * preserving the existence-only behaviour for every caller that does not supply it. Pure +
+ * deterministic over the injected `children` + the two predicates.
  */
 export function activeChildCount(
   children: readonly CapChild[],
   isMerged: (child: CapChild) => boolean,
+  isInactive: (child: CapChild) => boolean = () => false,
 ): number {
-  return children.filter((c) => c.role !== 'reviewer' && !isMerged(c)).length;
+  return children.filter((c) => c.role !== 'reviewer' && !isMerged(c) && !isInactive(c)).length;
 }
 
 /**
  * Decide whether a NEW dispatch under this parent must queue. Returns `{ queued: true }` when the
- * active-child count is at or beyond `cap` (the new dispatch WAITS), else `{ queued: false }`. Pure —
+ * active-child count is at or beyond `cap` (the new dispatch WAITS), else `{ queued: false }`. The
+ * optional `isInactive` predicate excludes children that hold no live slot (#131 — e.g. operator
+ * STOPPED children); it defaults to `() => false`, so existing two-arg callers are unaffected. Pure —
  * mirrors `acquireMergeSlot`'s first-class queued result; the caller surfaces WAITING loudly.
  */
 export function childCapDisposition(
   children: readonly CapChild[],
   isMerged: (child: CapChild) => boolean,
   cap: number,
+  isInactive: (child: CapChild) => boolean = () => false,
 ): ChildCapDisposition {
-  const activeCount = activeChildCount(children, isMerged);
+  const activeCount = activeChildCount(children, isMerged, isInactive);
   return { queued: activeCount >= cap, activeCount, cap };
 }

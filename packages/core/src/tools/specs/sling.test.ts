@@ -884,6 +884,54 @@ describe('co_sling — L6b E4 child-cap (queue-as-WAITING for excess dispatches)
     expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(0);
   });
 
+  // #131 — a durably STOPPED child no longer occupies a slot. With the operator-control seam injected
+  // and one of two children stopped, the third sling is PLACED (the slot was freed). Mirrors the
+  // "queues at cap of 2" test above but flips the outcome via the agentControl seam.
+  it('#131: a stopped child frees a slot so a 3rd sling is PLACED (agentControl injected)', async () => {
+    const repo = makeMainRepo();
+    const base = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    // Two children under lead-7 → existence cap of 2; one is durably STOPPED via the seam.
+    base.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    base.roster!.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
+    const stopped = new Set(['impl-b']);
+    const ctx: ToolContext = {
+      ...base,
+      agentControl: {
+        isStopped: (agentId: string): boolean => stopped.has(agentId),
+        listStopped: (): readonly string[] => [...stopped],
+      },
+    };
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/stopped-freed-slot',
+    })) as { status: string };
+
+    expect(out.status).toBe('placed');
+    expect(ctx.worktrees?.getWorktree('co/stopped-freed-slot')).toBeDefined();
+    expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(1);
+  });
+
+  // #131 — WITHOUT the agentControl seam injected, behaviour is UNCHANGED: a stopped child cannot be
+  // detected, so two children still occupy the cap and the 3rd sling QUEUES → WAITING (conservative).
+  it('#131: without agentControl injected, the same two children still queue → WAITING', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    expect(ctx.agentControl).toBeUndefined();
+    ctx.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/no-control-store-still-queues',
+    })) as { status: string };
+
+    expect(out.status).toBe('waiting');
+    expect(ctx.worktrees?.getWorktree('co/no-control-store-still-queues')).toBeUndefined();
+  });
+
   it('reviewer children do NOT occupy a slot — a parent with only reviewer children still places', async () => {
     const repo = makeMainRepo();
     const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);

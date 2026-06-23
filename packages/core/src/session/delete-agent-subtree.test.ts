@@ -391,6 +391,49 @@ describe('deleteAgentSubtree', () => {
     expect(roster.listAgents()).toHaveLength(0);
   });
 
+  // #131 — leaf-safe granular reclaim: running deleteAgentSubtree on ONE childless leaf removes
+  // exactly that agent (its worktree + roster row + slot), leaving siblings + parent intact. This is
+  // the primitive the new reclaimChild host method calls on a single leaf.
+  it('on a single childless leaf, removes only that leaf (sibling + parent intact) — #131', () => {
+    // coord → { lead-a (leaf), lead-b (leaf) }. Reclaim ONLY lead-a.
+    const roster = makeFakeRoster([
+      { agentId: 'coord', role: 'coordinator', parent: '@operator', registeredTs: 1 },
+      { agentId: 'lead-a', role: 'lead', parent: 'coord', registeredTs: 2 },
+      { agentId: 'lead-b', role: 'lead', parent: 'coord', registeredTs: 3 },
+    ]);
+    const wtA = worktree('co/lead-a', 'lead-a');
+    const wtB = worktree('co/lead-b', 'lead-b');
+    const worktreeStore = makeFakeWorktrees([wtA, wtB]);
+    const sessions = makeFakeSessions([]);
+    const archive = makeFakeArchive();
+    const { spy: gitExec } = makeGitExecSpy();
+    // lead-a's branch is merged so it deletes cleanly (no archive); the point is the SCOPE of removal.
+    const gitReader = makeGitReader({ mergedBranches: new Set(['co/lead-a']) });
+
+    const result = deleteAgentSubtree('proj', 'lead-a', {
+      openRoster: () => roster,
+      openWorktrees: () => worktreeStore,
+      openSessions: () => sessions,
+      openArchive: () => archive,
+      repoCwd: '/repo',
+      nowMs: 10_000,
+      gitExec,
+      gitReader,
+    });
+
+    // Exactly the one leaf removed.
+    expect(result.removed).toEqual(['lead-a']);
+    expect(roster.removed).toEqual(['lead-a']);
+    // The sibling and the parent survive in the roster.
+    const survivors = roster.listAgents().map((a) => a.agentId);
+    expect(survivors).toContain('lead-b');
+    expect(survivors).toContain('coord');
+    expect(survivors).not.toContain('lead-a');
+    // Only lead-a's worktree was removed; lead-b's was untouched.
+    expect(worktreeStore.removedBranches).toEqual(['co/lead-a']);
+    expect(worktreeStore.removedBranches).not.toContain('co/lead-b');
+  });
+
   it('deletes merged branches with branch -d (not -D)', () => {
     const roster = makeFakeRoster([
       { agentId: 'coord-x', role: 'coordinator', parent: '@operator', registeredTs: 1 },

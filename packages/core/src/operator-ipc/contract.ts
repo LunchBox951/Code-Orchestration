@@ -81,6 +81,13 @@ export const OPERATOR_IPC_METHODS = {
    */
   deleteAgent: 'deleteAgent',
   /**
+   * Reclaim a SINGLE leaf child (#131): tear down just that childless agent's worktree/branch/session/
+   * roster row, freeing its dispatch slot (the active-child cap drops automatically). Refuses a child
+   * that still has descendants — use {@link OPERATOR_IPC_METHODS.deleteAgent} for a whole subtree.
+   * Delegates to `ConductorControlSurface.reclaimChild`.
+   */
+  reclaimChild: 'reclaimChild',
+  /**
    * Re-wake a stopped/paused/stuck agent by posting an actionable `clarify_request` from `@operator`,
    * then clearing all suppression state — so `selectEligible` picks it up on the next daemon tick.
    * Unlike {@link OPERATOR_IPC_METHODS.operatorMessage} (which posts but does not unstop), this verb
@@ -235,6 +242,14 @@ export interface OperatorIpcSurface {
    * core primitive.
    */
   deleteAgent(agentId: string): Promise<void>;
+  /**
+   * Reclaim a SINGLE leaf child (#131): tear down just `childId`'s worktree/branch/session/roster row,
+   * freeing its dispatch slot so the parent's active-child cap drops. A control verb that requires the
+   * daemon socket — throws a clear error when the Conductor is down (Principle 9). Refuses a child that
+   * still has descendants (use {@link deleteAgent} for a whole subtree). Delegates to
+   * `ConductorControlSurface.reclaimChild`.
+   */
+  reclaimChild(childId: string): Promise<void>;
   /**
    * Re-wake `agentId`: post an actionable `clarify_request` from `@operator`, then clear all
    * suppression state (stopped/paused/stuck) so the daemon's `selectEligible` wakes the recipient on

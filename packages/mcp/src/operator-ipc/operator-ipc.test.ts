@@ -309,6 +309,7 @@ function makeControl(
       }),
     reviewContext,
     deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+    reclaimChild: () => Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
     listArchive: () => Promise.resolve([]),
     restoreArchive: () =>
       Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -873,6 +874,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -926,6 +929,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -979,6 +984,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -1035,6 +1042,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -1088,6 +1097,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -2841,6 +2852,8 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       onTranscript: () => () => {},
       reviewContext: (reviewId) => Promise.resolve({ kind: 'not-found', reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -3580,6 +3593,38 @@ describe('B4 — deleteAgent + rewake operator-IPC verbs', () => {
     expect(client.connected).toBe(true);
 
     // Suppress unused-variable warning for the router that `makeControl` returns.
+    void router;
+  });
+
+  // #131 — the reclaimChild operator-IPC verb routes the childId to control.reclaimChild end-to-end.
+  it('reclaimChild dispatches end-to-end: control.reclaimChild is called with the right childId', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+
+    const reclaimedChildIds: string[] = [];
+    const { router, control: baseControl } = makeControl(engine, projectId);
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      reclaimChild: (childId) => {
+        reclaimedChildIds.push(childId);
+        return Promise.resolve();
+      },
+    };
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.reclaimChild('impl-x');
+
+    expect(reclaimedChildIds).toEqual(['impl-x']);
+    expect(client.connected).toBe(true);
+
     void router;
   });
 

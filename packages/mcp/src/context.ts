@@ -4,6 +4,7 @@ import {
   buildCoreRegistry,
   defaultUsageSourceFactory,
   findSubRole,
+  openAgentControlStore,
   openDispatchStore,
   openIssueStore,
   openMailStore,
@@ -200,6 +201,11 @@ export function openContextStores(
     closeOnFailure.push(() => research.close());
     const archive = openArchiveStore(projectId);
     closeOnFailure.push(() => archive.close());
+    // #131 — durable operator-control state, injected read-only so co_sling can EXCLUDE stopped
+    // children from the active-child cap (a STOPPED child holds no live slot). Opened by the mount,
+    // never by the tool (Principle 9).
+    const agentControl = openAgentControlStore(projectId);
+    closeOnFailure.push(() => agentControl.close());
 
     const ctx: ToolContext = {
       agent,
@@ -216,6 +222,7 @@ export function openContextStores(
       issues,
       research,
       archive,
+      agentControl,
       usageSourceFactory: opts?.usageSourceFactory ?? defaultUsageSourceFactory,
       ...(opts?.reviewerSpawnGate != null ? { reviewerSpawnGate: opts.reviewerSpawnGate } : {}),
     };

@@ -333,14 +333,18 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
     }
 
     // ── L6b E4 child-cap: queue-as-WAITING when the parent is at its active-children cap ──
-    // Active children are this parent's NON-REVIEWER children whose branch is NOT yet merged
-    // (reviewers never occupy a slot; a merged child has freed its slot). The merged check uses the
-    // same `(parent integration branch, child branch)` PASS-verdict convention as co_phase_status.
-    // An absent review store conservatively counts every non-reviewer child as still-active. This
-    // gate fires BEFORE dispatch placement, so an over-cap dispatch records no placement decision —
-    // there is no placement to decide, just a queued WAITING (Principle 9 — never a silent overrun).
+    // Active children are this parent's NON-REVIEWER children whose branch is NOT yet merged and that
+    // are NOT durably STOPPED (reviewers never occupy a slot; a merged child has freed its slot; a
+    // STOPPED child holds no live slot either — #131). The merged check uses the same `(parent
+    // integration branch, child branch)` PASS-verdict convention as co_phase_status. The stopped
+    // check reads the operator-control seam injected by the mount (`ctx.agentControl`); when it is
+    // ABSENT (headless/tests) the cap conservatively counts every non-reviewer child as still-active,
+    // exactly as before — a tool never opens its own control store (Principle 9). This gate fires
+    // BEFORE dispatch placement, so an over-cap dispatch records no placement decision — there is no
+    // placement to decide, just a queued WAITING (Principle 9 — never a silent overrun).
     const worktrees = ctx.worktrees;
     const reviews = ctx.reviews;
+    const agentControl = ctx.agentControl;
     const children: CapChild[] = ctx.roster
       .listAgents()
       .filter((a) => a.parent === ctx.agent)
@@ -359,6 +363,9 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
         children,
         (child) => branchMerged(reviews, target, child.branch),
         cap,
+        // A durably STOPPED child (operator Stop, #131) no longer occupies a slot. With no control
+        // store injected, no child is treated as inactive — the count stays conservative (unchanged).
+        (child) => agentControl?.isStopped(child.childId) === true,
       );
       if (disposition.queued) {
         return {
