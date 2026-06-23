@@ -274,18 +274,19 @@ describe('injectMail — production default settle window', () => {
     const pane = new FakePty().spawn(CODEX_SPEC);
     const text = 'z'.repeat(400);
     const payloadLength = PASTE_START.length + text.length + PASTE_END.length;
+    const payloadSettleMs = adaptiveSettleMs(payloadLength);
     const p = injectMail(pane, text, { provider: 'codex' });
 
     expect(pane.written).toEqual([PASTE_START + text + PASTE_END]);
 
-    await vi.advanceTimersByTimeAsync(adaptiveSettleMs(0));
+    expect(payloadSettleMs).toBeGreaterThan(adaptiveSettleMs(0));
+    await vi.advanceTimersByTimeAsync(payloadSettleMs - 1);
     await vi.advanceTimersByTimeAsync(0);
     expect(pane.written).toEqual([PASTE_START + text + PASTE_END]);
 
     pane.emit(text);
     await p;
     expect(pane.written).toEqual([PASTE_START + text + PASTE_END, SUBMIT]);
-    expect(adaptiveSettleMs(payloadLength)).toBeGreaterThan(adaptiveSettleMs(0));
   });
 });
 
