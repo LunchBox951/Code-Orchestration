@@ -85,7 +85,7 @@ function deriveState(inputs: LimitsCostInputs): LimitsCostState {
       provider: status.provider,
       account: status.account,
       windowKind: 'unknown',
-      displayLabel: labelWindowKind(status.provider, 'unknown'),
+      displayLabel: 'headroom',
       // No bucket for this account → deriveHeadroom yields `unknown` (unavailable reason when the
       // status itself is unavailable, "no usage observed for this window" when available-but-empty).
       headroom: deriveHeadroom(status, undefined),

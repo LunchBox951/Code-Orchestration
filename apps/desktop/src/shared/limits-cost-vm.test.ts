@@ -236,6 +236,29 @@ describe('LimitsCostVM', () => {
     expect(typeof row.displayLabel).toBe('string');
   });
 
+  it('an unavailable status with NO matching bucket preserves the reason and readable label', () => {
+    const vm = new LimitsCostVM();
+    vm.update({
+      buckets: [],
+      accountStatuses: [
+        makeStatus({
+          provider: 'claude',
+          account: 'claude-acct',
+          available: false,
+          reason: 'API down',
+        }),
+      ],
+      rollups: [],
+    });
+    expect(vm.state.headroomRows).toHaveLength(1);
+    const row = vm.state.headroomRows[0]!;
+    expect(row.provider).toBe('claude');
+    expect(row.account).toBe('claude-acct');
+    expect(row.windowKind).toBe('unknown');
+    expect(row.displayLabel).toBe('headroom');
+    expect(row.headroom).toEqual({ kind: 'unknown', reason: 'API down' });
+  });
+
   it('a Codex bucket + a Claude status-with-no-bucket yields TWO provider groups', () => {
     const vm = new LimitsCostVM();
     vm.update({
