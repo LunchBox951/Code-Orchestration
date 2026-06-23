@@ -1197,6 +1197,62 @@ describe('ConductorEngine — P1b routes emitted mail via LiveDelivery (wake + i
     expect(existsSync(handoffPath)).toBe(false);
   });
 
+  it('scrubs routed warm Codex kickoff handoffs after failed pointer injection', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const wakes: Array<{ projectId: string; recipient: string }> = [];
+    const routeFailures: RouteFailure[] = [];
+    const deliveryFactories: DeliveryFactory[] = [];
+    const delegateHost = new LiveSessionHostImpl();
+    const host: LiveSessionHost = {
+      hostSession: (identity, transport, opts) => {
+        if (opts?.deliveryFactory != null) deliveryFactories.push(opts.deliveryFactory);
+        return delegateHost.hostSession(identity, transport, opts);
+      },
+    };
+    const { engine, pty } = makeEngine({
+      host,
+      injectOptions: { retryDelay: () => Promise.resolve(), maxEchoAttempts: 1 },
+      onRecipientWake: (pid, recipient) => wakes.push({ projectId: pid, recipient }),
+      onRouteFailure: (failure) => routeFailures.push(failure),
+    });
+    const { pane: bPane } = await hostCodexPane(
+      engine,
+      pty,
+      makeIdentity({
+        agent: 'impl-b',
+        projectId,
+        cwd,
+        provider: 'codex',
+        resume: { provider: 'codex', codexHome: join(cwd, '.codex-home') },
+      }),
+    );
+    const [deliveryFactory] = deliveryFactories;
+    if (deliveryFactory == null)
+      throw new Error('expected hosted session to capture deliveryFactory');
+    const routedMail = openMailStore(projectId, { deliveryFactory });
+    mailStores.push(routedMail);
+
+    const sent = routedMail.send({
+      type: 'clarify_request',
+      to: 'impl-b',
+      from: 'lead-1',
+      subject: 'routed kickoff',
+      body: 'please start now',
+      correlationId: turnKickoffCorrelationId('impl-b'),
+    });
+    await flush();
+    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-b', 'kickoff.txt');
+
+    expect(wakes).toContainEqual({ projectId, recipient: 'impl-b' });
+    expect(bPane.written).toContain(codexKickoffHandoffPointer());
+    expect(routeFailures).toHaveLength(1);
+    expect(routeFailures[0]!.phase).toBe('inject');
+    expect(routeFailures[0]!.mail.seq).toBe(sent.seq);
+    expect(outstandingCount(projectId, 'impl-b')).toBe(1);
+    expect(existsSync(handoffPath)).toBe(false);
+  });
+
   it('an emitted INFORMATIONAL mail wakes the recipient but does NOT inject (and never fails)', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');

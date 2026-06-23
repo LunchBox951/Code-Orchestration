@@ -50,6 +50,21 @@ describe('codex kickoff handoff path', () => {
     expect(() => codexKickoffHandoffPath(identity('..'))).toThrow(/unsafe agent id/i);
   });
 
+  it('keeps slash-bearing agent ids in one encoded handoff leaf', () => {
+    const root = join(projectDataDir('p-handoff-path'), 'handoffs');
+    for (const agent of ['../outside', 'impl/../other']) {
+      const target = identity(agent);
+      const handoffPath = codexKickoffHandoffPath(target);
+      expect(dirname(handoffPath)).toBe(join(root, encodeURIComponent(agent)));
+
+      writeCodexKickoffHandoff(target, `kickoff for ${agent}`);
+
+      expect(readFileSync(handoffPath, 'utf8')).toBe(`kickoff for ${agent}`);
+      expect(existsSync(join(root, 'outside', 'kickoff.txt'))).toBe(false);
+      expect(existsSync(join(root, 'other', 'kickoff.txt'))).toBe(false);
+    }
+  });
+
   it('rejects a symlinked agent handoff directory', () => {
     const target = identity('impl-cx');
     const handoffPath = codexKickoffHandoffPath(target);

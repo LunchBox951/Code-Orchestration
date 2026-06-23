@@ -734,7 +734,7 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     expect(pane.written.filter((w) => w === '\r')).toHaveLength(0); // never blind-fired Enter
   });
 
-  it('default FILE-HANDOFF writer scrubs the handoff when the cap retracts a kickoff', async () => {
+  it('default FILE-HANDOFF writer scrubs failed attempts while keeping retries live', async () => {
     const { projectId, repo } = makeProject();
     const clock = makeClock();
     const qw = makeQuietWindow();
@@ -753,17 +753,61 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     const hosted = engine.getHosted(projectId, 'impl-cx')!;
     const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt');
 
-    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    let turnP = engine.runOneTurn(hosted, kickoff);
+    await tick();
     expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    retry.settle();
+    await turnP;
+    expect(existsSync(handoffPath)).toBe(false);
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
 
-    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    turnP = engine.runOneTurn(hosted, kickoff);
+    await tick();
     expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    retry.settle();
+    await turnP;
+    expect(existsSync(handoffPath)).toBe(false);
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
 
-    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    turnP = engine.runOneTurn(hosted, kickoff);
+    await tick();
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    retry.settle();
+    await turnP;
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
     expect(existsSync(handoffPath)).toBe(false);
+  });
+
+  it('default FILE-HANDOFF writer scrubs an active handoff on closeAll before cap', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const pty = new FakePty();
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+    });
+    engines.push(engine);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt');
+
+    const turnP = engine.runOneTurn(hosted, kickoff);
+    await tick();
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+
+    await engine.closeAll();
+    expect(existsSync(handoffPath)).toBe(false);
+
+    retry.settle();
+    const turn = await turnP;
+    expect(turn.errored).toBe(true);
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
   });
 
   it('NON-VACUOUS: the kickoff SURVIVES every failed turn strictly before the cap, then disappears at it', async () => {

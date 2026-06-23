@@ -443,6 +443,7 @@ export class ConductorEngine {
   private readonly writeCodexHandoff: (identity: HostedIdentity, body: string) => string;
   private readonly removeCodexHandoff: (identity: HostedIdentity) => void;
   private readonly clarifyTimeoutSeconds: (projectId: ProjectId) => number;
+  private readonly activeCodexHandoffs = new Map<string, HostedIdentity>();
   /** Warm panes, keyed `${projectId}:${agent}` — the engine's launch-authority ledger (MNR-5). */
   private readonly hosted = new Map<string, HostedPane>();
   /** Pane-id occupancy, keyed `${projectId}:${pane}` — refuses two agents claiming one pane (MNR-5). */
@@ -1000,6 +1001,7 @@ export class ConductorEngine {
             this.kickoffInjectAttempts.delete(kickoffKey);
           }
         }
+        this.removeActiveCodexHandoff(hosted.identity, 'failed kickoff injection');
       }
       return { errored: true, error };
     } finally {
@@ -1245,24 +1247,40 @@ export class ConductorEngine {
 
   private consumeOneShotKickoff(identity: HostedIdentity, mail: DeliveredMail): void {
     if (!isTurnKickoffMail(mail)) return;
-    const store = this.openMail(identity.projectId);
+    let store: MailStore | undefined;
     try {
+      store = this.openMail(identity.projectId);
       store.retract(mail.sender, mail.seq);
     } finally {
-      store.close();
+      try {
+        store?.close();
+      } finally {
+        this.removeActiveCodexHandoff(identity, 'consumed codex kickoff');
+      }
     }
-    this.removeConsumedCodexHandoff(identity, mail);
   }
 
-  private removeConsumedCodexHandoff(identity: HostedIdentity, mail: DeliveredMail): void {
-    if (identity.provider !== 'codex' || !isTurnKickoffMail(mail)) return;
+  private recordActiveCodexHandoff(identity: HostedIdentity): void {
+    if (identity.provider !== 'codex') return;
+    this.activeCodexHandoffs.set(ConductorEngine.agentKey(identity.projectId, identity.agent), {
+      ...identity,
+    });
+  }
+
+  private removeActiveCodexHandoff(identity: HostedIdentity, reason: string): void {
+    if (identity.provider !== 'codex') return;
+    const agentKey = ConductorEngine.agentKey(identity.projectId, identity.agent);
+    const active = this.activeCodexHandoffs.get(agentKey);
+    if (active == null) return;
     try {
-      this.removeCodexHandoff(identity);
+      this.removeCodexHandoff(active);
     } catch (error) {
       console.error(
-        `[ConductorEngine] failed to remove consumed codex kickoff handoff for ` +
-          `'${identity.agent}' in project '${identity.projectId}': ${errorMessage(error)}`,
+        `[ConductorEngine] failed to remove codex kickoff handoff (${reason}) for ` +
+          `'${active.agent}' in project '${active.projectId}': ${errorMessage(error)}`,
       );
+    } finally {
+      this.activeCodexHandoffs.delete(agentKey);
     }
   }
 
@@ -1310,11 +1328,18 @@ export class ConductorEngine {
           'not-yet-hosted recipient from a PlacementRecord).',
       );
     }
-    await injectMail(
-      hosted.pane,
-      this.renderMail(mail),
-      this.injectOptionsFor(hosted.identity, mail),
-    );
+    try {
+      await injectMail(
+        hosted.pane,
+        this.renderMail(mail),
+        this.injectOptionsFor(hosted.identity, mail),
+      );
+    } catch (error) {
+      if (isTurnKickoffMail(mail)) {
+        this.removeActiveCodexHandoff(hosted.identity, 'failed routed kickoff injection');
+      }
+      throw error;
+    }
     this.consumeOneShotKickoff(hosted.identity, mail);
   }
 
@@ -1334,7 +1359,11 @@ export class ConductorEngine {
     return {
       ...base,
       codexHandoff: {
-        write: (body) => this.writeCodexHandoff(identity, body),
+        write: (body) => {
+          const path = this.writeCodexHandoff(identity, body);
+          this.recordActiveCodexHandoff(identity);
+          return path;
+        },
         pointer: codexKickoffHandoffPointer,
       },
     };
@@ -1526,6 +1555,7 @@ export class ConductorEngine {
     hosted: HostedPane,
     options: { readonly onPaneKillError?: (error: unknown) => void },
   ): Promise<void> {
+    this.removeActiveCodexHandoff(hosted.identity, 'pane release');
     try {
       hosted.pane.kill();
     } catch (error) {
@@ -1560,12 +1590,7 @@ export class ConductorEngine {
     }
     for (const [, hosted] of all) {
       try {
-        hosted.pane.kill();
-      } catch {
-        /* best-effort: pane may already be gone */
-      }
-      try {
-        await hosted.session.close();
+        await this.finalizeRelease(hosted, {});
       } catch {
         /* best-effort teardown */
       }
