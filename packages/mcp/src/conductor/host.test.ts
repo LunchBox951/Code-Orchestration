@@ -1635,7 +1635,7 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     void turn.catch(() => {});
     await tick();
 
-    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toThrow(/in-flight turn/i);
+    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toThrow(/launching|in-flight turn/i);
 
     expect(runner.control!.router.shouldSkip(projectId, 'leaf-a')).toBe(false);
     expect(engine.isHosted(projectId, 'leaf-a')).toBe(true);
@@ -1647,6 +1647,54 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     }
 
     await runner.stop({ waitForInFlight: false });
+  });
+
+  it('control.reclaimChild refuses a launching child before suppression or durable teardown', async () => {
+    const { projectId, cwd } = makeProject();
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+    roster.recordAgent({ agentId: 'leaf-a', role: 'implementer', parent: 'coord-x' });
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+
+    const launch = engine.ensureHosted({
+      ...makeIdentity('leaf-a', projectId, cwd),
+      agent: 'leaf-a',
+      role: 'implementer',
+      parent: 'coord-x',
+    });
+    void launch.catch(() => {});
+    await tick();
+    expect(pty.panes).toHaveLength(1);
+
+    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toThrow(/launching|in-flight turn/i);
+
+    expect(runner.control!.router.shouldSkip(projectId, 'leaf-a')).toBe(false);
+    expect(engine.isHosted(projectId, 'leaf-a')).toBe(false);
+    const rosterCheck = openRosterStore(projectId);
+    try {
+      expect(rosterCheck.getAgent('leaf-a')).toBeDefined();
+    } finally {
+      rosterCheck.close();
+    }
+
+    pty.panes[pty.panes.length - 1]!.exit(1, null);
+    await expect(launch).rejects.toThrow();
+    await runner.stop();
   });
 
   it('control.reclaimChild isolates pane-release failures: durable teardown still runs, error surfaced', async () => {
