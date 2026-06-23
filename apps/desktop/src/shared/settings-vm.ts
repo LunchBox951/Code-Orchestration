@@ -115,7 +115,7 @@ export function buildGithubSectionView(status: GithubStatus): GithubSectionView 
       statusLabel: 'Connected',
       showConnect: false,
       showDisconnect: true,
-      hint: 'A GitHub token is stored (encrypted) and provisioned to every coordinator pane.',
+      hint: 'A GitHub token is stored (encrypted) and provisioned to daemon-side GitHub operations.',
     };
   }
   if (status.source === 'env') {
@@ -133,7 +133,7 @@ export function buildGithubSectionView(status: GithubStatus): GithubSectionView 
       statusLabel: 'Connected via gh auth login',
       showConnect: true,
       showDisconnect: false,
-      hint: 'Authenticating from your existing `gh auth login`. Paste a token to store one in-app instead.',
+      hint: 'The running Conductor was authenticated from your existing `gh auth login`. Paste a token to store one in-app instead.',
     };
   }
   if (status.source === 'stored-unreadable') {

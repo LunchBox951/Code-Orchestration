@@ -1,8 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createGithubCredentialStore, type SafeStorageLike } from './github-credentials.js';
+import {
+  createGithubCredentialStore,
+  type CredentialFs,
+  type SafeStorageLike,
+} from './github-credentials.js';
 
 /**
  * #95/#71 — the Connect-GitHub credential store. Every external effect (safeStorage, the userData dir)
@@ -61,12 +65,68 @@ describe('github-credentials — encryption-unavailable refuses (Principle 9, no
     expect(existsSync(sidecar())).toBe(false);
   });
 
-  it('store() refuses the Linux basic_text backend because it is not protected by a real keyring', () => {
-    const safeStorage = fakeSafeStorage(true, 'basic_text');
-    const store = createGithubCredentialStore({ safeStorage, userDataPath });
+  it.each(['basic_text', 'unknown'] as const)(
+    'store() refuses the Linux %s backend because it is not protected by a real keyring',
+    (backend) => {
+      const safeStorage = fakeSafeStorage(true, backend);
+      const store = createGithubCredentialStore({ safeStorage, userDataPath });
 
-    expect(() => store.storeToken(TOKEN)).toThrow(/basic_text|keyring|plaintext/i);
-    expect(existsSync(sidecar())).toBe(false);
+      expect(() => store.storeToken(TOKEN)).toThrow(
+        new RegExp(`${backend}|keyring|plaintext`, 'i'),
+      );
+      expect(existsSync(sidecar())).toBe(false);
+    },
+  );
+});
+
+describe('github-credentials — stored sidecar read failures fail loud', () => {
+  it.each(['basic_text', 'unknown'] as const)(
+    'readToken refuses an existing sidecar when the Linux backend downgrades to %s',
+    (backend) => {
+      const store = createGithubCredentialStore({
+        safeStorage: fakeSafeStorage(),
+        userDataPath,
+      });
+      store.storeToken(TOKEN);
+
+      const downgraded = createGithubCredentialStore({
+        safeStorage: fakeSafeStorage(true, backend),
+        userDataPath,
+      });
+      expect(() => downgraded.readToken()).toThrow(new RegExp(`${backend}|keyring|plaintext`, 'i'));
+      expect(() => downgraded.hasToken()).toThrow(new RegExp(`${backend}|keyring|plaintext`, 'i'));
+    },
+  );
+
+  it('readToken throws for a non-missing sidecar read failure', () => {
+    const readError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    const fs: CredentialFs = {
+      readFileSync: () => {
+        throw readError;
+      },
+      writeFileSync: () => undefined,
+      mkdirSync: () => undefined,
+      rmSync: () => undefined,
+      chmodSync: () => undefined,
+    };
+    const store = createGithubCredentialStore({
+      safeStorage: fakeSafeStorage(),
+      userDataPath,
+      fs,
+    });
+
+    expect(() => store.readToken()).toThrow(/stored GitHub credential|read|permission/i);
+    expect(() => store.hasToken()).toThrow(/stored GitHub credential|read|permission/i);
+  });
+
+  it('readToken throws for an empty sidecar instead of treating it as never connected', () => {
+    writeFileSync(sidecar(), Buffer.alloc(0));
+    const store = createGithubCredentialStore({
+      safeStorage: fakeSafeStorage(),
+      userDataPath,
+    });
+
+    expect(() => store.readToken()).toThrow(/stored GitHub credential|empty|corrupt/i);
   });
 });
 

@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import type { ArchiveEntry, ProjectId } from '@co/core';
-import { openArchiveStore, openRegistry } from '@co/core';
+import { openArchiveStore, openRegistry, resolveGhTokenFromEnv } from '@co/core';
 import { createAppShell } from './app-shell.js';
 import {
   createDaemonSupervisor,
@@ -53,6 +53,7 @@ function sendToRenderer(channel: string, data: unknown): void {
  * spawn env the daemon supervisor builds — never to a log, the renderer, or the repo.
  */
 let githubCredentialStore: ReturnType<typeof createGithubCredentialStore> | null = null;
+let daemonGhAuthAvailable = false;
 function credentialStore(): ReturnType<typeof createGithubCredentialStore> {
   githubCredentialStore ??= createGithubCredentialStore({
     safeStorage,
@@ -63,7 +64,7 @@ function credentialStore(): ReturnType<typeof createGithubCredentialStore> {
 
 /**
  * Resolve the GitHub provisioning env for each `co-mcp serve` spawn (#95/#71): a connected token (or, with
- * none, a `gh auth token` auto-prime) becomes `CO_GH_TOKEN` so the daemon authenticates every pane app-wide.
+ * none, a `gh auth token` auto-prime) becomes `CO_GH_TOKEN` so daemon-side GitHub operations authenticate.
  * Reading the store can throw if the keyring vanished mid-session; degrade VISIBLY to no additions rather
  * than stranding the daemon unspawned (the supervisor also guards this seam).
  */
@@ -74,7 +75,10 @@ function resolveDaemonGithubEnv(): Readonly<Record<string, string>> {
   } catch (e) {
     console.error('Failed to read the stored GitHub credential (continuing without it):', e);
   }
-  return resolveSpawnGithubEnv({ storedToken, baseEnv: process.env });
+  const env = resolveSpawnGithubEnv({ storedToken, baseEnv: process.env });
+  daemonGhAuthAvailable =
+    storedToken == null && resolveGhTokenFromEnv(process.env) == null && env['CO_GH_TOKEN'] != null;
+  return env;
 }
 
 /**
@@ -562,7 +566,7 @@ ipcMain.handle('daemon:retry', () => controller.retryDaemon());
 // ── GitHub Connect IPC channels (#95/#71) ─────────────────────────────────────
 //
 // Connect-GitHub for the GUI launch path: store an operator-pasted token encrypted, then re-provision
-// the daemon so the new CO_GH_TOKEN takes effect across every pane app-wide. The token NEVER appears in
+// the daemon so the new CO_GH_TOKEN takes effect for daemon-side GitHub operations. The token NEVER appears in
 // any IPC payload, log, or error message — `github:status` reports only presence + source.
 
 /** The current GitHub-auth state for the renderer badge — presence + source ONLY, never the token. */
@@ -574,9 +578,9 @@ function githubStatus(): GithubAuthStatus {
     console.error('Failed to read the GitHub credential status:', e);
     storedCredential = 'unreadable';
   }
-  // No stored token — report whether the daemon would still authenticate via env or `gh auth login`,
-  // so the operator sees "connected (via gh)" rather than a misleading "not connected".
-  return resolveGithubAuthStatus({ storedCredential, baseEnv: process.env });
+  // No stored token — report only auth that is already effective for the daemon. This avoids a
+  // synchronous `gh auth token` probe from the Settings status path.
+  return resolveGithubAuthStatus({ storedCredential, baseEnv: process.env, daemonGhAuthAvailable });
 }
 
 ipcMain.handle('github:status', () => githubStatus());

@@ -2089,7 +2089,7 @@ function githubSectionHtml(): string {
   let showDisconnect: boolean;
   if (source === 'connected') {
     statusLabel = 'Connected';
-    hint = 'A GitHub token is stored (encrypted) and provisioned to every coordinator pane.';
+    hint = 'A GitHub token is stored (encrypted) and provisioned to daemon-side GitHub operations.';
     showConnect = false;
     showDisconnect = true;
   } else if (source === 'env') {
@@ -2101,7 +2101,7 @@ function githubSectionHtml(): string {
   } else if (source === 'gh') {
     statusLabel = 'Connected via gh auth login';
     hint =
-      'Authenticating from your existing `gh auth login`. Paste a token to store one in-app instead.';
+      'The running Conductor was authenticated from your existing `gh auth login`. Paste a token to store one in-app instead.';
     showConnect = true;
     showDisconnect = false;
   } else if (source === 'stored-unreadable') {

@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
  * daemon it spawns has no GitHub token and there is no way for the operator to provide one. This module
  * is the at-rest store behind the Connect-GitHub Settings UI: the operator pastes a token once, we
  * persist it ENCRYPTED, and the supervisor injects it as `CO_GH_TOKEN` into every `co-mcp serve` child
- * (which then provisions every pane app-wide via {@link resolveAndApplyDaemonGithubAuth}).
+ * so daemon-side GitHub operations authenticate via {@link resolveAndApplyDaemonGithubAuth}.
  *
  * SECURITY (Principle 9 — fail loud, never store plaintext):
  *   - Encryption rides Electron's {@link safeStorage} (OS keychain / DPAPI / libsecret). We GUARD on
@@ -76,7 +76,7 @@ export interface GithubCredentialStore {
    * unavailable, or when `token` is blank. The plaintext never touches disk or any log.
    */
   storeToken(token: string): void;
-  /** The stored token, decrypted, or `null` when none is stored / the sidecar is unreadable. */
+  /** The stored token, decrypted, or `null` when none is stored. Throws when a sidecar is unreadable. */
   readToken(): string | null;
   /** Remove the stored credential (idempotent — a no-op when none exists). */
   clearToken(): void;
@@ -98,7 +98,7 @@ export function createGithubCredentialStore(
     if (!deps.safeStorage.isEncryptionAvailable()) {
       // Principle 9 — fail LOUD rather than silently writing a plaintext secret to disk.
       throw new Error(
-        'Connect GitHub: OS credential encryption (safeStorage) is unavailable, so the token cannot ' +
+        'Connect GitHub: OS credential encryption (safeStorage) is unavailable, so the stored token cannot ' +
           'be stored securely. Refusing to persist a plaintext token. On Linux ensure a keyring ' +
           '(gnome-keyring / kwallet / libsecret) is running, or set CO_GH_TOKEN in the environment ' +
           'instead (or run `gh auth login`).',
@@ -109,7 +109,7 @@ export function createGithubCredentialStore(
       if (backend === 'basic_text' || backend === 'unknown') {
         throw new Error(
           `Connect GitHub: Electron safeStorage selected '${backend}', which does not provide a ` +
-            'usable Linux keyring for protecting tokens. Refusing to persist a plaintext-equivalent ' +
+            'usable Linux keyring for protecting tokens. Refusing to persist or decrypt a plaintext-equivalent ' +
             'token. Install or unlock gnome-keyring / kwallet / libsecret, set CO_GH_TOKEN in the ' +
             'environment instead, or run `gh auth login`.',
         );
@@ -135,20 +135,36 @@ export function createGithubCredentialStore(
       let ciphertext: Buffer;
       try {
         ciphertext = fs.readFileSync(sidecarPath);
-      } catch {
-        return null; // No sidecar — not connected.
-      }
-      if (ciphertext.length === 0) return null;
-      if (!deps.safeStorage.isEncryptionAvailable()) {
-        // The sidecar exists but the OS can no longer decrypt it (keyring gone). Surface the failure
-        // without exposing plaintext so the operator sees a repairable credential problem.
+      } catch (e) {
+        if (e instanceof Error && 'code' in e && e.code === 'ENOENT') {
+          return null; // No sidecar — not connected.
+        }
         throw new Error(
-          'stored GitHub credential exists but cannot be decrypted because OS credential encryption is unavailable.',
+          `stored GitHub credential exists but cannot be read: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          { cause: e },
+        );
+      }
+      if (ciphertext.length === 0) {
+        throw new Error('stored GitHub credential exists but is empty or corrupt.');
+      }
+      try {
+        assertEncryptionAvailable();
+      } catch (e) {
+        throw new Error(
+          `stored GitHub credential exists but cannot be decrypted: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          { cause: e },
         );
       }
       try {
         const token = deps.safeStorage.decryptString(ciphertext).trim();
-        return token.length > 0 ? token : null;
+        if (token.length === 0) {
+          throw new Error('decrypted token was empty');
+        }
+        return token;
       } catch (e) {
         throw new Error(
           `stored GitHub credential exists but cannot be decrypted: ${

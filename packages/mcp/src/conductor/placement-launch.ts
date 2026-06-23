@@ -54,22 +54,6 @@ export interface CoMcpPaths {
   /** Optional host-copied Codex auth file contents for the isolated CODEX_HOME. */
   readonly codexAuthJson?: string;
   /**
-   * Optional GitHub token (F3) to provision into each hosted pane's co MCP server env as
-   * `GH_TOKEN`, so the gated publish path (`co_push`/`co_pr_merge` → `gh`) authenticates under
-   * self-hosting. The pane CLI runs under a sanitized env that does NOT carry the daemon's
-   * process.env, so the MCP server's explicit env block is the ONLY channel that reaches `gh`.
-   * Sourced from `CO_GH_TOKEN` (then `GITHUB_TOKEN`/`GH_TOKEN`) by {@link defaultCoMcpPaths}; the
-   * desktop "Connect GitHub" UI (issue #71) is a convenience that sets `CO_GH_TOKEN` on the daemon.
-   * Never written to the repo; lives only in the isolated home's 0o600 MCP config.
-   *
-   * NOTE: the gated publish (`co_push`/`co_pr_merge`) and remote detection actually run DAEMON-side
-   * (the pane's `co-mcp bridge` is a dumb stdio↔socket relay that runs no `git`/`gh`), so the
-   * AUTHORITATIVE GitHub auth is provisioned onto the daemon's own env at `co-mcp serve` boot
-   * (see {@link import('./host.js').resolveAndApplyDaemonGithubAuth}). This pane-level token is kept
-   * as defense-in-depth for any future agent-side `gh` use; it is harmless when unused.
-   */
-  readonly ghToken?: string;
-  /**
    * Extra environment to inject into the co MCP server's env block (the Claude `mcpServers.co.env`
    * and the Codex `[mcp_servers.co.env]`). Used to carry `ELECTRON_RUN_AS_NODE=1` when the daemon —
    * and therefore `coMcpCommand` (= `process.execPath`) — is the Electron binary running under
@@ -223,15 +207,9 @@ export function buildHostedLaunchSpec(
       [CO_PARENT_ENV]: identity.parent,
       [CO_PROJECT_ID_ENV]: identity.projectId,
       ...bridgeDiagnosticEnv(isolatedHomeDir, bridgeSocketPath),
-      // F3 (defense-in-depth): the GitHub token in the pane MCP server env. The publish path itself
-      // runs daemon-side (this `co-mcp bridge` child is a pure relay), so this is NOT the authoritative
-      // auth — that is provisioned onto the daemon env at serve boot. Only emitted when configured.
-      ...(coMcpPaths.ghToken != null && coMcpPaths.ghToken.length > 0
-        ? { GH_TOKEN: coMcpPaths.ghToken }
-        : {}),
       // RC-1: carry ELECTRON_RUN_AS_NODE=1 (and any other host-required server env) so the provider
       // runs the co-mcp bridge as Node when `coMcpCommand` is the Electron binary. Last so an explicit
-      // host override wins; the values here never collide with the CO_* / GH_TOKEN keys above.
+      // host override wins; the values here never collide with the CO_* keys above.
       ...(coMcpPaths.coMcpExtraEnv ?? {}),
     },
     coCliCommand: coMcpPaths.coCliCommand,

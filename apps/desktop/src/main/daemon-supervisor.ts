@@ -120,6 +120,7 @@ export function resolveSpawnGithubEnv(args: {
 export function resolveGithubAuthStatus(args: {
   readonly storedCredential: 'available' | 'missing' | 'unreadable';
   readonly baseEnv: NodeJS.ProcessEnv;
+  readonly daemonGhAuthAvailable?: boolean;
   readonly runGhAuthToken?: GhAuthTokenRunner;
 }): GithubAuthStatus {
   if (args.storedCredential === 'available') return { connected: true, source: 'connected' };
@@ -127,12 +128,7 @@ export function resolveGithubAuthStatus(args: {
     return { connected: false, source: 'stored-unreadable' };
   }
   if (resolveGhTokenFromEnv(args.baseEnv) != null) return { connected: true, source: 'env' };
-  const env = resolveSpawnGithubEnv({
-    storedToken: null,
-    baseEnv: args.baseEnv,
-    ...(args.runGhAuthToken != null ? { runGhAuthToken: args.runGhAuthToken } : {}),
-  });
-  return env['CO_GH_TOKEN'] != null
+  return args.daemonGhAuthAvailable === true
     ? { connected: true, source: 'gh' }
     : { connected: false, source: null };
 }

@@ -273,14 +273,29 @@ describe('resolveGithubAuthStatus — Settings status source (#95/#71)', () => {
     },
   );
 
-  it('reports gh auto-prime auth as connected via gh', () => {
+  it('reports cached daemon gh auth as connected via gh without probing synchronously', () => {
+    const runGhAuthToken = vi.fn().mockReturnValue({ token: 'gh-token', command: '/opt/bin/gh' });
     expect(
       resolveGithubAuthStatus({
         storedCredential: 'missing',
         baseEnv: { PATH: '/usr/bin' },
-        runGhAuthToken: vi.fn().mockReturnValue({ token: 'gh-token', command: '/opt/bin/gh' }),
+        daemonGhAuthAvailable: true,
+        runGhAuthToken,
       }),
     ).toEqual({ connected: true, source: 'gh' });
+    expect(runGhAuthToken).not.toHaveBeenCalled();
+  });
+
+  it('does not run gh auth token from the status path', () => {
+    const runGhAuthToken = vi.fn().mockReturnValue({ token: 'gh-token', command: '/opt/bin/gh' });
+    expect(
+      resolveGithubAuthStatus({
+        storedCredential: 'missing',
+        baseEnv: { PATH: '/usr/bin' },
+        runGhAuthToken,
+      }),
+    ).toEqual({ connected: false, source: null });
+    expect(runGhAuthToken).not.toHaveBeenCalled();
   });
 
   it('surfaces an unreadable stored credential instead of collapsing it to not connected', () => {
