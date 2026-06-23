@@ -491,6 +491,7 @@ export type {
   ReviewPrMergeResult,
   MergeTeardown,
   ReviewerSpawnGate,
+  RedriveReviewerOutcome,
 } from './review/merge.js';
 export {
   CoReviewGate,

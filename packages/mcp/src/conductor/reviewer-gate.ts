@@ -39,6 +39,12 @@ export class EngineReviewerSpawnGate implements ReviewerSpawnGate {
       );
     }
     if (this.engine.isHosted(projectId, record.agent)) return;
+    const sessions = this.openSessions(projectId);
+    try {
+      if (sessions.getSession(record.agent) != null) return;
+    } finally {
+      sessions.close();
+    }
     // Reviewers supply a reviewBranch (the branch being reviewed as the pane cwd); slung children
     // are resolved from their recorded worktree keyed by agent.
     const worktree =

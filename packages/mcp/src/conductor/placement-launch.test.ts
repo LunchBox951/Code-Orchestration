@@ -951,6 +951,43 @@ describe('EngineReviewerSpawnGate — launches a reviewer pane from a placed rev
     expect(sessionRecord!.agentId).toBe(reviewerAgent);
   });
 
+  it('spawn() no-ops when the reviewer already has an active durable session', async () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    seedParentChain(projectId);
+    const implBranch = 'co/impl-active-session';
+    recordWorktree(projectId, 'impl-active-session', implBranch, cwd);
+    const reviewerAgent = 'reviewer@rev-active-session';
+    const reviewPlacement = recordPlacement(projectId, reviewerAgent, 'reviewer', 'claude', {
+      reviewId: 'rev-active-session',
+      reviewBranch: implBranch,
+      reviewTarget: 'main',
+      reviewScope: 'worker_merge',
+    });
+    const sessions = openSessionStore(projectId);
+    sessionStores.push(sessions);
+    sessions.recordSession({
+      agentId: reviewerAgent,
+      pane: 'pane-existing-reviewer',
+      cwd,
+      provider: 'claude',
+      resume: { provider: 'claude', sessionId: 'session-existing-reviewer' },
+    });
+
+    const { engine, pty } = makeEngine();
+    const wtStore = worktreeStores[worktreeStores.length - 1]!;
+    const gate = new EngineReviewerSpawnGate(
+      engine,
+      wtStore,
+      (agent) => join(dataDir, 'isolated', agent),
+      TEST_MCP_PATHS,
+    );
+
+    await expect(gate.spawn(projectId, reviewPlacement)).resolves.toBeUndefined();
+
+    expect(engine.isHosted(projectId, reviewerAgent)).toBe(false);
+    expect(pty.panes).toHaveLength(0);
+  });
+
   it('throws if placement kind is waiting (not placed)', async () => {
     const { projectId } = makeProject();
     const { engine } = makeEngine();

@@ -335,11 +335,25 @@ export class ConductorHostRunner {
   private async runBeat(rethrowTickErrors = false): Promise<void> {
     try {
       const outcome = await this.daemon.tick();
-      this.onTick?.(outcome);
+      try {
+        this.onTick?.(outcome);
+      } finally {
+        this.reportReviewerRedriveErrors(outcome);
+      }
     } catch (error) {
       if (this.onError != null) this.onError(error);
       else console.error('[co-mcp serve] tick error:', error);
       if (rethrowTickErrors) throw error;
+    }
+  }
+
+  private reportReviewerRedriveErrors(outcome: DaemonTickOutcome): void {
+    for (const error of outcome.reviewerRedriveErrors) {
+      const diagnostic = new Error(
+        `co-mcp serve: reviewer redrive for '${error.agent}' failed: ${error.message}`,
+      );
+      if (this.onError != null) this.onError(diagnostic);
+      else console.error('[co-mcp serve] reviewer redrive error:', diagnostic);
     }
   }
 }
@@ -1891,6 +1905,9 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     now,
     reconcileEvery: opts.reconcileEvery ?? 5,
     ...(isolatedHomeDirFor != null ? { codexHomeFor: isolatedHomeDirFor } : {}),
+    // #133 — the daemon-tick reviewer re-drive launches a recovered `waiting` seat through the SAME
+    // single launch authority the `co_merge` trigger uses (lazy thunk — the gate wraps the engine).
+    reviewerSpawnGate: () => spawnGate,
     // P3 §3c — honor `pause`/STUCK: filter the router's suppressed agents out of candidate selection.
     isSkipped: (pid, agent) => router.shouldSkip(pid, agent),
   });

@@ -15,14 +15,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
+  CoReviewGate,
   FakePty,
   MAIL_REVIEW_REQUEST,
   OPERATOR,
   ReconcileLoop,
+  accountForProvider,
   defaultMailRenderer,
+  openDispatchStore,
   openArchiveStore,
   openMailStore,
   openRegistry,
+  openReviewStore,
   openRosterStore,
   openSessionStore,
   openWorktreeStore,
@@ -585,6 +589,97 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     expect(errors).toEqual(['tick failed in manual step', 'tick failed in manual step']);
     await runner.stop();
   });
+
+  it('reports reviewer redrive errors from successful ticks through onError', async () => {
+    const scheduler = new FakeScheduler();
+    const ticks: DaemonTickOutcome[] = [];
+    const errors: string[] = [];
+    const outcome = {
+      observedAt: 1,
+      tick: 1,
+      candidateCount: 0,
+      coldStarted: [],
+      coldStartErrors: [],
+      coldRewoke: [],
+      coldRewakeErrors: [],
+      reWarmed: [],
+      reWarmErrors: [],
+      reviewersRedriven: [],
+      reviewerRedriveErrors: [{ agent: 'reviewer:pr@rev-x', message: 'spawn failed' }],
+      coldCandidates: [],
+      cycle: null,
+      selected: null,
+      cadenceFired: false,
+      clarifyForwarded: [],
+      reconcile: null,
+    } satisfies DaemonTickOutcome;
+    const runner = new ConductorHostRunner({
+      daemon: {
+        recover: () => [],
+        tick: async () => outcome,
+        reconcile: makeReconcile(makeClock()),
+      } as unknown as ConductorDaemon,
+      intervalMs: 1000,
+      scheduler,
+      onTick: (o) => ticks.push(o),
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
+    runner.start();
+    await runner.step();
+
+    expect(ticks).toEqual([outcome]);
+    expect(errors).toEqual([
+      "co-mcp serve: reviewer redrive for 'reviewer:pr@rev-x' failed: spawn failed",
+    ]);
+    await runner.stop();
+  });
+
+  it('reports reviewer redrive errors even when the tick observer throws', async () => {
+    const scheduler = new FakeScheduler();
+    const errors: string[] = [];
+    const outcome = {
+      observedAt: 1,
+      tick: 1,
+      candidateCount: 0,
+      coldStarted: [],
+      coldStartErrors: [],
+      coldRewoke: [],
+      coldRewakeErrors: [],
+      reWarmed: [],
+      reWarmErrors: [],
+      reviewersRedriven: [],
+      reviewerRedriveErrors: [{ agent: 'reviewer:pr@rev-x', message: 'spawn failed' }],
+      coldCandidates: [],
+      cycle: null,
+      selected: null,
+      cadenceFired: false,
+      clarifyForwarded: [],
+      reconcile: null,
+    } satisfies DaemonTickOutcome;
+    const runner = new ConductorHostRunner({
+      daemon: {
+        recover: () => [],
+        tick: async () => outcome,
+        reconcile: makeReconcile(makeClock()),
+      } as unknown as ConductorDaemon,
+      intervalMs: 1000,
+      scheduler,
+      onTick: () => {
+        throw new Error('tick observer failed');
+      },
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
+    runner.start();
+    await expect(runner.step()).rejects.toThrow(/tick observer failed/);
+
+    expect(errors).toEqual([
+      "co-mcp serve: reviewer redrive for 'reviewer:pr@rev-x' failed: spawn failed",
+      'tick observer failed',
+    ]);
+    await runner.stop();
+  });
 });
 
 describe('hostLiveCaptureUsageSourceFactory', () => {
@@ -674,6 +769,52 @@ describe('statusLineCandidates (#67-adjacent usage status-line filter)', () => {
 
 // ── serveConductor wiring + the [host-live] handoff seams ─────────────────────
 describe('serveConductor — wires the full stack over injected seams (no real binary)', () => {
+  function seedWaitingReviewer(projectId: ProjectId, reviewId: string, branch: string): void {
+    const reviews = openReviewStore(projectId);
+    const worktrees = openWorktreeStore(projectId);
+    const mail = openMailStore(projectId);
+    const dispatch = openDispatchStore(projectId);
+    try {
+      new CoReviewGate({
+        reviews,
+        worktrees,
+        mail,
+        resolveMode: () => 'offline',
+        dispatch,
+        nowMs: 0,
+      }).triggerReview({
+        reviewId,
+        target: `co/dev-${reviewId}`,
+        branch,
+        requestedBy: 'lead-1',
+        scope: 'pr_merge',
+        projectId,
+      });
+      worktrees.recordWorktree({
+        branch,
+        baseRef: 'dev',
+        baseSha: 'a'.repeat(40),
+        path: worktreePathFor(projectId, branch),
+        parent: 'lead-1',
+        agent: `impl-${reviewId}`,
+        role: 'implementer',
+      });
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+    } finally {
+      dispatch.close();
+      mail.close();
+      worktrees.close();
+      reviews.close();
+    }
+  }
+
   it('builds, recovers, arms, and ticks over FakePty + a controllable scheduler', async () => {
     const { projectId } = makeProject();
     const clock = makeClock();
@@ -730,6 +871,7 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     const scheduler = new FakeScheduler();
     const pty = new FakePty();
     const ticks: DaemonTickOutcome[] = [];
+    const errors: string[] = [];
     const bridgeRequests: Array<{ readonly isolatedHomeDir: string; readonly agent: string }> = [];
     const runner = await serveConductor({
       projectId,
@@ -749,6 +891,7 @@ describe('serveConductor — wires the full stack over injected seams (no real b
       reconcileEvery: 1,
       injectNudge: async () => {},
       onTick: (o) => ticks.push(o),
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
     });
 
     scheduler.fire();
@@ -776,6 +919,71 @@ describe('serveConductor — wires the full stack over injected seams (no real b
       f.path.endsWith(`/isolated/${root}/settings.json`),
     );
     expect(settingsFile?.contents).toContain('skipDangerousModePermissionPrompt');
+
+    await runner.stop();
+  });
+
+  it('wires the reviewer redrive spawn gate through serveConductor', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    seedWaitingReviewer(projectId, 'rev-host-redrive', 'co/feat-host-redrive');
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const scheduler = new FakeScheduler();
+    const pty = new FakePty();
+    const ticks: DaemonTickOutcome[] = [];
+    const errors: string[] = [];
+    const bridgeRequests: Array<{ readonly isolatedHomeDir: string; readonly agent: string }> = [];
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      coMcpPaths: {
+        coMcpCommand: '/opt/co-mcp',
+        coCliCommand: '/opt/co',
+        coMcpBridgeSocketPath: (isolatedHomeDir, agent) => {
+          bridgeRequests.push({ isolatedHomeDir, agent });
+          return join(isolatedHomeDir, 'mcp', 'bridge.sock');
+        },
+      },
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler,
+      reconcileEvery: 1,
+      injectNudge: async () => {},
+      onTick: (o) => ticks.push(o),
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
+    const stepP = runner.step();
+    let settled = false;
+    void stepP.then(() => {
+      settled = true;
+    });
+    const driven = new Set<FakePty['panes'][number]>();
+    for (let i = 0; i < 30 && !settled; i++) {
+      for (const pane of pty.panes) {
+        if (!driven.has(pane)) {
+          driven.add(pane);
+          pane.emit(CLAUDE_READY);
+        }
+      }
+      await tick();
+    }
+    await stepP;
+
+    expect(errors).toEqual([]);
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]?.reviewersRedriven).toEqual(['reviewer:pr@rev-host-redrive']);
+    expect(ticks[0]?.reviewerRedriveErrors).toEqual([]);
+    expect(bridgeRequests).toEqual([
+      {
+        isolatedHomeDir: expect.stringContaining('/isolated/reviewer:pr@rev-host-redrive'),
+        agent: 'reviewer:pr@rev-host-redrive',
+      },
+    ]);
+    expect(pty.panes[0]?.spec.cwd).toContain('co/feat-host-redrive');
 
     await runner.stop();
   });
