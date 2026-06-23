@@ -686,6 +686,65 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
     }
   });
 
+  it('single-record cost getters do not migrate old cost rollup schemas', () => {
+    const pid = 'p-rollup-single-readonly-old-schema';
+    const obs = {
+      provider: 'claude' as const,
+      agent: 'a1',
+      task: 't1',
+      turn: 0,
+      input_tokens: 7,
+      output_tokens: 8,
+    };
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        tx.append([makeCostRecordedEvent(pid, obs)]);
+        const db = tx.raw as DatabaseSync;
+        db.exec(`
+          CREATE TABLE cost_rollup (
+            kind           TEXT NOT NULL,
+            id             TEXT NOT NULL,
+            total_cost_usd REAL NOT NULL DEFAULT 0,
+            input_tokens   INTEGER NOT NULL DEFAULT 0,
+            output_tokens  INTEGER NOT NULL DEFAULT 0,
+            total_tokens   INTEGER NOT NULL DEFAULT 0,
+            used_pct       REAL NOT NULL DEFAULT 0,
+            observations   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (kind, id)
+          );
+          INSERT INTO cost_rollup
+            (kind, id, total_cost_usd, input_tokens, output_tokens, total_tokens, used_pct, observations)
+          VALUES
+            ('agent', 'a1', 0, 7, 8, 15, 0, 1),
+            ('task', 't1', 0, 7, 8, 15, 0, 1);
+        `);
+      });
+    } finally {
+      project.close();
+    }
+    expect(hasColumn(pid, 'cost_rollup', 'token_observations')).toBe(false);
+
+    const store = openDispatchStore(pid);
+    try {
+      expect(store.getRollup('agent', 'a1')).toEqual(
+        expect.objectContaining({ inputTokens: 7, outputTokens: 8, totalTokens: 15 }),
+      );
+      expect(store.getAgentCostRollup('a1')).toEqual(
+        expect.objectContaining({
+          agentId: 'a1',
+          inputTokens: 7,
+          outputTokens: 8,
+          totalTokens: 15,
+        }),
+      );
+    } finally {
+      store.close();
+    }
+
+    expect(hasColumn(pid, 'cost_rollup', 'token_observations')).toBe(false);
+  });
+
   it('fails loud on conflicting duplicate cost observations', () => {
     const store = openDispatchStore('p-rollup-conflict');
     const budget = { capCents: 1000 };
@@ -1085,6 +1144,70 @@ describe('fail-loud (AC6, Principle 9) — unavailable usage never reads as heal
     expect(tableExists(pid, 'usage_accounts_legacy')).toBe(false);
   });
 
+  it('single-record usage getters do not repair old usage projection schemas', () => {
+    const pid = 'p-old-usage-schema-single-readonly';
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        db.exec(`
+          CREATE TABLE usage_buckets (
+            account     TEXT NOT NULL,
+            window_kind TEXT NOT NULL,
+            provider    TEXT NOT NULL,
+            used_pct    REAL NOT NULL,
+            reset_at    TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            sampled_at  TEXT NOT NULL,
+            ts          INTEGER NOT NULL,
+            PRIMARY KEY (account, window_kind)
+          );
+          CREATE TABLE usage_accounts (
+            account    TEXT PRIMARY KEY,
+            provider   TEXT NOT NULL,
+            available  INTEGER NOT NULL,
+            reason     TEXT,
+            source     TEXT NOT NULL,
+            sampled_at TEXT NOT NULL,
+            ts         INTEGER NOT NULL
+          );
+          INSERT INTO usage_buckets
+            (account, window_kind, provider, used_pct, reset_at, source, sampled_at, ts)
+          VALUES
+            ('default', 'primary', 'claude', 80, '2026-06-03T05:00:00.000Z', 'legacy', '2026-06-03T00:00:00.000Z', 1);
+          INSERT INTO usage_accounts
+            (account, provider, available, reason, source, sampled_at, ts)
+          VALUES
+            ('default', 'claude', 1, NULL, 'legacy', '2026-06-03T00:00:00.000Z', 1);
+        `);
+      });
+    } finally {
+      project.close();
+    }
+
+    const store = openDispatchStore(pid);
+    try {
+      expect(store.getBucket('claude', 'default', 'primary')).toEqual(
+        expect.objectContaining({ provider: 'claude', account: 'default', usedPct: 80 }),
+      );
+      expect(store.getAccountStatus('claude', 'default')).toEqual(
+        expect.objectContaining({ provider: 'claude', account: 'default', available: true }),
+      );
+      expect(store.getHeadroom('claude', 'default', 'primary')).toEqual({
+        kind: 'known',
+        used_pct: 80,
+        reset_at: '2026-06-03T05:00:00.000Z',
+      });
+    } finally {
+      store.close();
+    }
+
+    expect(primaryKeyColumns(pid, 'usage_buckets')).toEqual(['account', 'window_kind']);
+    expect(primaryKeyColumns(pid, 'usage_accounts')).toEqual(['account']);
+    expect(tableExists(pid, 'usage_buckets_legacy')).toBe(false);
+    expect(tableExists(pid, 'usage_accounts_legacy')).toBe(false);
+  });
+
   it('readBuckets and readAccountStatuses infer providerless legacy usage rows without repairing schema', () => {
     const pid = 'p-providerless-usage-readonly';
     const project = openProjectStore(pid);
@@ -1185,6 +1308,42 @@ describe('fail-loud (AC6, Principle 9) — unavailable usage never reads as heal
 
     expect(hasColumn(pid, 'usage_buckets', 'provider')).toBe(false);
     expect(primaryKeyColumns(pid, 'usage_buckets')).toEqual(['account', 'window_kind']);
+  });
+
+  it('readAccountStatuses fails loud for ambiguous providerless legacy usage rows without repairing schema', () => {
+    const pid = 'p-providerless-usage-status-readonly-ambiguous';
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        db.exec(`
+          CREATE TABLE usage_accounts (
+            account    TEXT PRIMARY KEY,
+            available  INTEGER NOT NULL,
+            reason     TEXT,
+            source     TEXT NOT NULL,
+            sampled_at TEXT NOT NULL,
+            ts         INTEGER NOT NULL
+          );
+          INSERT INTO usage_accounts
+            (account, available, reason, source, sampled_at, ts)
+          VALUES
+            ('team', 0, 'offline', 'legacy', '2026-06-03T00:00:00.000Z', 1);
+        `);
+      });
+    } finally {
+      project.close();
+    }
+
+    const store = openDispatchStore(pid);
+    try {
+      expect(() => store.readAccountStatuses()).toThrow(/cannot be safely migrated/i);
+    } finally {
+      store.close();
+    }
+
+    expect(hasColumn(pid, 'usage_accounts', 'provider')).toBe(false);
+    expect(primaryKeyColumns(pid, 'usage_accounts')).toEqual(['account']);
   });
 
   it('a source THROW with an account marks that account unavailable and shadows stale healthy buckets', async () => {

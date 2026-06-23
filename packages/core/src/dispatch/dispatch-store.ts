@@ -60,7 +60,6 @@ import {
 import {
   UsageProjector,
   ensureUsageTables,
-  selectAllUsageAccounts,
   selectAllUsageAccountsReadOnly,
   selectAllUsageBuckets,
   selectAllUsageBucketsReadOnly,
@@ -318,26 +317,25 @@ export function openDispatchStore(projectId: string): DispatchStore {
     ): UsageBucket | undefined {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
+        const buckets = selectAllUsageBucketsReadOnly(db);
         if (maybeWindowKind !== undefined) {
-          return selectUsageBucket(
-            db,
-            providerOrAccount as Provider,
-            accountOrWindowKind,
-            maybeWindowKind,
+          return buckets.find(
+            (b) =>
+              b.provider === providerOrAccount &&
+              b.account === accountOrWindowKind &&
+              b.windowKind === maybeWindowKind,
           );
         }
         const account = String(providerOrAccount);
         assertAccountOnlyUnambiguous(
           'bucket',
           account,
-          selectAllUsageBuckets(db)
-            .filter((b) => b.account === account)
-            .map((b) => ({ provider: b.provider })),
+          buckets.filter((b) => b.account === account).map((b) => ({ provider: b.provider })),
         );
         return singleAccountOnlyMatch(
           'bucket',
           account,
-          selectAllUsageBuckets(db).filter(
+          buckets.filter(
             (b) => b.account === providerOrAccount && b.windowKind === accountOrWindowKind,
           ),
         );
@@ -350,13 +348,16 @@ export function openDispatchStore(projectId: string): DispatchStore {
     ): UsageAccountStatus | undefined {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
+        const accounts = selectAllUsageAccountsReadOnly(db);
         if (maybeAccount !== undefined) {
-          return selectUsageAccount(db, providerOrAccount as Provider, maybeAccount);
+          return accounts.find(
+            (a) => a.provider === providerOrAccount && a.account === maybeAccount,
+          );
         }
         return singleAccountOnlyMatch(
           'account status',
           String(providerOrAccount),
-          selectAllUsageAccounts(db).filter((a) => a.account === providerOrAccount),
+          accounts.filter((a) => a.account === providerOrAccount),
         );
       });
     },
@@ -368,12 +369,19 @@ export function openDispatchStore(projectId: string): DispatchStore {
     ): Headroom {
       return store.transaction((tx) => {
         const db = tx.raw as DatabaseSync;
+        const accounts = selectAllUsageAccountsReadOnly(db);
+        const buckets = selectAllUsageBucketsReadOnly(db);
         if (maybeWindowKind !== undefined) {
           const provider = providerOrAccount as Provider;
           const account = accountOrWindowKind;
           return deriveHeadroom(
-            selectUsageAccount(db, provider, account),
-            selectUsageBucket(db, provider, account, maybeWindowKind),
+            accounts.find((a) => a.provider === provider && a.account === account),
+            buckets.find(
+              (b) =>
+                b.provider === provider &&
+                b.account === account &&
+                b.windowKind === maybeWindowKind,
+            ),
           );
         }
         const account = providerOrAccount;
@@ -382,21 +390,19 @@ export function openDispatchStore(projectId: string): DispatchStore {
           'headroom',
           String(account),
           [
-            ...selectAllUsageAccounts(db).filter((a) => a.account === account),
-            ...selectAllUsageBuckets(db).filter((b) => b.account === account),
+            ...accounts.filter((a) => a.account === account),
+            ...buckets.filter((b) => b.account === account),
           ].map((row) => ({ provider: row.provider })),
         );
         const accountStatus = singleAccountOnlyMatch(
           'account status',
           String(account),
-          selectAllUsageAccounts(db).filter((a) => a.account === account),
+          accounts.filter((a) => a.account === account),
         );
         const bucket = singleAccountOnlyMatch(
           'bucket',
           String(account),
-          selectAllUsageBuckets(db).filter(
-            (b) => b.account === account && b.windowKind === windowKind,
-          ),
+          buckets.filter((b) => b.account === account && b.windowKind === windowKind),
         );
         return deriveHeadroom(accountStatus, bucket);
       });
@@ -459,7 +465,11 @@ export function openDispatchStore(projectId: string): DispatchStore {
     },
 
     getRollup(kind: CostRollupKind, id: string): CostRollup | undefined {
-      return store.transaction((tx) => selectCostRollup(tx.raw as DatabaseSync, kind, id));
+      return store.transaction((tx) =>
+        selectAllCostRollups(tx.raw as DatabaseSync, { backfillLegacy: false }).find(
+          (r) => r.kind === kind && r.id === id,
+        ),
+      );
     },
 
     readRollups(): readonly CostRollup[] {
@@ -476,7 +486,9 @@ export function openDispatchStore(projectId: string): DispatchStore {
 
     getAgentCostRollup(agentId: string): AgentCostRollup | undefined {
       return store.transaction((tx) => {
-        const rollup = selectCostRollup(tx.raw as DatabaseSync, 'agent', agentId);
+        const rollup = selectAllCostRollups(tx.raw as DatabaseSync, {
+          backfillLegacy: false,
+        }).find((r) => r.kind === 'agent' && r.id === agentId);
         return rollup ? toAgentCostRollup(rollup) : undefined;
       });
     },
