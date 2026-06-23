@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   FakePty,
@@ -734,6 +734,38 @@ describe('#77 codex collapsed-paste kickoff — consume after the inject-attempt
     expect(pane.written.filter((w) => w === '\r')).toHaveLength(0); // never blind-fired Enter
   });
 
+  it('default FILE-HANDOFF writer scrubs the handoff when the cap retracts a kickoff', async () => {
+    const { projectId, repo } = makeProject();
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const retry = makeInjectRetry();
+    const pty = new FakePty();
+    const engine = new ConductorEngine({
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      injectOptions: { retryDelay: retry.retryDelay, maxEchoAttempts: 1 },
+    });
+    engines.push(engine);
+    const { kickoff, worktreePath } = seedCodexKickoff(projectId, repo);
+    await hostCodexPane(engine, pty, codexIdentity(projectId, worktreePath));
+    const hosted = engine.getHosted(projectId, 'impl-cx')!;
+    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt');
+
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
+
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(true);
+
+    await driveCodexInjectFailure(engine, hosted, kickoff, retry);
+    expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
+    expect(existsSync(handoffPath)).toBe(false);
+  });
+
   it('NON-VACUOUS: the kickoff SURVIVES every failed turn strictly before the cap, then disappears at it', async () => {
     // Makes the consume-after-cap assertion real: the kickoff must persist at attempts 1 and 2 and
     // vanish exactly at attempt 3 — so the test fails if the cap is removed (never consumed) OR set
@@ -994,7 +1026,7 @@ describe('#93/#132 cap-retract notice — reconciled against pane liveness', () 
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);
   });
 
-  it('default FILE-HANDOFF writer stores kickoff mail in private program-data, not the worktree', async () => {
+  it('default FILE-HANDOFF writer stores kickoff mail privately, then scrubs it', async () => {
     const { projectId, repo } = makeProject();
     const clock = makeClock();
     const qw = makeQuietWindow();
@@ -1015,6 +1047,11 @@ describe('#93/#132 cap-retract notice — reconciled against pane liveness', () 
     const turnP = engine.runOneTurn(hosted, kickoff);
     await tick();
     const injectedPointer = pane.written[0] ?? '';
+    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt');
+    expect(pane.spec.env.CO_KICKOFF_HANDOFF).toBe(handoffPath);
+    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
+    expect(statSync(dirname(handoffPath)).mode & 0o777).toBe(0o700);
+    expect(statSync(handoffPath).mode & 0o777).toBe(0o600);
     pane.emit(injectedPointer);
     await tick();
     clock.set(1000);
@@ -1028,10 +1065,7 @@ describe('#93/#132 cap-retract notice — reconciled against pane liveness', () 
     expect(injectedPointer).toBe(CODEX_ENV_HANDOFF_POINTER);
     expect(injectedPointer.length).toBeLessThan(256);
     expect(injectedPointer).not.toContain(projectDataDir(projectId));
-    const handoffPath = join(projectDataDir(projectId), 'handoffs', 'impl-cx', 'kickoff.txt');
-    expect(pane.spec.env.CO_KICKOFF_HANDOFF).toBe(handoffPath);
-    expect(readFileSync(handoffPath, 'utf8')).toBe(defaultMailRenderer(kickoff));
-    expect(statSync(handoffPath).mode & 0o777).toBe(0o600);
+    expect(existsSync(handoffPath)).toBe(false);
     expect(existsSync(join(worktreePath, '.co'))).toBe(false);
     expect(pane.written.some((w) => w.includes('Implement the feature per the spec'))).toBe(false);
     expect(kickoffOutstanding(projectId, kickoff.seq)).toBe(false);

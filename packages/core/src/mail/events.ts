@@ -339,7 +339,8 @@ export function turnKickoffCorrelationId(agent: string): string {
 export function isTurnKickoffMail(mail: DeliveredMail): boolean {
   return (
     mail.type === MAIL_CLARIFY_REQUEST &&
-    mail.correlationId?.startsWith(TURN_KICKOFF_CORRELATION_PREFIX) === true
+    mail.causationId == null &&
+    mail.correlationId === turnKickoffCorrelationId(mail.recipient)
   );
 }
 

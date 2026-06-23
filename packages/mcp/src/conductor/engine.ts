@@ -95,6 +95,7 @@ import {
   CODEX_KICKOFF_HANDOFF_ENV,
   codexKickoffHandoffPath,
   codexKickoffHandoffPointer,
+  removeCodexKickoffHandoff,
   writeCodexKickoffHandoff,
 } from './codex-handoff.js';
 
@@ -183,6 +184,11 @@ export interface ConductorEngineDeps {
    * Injected so the testable path needs no real filesystem.
    */
   readonly writeCodexHandoff?: (identity: HostedIdentity, body: string) => string;
+  /**
+   * Cleanup pair for {@link writeCodexHandoff}. The default is installed only with the default writer;
+   * custom writers can supply a matching cleanup seam when they persist kickoff bodies.
+   */
+  readonly removeCodexHandoff?: (identity: HostedIdentity) => void;
   /** Base {@link detectTurnEnd} config. `provider` is always taken from the hosted identity (authoritative). */
   readonly turnConfig?: Omit<TurnEndConfig, 'provider'>;
   /**
@@ -435,6 +441,7 @@ export class ConductorEngine {
   private readonly renderMail: MailRenderer;
   private readonly spawnSpecFor: (identity: HostedIdentity) => SpawnSpec;
   private readonly writeCodexHandoff: (identity: HostedIdentity, body: string) => string;
+  private readonly removeCodexHandoff: (identity: HostedIdentity) => void;
   private readonly clarifyTimeoutSeconds: (projectId: ProjectId) => number;
   /** Warm panes, keyed `${projectId}:${agent}` — the engine's launch-authority ledger (MNR-5). */
   private readonly hosted = new Map<string, HostedPane>();
@@ -568,6 +575,9 @@ export class ConductorEngine {
     this.renderMail = deps.renderMail ?? defaultMailRenderer;
     this.spawnSpecFor = deps.spawnSpecFor ?? defaultSpawnSpec;
     this.writeCodexHandoff = deps.writeCodexHandoff ?? writeCodexKickoffHandoff;
+    this.removeCodexHandoff =
+      deps.removeCodexHandoff ??
+      (deps.writeCodexHandoff == null ? removeCodexKickoffHandoff : noop);
     this.clarifyTimeoutSeconds =
       deps.clarifyTimeoutSeconds ?? ((projectId) => defaultClarifyTimeoutSeconds(projectId));
   }
@@ -912,7 +922,7 @@ export class ConductorEngine {
         this.recordOverloadBackoff(agentKey);
       } else {
         this.clearOverloadBackoff(agentKey);
-        this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+        this.consumeOneShotKickoff(hosted.identity, mail);
         if (sawMcpActivity) {
           this.consumeUnreadTurnWakeMail(hosted.identity.projectId, mail);
         }
@@ -978,7 +988,7 @@ export class ConductorEngine {
               `Freeing the warm pane instead of re-pasting every tick. Last error: ${errorMessage(error)}`,
           );
           try {
-            this.consumeOneShotKickoff(hosted.identity.projectId, mail);
+            this.consumeOneShotKickoff(hosted.identity, mail);
             this.surfaceCappedKickoffFailure(hosted, mail, attempts, error);
           } catch (retractErr) {
             // Best-effort cap cleanup must NOT mask the turn's own outcome (mirrors the finally below).
@@ -1233,13 +1243,26 @@ export class ConductorEngine {
     );
   }
 
-  private consumeOneShotKickoff(projectId: ProjectId, mail: DeliveredMail): void {
+  private consumeOneShotKickoff(identity: HostedIdentity, mail: DeliveredMail): void {
     if (!isTurnKickoffMail(mail)) return;
-    const store = this.openMail(projectId);
+    const store = this.openMail(identity.projectId);
     try {
       store.retract(mail.sender, mail.seq);
     } finally {
       store.close();
+    }
+    this.removeConsumedCodexHandoff(identity, mail);
+  }
+
+  private removeConsumedCodexHandoff(identity: HostedIdentity, mail: DeliveredMail): void {
+    if (identity.provider !== 'codex' || !isTurnKickoffMail(mail)) return;
+    try {
+      this.removeCodexHandoff(identity);
+    } catch (error) {
+      console.error(
+        `[ConductorEngine] failed to remove consumed codex kickoff handoff for ` +
+          `'${identity.agent}' in project '${identity.projectId}': ${errorMessage(error)}`,
+      );
     }
   }
 

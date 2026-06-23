@@ -17,6 +17,7 @@ import {
   MAIL_CLARIFY_REQUEST,
   MAIL_CLARIFY_RESPONSE,
   MAIL_TYPES,
+  isTurnKickoffMail,
   makeMailEvent,
   makeMailReadEvent,
   mailSchemas,
@@ -25,6 +26,7 @@ import {
   mailKind,
   completionPredicates,
   completionPredicate,
+  turnKickoffCorrelationId,
   type DeliveredMail,
   type MailEnvelope,
 } from './events.js';
@@ -994,6 +996,42 @@ describe('AC-L1-9 — new events replay byte-equal; send/markRead are repo-prist
       });
       expect(viewed.read).toBe(true);
       expect(mail.outstandingCount('lead')).toBe(1); // viewed, but still pending (un-loseable)
+    } finally {
+      mail.close();
+    }
+  });
+
+  it('classifies only root recipient-bound turn kickoff mail as a one-shot kickoff', () => {
+    const mail = openMailStore('p-turn-kickoff-classifier');
+    try {
+      const kickoff = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'impl-x',
+        from: 'lead',
+        subject: 'kickoff',
+        body: 'start',
+        correlationId: turnKickoffCorrelationId('impl-x'),
+      });
+      expect(isTurnKickoffMail(kickoff)).toBe(true);
+
+      const replyInKickoffThread = mail.reply(kickoff, {
+        type: MAIL_CLARIFY_REQUEST,
+        subject: 'follow-up',
+        body: 'need one detail',
+      });
+      expect(replyInKickoffThread.correlationId).toBe(kickoff.correlationId);
+      expect(replyInKickoffThread.causationId).toBe(String(kickoff.seq));
+      expect(isTurnKickoffMail(replyInKickoffThread)).toBe(false);
+
+      const wrongRecipientMarker = mail.send({
+        type: MAIL_CLARIFY_REQUEST,
+        to: 'impl-y',
+        from: 'lead',
+        subject: 'ordinary',
+        body: 'not your kickoff',
+        correlationId: turnKickoffCorrelationId('impl-x'),
+      });
+      expect(isTurnKickoffMail(wrongRecipientMarker)).toBe(false);
     } finally {
       mail.close();
     }
