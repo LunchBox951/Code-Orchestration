@@ -66,5 +66,14 @@ building → review → verified → merged), shown in the app. Escalation can t
 spawn a remediation phase) with an audit trail. Phase-ready = the phase's acceptance criteria
 met + verified (mechanical suite-run vs baseline) — the heir to `phase_chunk_ready`.
 
+**Evidence-invalidation policy** (pinned; enforced in `PlansProjector` on `plan.replanned`). A
+phase's `verifiedPass`/`baselineSha` is a *criteria-vs-baseline fact*, so a replan only carries
+that evidence forward while it stays true. The compared **verification contract is `deps` +
+`criteria` only** — never `name`/`owner`: renaming a phase or handing it to a new owner preserves
+its evidence, but changing what was tested (`criteria`) or the upstream the baseline sits on
+(`deps`) drops it back to `planned`. Invalidation is **transitive over `deps`**: a phase verified
+against an upstream contract that has since changed can't be trusted, so the whole downstream
+subgraph re-verifies. This is intentionally stricter than the original preserve-only ask.
+
 > Per-role model preferences and rate-limit-aware provider routing live in [DISPATCH](dispatch.md) / [COST](cost-and-usage.md);
 > the concurrency *caps* above are the knobs those policies turn.

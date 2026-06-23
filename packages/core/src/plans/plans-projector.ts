@@ -151,6 +151,16 @@ interface PreservedPhaseState {
   readonly baselineSha?: string;
 }
 
+/**
+ * Across a `plan.replanned`, is the surviving phase's VERIFICATION CONTRACT unchanged? PINNED DESIGN
+ * DECISION: the contract is deliberately `deps` + `criteria` ONLY — never `name`/`owner`. A phase's
+ * `verifiedPass`/`baselineSha` is a criteria-vs-baseline FACT (see
+ * {@link import('./readiness.js').foldPhaseReadiness}: a green `phase.verified` = the
+ * criteria-tests pass with no regression vs
+ * `baselineSha`). So a replan that only renames a phase or hands it to a new owner leaves that fact
+ * true and PRESERVES the evidence; a replan that touches `criteria` (what was tested) or `deps` (the
+ * upstream the baseline sits on) changes what "verified" would mean and DROPS the stale evidence.
+ */
 function samePhaseVerificationContract(
   preserved: PreservedPhaseState | undefined,
   phase: PhaseNode,
@@ -179,6 +189,16 @@ function changedPhaseContracts(
   return changed;
 }
 
+/**
+ * Transitively close `changed` over the `deps` DAG: every phase that (recursively) depends on a
+ * changed phase is itself affected. PINNED DESIGN DECISION: a `plan.replanned` invalidates not just
+ * the phases whose own contract moved but ALL DOWNSTREAM phases over `deps` — a phase whose evidence
+ * was earned against an upstream contract that has SINCE changed can no longer be trusted, so its
+ * `verifiedPass`/`baselineSha` is dropped and it returns to `planned`. This is intentionally STRICTER
+ * than #73's preserve-surviving-evidence ask: #73 keeps a phase's own evidence across a rename, but a
+ * shifted upstream still forces a re-verify downstream. (Pinned in `docs/architecture/phases-and-plans.md`,
+ * "Lifecycle & re-planning".)
+ */
 function affectedPhaseContracts(
   phases: readonly PhaseNode[],
   changed: ReadonlySet<string>,
