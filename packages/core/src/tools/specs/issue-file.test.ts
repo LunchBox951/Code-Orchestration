@@ -80,14 +80,18 @@ function configure(
   }
 }
 
-function seedDiagnosedIssue(stores: Stores, destination: 'target' | 'co' = 'co'): void {
+function seedCapturedIssue(stores: Stores, destination: 'target' | 'co' = 'co'): void {
   stores.issues.recordCapture({
     issueId: 'iss-1',
     summary: 'mail drops envelope at /home/alice/co',
     detail: 'repro detail',
     destination,
-    capturedBy: 'impl-1',
+    capturedBy: 'coord-1',
   });
+}
+
+function seedDiagnosedIssue(stores: Stores, destination: 'target' | 'co' = 'co'): void {
+  seedCapturedIssue(stores, destination);
   stores.issues.recordDiagnosis({
     issueId: 'iss-1',
     probableCause: 'seam swallows envelope',
@@ -134,6 +138,12 @@ const file = (ctx: ToolContext) =>
 
 const fileWithTitle = (ctx: ToolContext, title: string) =>
   invokeTool(buildCoreRegistry(), ctx, 'co_issue_file', { issue_id: 'iss-1', title });
+
+const fileWithCause = (ctx: ToolContext, probableCause: string) =>
+  invokeTool(buildCoreRegistry(), ctx, 'co_issue_file', {
+    issue_id: 'iss-1',
+    probable_cause: probableCause,
+  });
 
 describe('co_issue_file — publish opt-in + pipeline-order gates', () => {
   it('refuses when issues.publish is not enabled', async () => {
@@ -445,5 +455,67 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     expect(filed['posted_ref']).toBe(alreadyPosted); // reused, not re-posted
     expect(createCallCount(gh)).toBe(0); // gh issue create never ran — no double-post
     expect(stores.issues.getIssue('iss-1')?.postedRef).toBe(alreadyPosted);
+  });
+});
+
+// #130 — an owner-tier caller (coordinator / lead) can co_issue_capture + co_issue_file but NOT
+// co_issue_diagnose (researcher-only). An inline `probable_cause` on co_issue_file auto-diagnoses a
+// captured issue so the owner's own captures are not dead-ended, while the standalone diagnose verb
+// stays researcher-only and the per-post operator approval remains the real backstop.
+describe('co_issue_file — inline owner-tier diagnosis (#130)', () => {
+  it('auto-diagnoses a captured issue from an inline probable_cause, then requests approval', async () => {
+    const id = 'p-if-inline-diagnose';
+    configure(id);
+    const stores = openStores(id);
+    seedCapturedIssue(stores);
+    const gh = vi.fn<GhExec>();
+    const ctx = makeCtx(id, stores, gh);
+
+    const result = (await fileWithCause(ctx, 'coordinator-supplied probable cause')) as Record<
+      string,
+      unknown
+    >;
+    expect(result['status']).toBe('approval_requested');
+    expect(gh).not.toHaveBeenCalled();
+
+    // The capture advanced to diagnosed, attributed to the owner-tier caller (not a researcher).
+    const issue = stores.issues.getIssue('iss-1');
+    expect(issue?.state).toBe('diagnosed');
+    expect(issue?.diagnosedBy).toBe('coord-1');
+    expect(issue?.probableCause).toBe('coordinator-supplied probable cause');
+  });
+
+  it('files after the operator approves the inline-diagnosed capture', async () => {
+    const id = 'p-if-inline-diagnose-approve';
+    configure(id);
+    const stores = openStores(id);
+    seedCapturedIssue(stores);
+    const gh = fakeGh('https://github.com/acme/co/issues/13');
+    const ctx = makeCtx(id, stores, gh);
+
+    const req = (await fileWithCause(ctx, 'inline cause')) as Record<string, unknown>;
+    const held = stores.mail
+      .inbox(OPERATOR)
+      .find((m) => m.seq === (req['approval_seq'] as number))!;
+    stores.mail.reply(held, {
+      type: MAIL_APPROVAL_RESPONSE,
+      subject: 're',
+      body: 'approved',
+      decision: 'approve',
+    });
+
+    const filed = (await fileWithCause(ctx, 'inline cause')) as Record<string, unknown>;
+    expect(filed['status']).toBe('filed');
+    expect(filed['posted_ref']).toBe('https://github.com/acme/co/issues/13');
+    expect(createCallCount(gh)).toBe(1);
+    expect(stores.issues.getIssue('iss-1')?.state).toBe('filed');
+  });
+
+  it('still refuses a captured issue when no probable_cause is supplied (diagnose preserved)', async () => {
+    const id = 'p-if-captured-no-cause';
+    configure(id);
+    const stores = openStores(id);
+    seedCapturedIssue(stores);
+    await expect(file(makeCtx(id, stores, vi.fn<GhExec>()))).rejects.toThrow(/diagnos/i);
   });
 });

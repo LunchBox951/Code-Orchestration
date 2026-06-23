@@ -22,6 +22,16 @@ const issueFileInput = z
       .min(1)
       .optional()
       .describe('Optional issue title override; defaults to the captured summary (scrubbed).'),
+    probable_cause: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'An inline probable-cause report. When the issue is still captured, supplying this ' +
+          'auto-diagnoses it under the owner-tier caller (coordinator/lead) before filing — the ' +
+          "escape from the diagnose step's researcher-only gate when no researcher is in play. " +
+          'Ignored once the issue is already diagnosed. The per-post @operator approval still backstops.',
+      ),
   })
   .strict();
 type IssueFileInput = z.infer<typeof issueFileInput>;
@@ -57,8 +67,10 @@ type IssueFileOutput = z.infer<typeof issueFileOutput>;
  * idempotent and never re-runs `gh`.
  *
  * Gates, in order: coordinator/lead caller → `issues.publish` opt-in (OFF by default) →
- * pipeline order (diagnosed only) → destination vs repo mode (no target filing in Offline) →
- * the per-post approval. All `gh` I/O rides the injectable `ctx.ghExec` seam.
+ * pipeline order (diagnosed only — an owner-tier caller may pass an inline `probable_cause` to
+ * auto-diagnose its own still-captured issue, since the diagnose VERB is researcher-only) →
+ * destination vs repo mode (no target filing in Offline) → the per-post approval. All `gh` I/O
+ * rides the injectable `ctx.ghExec` seam.
  */
 export const issueFileTool: ToolSpec<IssueFileInput, IssueFileOutput> = {
   name: 'co_issue_file',
@@ -104,7 +116,7 @@ export const issueFileTool: ToolSpec<IssueFileInput, IssueFileOutput> = {
       config.close();
     }
 
-    const issue = ctx.issues.getIssue(input.issue_id);
+    let issue = ctx.issues.getIssue(input.issue_id);
     if (issue == null) {
       throw new Error(`co_issue_file: no issue record for '${input.issue_id}' — capture it first.`);
     }
@@ -118,10 +130,23 @@ export const issueFileTool: ToolSpec<IssueFileInput, IssueFileOutput> = {
         issue: issueRecordToOutput(issue),
       };
     }
+    // Inline owner-tier diagnosis (#130): the diagnose VERB stays researcher-only, but a
+    // coordinator/lead who captured an issue can carry the probable cause on the file call so its
+    // own captures are not dead-ended. We record the diagnosis under the caller, then fall through
+    // into the same per-post operator approval — that human approval is the real backstop.
+    if (issue.state === 'captured' && input.probable_cause != null) {
+      issue = ctx.issues.recordDiagnosis({
+        issueId: issue.issueId,
+        probableCause: input.probable_cause,
+        diagnosedBy: ctx.agent,
+      });
+    }
     if (issue.state !== 'diagnosed') {
       throw new Error(
         `co_issue_file: issue '${input.issue_id}' is in state '${issue.state}' — it must be ` +
-          'diagnosed before filing (the pipeline is detect → diagnose → dedup → file).',
+          'diagnosed before filing (the pipeline is detect → diagnose → dedup → file). Supply a ' +
+          "'probable_cause' on this call to diagnose it inline, or dispatch a researcher to run " +
+          'co_issue_diagnose.',
       );
     }
 
