@@ -1460,6 +1460,148 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     expect(spec?.lockedBy).toBe(OPERATOR);
   });
 
+  it('generic approval_response reply to a spec-lock request also locks the spec', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const specs = openSpecStore(projectId);
+    let approval: DeliveredMail;
+    try {
+      specs.recordDraft({
+        taskId: 'task-reply-lock',
+        title: 'T',
+        goal: 'G',
+        criteria: [{ text: 'tokens rejected (401)', verify: 'pnpm vitest run packages/core/x' }],
+        body: 'body',
+        actor: 'coord-1',
+      });
+      const seedStore = openMailStore(projectId);
+      try {
+        approval = seedStore.send(
+          buildSpecLockApprovalEnvelope({
+            from: 'coord-1',
+            taskId: 'task-reply-lock',
+            spec: specs.getSpec('task-reply-lock')!,
+          }),
+        );
+      } finally {
+        seedStore.close();
+      }
+    } finally {
+      specs.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    const delivered = await client.reply(
+      { seq: approval.seq, recipient: OPERATOR },
+      { type: MAIL_APPROVAL_RESPONSE, decision: 'approve', subject: 're: lock', body: 'approved' },
+    );
+    expect(delivered.type).toBe(MAIL_APPROVAL_RESPONSE);
+
+    const verify = openSpecStore(projectId);
+    specStores.push(verify);
+    expect(verify.getSpec('task-reply-lock')?.state).toBe('locked');
+  });
+
+  it('decline retry is rejected after the spec-lock side effect already succeeded', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const specs = openSpecStore(projectId);
+    let approval: DeliveredMail;
+    try {
+      specs.recordDraft({
+        taskId: 'task-retry-audit',
+        title: 'T',
+        goal: 'G',
+        criteria: [{ text: 'tokens rejected (401)', verify: 'pnpm vitest run packages/core/x' }],
+        body: 'body',
+        actor: 'coord-1',
+      });
+      const seedStore = openMailStore(projectId);
+      try {
+        approval = seedStore.send(
+          buildSpecLockApprovalEnvelope({
+            from: 'coord-1',
+            taskId: 'task-retry-audit',
+            spec: specs.getSpec('task-retry-audit')!,
+          }),
+        );
+      } finally {
+        seedStore.close();
+      }
+    } finally {
+      specs.close();
+    }
+
+    let failNextReply = true;
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    const server = new OperatorIpcServer({
+      control,
+      projectId,
+      socketPath,
+      openMail: (id) => {
+        const real = openMailStore(id);
+        return {
+          ...real,
+          reply: (toMail, draft) => {
+            if (failNextReply) {
+              failNextReply = false;
+              throw new Error('injected approval_response write failure');
+            }
+            return real.reply(toMail, draft);
+          },
+        };
+      },
+    });
+    servers.push(server);
+    await server.start();
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.approve(approval.seq, {
+        decision: 'approve',
+        subject: 're: lock',
+        body: 'approved',
+      }),
+    ).rejects.toThrow(/injected approval_response write failure/);
+
+    const afterFailure = openSpecStore(projectId);
+    specStores.push(afterFailure);
+    expect(afterFailure.getSpec('task-retry-audit')?.state).toBe('locked');
+    const afterFailureMail = openMailStore(projectId);
+    mailStores.push(afterFailureMail);
+    expect(afterFailureMail.inbox(OPERATOR).find((m) => m.seq === approval.seq)?.resolved).toBe(
+      false,
+    );
+    expect(afterFailureMail.inbox('coord-1')).toHaveLength(0);
+
+    await expect(
+      client.approve(approval.seq, {
+        decision: 'decline',
+        subject: 're: lock',
+        body: 'declined',
+      }),
+    ).rejects.toThrow(/already locked.*approve/i);
+
+    const verifyMail = openMailStore(projectId);
+    mailStores.push(verifyMail);
+    expect(approvalOutcome(verifyMail, approval)).toBe('pending');
+  });
+
   it('approve of a spec-lock request with FUZZY criteria surfaces a JSON-RPC error; spec stays draft', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);

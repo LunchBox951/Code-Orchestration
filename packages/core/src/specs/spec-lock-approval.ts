@@ -109,9 +109,17 @@ export function applyApprovalLockSideEffect(
   if (approval.type !== MAIL_APPROVAL) return undefined;
   const taskId = taskIdFromSpecLockApprovalKey(approval.idempotencyKey);
   if (taskId == null) return undefined;
-  if (decision === 'decline') return undefined;
 
   const current = specs.getSpec(taskId);
+  if (decision === 'decline') {
+    if (current != null && current.state === 'locked') {
+      throw new Error(
+        `spec-lock approval '${taskId}' already locked the spec; retry with approve to record ` +
+          'the matching approval_response.',
+      );
+    }
+    return undefined;
+  }
   // Idempotent replay: an already-locked spec is a no-op (return the locked record, never throw).
   if (current != null && current.state === 'locked') return current;
 

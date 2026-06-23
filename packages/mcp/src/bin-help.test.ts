@@ -52,8 +52,10 @@ describe('co-mcp binary help', () => {
     expect(runbook).toContain('Current Stage 15 boundary');
     expect(runbook).toContain('The desktop app now owns and supervises the Conductor daemon');
     expect(runbook).toContain('Manual `co-mcp serve <projectId>` remains an advanced/headless');
-    // Spec lock is now the public `co spec lock` CLI (PR #50) — no longer an app-surface gap.
-    expect(runbook).toContain('Spec lock is the public `co spec lock <taskId>` CLI (PR #50)');
+    // Spec lock is now Mail-first in the app, with `co spec lock` kept as the headless fallback.
+    expect(runbook).toContain("Spec lock is the operator's Mail approval gate");
+    expect(runbook).toContain('The public `co spec lock <taskId>` CLI remains a');
+    expect(runbook).toContain('headless/debug fallback');
     expect(runbook).not.toContain('known temporary gap in the app surface');
     expect(runbook).not.toMatch(/no public `co spec lock` CLI command yet/);
     expect(runbook).toContain('For SH-1 evidence, submit from the Review view');

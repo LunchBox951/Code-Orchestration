@@ -642,9 +642,25 @@ export class OperatorIpcServer {
       if (found.resolved) {
         throw new Error(`operator IPC reply: mail seq=${seq} is already resolved.`);
       }
+      if (draft.type === MAIL_APPROVAL_RESPONSE && draft.decision != null) {
+        this.applySpecLockApprovalSideEffectBeforeResponse(found, draft.decision);
+      }
       return mail.reply(found, draft);
     } finally {
       mail.close();
+    }
+  }
+
+  private applySpecLockApprovalSideEffectBeforeResponse(
+    approval: DeliveredMail,
+    decision: ApprovalDecision,
+  ): void {
+    if (approval.type !== MAIL_APPROVAL || !isSpecLockApprovalKey(approval.idempotencyKey)) return;
+    const specs = this.openSpec(this.projectId);
+    try {
+      applyApprovalLockSideEffect(specs, approval, decision);
+    } finally {
+      specs.close();
     }
   }
 
@@ -809,14 +825,7 @@ export class OperatorIpcServer {
       // Issue #91 — bridge an approve of a `spec-lock:<taskId>` approval to the real lock path. Run
       // the lock BEFORE recording the approval_response: if D3 refuses the lock, the operator action
       // must remain unresolved/retryable instead of being consumed by a failed side effect.
-      if (isSpecLockApprovalKey(approval.idempotencyKey)) {
-        const specs = this.openSpec(this.projectId);
-        try {
-          applyApprovalLockSideEffect(specs, approval, decision);
-        } finally {
-          specs.close();
-        }
-      }
+      this.applySpecLockApprovalSideEffectBeforeResponse(approval, decision);
       return mail.reply(approval, { type: MAIL_APPROVAL_RESPONSE, decision, subject, body });
     } finally {
       mail.close();

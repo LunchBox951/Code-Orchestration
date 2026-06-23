@@ -35,10 +35,15 @@ describe('multi-coordinator design acceptance ladder', () => {
     }
   });
 
-  it('describes spec locking as an operator-owned CLI gate until the app lock button ships', () => {
+  it('describes spec locking as Mail-first with a CLI fallback', () => {
     const quickstart = readFileSync(join(process.cwd(), 'docs', 'alpha-quickstart.md'), 'utf8');
 
-    expect(quickstart).toContain('operator-owned `co spec lock <taskId>` gate');
+    expect(quickstart).toContain(
+      "locking a drafted spec is the operator's approval gate through Mail",
+    );
+    expect(quickstart).toContain(
+      'The public `co spec lock\n<taskId>` CLI remains the headless/debug fallback',
+    );
     expect(quickstart).not.toContain('co_spec_lock` app-surface gap');
   });
 

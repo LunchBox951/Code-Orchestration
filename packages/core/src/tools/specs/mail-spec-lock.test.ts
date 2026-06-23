@@ -140,6 +140,39 @@ describe('co_mail_send — #91 approve-reply bridges the lock', () => {
     expect(specs.getSpec('task-4')?.state).toBe('draft');
   });
 
+  it('rejects a second approval_response after a spec-lock request is already resolved', () => {
+    seedDraft('task-4b', VALID_CRITERIA);
+    const req = send('coord-1', {
+      type: MAIL_APPROVAL,
+      subject: 's',
+      body: 'b',
+      lock_task_id: 'task-4b',
+    });
+    send(OPERATOR, {
+      type: 'approval_response',
+      subject: 're: lock',
+      body: 'no',
+      in_reply_to: req.seq,
+      decision: 'decline',
+    });
+
+    expect(() =>
+      send(OPERATOR, {
+        type: 'approval_response',
+        subject: 're: lock',
+        body: 'actually yes',
+        in_reply_to: req.seq,
+        decision: 'approve',
+      }),
+    ).toThrow(/already resolved/i);
+    expect(specs.getSpec('task-4b')?.state).toBe('draft');
+    const responses = mail
+      .inbox('coord-1')
+      .filter((m) => m.type === 'approval_response' && m.causationId === String(req.seq));
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.decision).toBe('decline');
+  });
+
   it('approve reply on a spec-lock request with FUZZY criteria is refused (spec stays draft)', () => {
     seedDraft('task-5', [
       { text: 'expired tokens rejected (401)', verify: 'pnpm vitest run packages/core/x' },

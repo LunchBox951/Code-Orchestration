@@ -112,6 +112,9 @@ export const mailSendTool: ToolSpec<MailSendInput, MailSendOutput> = {
             `(got type '${input.type}').`,
         );
       }
+      if (input.type === MAIL_APPROVAL_RESPONSE && answered.resolved) {
+        throw new Error(`co_mail_send: mail ${input.in_reply_to} is already resolved.`);
+      }
       if (
         input.type === MAIL_APPROVAL_RESPONSE &&
         input.decision != null &&
