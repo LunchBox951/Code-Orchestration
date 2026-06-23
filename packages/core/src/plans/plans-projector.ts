@@ -145,8 +145,21 @@ function sameDraft(existing: PlanRecord, rec: PlanDrafted): boolean {
 
 interface PreservedPhaseState {
   readonly status: PhaseStatus;
+  readonly deps: readonly string[];
+  readonly criteria: readonly Criterion[];
   readonly verifiedPass?: boolean;
   readonly baselineSha?: string;
+}
+
+function samePhaseVerificationContract(
+  preserved: PreservedPhaseState | undefined,
+  phase: PhaseNode,
+): preserved is PreservedPhaseState {
+  return (
+    preserved != null &&
+    JSON.stringify(preserved.deps) === JSON.stringify(phase.deps) &&
+    JSON.stringify(preserved.criteria) === JSON.stringify(phase.criteria)
+  );
 }
 
 function upsertPhases(
@@ -158,6 +171,7 @@ function upsertPhases(
   db.prepare(`DELETE FROM plan_phases WHERE task_id = ?`).run(taskId);
   phases.forEach((phase, ordinal) => {
     const preserved = preservedPhaseState.get(phase.phaseId);
+    const preserveState = samePhaseVerificationContract(preserved, phase);
     db.prepare(
       `INSERT INTO plan_phases
        (task_id, phase_id, ordinal, name, owner, deps, criteria, status, verified_pass, baseline_sha)
@@ -170,9 +184,9 @@ function upsertPhases(
       phase.owner ?? null,
       JSON.stringify(phase.deps),
       JSON.stringify(phase.criteria),
-      preserved?.status ?? 'planned',
-      preserved?.verifiedPass == null ? null : preserved.verifiedPass ? 1 : 0,
-      preserved?.baselineSha ?? null,
+      preserveState ? preserved.status : 'planned',
+      preserveState && preserved.verifiedPass != null ? (preserved.verifiedPass ? 1 : 0) : null,
+      preserveState ? preserved.baselineSha ?? null : null,
     );
   });
 }
@@ -321,6 +335,8 @@ export class PlansProjector implements Projector {
             phase.phaseId,
             {
               status: phase.status,
+              deps: phase.deps,
+              criteria: phase.criteria,
               ...(phase.verifiedPass != null ? { verifiedPass: phase.verifiedPass } : {}),
               ...(phase.baselineSha != null ? { baselineSha: phase.baselineSha } : {}),
             },

@@ -433,6 +433,58 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
     }
   });
 
+  it('clears stale phase evidence when replan changes criteria under the same phase id', () => {
+    const store = openPlanStore('p-plans-replan-clears-stale-verification');
+    const updatedCriterion = {
+      text: 'updated phase criterion passes',
+      verify: 'pnpm vitest run packages/core/src/plans/plans-store.test.ts',
+    };
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: [
+          {
+            phaseId: 'ph-1',
+            name: 'Phase One',
+            deps: [],
+            criteria: [WIRED_CRITERION],
+          },
+        ],
+        actor: ACTOR,
+      });
+      store.changePhaseStatus('task-1', 'ph-1', 'merged', ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a', true, ACTOR);
+
+      const after = store.recordReplan(
+        'task-1',
+        'criteria changed',
+        [
+          {
+            phaseId: 'ph-1',
+            name: 'Phase One Updated',
+            deps: [],
+            criteria: [updatedCriterion],
+          },
+        ],
+        ACTOR,
+      );
+
+      const replanned = after.phases[0]!;
+      expect(replanned).toMatchObject({
+        phaseId: 'ph-1',
+        criteria: [updatedCriterion],
+        status: 'planned',
+      });
+      expect(replanned.verifiedPass).toBeUndefined();
+      expect(replanned.baselineSha).toBeUndefined();
+      expect(() => store.recordTaskCompleted('task-1', ACTOR)).toThrow(/not 'merged'/i);
+    } finally {
+      store.close();
+    }
+  });
+
   it('multiple replans accumulate replanCount', () => {
     const store = openPlanStore('p-plans-replan-multi');
     try {
