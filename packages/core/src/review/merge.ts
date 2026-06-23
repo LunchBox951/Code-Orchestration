@@ -158,8 +158,8 @@ export interface MergeTeardown {
  * policy+record+spawn path the trigger uses. The discriminant names exactly WHY a redrive did or did not
  * launch, so the daemon can mirror it into its tick outcome without re-deriving the reason.
  *
- *   - `launched`    — capacity recovered: the seat re-resolved to a `placed` placement, the new
- *                     placement was recorded, the reviewer kickoff seeded, and the live spawn fired.
+ *   - `launched`    — capacity recovered (or an already-placed but not-yet-hosted seat was retried):
+ *                     the reviewer kickoff was seeded and the live spawn fired.
  *   - `still-waiting` — re-resolution stayed `waiting` (still maxed); nothing was launched, no churn.
  *   - `no-op`       — a NEGATIVE guard short-circuited before any re-resolution (no dispatch wired, the
  *                     review is unknown / already has a recorded verdict / is not the active-serialized
@@ -172,6 +172,14 @@ export interface RedriveReviewerOutcome {
   readonly agent?: string;
   /** A short human-readable reason, present on `no-op` (which guard) and `still-waiting` (why maxed). */
   readonly reason?: string;
+}
+
+export interface RedriveWaitingReviewerOptions {
+  /**
+   * Retry a compatible already-placed seat through the spawn gate instead of treating it as idempotently
+   * complete. Intended for the daemon after it proves the placed reviewer has no warm pane or live session.
+   */
+  readonly retryPlaced?: boolean;
 }
 
 /**
@@ -545,17 +553,22 @@ export class CoReviewGate implements FinishReviewGate {
    * NEGATIVE GUARDS (each a `no-op`, never a throw — Principle 9): no dispatch store wired; the
    * `reviewId` has no recorded review request; the review already has a recorded verdict (resolved); the
    * review is no longer the active-serialized branch for its target; or the seat already carries a
-   * `placed` placement (already redriven — the idempotency guard against a concurrent tick OR a lead
-   * re-call double-launching). On a clean re-resolution it returns `launched` (capacity recovered: the
-   * seat flipped to `placed`, the placement was recorded ONCE, the kickoff seeded, the spawn fired) or
-   * `still-waiting` (still maxed — no churn, no new launch). IDEMPOTENT across repeated invocations: the
-   * placed-seat idempotency guard makes a second call a `no-op` (single placement append, single launch).
+   * `placed` placement (already redriven). When the daemon has independently proved an already-placed seat
+   * is still not hosted, it may pass `retryPlaced` to retry the SAME recorded placement through the SAME
+   * spawn gate; this is the recovery path for a transient post-placement launch failure. On a clean
+   * re-resolution it returns `launched` (capacity recovered: the seat flipped to `placed`, the placement was
+   * recorded ONCE, the kickoff seeded, the spawn fired), `launched` for an explicit already-placed retry (no
+   * new placement row), or `still-waiting` (still maxed — no churn, no new launch).
    *
    * The live spawn is fire-and-forget (pushed onto {@link pendingSpawns}); async callers await
    * {@link drainSpawns} to surface a launch failure. `projectId` is the review's project — the daemon
    * (and the tool) pass the project whose stores back this gate; the spawn launches into it.
    */
-  redriveWaitingReviewer(reviewId: string, projectId: string): RedriveReviewerOutcome {
+  redriveWaitingReviewer(
+    reviewId: string,
+    projectId: string,
+    options: RedriveWaitingReviewerOptions = {},
+  ): RedriveReviewerOutcome {
     if (this.deps.dispatch == null) {
       return { kind: 'no-op', reason: 'no dispatch store wired' };
     }
@@ -591,8 +604,10 @@ export class CoReviewGate implements FinishReviewGate {
         : {}),
     };
     // IDEMPOTENCY GUARD (the placement store is NOT a transactional queue): a compatible `placed`
-    // placement already exists ⇒ this seat was redriven by a prior tick or the lead re-call — a re-drive
-    // would double-launch. Refuse before re-resolution so concurrent ticks cannot both record + launch.
+    // placement already exists ⇒ this seat was redriven by a prior tick or the lead re-call. When the
+    // daemon explicitly requests a retry and a live spawn gate is wired, retry that SAME placement rather
+    // than appending another row; the engine-backed gate is the single launch authority and no-ops if the
+    // reviewer is already hosted.
     const seatPlacements = this.deps.dispatch
       .readPlacements()
       .filter((placement) =>
@@ -601,6 +616,15 @@ export class CoReviewGate implements FinishReviewGate {
       .filter((placement) => placementMatchesReview(placement, req, request.scope));
     const alreadyPlaced = seatPlacements.find((placement) => placement.kind === 'placed');
     if (alreadyPlaced != null) {
+      if (options.retryPlaced === true && this.deps.reviewerSpawnGate != null) {
+        this.seedReviewerKickoff(alreadyPlaced.agent, req, request.scope);
+        this.fireSpawn(alreadyPlaced.agent, projectId, alreadyPlaced);
+        return {
+          kind: 'launched',
+          agent: alreadyPlaced.agent,
+          reason: `reviewer seat '${alreadyPlaced.agent}' already placed; spawn retried`,
+        };
+      }
       return {
         kind: 'no-op',
         agent: alreadyPlaced.agent,

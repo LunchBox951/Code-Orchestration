@@ -239,12 +239,23 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function pushReviewerRedriveError(errors: LaunchError[], agent: string, error: unknown): void {
+  errors.push({ agent, message: errorMessage(error) });
+}
+
 /**
  * #133 — the default THUNDERING-HERD cap for waiting-reviewer re-drive: at most this many seats flip from
  * `waiting` to `placed` (and launch) per tick. Small + deterministic so a recovered capacity window
  * cannot stampede the launch authority; the rest drain on subsequent ticks.
  */
 export const DEFAULT_MAX_REVIEWER_REDRIVES_PER_TICK = 2;
+
+interface ReviewerRedriveSeat {
+  readonly reviewId: string;
+  readonly agent: string;
+  /** `waiting` re-runs placement; `placed` retries an already-recorded placement whose live spawn failed. */
+  readonly kind: 'waiting' | 'placed';
+}
 
 // TODO(host-live): duplicate-active-session is detected by regex-matching the error message, which
 // is brittle across provider/store wording changes. Replace with a typed/sentinel error once the
@@ -572,77 +583,116 @@ export class ConductorDaemon {
     const spawnGate = this.reviewerSpawnGate?.();
     if (spawnGate == null) return empty; // nothing to launch through — never churn a waiting placement.
 
-    const dispatch = this.openDispatch(this.projectId);
+    const reviewersRedriven: string[] = [];
+    const reviewerRedriveErrors: LaunchError[] = [];
     try {
-      const seats = this.discoverWaitingReviewerSeats(dispatch);
-      if (seats.length === 0) return empty;
-      // Cheap pre-gate (canResume's first real caller): if NO suitable provider is healthy + below the
-      // maxed threshold, every seat would re-resolve to waiting — skip the whole drain (no churn).
-      const candidates = candidatesFromStore(dispatch, this.reviewerAccounts, {
-        nowMs: this.now(),
-      });
-      if (!canResume(candidates, { nowMs: this.now() })) return empty;
-
-      const reviews = this.openReviews(this.projectId);
-      const worktrees = this.openWorktrees(this.projectId);
-      const mail = this.openMail(this.projectId);
-      const reviewersRedriven: string[] = [];
-      const reviewerRedriveErrors: LaunchError[] = [];
+      const dispatch = this.openDispatch(this.projectId);
       try {
-        // Drain at most K seats per tick, in deterministic reviewId order (THUNDERING-HERD cap).
-        for (const reviewId of seats.slice(0, this.maxReviewerRedrivesPerTick)) {
-          const gate = new CoReviewGate({
-            reviews,
-            worktrees,
-            dispatch,
-            mail,
-            nowMs: this.now(),
-            reviewerAccounts: this.reviewerAccounts,
-            reviewerSpawnGate: spawnGate,
-          });
-          const outcome = gate.redriveWaitingReviewer(reviewId, this.projectId);
-          if (outcome.kind === 'launched') {
+        const sessions = this.openSessions(this.projectId);
+        let liveSessions: ReadonlySet<string>;
+        try {
+          liveSessions = new Set(sessions.listSessions().map((session) => session.agentId));
+        } finally {
+          sessions.close();
+        }
+        const seats = this.discoverReviewerRedriveSeats(dispatch, liveSessions);
+        if (seats.length === 0) return empty;
+        // Cheap pre-gate (canResume's first real caller): if NO suitable provider is healthy + below the
+        // maxed threshold, every WAITING seat would re-resolve to waiting. Already-PLACED retry seats still
+        // run: they are recovering a post-placement launch failure, not consuming a new dispatch slot.
+        const candidates = candidatesFromStore(dispatch, this.reviewerAccounts, {
+          nowMs: this.now(),
+        });
+        const waitingCanResume = canResume(candidates, { nowMs: this.now() });
+        if (!waitingCanResume && !seats.some((seat) => seat.kind === 'placed')) return empty;
+
+        let reviews: ReviewStore | undefined;
+        let worktrees: WorktreeStore | undefined;
+        let mail: MailStore | undefined;
+        try {
+          reviews = this.openReviews(this.projectId);
+          worktrees = this.openWorktrees(this.projectId);
+          mail = this.openMail(this.projectId);
+          // Scan deterministic seats until K launches are accepted. No-op/still-waiting/error seats do not
+          // consume the launch cap, so stale low-sorted seats cannot starve a valid later reviewer forever.
+          for (const seat of seats) {
+            if (reviewersRedriven.length >= this.maxReviewerRedrivesPerTick) break;
+            if (seat.kind === 'waiting' && !waitingCanResume) continue;
             try {
-              // Surface a launch failure: drainSpawns rejects if the fire-and-forget spawn failed.
-              await gate.drainSpawns();
-              if (outcome.agent != null) reviewersRedriven.push(outcome.agent);
-            } catch (error: unknown) {
-              reviewerRedriveErrors.push({
-                agent: outcome.agent ?? `reviewer@${reviewId}`,
-                message: errorMessage(error),
+              const gate = new CoReviewGate({
+                reviews,
+                worktrees,
+                dispatch,
+                mail,
+                nowMs: this.now(),
+                reviewerAccounts: this.reviewerAccounts,
+                reviewerSpawnGate: spawnGate,
               });
+              const outcome = gate.redriveWaitingReviewer(seat.reviewId, this.projectId, {
+                retryPlaced: seat.kind === 'placed',
+              });
+              if (outcome.kind !== 'launched') continue;
+
+              try {
+                // Surface a launch failure: drainSpawns rejects if the fire-and-forget spawn failed.
+                await gate.drainSpawns();
+                if (outcome.agent != null) reviewersRedriven.push(outcome.agent);
+              } catch (error: unknown) {
+                pushReviewerRedriveError(
+                  reviewerRedriveErrors,
+                  outcome.agent ?? seat.agent,
+                  error,
+                );
+              }
+            } catch (error: unknown) {
+              pushReviewerRedriveError(reviewerRedriveErrors, seat.agent, error);
             }
           }
+        } finally {
+          mail?.close();
+          worktrees?.close();
+          reviews?.close();
         }
+        return { reviewersRedriven, reviewerRedriveErrors };
       } finally {
-        mail.close();
-        worktrees.close();
-        reviews.close();
+        dispatch.close();
       }
+    } catch (error: unknown) {
+      pushReviewerRedriveError(reviewerRedriveErrors, 'reviewer:redrive', error);
       return { reviewersRedriven, reviewerRedriveErrors };
-    } finally {
-      dispatch.close();
     }
   }
 
   /**
-   * #133 — the deterministic list of reviewId seats to re-drive this tick: every reviewId with a recorded
-   * `kind:'waiting'` reviewer placement (`<role>@<reviewId>`) and NO `placed` reviewer placement yet
-   * (an already-placed seat was redriven on a prior tick — excluding it here keeps the per-tick K cap
-   * from being consumed by no-ops so genuinely-waiting seats still drain). Deduped to one per reviewId and
-   * sorted by reviewId (replay-stable per-seat ordering — no thundering herd). The per-review NEGATIVE
-   * guards (no verdict yet, active-serialized branch) live in {@link CoReviewGate.redriveWaitingReviewer},
-   * the single source of truth shared with the lead re-call; this only narrows the candidate set cheaply.
+   * #133 — the deterministic list of reviewer seats to re-drive this tick. Includes:
+   *   - `waiting` seats with no placed row yet (re-run placement when capacity recovers).
+   *   - `placed` seats with no warm pane and no active session (retry a post-placement spawn failure).
+   *
+   * Deduped to one per reviewId and sorted by reviewId (replay-stable per-seat ordering — no thundering
+   * herd). The per-review NEGATIVE guards (no verdict yet, active-serialized branch) live in
+   * {@link CoReviewGate.redriveWaitingReviewer}, the single source of truth shared with the lead re-call;
+   * this only narrows the candidate set cheaply.
    */
-  private discoverWaitingReviewerSeats(dispatch: DispatchStore): readonly string[] {
-    const waiting = new Set<string>();
-    const placed = new Set<string>();
+  private discoverReviewerRedriveSeats(
+    dispatch: DispatchStore,
+    liveSessions: ReadonlySet<string>,
+  ): readonly ReviewerRedriveSeat[] {
+    const waiting = new Map<string, string>();
+    const placed = new Map<string, string>();
     for (const placement of dispatch.readPlacements()) {
       if (!isReviewerSeatPlacement(placement) || placement.reviewId == null) continue;
-      if (placement.kind === 'waiting') waiting.add(placement.reviewId);
-      else if (placement.kind === 'placed') placed.add(placement.reviewId);
+      if (placement.kind === 'waiting') waiting.set(placement.reviewId, placement.agent);
+      else if (placement.kind === 'placed') placed.set(placement.reviewId, placement.agent);
     }
-    return [...waiting].filter((reviewId) => !placed.has(reviewId)).sort();
+    const seats: ReviewerRedriveSeat[] = [];
+    for (const [reviewId, agent] of waiting) {
+      if (!placed.has(reviewId)) seats.push({ reviewId, agent, kind: 'waiting' });
+    }
+    for (const [reviewId, agent] of placed) {
+      if (this.engine.isHosted(this.projectId, agent) || liveSessions.has(agent)) continue;
+      seats.push({ reviewId, agent, kind: 'placed' });
+    }
+    return seats.sort((a, b) => a.reviewId.localeCompare(b.reviewId));
   }
 
   /**

@@ -914,6 +914,29 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
     }
   }
 
+  function seedUnknownWaitingReviewer(projectId: ProjectId, reviewId: string): void {
+    const dispatch = openDispatchStore(projectId);
+    try {
+      dispatch.recordPlacement(`reviewer:pr@${reviewId}`, {
+        kind: 'waiting',
+        role: 'reviewer:pr',
+        work_size: 'technical',
+        reasoning_budget: 'standard',
+        review_id: reviewId,
+        review_target: `co/dev-${reviewId}`,
+        review_branch: `${REVIEW_BRANCH_PREFIX}${reviewId}`,
+        review_scope: 'pr_merge',
+        reason: 'fixture: no review request exists for this waiting seat',
+        maxed_providers: ['claude'],
+        maxed_accounts: [accountForProvider('claude')],
+        unavailable_providers: [],
+        unavailable_accounts: [],
+      });
+    } finally {
+      dispatch.close();
+    }
+  }
+
   /**
    * A fake reviewer spawn gate that routes EVERY launch through `engine.ensureHosted` (single authority).
    * It does NOT drive readiness inline — the test concurrently drives the freshly-spawned panes via
@@ -1040,6 +1063,125 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
     const third = await daemon.tick();
     expect(third.reviewersRedriven).toEqual([]);
     expect(launches).toHaveLength(3);
+  });
+
+  it('does not let no-op lower-sorted seats consume the per-tick launch cap', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedUnknownWaitingReviewer(projectId, 'rev-000-no-request'); // sorts before the valid seat
+    seedWaitingReviewer(projectId, 'rev-999-valid', `${REVIEW_BRANCH_PREFIX}valid`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { gate: spawnGate, launches } = routingSpawnGate(engine, cwd);
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => spawnGate,
+      maxReviewerRedrivesPerTick: 1,
+      isSkipped: skipReviewerSeats,
+    });
+
+    const out = await drivePanesReady(daemon.tick(), pty);
+
+    expect(out.reviewersRedriven).toEqual(['reviewer:pr@rev-999-valid']);
+    expect(out.reviewerRedriveErrors).toEqual([]);
+    expect(launches).toEqual(['reviewer:pr@rev-999-valid']);
+  });
+
+  it('retries an already-placed reviewer seat after a transient spawn failure', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-flaky', `${REVIEW_BRANCH_PREFIX}flaky`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { gate: baseGate, launches } = routingSpawnGate(engine, cwd);
+    let failNextSpawn = true;
+    const flakyGate: ReviewerSpawnGate = {
+      spawn: async (projectId, record) => {
+        if (failNextSpawn) {
+          failNextSpawn = false;
+          launches.push(record.agent);
+          throw new Error('fixture spawn failed once');
+        }
+        await baseGate.spawn(projectId, record);
+      },
+    };
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => flakyGate,
+      isSkipped: skipReviewerSeats,
+    });
+
+    const first = await daemon.tick();
+
+    expect(first.reviewersRedriven).toEqual([]);
+    expect(first.reviewerRedriveErrors).toEqual([
+      { agent: 'reviewer:pr@rev-flaky', message: 'fixture spawn failed once' },
+    ]);
+    expect(engine.isHosted(projectId, 'reviewer:pr@rev-flaky')).toBe(false);
+    const dispatch = openDispatchStore(projectId);
+    try {
+      expect(dispatch.readPlacements('reviewer:pr@rev-flaky').map((p) => p.kind)).toEqual([
+        'waiting',
+        'placed',
+      ]);
+    } finally {
+      dispatch.close();
+    }
+
+    const second = await drivePanesReady(daemon.tick(), pty);
+
+    expect(second.reviewersRedriven).toEqual(['reviewer:pr@rev-flaky']);
+    expect(second.reviewerRedriveErrors).toEqual([]);
+    expect(engine.isHosted(projectId, 'reviewer:pr@rev-flaky')).toBe(true);
+    expect(launches).toEqual(['reviewer:pr@rev-flaky', 'reviewer:pr@rev-flaky']);
+    const dispatchAfterRetry = openDispatchStore(projectId);
+    try {
+      expect(dispatchAfterRetry.readPlacements('reviewer:pr@rev-flaky').map((p) => p.kind)).toEqual([
+        'waiting',
+        'placed',
+      ]);
+    } finally {
+      dispatchAfterRetry.close();
+    }
+  });
+
+  it('reports per-seat redrive errors and still runs the normal daemon cycle', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-mailfail', `${REVIEW_BRANCH_PREFIX}mailfail`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const pane = await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd }));
+    seedActionableMail(projectId, 'impl-x');
+    const throwingMail = {
+      send: () => {
+        throw new Error('fixture kickoff mail failed');
+      },
+      outstanding: () => [],
+      inbox: () => [],
+      close: () => {},
+    } as unknown as MailStore;
+    const { gate: spawnGate } = routingSpawnGate(engine, cwd);
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => spawnGate,
+      openMail: () => throwingMail,
+    });
+
+    const tickP = daemon.tick();
+    await driveTurnToIdle(pane, outstandingItem(projectId, 'impl-x'), clock, qw);
+    const out = await tickP;
+
+    expect(out.selected).toBe('impl-x');
+    expect(out.reviewerRedriveErrors).toEqual([
+      { agent: 'reviewer:pr@rev-mailfail', message: 'fixture kickoff mail failed' },
+    ]);
   });
 
   it('a still-maxed window leaves waiting seats untouched (no launch, no churn)', async () => {
