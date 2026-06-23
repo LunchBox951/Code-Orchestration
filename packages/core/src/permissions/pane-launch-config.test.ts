@@ -893,6 +893,16 @@ describe('role base-prompt injection into builder args', () => {
     expect(override).toContain('PR review');
   });
 
+  it('#94: reviewer pane prompt names verdict recording as the primary deliverable', () => {
+    const prompt = roleBasePrompt('reviewer');
+
+    expect(prompt).toContain('co_review_finalize');
+    expect(prompt).toMatch(/review id/i);
+    expect(prompt).toMatch(/PASS requires a verification marker/i);
+    expect(prompt).toMatch(/ISSUES requires at least one named blocker/i);
+    expect(prompt).toMatch(/mailed PASS is not a recorded verdict/i);
+  });
+
   it('the base prompt is repo-agnostic: no project-memory / CLAUDE.md leakage, and stays short', () => {
     for (const role of ['coordinator', 'lead', 'implementer', 'reviewer', 'researcher'] as const) {
       const prompt = roleBasePrompt(role);
@@ -908,7 +918,7 @@ describe('role base-prompt injection into builder args', () => {
       // Prompting split (Principle 11): never names a project-memory file or repo conventions.
       expect(prompt).not.toMatch(/CLAUDE\.md|AGENTS\.md/);
       // ~5-8 lines — short enough not to crowd out co orient + the schemas.
-      expect(prompt.split('\n').length).toBeLessThanOrEqual(8);
+      expect(prompt.split('\n').length).toBeLessThanOrEqual(role === 'reviewer' ? 9 : 8);
     }
   });
 

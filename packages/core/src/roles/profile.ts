@@ -156,6 +156,11 @@ export function roleBasePrompt(role: Role, options: RoleBasePromptOptions = {}):
   if (options.subRole != null && options.subRoleApproach != null) {
     lines.push(`Sub-role focus (${role}:${options.subRole}): ${options.subRoleApproach}.`);
   }
+  if (role === 'reviewer') {
+    lines.push(
+      'Reviewer verdicts are recorded with co_review_finalize using the review id from your kickoff; PASS requires a verification marker, ISSUES requires at least one named blocker, and a mailed PASS is not a recorded verdict.',
+    );
+  }
   return lines.join('\n');
 }
 

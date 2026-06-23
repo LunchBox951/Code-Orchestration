@@ -119,10 +119,11 @@ const IMPLEMENTER_GUIDANCE = [
 
 const REVIEWER_GUIDANCE = [
   'As a reviewer you are the gate. Inspect the target, run its tests, and record your verdict — pass',
-  'or issues — through co_review_finalize. Hold the strict line: the failure mode to avoid is',
-  'leniency, not thoroughness, so when you flag issues name them specifically enough that the maker',
-  'can fix and resubmit. Review-response mail is for operator-routed human review, not agent',
-  'review verdicts.',
+  'or issues — through co_review_finalize using the review id from the review kickoff. PASS requires',
+  'a verification marker; ISSUES requires at least one named blocker. Hold the strict line: the',
+  'failure mode to avoid is leniency, not thoroughness, so when you flag issues name them',
+  'specifically enough that the maker can fix and resubmit. A mailed PASS is not a recorded verdict;',
+  'review-response mail is for operator-routed human review, not agent review verdicts.',
   '',
   'Stay out of the code you review: read it, run it, judge it — but do not edit it; a reviewer who',
   'fixes the work cannot impartially gate it. Once you have returned your verdict, end your turn —',

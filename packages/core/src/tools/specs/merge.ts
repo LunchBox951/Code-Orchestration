@@ -157,16 +157,46 @@ const mergeOutput = z.object({
     .describe(
       'Present on a review_pending result (#94): the review scope the verdict will be judged under.',
     ),
+  reviewer_kind: z
+    .enum(['agent', 'human'])
+    .optional()
+    .describe(
+      'Present on a review_pending result (#94): whether the pending review is routed to an agent ' +
+        'reviewer or to the operator Review view.',
+    ),
   next_step: z
     .string()
     .optional()
     .describe(
-      'Present on a review_pending result (#94): a one-line directive — the reviewer must call ' +
-        'co_review_finalize with this review_id (PASS requires a verification marker); re-call ' +
-        'co_merge after the PASS is recorded.',
+      'Present on a review_pending result (#94): a one-line directive. Agent reviews name ' +
+        'co_review_finalize with this review_id (PASS requires a verification marker); human ' +
+        'reviews name the operator Review view. Re-call co_merge after the PASS is recorded.',
     ),
 });
 type MergeOutput = z.infer<typeof mergeOutput>;
+
+function reviewPendingNextStep(params: {
+  readonly reviewerKind: 'agent' | 'human';
+  readonly branch: string;
+  readonly into: string;
+  readonly reviewId: string;
+  readonly scope: string;
+}): string {
+  if (params.reviewerKind === 'human') {
+    return (
+      `No recorded PASS verdict exists for '${params.branch}' into '${params.into}'. A human ` +
+      `review is pending in the operator Review view for review_id '${params.reviewId}' (target ` +
+      `'${params.into}', branch '${params.branch}', scope '${params.scope}'). Re-call co_merge ` +
+      'after the operator records PASS. A mailed PASS is not a recorded verdict.'
+    );
+  }
+  return (
+    `No recorded PASS verdict exists for '${params.branch}' into '${params.into}'. The reviewer ` +
+    `must call co_review_finalize with review_id '${params.reviewId}' (target '${params.into}', ` +
+    `branch '${params.branch}', scope '${params.scope}'; a PASS requires a verification marker). ` +
+    'Re-call co_merge after the PASS is recorded. A mailed PASS is not a recorded verdict.'
+  );
+}
 
 function assertMergeIdentities(
   repoCwd: string,
@@ -384,6 +414,8 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         // coordinator/reviewer has no way to learn which review_id to record, so the merge stalls.
         // Use the review_id the gate actually recorded (an existing open request keeps its id).
         const recordedReviewId = trigger.reviewId;
+        const recordedReq = ctx.reviews.getReviewRequest(into, input.branch);
+        const reviewerKind = recordedReq?.reviewerKind ?? 'agent';
         return {
           merged: false,
           // The merge hasn't happened yet — the review is pending — so there is no commit to report.
@@ -395,11 +427,14 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
           review_target: into,
           review_branch: input.branch,
           review_scope: scope,
-          next_step:
-            `No recorded PASS verdict exists for '${input.branch}' into '${into}'. The reviewer must ` +
-            `call co_review_finalize with review_id '${recordedReviewId}' (target '${into}', branch ` +
-            `'${input.branch}', scope '${scope}'; a PASS requires a verification marker). Re-call ` +
-            'co_merge after the PASS is recorded. A mailed PASS is not a recorded verdict.',
+          reviewer_kind: reviewerKind,
+          next_step: reviewPendingNextStep({
+            reviewerKind,
+            branch: input.branch,
+            into,
+            reviewId: recordedReviewId,
+            scope,
+          }),
         };
       }
     }

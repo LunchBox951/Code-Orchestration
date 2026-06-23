@@ -76,9 +76,12 @@ const slingInput = z
       .min(1)
       .optional()
       .describe(
-        'The role of the agent being dispatched (e.g. "implementer", "reviewer"). ' +
-          'Dispatch is always resolved before sandbox creation; placed decisions are recorded after successful sandbox creation. This overrides ' +
-          'the default role.',
+        'The role of the agent being dispatched (e.g. "implementer", "implementer:test", ' +
+          '"researcher"). Reviewer dispatch is gate-internal: do not sling "reviewer" or ' +
+          '"reviewer:*" ad-hoc; finish the branch and call co_merge so the review gate records ' +
+          'review.requested, places the reviewer seat, and supplies the review_id. Dispatch is ' +
+          'always resolved before sandbox creation; placed decisions are recorded after successful ' +
+          'sandbox creation. This overrides the default role.',
       ),
     work_size: workSizeSchema
       .optional()

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { OPERATOR } from '../../mail/events.js';
+import { MAIL_CLARIFY_REQUEST, OPERATOR, turnKickoffCorrelationId } from '../../mail/events.js';
 import { openMailStore, type MailStore } from '../../mail/mail-store.js';
 import { openArchiveStore, type ArchiveStore } from '../../archive/archive-store.js';
 import { openConfigStore } from '../../config/config-store.js';
@@ -1679,6 +1679,83 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
     },
   );
 
+  it('#94: valid human-routed pending review returns human-specific next step and no agent spawn', async () => {
+    const repo = makeRepo();
+    const reg = buildCoreRegistry();
+    const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+    worktreeStore!.recordWorktreeAndBaseline(
+      {
+        branch: 'co/feature',
+        baseRef: 'main',
+        baseSha: FAKE_SHA,
+        path: '/tmp/fake',
+        parent: 'lead-2',
+      },
+      { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+    );
+    const specStore = openSpecStore('p-merge-tool');
+    specs.push(specStore);
+    specStore.recordDraft({
+      taskId: 'task-merge-live',
+      title: 'Human review task',
+      goal: 'prove human pending guidance',
+      criteria: [{ text: 'human review can inspect criteria', verify: 'pnpm test' }],
+      body: '',
+      actor: 'coordinator-1',
+    });
+    specStore.recordLock('task-merge-live', OPERATOR);
+    const cfg = openConfigStore();
+    try {
+      cfg.setProjectOverride('p-merge-tool', 'review.worker_merge.reviewer', 'human');
+    } finally {
+      cfg.close();
+    }
+    const spawned: string[] = [];
+    const toolCtx = {
+      ...ctx,
+      specs: specStore,
+      reviewerSpawnGate: {
+        spawn: async (_projectId, placement) => {
+          spawned.push(placement.agent);
+        },
+      } satisfies ReviewerSpawnGate,
+    };
+
+    const out = (await invokeTool(reg, toolCtx, 'co_merge', {
+      branch: 'co/feature',
+      into: 'main',
+      spec_ref: 'spec:task-merge-live#locked',
+      intent: { summary: 'trigger a human review' },
+    })) as {
+      merged: boolean;
+      review_pending?: boolean;
+      review_id?: string;
+      review_target?: string;
+      review_branch?: string;
+      review_scope?: string;
+      reviewer_kind?: string;
+      next_step?: string;
+    };
+
+    const request = reviewStore!.getReviewRequest('main', 'co/feature');
+    expect(out.merged).toBe(false);
+    expect(out.review_pending).toBe(true);
+    expect(out.review_id).toBe(request!.reviewId);
+    expect(out.review_target).toBe('main');
+    expect(out.review_branch).toBe('co/feature');
+    expect(out.review_scope).toBe('worker_merge');
+    expect(out.reviewer_kind).toBe('human');
+    expect(request?.reviewerKind).toBe('human');
+    expect(out.next_step).toMatch(/operator Review view/i);
+    expect(out.next_step).toContain(out.review_id!);
+    expect(out.next_step).not.toMatch(/co_review_finalize/);
+    expect(ctx.mail.inbox(OPERATOR).filter((m) => m.type === 'review_request')).toHaveLength(1);
+    expect(ctx.mail.inbox(OPERATOR).find((m) => m.type === 'review_request')?.body).toContain(
+      out.review_id!,
+    );
+    expect(spawned).toHaveLength(0);
+  });
+
   it('AC-S10-2.1: returns review_pending:true and fires spawn gate when reviewerSpawnGate is wired and no PASS exists', async () => {
     // Freeze time at epoch 0 so the 1970-epoch snapshot timestamps are fresh (not stale) when the
     // handler calls Date.now() to build the trigger gate's nowMs. A healthy snapshot → dispatch policy
@@ -1728,6 +1805,7 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
           review_target?: string;
           review_branch?: string;
           review_scope?: string;
+          reviewer_kind?: string;
           next_step?: string;
         };
         expect(out.merged).toBe(false);
@@ -1744,11 +1822,27 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
         expect(out.review_target).toBe('main');
         expect(out.review_branch).toBe('co/feature');
         expect(out.review_scope).toBe('worker_merge');
+        expect(out.reviewer_kind).toBe('agent');
         expect(out.next_step).toMatch(/co_review_finalize/);
         expect(out.next_step).toContain(out.review_id!);
         // The seat the reviewer is spawned under matches the named review_id (so co_review_finalize's
         // ctx.agent === `${role}@${reviewId}` seat check passes).
         expect(spawned[0]!.agent).toBe(`reviewer@${out.review_id}`);
+        const kickoff = ctx.mail.outstanding(spawned[0]!.agent)[0];
+        expect(kickoff).toMatchObject({
+          type: MAIL_CLARIFY_REQUEST,
+          sender: 'lead-2',
+          recipient: spawned[0]!.agent,
+          correlationId: turnKickoffCorrelationId(spawned[0]!.agent),
+        });
+        expect(kickoff!.body).toContain(out.review_id!);
+        expect(kickoff!.body).toContain("target 'main'");
+        expect(kickoff!.body).toContain("branch 'co/feature'");
+        expect(kickoff!.body).toContain("scope 'worker_merge'");
+        expect(kickoff!.body).toMatch(/co_review_finalize/);
+        expect(kickoff!.body).toMatch(/PASS requires a verification marker/i);
+        expect(kickoff!.body).toMatch(/ISSUES requires at least one named blocker/i);
+        expect(kickoff!.body).toMatch(/mailed PASS is not a recorded verdict/i);
         // The spawn body runs before co_merge returns review_pending.
         expect(spawned).toHaveLength(1);
         expect(spawned[0]!.projectId).toBe('p-merge-tool');
@@ -2066,14 +2160,23 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
           branch: 'co/feature',
           into: 'main',
           intent: { summary: 'land the feature' },
-        })) as { merged: boolean; review_pending?: boolean };
+        })) as {
+          merged: boolean;
+          review_pending?: boolean;
+          review_id?: string;
+          next_step?: string;
+        };
         const placements = dispatch.readPlacements();
+        const request = reviewStore!.getReviewRequest('main', 'co/feature');
 
         expect(out.review_pending).toBe(true);
+        expect(out.review_id).toBe(request!.reviewId);
+        expect(out.review_id).not.toBe('rev-stale');
+        expect(out.next_step).toContain(out.review_id!);
         expect(spawnCalls).toHaveLength(1);
-        expect(spawnCalls[0]).not.toContain('rev-stale');
+        expect(spawnCalls[0]).toBe(`reviewer@${out.review_id}`);
         expect(placements).toHaveLength(1);
-        expect(placements[0]!.reviewId).not.toBe('rev-stale');
+        expect(placements[0]!.reviewId).toBe(out.review_id);
       } finally {
         dispatch.close();
       }
@@ -2241,10 +2344,21 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
           branch: 'co/feature',
           into: 'main',
           intent: { summary: 'retry the same review placement' },
-        })) as { merged: boolean; review_pending?: boolean };
+        })) as {
+          merged: boolean;
+          review_pending?: boolean;
+          review_id?: string;
+          next_step?: string;
+        };
+        const request = ctx.reviews!.getReviewRequest('main', 'co/feature');
+        const placements = dispatch.readPlacements(`reviewer@${out.review_id}`);
 
         expect(out.merged).toBe(false);
         expect(out.review_pending).toBe(true);
+        expect(out.review_id).toBe(request!.reviewId);
+        expect(out.next_step).toContain(out.review_id!);
+        expect(placements).toHaveLength(1);
+        expect(placements[0]!.reviewId).toBe(out.review_id);
         expect(attempts).toBe(2);
       } finally {
         dispatch.close();

@@ -455,6 +455,20 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     });
   });
 
+  it('#94: role schema tells agents reviewer dispatch is gate-internal, not ad-hoc co_sling', () => {
+    const roleDescription =
+      (
+        slingTool.inputSchema as unknown as {
+          readonly shape: { readonly role: { readonly description?: string } };
+        }
+      ).shape.role.description ?? '';
+
+    expect(roleDescription).toMatch(/implementer/i);
+    expect(roleDescription).toMatch(/researcher/i);
+    expect(roleDescription).toMatch(/reviewer.*gate-internal/i);
+    expect(roleDescription).toMatch(/co_merge/);
+  });
+
   // #94: an ad-hoc reviewer dispatch establishes a worktree + placement with NO review.requested
   // event / review_id / `${role}@${reviewId}` seat, so co_review_finalize can never record a verdict
   // and co_merge stalls at review_pending. Reviewer dispatch is gate-internal (co_merge only); a
