@@ -162,16 +162,57 @@ function samePhaseVerificationContract(
   );
 }
 
+function changedPhaseContracts(
+  phases: readonly PhaseNode[],
+  preservedPhaseState: ReadonlyMap<string, PreservedPhaseState>,
+): ReadonlySet<string> {
+  const currentPhaseIds = new Set(phases.map((phase) => phase.phaseId));
+  const changed = new Set<string>();
+  for (const phase of phases) {
+    if (!samePhaseVerificationContract(preservedPhaseState.get(phase.phaseId), phase)) {
+      changed.add(phase.phaseId);
+    }
+  }
+  for (const phaseId of preservedPhaseState.keys()) {
+    if (!currentPhaseIds.has(phaseId)) changed.add(phaseId);
+  }
+  return changed;
+}
+
+function affectedPhaseContracts(
+  phases: readonly PhaseNode[],
+  changed: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const affected = new Set(changed);
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const phase of phases) {
+      if (affected.has(phase.phaseId)) continue;
+      if (phase.deps.some((dep) => affected.has(dep))) {
+        affected.add(phase.phaseId);
+        expanded = true;
+      }
+    }
+  }
+  return affected;
+}
+
 function upsertPhases(
   db: DatabaseSync,
   taskId: string,
   phases: readonly PhaseNode[],
   preservedPhaseState: ReadonlyMap<string, PreservedPhaseState> = new Map(),
 ): void {
+  const affectedPhaseState = affectedPhaseContracts(
+    phases,
+    changedPhaseContracts(phases, preservedPhaseState),
+  );
   db.prepare(`DELETE FROM plan_phases WHERE task_id = ?`).run(taskId);
   phases.forEach((phase, ordinal) => {
     const preserved = preservedPhaseState.get(phase.phaseId);
-    const preserveState = samePhaseVerificationContract(preserved, phase);
+    const preserveState =
+      !affectedPhaseState.has(phase.phaseId) && samePhaseVerificationContract(preserved, phase);
     db.prepare(
       `INSERT INTO plan_phases
        (task_id, phase_id, ordinal, name, owner, deps, criteria, status, verified_pass, baseline_sha)
@@ -186,7 +227,7 @@ function upsertPhases(
       JSON.stringify(phase.criteria),
       preserveState ? preserved.status : 'planned',
       preserveState && preserved.verifiedPass != null ? (preserved.verifiedPass ? 1 : 0) : null,
-      preserveState ? preserved.baselineSha ?? null : null,
+      preserveState ? (preserved.baselineSha ?? null) : null,
     );
   });
 }

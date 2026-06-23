@@ -485,6 +485,56 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
     }
   });
 
+  it('clears dependent phase evidence when an upstream phase contract changes', () => {
+    const store = openPlanStore('p-plans-replan-clears-dependent-verification');
+    const updatedCriterion = {
+      text: 'updated upstream criterion passes',
+      verify: 'pnpm vitest run packages/core/src/plans/plans-store.test.ts',
+    };
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: SAMPLE_PHASES,
+        actor: ACTOR,
+      });
+      store.changePhaseStatus('task-1', 'ph-1', 'merged', ACTOR);
+      store.changePhaseStatus('task-1', 'ph-2', 'merged', ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a', true, ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-2', 'base-b', true, ACTOR);
+
+      const after = store.recordReplan(
+        'task-1',
+        'upstream criteria changed',
+        [
+          {
+            phaseId: 'ph-1',
+            name: 'Phase One',
+            deps: [],
+            criteria: [updatedCriterion],
+          },
+          SAMPLE_PHASES[1]!,
+        ],
+        ACTOR,
+      );
+
+      const downstream = after.phases.find((p) => p.phaseId === 'ph-2')!;
+      expect(downstream).toMatchObject({
+        phaseId: 'ph-2',
+        status: 'planned',
+      });
+      expect(downstream.verifiedPass).toBeUndefined();
+      expect(downstream.baselineSha).toBeUndefined();
+
+      store.changePhaseStatus('task-1', 'ph-1', 'merged', ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a2', true, ACTOR);
+      expect(() => store.recordTaskCompleted('task-1', ACTOR)).toThrow(/not 'merged'.*ph-2/i);
+    } finally {
+      store.close();
+    }
+  });
+
   it('multiple replans accumulate replanCount', () => {
     const store = openPlanStore('p-plans-replan-multi');
     try {
