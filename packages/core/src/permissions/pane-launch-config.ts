@@ -67,6 +67,15 @@ export interface PaneIdentity {
   readonly role?: Role;
   /** Optional sub-role token; when present, the shipped sub-role approach is appended to the prompt. */
   readonly subRole?: string;
+  /**
+   * #169 — OS temp dir granted as a Codex `[sandbox_workspace_write] writable_roots` entry so a
+   * codex pane's gated verify (`pnpm vitest run packages/mcp`) can run git-fixture suites that
+   * `mkdtempSync(tmpdir())` + `git init/commit` inside /tmp. Codex's workspace-write sandbox grants
+   * writes to the pane cwd only, leaving /tmp read-only/spawn-denied → EPERM → suites fail on green
+   * code. Threaded as plain data so core stays PURE/replay-safe; the placement-launch adapter reads
+   * `os.tmpdir()` and passes it here (the only impure read). Absent ⇒ no writable_roots emitted.
+   */
+  readonly tmpDir?: string;
 }
 
 /**
@@ -321,10 +330,14 @@ export const CODEX_NON_INTERACTIVE_APPROVAL_ARGS: readonly string[] = [
 ];
 
 /**
- * #127 — the Codex config section that re-opens outbound network under `sandbox_mode =
- * "workspace-write"` (which otherwise default-denies egress). Emitted with `network_access = true`
- * ONLY for a web-research pane ({@link paneMayResearchWeb}); omitted entirely for everyone else so the
- * default-deny posture holds.
+ * The Codex `[sandbox_workspace_write]` table — the workspace-write sandbox's tuning block. It now
+ * carries two independently-gated keys:
+ *   - #127 `network_access = true` re-opens outbound egress (otherwise default-denied) ONLY for a
+ *     web-research pane ({@link paneMayResearchWeb}); omitted for everyone else so default-deny holds.
+ *   - #169 `writable_roots = ["<tmp>"]` grants the OS temp dir as a writable root for EVERY code pane
+ *     ({@link PaneIdentity.tmpDir}) so gated verify (`pnpm vitest run packages/mcp`) can run
+ *     git-fixture suites that mkdtemp+git-init inside /tmp without EPERM.
+ * The table is emitted whenever EITHER key applies; both share one `[sandbox_workspace_write]` header.
  */
 export const CODEX_SANDBOX_NETWORK_SECTION = 'sandbox_workspace_write';
 
@@ -374,14 +387,30 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
   const mcpEnvLines = sortedEnvEntries(identity.coMcpEnv, 'coMcpEnv').flatMap(([key, value]) => [
     `${key} = "${tomlStringEscape(value)}"`,
   ]);
-  // #127: re-open outbound network ONLY for a web-research pane — Codex's workspace-write sandbox
-  // default-denies egress, so a `researcher:external` pane cannot reach api.github.com / the web
-  // without this. Default-deny holds for every other pane (the block is simply absent). Emitted after
-  // the top-level policy scalars so `sandbox_mode`/`approval_policy` stay at the document root where
-  // the drift check reads them.
-  const networkLines = paneMayResearchWeb(identity)
-    ? [`[${CODEX_SANDBOX_NETWORK_SECTION}]`, 'network_access = true', '']
-    : [];
+  // The `[sandbox_workspace_write]` table tunes the workspace-write sandbox. Two independently-gated
+  // keys, merged under ONE table header:
+  //   #169 writable_roots — Codex's workspace-write sandbox grants writes to the pane cwd (the
+  //     worktree) only; /tmp and everything else is read-only / spawn-denied. The gated verify
+  //     (`pnpm vitest run packages/mcp`, run by reviewers AND workers) includes git-fixture suites
+  //     that `mkdtempSync(tmpdir())` then `git init/config/commit` inside /tmp — denied EPERM → the
+  //     suite FAILS on green code → the reviewer falsely reports IS-FAILING. Granting the OS temp dir
+  //     as a writable root cures it (the worker/reviewer analogue of #129). Temp is ephemeral and the
+  //     worktree is already writable, so this is NOT a privilege escalation — and it does NOT open
+  //     egress. Threaded via PaneIdentity.tmpDir (the impure os.tmpdir() read lives in the adapter).
+  //   #127 network_access — re-open outbound egress (otherwise default-denied) ONLY for a
+  //     web-research pane; a `researcher:external` pane cannot reach api.github.com / the web without
+  //     it. Default-deny holds for every other pane (the key is simply absent).
+  // Emitted after the top-level policy scalars so `sandbox_mode`/`approval_policy` stay at the
+  // document root where the drift check reads them.
+  const writableRoots = identity.tmpDir != null ? [identity.tmpDir] : [];
+  const sandboxKeyLines: string[] = [
+    ...(writableRoots.length > 0 ? [`writable_roots = ${tomlArray(writableRoots)}`] : []),
+    ...(paneMayResearchWeb(identity) ? ['network_access = true'] : []),
+  ];
+  const networkLines =
+    sandboxKeyLines.length > 0
+      ? [`[${CODEX_SANDBOX_NETWORK_SECTION}]`, ...sandboxKeyLines, '']
+      : [];
   const lines: string[] = [
     'sandbox_mode = "workspace-write"',
     'approval_policy = "never"',

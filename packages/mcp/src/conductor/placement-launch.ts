@@ -20,6 +20,7 @@ import type {
 import { buildPaneLaunchConfig, paneMayResearchWeb, parseSubRoleId } from '@co/core';
 import type { Role } from '@co/core';
 import { dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { HostedIdentity } from '../live-session-host.js';
 import {
   CO_AGENT_ENV,
@@ -224,6 +225,10 @@ export function buildHostedLaunchSpec(
   const paneIdentityBase = {
     cwd: identity.cwd,
     isolatedHomeDir,
+    // #169: grant the OS temp dir as a Codex sandbox writable_root so a codex pane's gated verify
+    // (`pnpm vitest run packages/mcp`) can run git-fixture suites that mkdtemp+git-init inside /tmp
+    // without EPERM. This os.tmpdir() read is the ONLY impure input — buildPaneLaunchConfig stays pure.
+    tmpDir: tmpdir(),
     // Thread the role/sub-role so buildPaneLaunchConfig injects the repo-agnostic base system prompt
     // plus shipped approach focus (Claude --append-system-prompt / Codex config override).
     role: identity.role,
