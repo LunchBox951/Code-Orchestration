@@ -929,7 +929,7 @@ describe('role base-prompt injection into builder args', () => {
       // Prompting split (Principle 11): never names a project-memory file or repo conventions.
       expect(prompt).not.toMatch(/CLAUDE\.md|AGENTS\.md/);
       // ~5-8 lines — short enough not to crowd out co orient + the schemas.
-      expect(prompt.split('\n').length).toBeLessThanOrEqual(role === 'reviewer' ? 9 : 8);
+      expect(prompt.split('\n').length).toBeLessThanOrEqual(8);
     }
   });
 
