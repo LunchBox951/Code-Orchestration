@@ -106,10 +106,13 @@ proves it.
   Principle 8, `RG-1`, `SF-3`.
 - `AC-L6b-G4` — The pipeline verbs are scoped by role: any agent may capture and list
   (`co_issue_capture`/`co_issue_list` in `UNIVERSAL` — friction can hit anyone, and dedup needs
-  read access), only a researcher may diagnose (`co_issue_diagnose` — the `researcher:diagnostic`
-  mandate), only a coordinator/lead may file (`co_issue_file` — the outward tier). Evidence:
-  `packages/core/src/roles/profile.ts` toolsets; proven by `issue-tools.test.ts` /
-  `issue-file.test.ts` role-refusal cases. Ladders to `RL-1`, `RL-2`.
+  read access), only a researcher may invoke the standalone diagnosis verb
+  (`co_issue_diagnose` — the `researcher:diagnostic` mandate), only a coordinator/lead may file
+  (`co_issue_file` — the outward tier). A coordinator/lead filing its own still-captured issue may
+  supply inline `probable_cause` on `co_issue_file`, which records that narrow diagnosis before the
+  per-post operator approval; captures owned by another agent still require `co_issue_diagnose`.
+  Evidence: `packages/core/src/roles/profile.ts` toolsets; proven by `issue-tools.test.ts` /
+  `issue-file.test.ts` role-refusal and inline-diagnosis cases. Ladders to `RL-1`, `RL-2`.
 
 ## H — Codebase locator (static half)
 

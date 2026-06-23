@@ -91,7 +91,13 @@ function seedCapturedIssue(stores: Stores, destination: 'target' | 'co' = 'co'):
 }
 
 function seedDiagnosedIssue(stores: Stores, destination: 'target' | 'co' = 'co'): void {
-  seedCapturedIssue(stores, destination);
+  stores.issues.recordCapture({
+    issueId: 'iss-1',
+    summary: 'mail drops envelope at /home/alice/co',
+    detail: 'repro detail',
+    destination,
+    capturedBy: 'impl-1',
+  });
   stores.issues.recordDiagnosis({
     issueId: 'iss-1',
     probableCause: 'seam swallows envelope',
