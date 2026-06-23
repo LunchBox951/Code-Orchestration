@@ -28,7 +28,7 @@ import {
   CODEX_SANDBOX_NETWORK_SECTION,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
-import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
+import { roleBasePrompt } from '../roles/profile.js';
 import { SUB_ROLES } from '../roles/sub-roles.js';
 import type { SpawnSpec } from '../pty/pty-host.js';
 

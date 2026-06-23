@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { sanitizeClaudeStateJson, type CoMcpPaths } from './placement-launch.js';
-import { resolveGhTokenFromEnv } from '@co/core';
 
 export interface HostLaunchPathOptions {
   readonly argv?: readonly string[];
@@ -19,11 +18,6 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
   const coMcpBin = currentCoMcpBin(argv);
   const homeDir = opts.homeDir ?? homedir();
   const coCli = resolveCoCliCommand(coMcpBin, env, opts.nodeCommand ?? process.execPath);
-  // F3/#127: source an optional GitHub token candidate from the daemon env via the shared policy
-  // ({@link resolveGhTokenFromEnv}: CO_GH_TOKEN > GH_TOKEN > GITHUB_TOKEN). Authoritative publish auth
-  // is provisioned daemon-side at serve boot; buildHostedLaunchSpec injects this candidate only into
-  // web-research panes (their own shell env, never the on-disk bridge config).
-  const ghToken = resolveGhTokenFromEnv(env);
   return {
     coMcpCommand: opts.nodeCommand ?? process.execPath,
     coMcpArgs: [coMcpBin],
