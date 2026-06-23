@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { LimitsCostVM } from './limits-cost-vm.js';
+import { LimitsCostVM, labelWindowKind } from './limits-cost-vm.js';
 import type { LimitsCostInputs } from './limits-cost-vm.js';
 import type { UsageBucket, UsageAccountStatus, CostRollup } from '@co/core';
 
@@ -49,6 +49,32 @@ function makeRollup(kind: 'agent' | 'task', id: string, totalCostUsd: number): C
 }
 
 const EMPTY_INPUTS: LimitsCostInputs = { buckets: [], accountStatuses: [], rollups: [] };
+
+describe('labelWindowKind', () => {
+  it('maps codex primary → session and secondary → weekly', () => {
+    expect(labelWindowKind('codex', 'primary')).toBe('session');
+    expect(labelWindowKind('codex', 'secondary')).toBe('weekly');
+  });
+
+  it('maps claude five_hour → session and weekly → weekly', () => {
+    expect(labelWindowKind('claude', 'five_hour')).toBe('session');
+    expect(labelWindowKind('claude', 'weekly')).toBe('weekly');
+  });
+
+  it('is provider-agnostic for canonical kinds', () => {
+    expect(labelWindowKind('claude', 'primary')).toBe('session');
+    expect(labelWindowKind('codex', 'five_hour')).toBe('session');
+    expect(labelWindowKind('anything', 'secondary')).toBe('weekly');
+  });
+
+  it('passes unknown kinds through verbatim without throwing', () => {
+    expect(() => labelWindowKind('claude', 'monthly')).not.toThrow();
+    expect(labelWindowKind('claude', 'monthly')).toBe('monthly');
+    expect(labelWindowKind('codex', 'some_other_window')).toBe('some_other_window');
+    expect(labelWindowKind('codex', 'unknown')).toBe('unknown');
+    expect(labelWindowKind('codex', '')).toBe('');
+  });
+});
 
 describe('LimitsCostVM', () => {
   it('starts with empty state', () => {
@@ -164,6 +190,69 @@ describe('LimitsCostVM', () => {
     unsub();
     vm.update(EMPTY_INPUTS);
     expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('sets displayLabel on each headroom row (codex primary/secondary → session/weekly)', () => {
+    const vm = new LimitsCostVM();
+    vm.update({
+      buckets: [
+        makeBucket({ provider: 'codex', windowKind: 'primary', usedPct: 20 }),
+        makeBucket({ provider: 'codex', windowKind: 'secondary', usedPct: 50 }),
+      ],
+      accountStatuses: [makeStatus({ provider: 'codex' })],
+      rollups: [],
+    });
+    expect(vm.state.headroomRows.map((r) => r.displayLabel)).toEqual(['session', 'weekly']);
+  });
+
+  it('sets displayLabel on each headroom row (claude five_hour/weekly → session/weekly)', () => {
+    const vm = new LimitsCostVM();
+    vm.update({
+      buckets: [
+        makeBucket({ provider: 'claude', windowKind: 'five_hour', usedPct: 10 }),
+        makeBucket({ provider: 'claude', windowKind: 'weekly', usedPct: 30 }),
+      ],
+      accountStatuses: [makeStatus({ provider: 'claude' })],
+      rollups: [],
+    });
+    expect(vm.state.headroomRows.map((r) => r.displayLabel)).toEqual(['session', 'weekly']);
+  });
+
+  it('an account status with NO matching bucket still produces an unknown headroom row', () => {
+    const vm = new LimitsCostVM();
+    vm.update({
+      buckets: [],
+      accountStatuses: [
+        makeStatus({ provider: 'claude', account: 'claude-acct', available: true }),
+      ],
+      rollups: [],
+    });
+    expect(vm.state.headroomRows).toHaveLength(1);
+    const row = vm.state.headroomRows[0]!;
+    expect(row.provider).toBe('claude');
+    expect(row.account).toBe('claude-acct');
+    expect(row.headroom.kind).toBe('unknown');
+    // synthesized rows still carry a usable display label
+    expect(typeof row.displayLabel).toBe('string');
+  });
+
+  it('a Codex bucket + a Claude status-with-no-bucket yields TWO provider groups', () => {
+    const vm = new LimitsCostVM();
+    vm.update({
+      buckets: [makeBucket({ provider: 'codex', account: 'codex-acct', windowKind: 'primary' })],
+      accountStatuses: [
+        makeStatus({ provider: 'codex', account: 'codex-acct' }),
+        makeStatus({ provider: 'claude', account: 'claude-acct' }),
+      ],
+      rollups: [],
+    });
+    const keys = new Set(vm.state.headroomRows.map((r) => `${r.provider}:${r.account}`));
+    expect(keys).toEqual(new Set(['codex:codex-acct', 'claude:claude-acct']));
+    const codexRow = vm.state.headroomRows.find((r) => r.provider === 'codex')!;
+    expect(codexRow.displayLabel).toBe('session');
+    expect(codexRow.headroom.kind).toBe('known');
+    const claudeRow = vm.state.headroomRows.find((r) => r.provider === 'claude')!;
+    expect(claudeRow.headroom.kind).toBe('unknown');
   });
 
   it('headroom is unknown for accounts with no status, NOT unknown due to zero usedPct', () => {

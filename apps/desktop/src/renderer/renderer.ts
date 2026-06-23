@@ -551,13 +551,13 @@ function renderLimitsPopover(state: LimitsCostState): void {
       const bars = g.rows
         .map((row) => {
           if (row.headroom.kind === 'unknown') {
-            return `<div class="bar-row"><div class="bar-meta"><span class="lbl">${esc(row.windowKind)}</span><span class="val" style="color:var(--text-faint)">no data</span></div></div>`;
+            return `<div class="bar-row"><div class="bar-meta"><span class="lbl">${esc(row.displayLabel)}</span><span class="val" style="color:var(--text-faint)">no data</span></div></div>`;
           }
           const pct = Math.min(100, Math.round(row.headroom.used_pct));
           return `
             <div class="bar-row">
               <div class="bar-meta">
-                <span class="lbl">${esc(row.windowKind)}</span>
+                <span class="lbl">${esc(row.displayLabel)}</span>
                 <span class="val" style="color:${color}">${pct}% · resets ${esc(resetEta(row.headroom.reset_at))}</span>
               </div>
               <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${fillColor(pct)}"></div></div>
@@ -1839,7 +1839,7 @@ function renderUsage(state: LimitsCostState): void {
                     : 'no data';
                 return `
                 <div class="prov-window">
-                  <div class="big"><span class="num" style="color:${color}">${known ? `${pct}%` : '—'}</span><span class="unit">${esc(row.windowKind)}</span></div>
+                  <div class="big"><span class="num" style="color:${color}">${known ? `${pct}%` : '—'}</span><span class="unit">${esc(row.displayLabel)}</span></div>
                   <div class="track"><div class="fill" style="width:${pct}%;background:${color}"></div></div>
                   <div class="reset">${esc(reset)}</div>
                 </div>`;

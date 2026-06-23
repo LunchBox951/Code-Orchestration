@@ -209,6 +209,7 @@ interface LimitsCostHeadroomRow {
   provider: string;
   account: string;
   windowKind: string;
+  displayLabel: string;
   headroom: LimitsCostHeadroom | LimitsCostHeadroomUnknown;
 }
 
