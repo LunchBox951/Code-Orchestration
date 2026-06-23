@@ -440,20 +440,59 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     await invokeTool(reg, ctx, 'co_sling', {
       parent: 'lead-7',
-      agent: 'reviewer-1',
+      agent: 'researcher-1',
       branch: 'co/canonical-role',
-      role: ' Reviewer:PR ',
+      role: ' Researcher ',
       work_size: 'average',
       reasoning_budget: 'standard',
     });
 
     const placements = ctx.dispatch!.readPlacements('lead-7');
     expect(placements).toHaveLength(1);
-    expect(placements[0]!.role).toBe('reviewer:pr');
+    expect(placements[0]!.role).toBe('researcher');
     expect(ctx.worktrees!.getWorktree('co/canonical-role')).toMatchObject({
-      role: 'reviewer',
-      subRole: 'pr',
+      role: 'researcher',
     });
+  });
+
+  // #94: an ad-hoc reviewer dispatch establishes a worktree + placement with NO review.requested
+  // event / review_id / `${role}@${reviewId}` seat, so co_review_finalize can never record a verdict
+  // and co_merge stalls at review_pending. Reviewer dispatch is gate-internal (co_merge only); a
+  // co_sling role=reviewer must be REJECTED before any worktree/placement/review.requested side effect.
+  it('#94: rejects an ad-hoc role=reviewer co_sling and records NO worktree/placement', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    await expect(
+      invokeTool(reg, ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'reviewer-1',
+        branch: 'co/adhoc-reviewer',
+        role: 'reviewer',
+      }),
+    ).rejects.toThrow(/reviewer dispatch is gate-internal.*co_merge/su);
+
+    // No side effects: no worktree, no recorded placement.
+    expect(ctx.worktrees!.getWorktree('co/adhoc-reviewer')).toBeUndefined();
+    expect(ctx.dispatch!.readPlacements('lead-7')).toHaveLength(0);
+  });
+
+  it('#94: rejects an ad-hoc reviewer sub-role (reviewer:pr) co_sling too', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    await expect(
+      invokeTool(reg, ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'reviewer-pr-1',
+        branch: 'co/adhoc-reviewer-pr',
+        role: ' Reviewer:PR ',
+      }),
+    ).rejects.toThrow(/reviewer dispatch is gate-internal/su);
+    expect(ctx.worktrees!.getWorktree('co/adhoc-reviewer-pr')).toBeUndefined();
+    expect(ctx.dispatch!.readPlacements('lead-7')).toHaveLength(0);
   });
 
   it('lets an implementer sling a researcher child, matching spawn rules and role profile', async () => {
@@ -848,23 +887,25 @@ describe('co_sling — L6b E4 child-cap (queue-as-WAITING for excess dispatches)
     expect(ctx.worktrees?.getWorktree('co/reviewers-dont-count')).toBeDefined();
   });
 
-  // AC-L6b-8 reviewer-exemption regression: a reviewer dispatched while at-cap must NOT queue.
-  it('a reviewer dispatched while at-cap is NOT queued (AC-L6b-8 exemption)', async () => {
+  // #94: reviewer dispatch is rejected outright (gate-internal), so the AC-L6b-8 cap-exemption is no
+  // longer reachable via co_sling — a reviewer dispatched at-cap is REJECTED, never queued or placed.
+  it('#94: a reviewer co_sling at-cap is rejected (not queued, not placed)', async () => {
     const repo = makeMainRepo();
     const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
     // Two active (non-reviewer) children → parent is at the default cap of 2.
     ctx.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
     ctx.roster!.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
 
-    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
-      parent: 'lead-7',
-      agent: 'rev-1',
-      branch: 'co/reviewer-exempt-at-cap',
-      role: 'reviewer',
-    })) as { status: string };
+    await expect(
+      invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'rev-1',
+        branch: 'co/reviewer-rejected-at-cap',
+        role: 'reviewer',
+      }),
+    ).rejects.toThrow(/reviewer dispatch is gate-internal/su);
 
-    expect(out.status).toBe('placed');
-    expect(ctx.worktrees?.getWorktree('co/reviewer-exempt-at-cap')).toBeDefined();
+    expect(ctx.worktrees?.getWorktree('co/reviewer-rejected-at-cap')).toBeUndefined();
   });
 
   it('a non-reviewer dispatched while at-cap still queues → WAITING (AC-L6b-8 non-reviewer side)', async () => {

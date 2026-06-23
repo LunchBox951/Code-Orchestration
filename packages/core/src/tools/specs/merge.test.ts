@@ -1721,18 +1721,275 @@ describe('co_merge — P2 live reviewer trigger path (AC-S10-2)', () => {
           into: 'main',
           spec_ref: 'spec:task-merge-live#locked',
           intent: { summary: 'trigger a review' },
-        })) as { merged: boolean; review_pending?: boolean };
+        })) as {
+          merged: boolean;
+          review_pending?: boolean;
+          review_id?: string;
+          review_target?: string;
+          review_branch?: string;
+          review_scope?: string;
+          next_step?: string;
+        };
         expect(out.merged).toBe(false);
         expect(out.review_pending).toBe(true);
-        expect(reviewStore!.getReviewRequest('main', 'co/feature')?.specRef).toEqual({
+        // #94: the review_pending result NAMES exactly which (target, branch) verdict is missing, the
+        // review_id the reviewer must finalize against, and the scope — plus a one-line directive.
+        const recordedReq = reviewStore!.getReviewRequest('main', 'co/feature');
+        expect(recordedReq?.specRef).toEqual({
           kind: 'criteria',
           ref: 'spec:task-merge-live#locked',
         });
+        expect(out.review_id).toBe(recordedReq!.reviewId);
+        expect(out.review_id).toMatch(/^rev-/);
+        expect(out.review_target).toBe('main');
+        expect(out.review_branch).toBe('co/feature');
+        expect(out.review_scope).toBe('worker_merge');
+        expect(out.next_step).toMatch(/co_review_finalize/);
+        expect(out.next_step).toContain(out.review_id!);
+        // The seat the reviewer is spawned under matches the named review_id (so co_review_finalize's
+        // ctx.agent === `${role}@${reviewId}` seat check passes).
+        expect(spawned[0]!.agent).toBe(`reviewer@${out.review_id}`);
         // The spawn body runs before co_merge returns review_pending.
         expect(spawned).toHaveLength(1);
         expect(spawned[0]!.projectId).toBe('p-merge-tool');
         // Assert the agent id (reviewer seat) so a wrong-key regression is caught (spy-key-value-blind-spot).
         expect(spawned[0]!.agent).toMatch(/^reviewer@rev-/);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('#94: full handshake — co_merge triggers review → seat placement → co_review_finalize PASS → re-call co_merge merges', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+      // Record the worktree + a clean baseline + a finish whose head matches the branch head, so the
+      // eventual re-call's honest-verify passes once a PASS verdict is recorded.
+      const branchHead = git(repo, 'rev-parse', 'co/feature');
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          tests: [{ name: 'test-a', passed: true }],
+        },
+      );
+      worktreeStore!.recordFinish({
+        branch: 'co/feature',
+        baseSha: FAKE_SHA,
+        commitSha: branchHead,
+        tests: [{ name: 'test-a', passed: true }],
+      });
+
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const spawnGate: ReviewerSpawnGate = {
+        spawn() {
+          return Promise.resolve();
+        },
+      };
+      try {
+        // (1) co_merge with no recorded PASS → triggers the review, records request + seat placement,
+        //     returns review_pending naming the review_id/(target,branch)/scope.
+        const triggerCtx = { ...ctx, dispatch, reviewerSpawnGate: spawnGate };
+        const pending = (await invokeTool(reg, triggerCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'land the feature' },
+        })) as {
+          merged: boolean;
+          review_pending?: boolean;
+          review_id?: string;
+          review_scope?: string;
+        };
+        expect(pending.merged).toBe(false);
+        expect(pending.review_pending).toBe(true);
+        const reviewId = pending.review_id!;
+        expect(reviewId).toMatch(/^rev-/);
+
+        // A review.requested event exists for review:main and a placed reviewer seat exists.
+        const request = reviewStore!.getReviewRequest('main', 'co/feature');
+        expect(request?.reviewId).toBe(reviewId);
+        const seat = `reviewer@${reviewId}`;
+        const seatPlacements = dispatch.readPlacements(seat).filter((p) => p.kind === 'placed');
+        expect(seatPlacements).toHaveLength(1);
+
+        // (2) The spawned reviewer (registered under the seat id) records a PASS verdict.
+        ctx.roster!.recordAgent({ agentId: seat, role: 'reviewer', parent: 'lead-2' });
+        const reviewerCtx = { ...ctx, agent: seat, dispatch };
+        const finalized = (await invokeTool(reg, reviewerCtx, 'co_review_finalize', {
+          target: 'main',
+          branch: 'co/feature',
+          scope: 'worker_merge',
+          review_id: reviewId,
+          verdict: 'PASS',
+          blockers: [],
+          suggestions: [],
+          verification: {
+            commands_run: ['pnpm test'],
+            suite_result: 'pass',
+            baseline_compared: true,
+          },
+        })) as { recorded: boolean; verdict: string };
+        expect(finalized.recorded).toBe(true);
+        expect(finalized.verdict).toBe('PASS');
+        const recordedVerdict = reviewStore!.getVerdict('main', 'co/feature');
+        expect(recordedVerdict?.verdict).toBe('PASS');
+        expect(recordedVerdict?.reviewId).toBe(reviewId);
+
+        // (3) Re-call co_merge — now a PASS is recorded → the merge lands (no review_pending).
+        const merged = (await invokeTool(reg, triggerCtx, 'co_merge', {
+          branch: 'co/feature',
+          into: 'main',
+          intent: { summary: 'land the feature' },
+        })) as { merged: boolean; review_pending?: boolean };
+        expect(merged.review_pending).toBeUndefined();
+        expect(merged.merged).toBe(true);
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('#94: co_review_finalize PASS without a verification marker is still rejected (gate not weakened)', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const spawnGate: ReviewerSpawnGate = {
+        spawn() {
+          return Promise.resolve();
+        },
+      };
+      try {
+        const pending = (await invokeTool(
+          reg,
+          { ...ctx, dispatch, reviewerSpawnGate: spawnGate },
+          'co_merge',
+          { branch: 'co/feature', into: 'main', intent: { summary: 'land it' } },
+        )) as { review_id?: string };
+        const reviewId = pending.review_id!;
+        const seat = `reviewer@${reviewId}`;
+        ctx.roster!.recordAgent({ agentId: seat, role: 'reviewer', parent: 'lead-2' });
+        await expect(
+          invokeTool(reg, { ...ctx, agent: seat, dispatch }, 'co_review_finalize', {
+            target: 'main',
+            branch: 'co/feature',
+            scope: 'worker_merge',
+            review_id: reviewId,
+            verdict: 'PASS',
+            blockers: [],
+            suggestions: [],
+          }),
+        ).rejects.toThrow(/PASS verdict requires a verification marker/i);
+        expect(reviewStore!.getVerdict('main', 'co/feature')).toBeUndefined();
+      } finally {
+        dispatch.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('#94: co_review_finalize from a non-seat reviewer id is rejected, naming the expected reviewer', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const repo = makeRepo();
+      const reg = buildCoreRegistry();
+      const { ctx, reviewStore, worktreeStore } = setup('lead-2', { cwd: repo });
+      worktreeStore!.recordWorktreeAndBaseline(
+        {
+          branch: 'co/feature',
+          baseRef: 'main',
+          baseSha: FAKE_SHA,
+          path: '/tmp/fake',
+          parent: 'lead-2',
+        },
+        { branch: 'co/feature', baseRef: 'main', baseSha: FAKE_SHA, tests: [] },
+      );
+      const dispatch = openDispatchStore('p-merge-tool');
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 0.1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+      const spawnGate: ReviewerSpawnGate = {
+        spawn() {
+          return Promise.resolve();
+        },
+      };
+      try {
+        const pending = (await invokeTool(
+          reg,
+          { ...ctx, dispatch, reviewerSpawnGate: spawnGate },
+          'co_merge',
+          { branch: 'co/feature', into: 'main', intent: { summary: 'land it' } },
+        )) as { review_id?: string };
+        const reviewId = pending.review_id!;
+        // A reviewer NOT under the `${role}@${reviewId}` seat must be rejected, naming the seat.
+        const imposter = 'reviewer@rev-imposter';
+        ctx.roster!.recordAgent({ agentId: imposter, role: 'reviewer', parent: 'lead-2' });
+        await expect(
+          invokeTool(reg, { ...ctx, agent: imposter, dispatch }, 'co_review_finalize', {
+            target: 'main',
+            branch: 'co/feature',
+            scope: 'worker_merge',
+            review_id: reviewId,
+            verdict: 'PASS',
+            blockers: [],
+            suggestions: [],
+            verification: {
+              commands_run: ['pnpm test'],
+              suite_result: 'pass',
+              baseline_compared: true,
+            },
+          }),
+        ).rejects.toThrow(new RegExp(`assigned reviewer for review_id '${reviewId}' is`, 'i'));
+        expect(reviewStore!.getVerdict('main', 'co/feature')).toBeUndefined();
       } finally {
         dispatch.close();
       }

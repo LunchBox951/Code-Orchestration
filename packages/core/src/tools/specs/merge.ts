@@ -130,6 +130,41 @@ const mergeOutput = z.object({
       'True when a live reviewer was just triggered (P2 / AC-S10-2) and the merge is pending its ' +
         'review. Re-call co_merge once the reviewer records a PASS verdict.',
     ),
+  review_id: z
+    .string()
+    .optional()
+    .describe(
+      'Present on a review_pending result (#94): the review_id of the triggered/open review. The ' +
+        'reviewer MUST pass this exact id to co_review_finalize to record the missing PASS verdict.',
+    ),
+  review_target: z
+    .string()
+    .optional()
+    .describe(
+      'Present on a review_pending result (#94): the merge target (into) whose recorded PASS verdict ' +
+        'is missing. Names exactly which (target, branch) verdict co_merge is waiting on.',
+    ),
+  review_branch: z
+    .string()
+    .optional()
+    .describe(
+      'Present on a review_pending result (#94): the reviewed branch whose recorded PASS verdict is ' +
+        'missing.',
+    ),
+  review_scope: z
+    .string()
+    .optional()
+    .describe(
+      'Present on a review_pending result (#94): the review scope the verdict will be judged under.',
+    ),
+  next_step: z
+    .string()
+    .optional()
+    .describe(
+      'Present on a review_pending result (#94): a one-line directive — the reviewer must call ' +
+        'co_review_finalize with this review_id (PASS requires a verification marker); re-call ' +
+        'co_merge after the PASS is recorded.',
+    ),
 });
 type MergeOutput = z.infer<typeof mergeOutput>;
 
@@ -333,16 +368,22 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
         const existingReq = ctx.reviews.getReviewRequest(into, input.branch);
         const reviewId =
           existingReq != null && verdict == null ? existingReq.reviewId : `rev-${randomUUID()}`;
-        triggerGate.triggerReview({
+        const scope = 'worker_merge';
+        const trigger = triggerGate.triggerReview({
           reviewId,
           target: into,
           branch: input.branch,
           requestedBy: ctx.agent,
-          scope: 'worker_merge',
+          scope,
           projectId: ctx.projectId,
           ...(input.spec_ref != null ? { specRef: input.spec_ref } : {}),
         });
         await triggerGate.drainSpawns();
+        // #94: NAME exactly which (target, branch) verdict is missing, the review_id the reviewer
+        // must finalize against, and the scope — plus a one-line directive. Without these the
+        // coordinator/reviewer has no way to learn which review_id to record, so the merge stalls.
+        // Use the review_id the gate actually recorded (an existing open request keeps its id).
+        const recordedReviewId = trigger.reviewId;
         return {
           merged: false,
           // The merge hasn't happened yet — the review is pending — so there is no commit to report.
@@ -350,6 +391,15 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
           commit_message: '',
           mode: resolveRepoMode(ctx.projectId, repoCwd),
           review_pending: true,
+          review_id: recordedReviewId,
+          review_target: into,
+          review_branch: input.branch,
+          review_scope: scope,
+          next_step:
+            `No recorded PASS verdict exists for '${input.branch}' into '${into}'. The reviewer must ` +
+            `call co_review_finalize with review_id '${recordedReviewId}' (target '${into}', branch ` +
+            `'${input.branch}', scope '${scope}'; a PASS requires a verification marker). Re-call ` +
+            'co_merge after the PASS is recorded. A mailed PASS is not a recorded verdict.',
         };
       }
     }
