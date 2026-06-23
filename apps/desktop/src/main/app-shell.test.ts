@@ -24,6 +24,8 @@ import type { ProjectId } from '@co/core';
 import { MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE, OPERATOR, projectDataDir } from '@co/core';
 import {
   openConfigStore,
+  openDispatchStore,
+  ACCOUNT_STATUS_SEED_SOURCE,
   MAX_ACTIVE_CHILDREN_KEY,
   DISPATCH_MAXED_THRESHOLD_PCT_KEY,
   type ConfigStore,
@@ -1437,5 +1439,67 @@ describe('createAppShell — settings ops (AC-SET-3/4/6)', () => {
     expect(shell.getSettingsState().activeLayer).toBe('project');
     shell.setSettingsLayer('global');
     expect(shell.getSettingsState().activeLayer).toBe('global');
+  });
+});
+
+describe('createAppShell — seeds initial account statuses on a fresh box (#122/#125/#88)', () => {
+  const ORIGINAL_ENV = process.env;
+  let dataDir: string;
+
+  beforeEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    dataDir = mkdtempSync(join(tmpdir(), 'co-shell-seed-'));
+    process.env.CO_DATA_DIR = dataDir;
+  });
+
+  afterEach(() => {
+    process.env = ORIGINAL_ENV;
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('production mode (no injected readers) seeds an unavailable status per provider at startup', async () => {
+    // No bucketsReader/accountStatusesReader → app-shell opens a REAL dispatch store and seeds it.
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+    });
+    try {
+      const store = openDispatchStore(FAKE_PROJECT_ID);
+      try {
+        const statuses = store.readAccountStatuses();
+        const providers = new Set(statuses.map((s) => s.provider));
+        expect(providers).toEqual(new Set(['claude', 'codex']));
+        const claude = statuses.find((s) => s.provider === 'claude');
+        expect(claude?.available).toBe(false);
+        expect(claude?.source).toBe(ACCOUNT_STATUS_SEED_SOURCE);
+        expect(claude?.reason).toMatch(/no usage observed/i);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await shell.close();
+    }
+  });
+
+  it('skips seeding when accountStatusesReader is injected (test mode leaves no real store)', () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+      bucketsReader: () => [],
+      accountStatusesReader: () => [],
+      rollupsReader: () => [],
+    });
+    // Injected readers ⇒ ownedDispatchStore is null ⇒ the seed never runs, so no store row was written.
+    const store = openDispatchStore(FAKE_PROJECT_ID);
+    try {
+      expect(store.readAccountStatuses()).toHaveLength(0);
+    } finally {
+      store.close();
+      void shell.close();
+    }
   });
 });

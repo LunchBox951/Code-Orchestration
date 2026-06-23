@@ -25,6 +25,8 @@ import {
   openDispatchStore,
   openMailStore,
   projectDataDir,
+  resolveEnabledProviders,
+  seedInitialAccountStatuses,
   settingsDescriptors,
   validateSettingValue,
 } from '@co/core';
@@ -180,6 +182,16 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   // (resolveLayers reads both the global base and this project's overrides).
   const ownedConfigStore = deps.configStore == null ? openConfigStore() : null;
   const configStore: ConfigStore | null = deps.configStore ?? ownedConfigStore;
+
+  // Seed an initial `available: false` status per configured provider so a FRESH box renders a
+  // "headroom / no data" card instead of the empty "No usage recorded yet" state (#122/#125/#88).
+  // Production only: guarded on ownedDispatchStore so test-injected readers (no real store) skip it.
+  // The seed is idempotent and non-destructive — a later real provider read upserts over it.
+  if (ownedDispatchStore != null) {
+    const providers =
+      configStore != null ? resolveEnabledProviders(deps.projectId, configStore) : undefined;
+    seedInitialAccountStatuses(ownedDispatchStore, providers);
+  }
 
   let closed = false;
   const shellSubscriptions: Array<() => void> = [];

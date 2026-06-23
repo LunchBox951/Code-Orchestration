@@ -705,8 +705,10 @@ export type {
 } from './dispatch/dispatch-store.js';
 export {
   COST_BUDGET_CENTS_KEY,
+  ACCOUNT_STATUS_SEED_SOURCE,
   openDispatchStore,
   observeUsage,
+  seedInitialAccountStatuses,
   resolveBudgetCapCents,
   resolveBudgetCap,
 } from './dispatch/dispatch-store.js';

@@ -77,6 +77,8 @@ import {
   type ProviderUsageSource,
   type UsageSnapshot,
 } from './usage-source.js';
+import { ALL_PROVIDERS } from './dispatch-config.js';
+import { accountForProvider } from './provider-source.js';
 
 /** The config-cascade key the per-project budget cap lives under (heir to the prototype's setting). */
 export const COST_BUDGET_CENTS_KEY = 'cost_budget_cents';
@@ -777,6 +779,44 @@ function markAccountUnavailable(
     source: 'usage-source',
     sampled_at: new Date(nowMs ?? Date.now()).toISOString(),
   });
+}
+
+/** The `source` tag the startup seed writes — distinguishable from a real provider read's source. */
+export const ACCOUNT_STATUS_SEED_SOURCE = 'seed' as const;
+
+/**
+ * Seed an initial `available: false` account status for every configured provider that has NO status
+ * row yet, so a FRESH box renders a "headroom / no data" card per provider instead of the empty
+ * "No usage recorded yet" state (#122 / #125 / #88). `usage_accounts` is otherwise populated only as a
+ * side effect of a real provider read on the dispatch/CLI path; nothing seeds a row at desktop startup.
+ *
+ * This is idempotent and NON-destructive: for each provider it writes the seed ONLY when
+ * `store.getAccountStatus(provider, account)` is undefined, so a later REAL read upserts over the seed
+ * (latest status wins) and the seed never clobbers real data. Re-running it after a real read is a no-op.
+ * It writes an UNAVAILABLE sample (carrying a "no usage observed yet" reason) — never a fabricated 0%
+ * (AC6, Principle 9): the card shows the reason, never a made-up percentage.
+ *
+ * `providers` defaults to {@link ALL_PROVIDERS}; the desktop adapter passes the project's
+ * `resolveEnabledProviders` result. The write stays in core (the single source of truth); adapters call.
+ */
+export function seedInitialAccountStatuses(
+  store: DispatchStore,
+  providers: readonly Provider[] = ALL_PROVIDERS,
+  options: { readonly nowMs?: number } = {},
+): void {
+  const sampledAt = new Date(options.nowMs ?? Date.now()).toISOString();
+  for (const provider of providers) {
+    const account = accountForProvider(provider);
+    if (store.getAccountStatus(provider, account) !== undefined) continue;
+    store.recordUsageObserved({
+      available: false,
+      provider,
+      account,
+      reason: 'no usage observed yet',
+      source: ACCOUNT_STATUS_SEED_SOURCE,
+      sampled_at: sampledAt,
+    });
+  }
 }
 
 /** Best-effort message extraction from an unknown thrown value (no `String(err)` `[object Object]`). */

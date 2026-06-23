@@ -27,11 +27,13 @@ import { UsageProjector, ensureUsageTables } from './usage-projector.js';
 import { CostProjector, ensureCostTables } from './cost-projector.js';
 import { PlacementProjector, ensurePlacementTable } from './placement-projector.js';
 import {
+  ACCOUNT_STATUS_SEED_SOURCE,
   COST_BUDGET_CENTS_KEY,
   observeUsage,
   openDispatchStore,
   resolveBudgetCap,
   resolveBudgetCapCents,
+  seedInitialAccountStatuses,
 } from './dispatch-store.js';
 import { FakeUsageSource, UsageUnavailableError, type UsageSnapshot } from './usage-source.js';
 import { isStale } from './policy.js';
@@ -199,6 +201,76 @@ describe('recordSnapshot — a FakeUsageSource snapshot updates provider-account
       expect(store.getBucket('codex', 'default', 'primary')?.usedPct).toBe(10);
       expect(() => store.getBucket('default', 'five_hour')).toThrow(/ambiguous account-only/i);
       expect(() => store.getHeadroom('default', 'five_hour')).toThrow(/ambiguous account-only/i);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// ── Proof #2b: a fresh box seeds an initial unavailable status per provider (#122/#125/#88) ────────
+describe('seedInitialAccountStatuses — seeds a no-data status per configured provider on a fresh box', () => {
+  it('writes one available:false row per configured provider with a no-data reason (never a fake 0%)', () => {
+    const store = openDispatchStore('p-seed-fresh');
+    try {
+      seedInitialAccountStatuses(store, ['claude', 'codex']);
+      const statuses = store.readAccountStatuses();
+      expect(statuses).toHaveLength(2);
+      const claude = statuses.find((s) => s.provider === 'claude');
+      const codex = statuses.find((s) => s.provider === 'codex');
+      expect(claude).toBeDefined();
+      expect(codex).toBeDefined();
+      expect(claude?.available).toBe(false);
+      expect(claude?.reason).toMatch(/no usage observed/i);
+      expect(claude?.source).toBe(ACCOUNT_STATUS_SEED_SOURCE);
+      expect(codex?.available).toBe(false);
+      // No bucket is fabricated for an unseen window — the seed marks the account unavailable only.
+      expect(store.readBuckets()).toHaveLength(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('defaults to ALL providers when none are passed', () => {
+    const store = openDispatchStore('p-seed-default');
+    try {
+      seedInitialAccountStatuses(store);
+      const providers = new Set(store.readAccountStatuses().map((s) => s.provider));
+      expect(providers).toEqual(new Set(['claude', 'codex']));
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a later REAL read UPSERTS the seed row (one row, available:true, source != seed)', () => {
+    const store = openDispatchStore('p-seed-upsert');
+    try {
+      seedInitialAccountStatuses(store, ['claude']);
+      expect(store.readAccountStatuses()).toHaveLength(1);
+      // A real available Claude snapshot arrives afterwards.
+      store.recordSnapshot(claudeSnap);
+      const statuses = store.readAccountStatuses().filter((s) => s.provider === 'claude');
+      expect(statuses).toHaveLength(1); // upserted, not duplicated
+      const claude = statuses[0]!;
+      expect(claude.available).toBe(true);
+      expect(claude.source).not.toBe(ACCOUNT_STATUS_SEED_SOURCE);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('does NOT overwrite an existing real status when re-run (idempotent guard)', () => {
+    const store = openDispatchStore('p-seed-guard');
+    try {
+      // A real read lands first.
+      store.recordSnapshot(claudeSnap);
+      const before = store.getAccountStatus('claude', 'claude:max');
+      expect(before?.available).toBe(true);
+      // Seeding afterwards must be a no-op for the already-known account.
+      seedInitialAccountStatuses(store, ['claude']);
+      const after = store.getAccountStatus('claude', 'claude:max');
+      expect(after?.available).toBe(true);
+      expect(after?.source).not.toBe(ACCOUNT_STATUS_SEED_SOURCE);
+      expect(store.readAccountStatuses().filter((s) => s.provider === 'claude')).toHaveLength(1);
     } finally {
       store.close();
     }
