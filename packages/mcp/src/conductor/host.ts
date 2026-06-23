@@ -1653,9 +1653,10 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       assertReclaimableChildLeaf(childId);
       if (engine.isBusy(projectId, childId)) {
         throw new Error(
-          `co-mcp serve: reclaimChild: '${childId}' is launching or has an in-flight turn — ` +
+          `co-mcp serve: reclaimChild: '${childId}' is launching, receiving routed mail, or has an ` +
+            'in-flight turn — ' +
             'refusing to delete durable state while the agent can still produce side effects. ' +
-            'Stop it and retry after the launch/turn yields.',
+            'Stop it and retry after the live work yields.',
         );
       }
 

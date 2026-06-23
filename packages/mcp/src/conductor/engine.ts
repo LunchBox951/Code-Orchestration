@@ -502,6 +502,8 @@ export class ConductorEngine {
    * on release.
    */
   private readonly turnInFlight = new Map<string, boolean>();
+  /** Routed live-delivery injections currently pasting into a recipient pane, keyed by `${projectId}:${agent}`. */
+  private readonly routeInjectInFlight = new Map<string, number>();
   /**
    * P6 (watchdog-seam) — the injected-time start of the current or most-recent unfinished turn. Used
    * to scope host liveness to current-turn bytes instead of stale startup/prior-turn output, and to
@@ -567,10 +569,14 @@ export class ConductorEngine {
     return this.hosted.has(ConductorEngine.agentKey(projectId, agent));
   }
 
-  /** Whether `agent` is in a launch or driven-turn window where control teardown must wait. */
+  /** Whether `agent` is in a live-work window where control teardown must wait. */
   isBusy(projectId: ProjectId, agent: string): boolean {
     const agentKey = ConductorEngine.agentKey(projectId, agent);
-    return this.launching.has(agentKey) || this.turnInFlight.get(agentKey) === true;
+    return (
+      this.launching.has(agentKey) ||
+      this.turnInFlight.get(agentKey) === true ||
+      (this.routeInjectInFlight.get(agentKey) ?? 0) > 0
+    );
   }
 
   /** The warm hosted handle for `agent`, or `undefined`. Use this to reuse a warm pane (no relaunch). */
@@ -1253,18 +1259,26 @@ export class ConductorEngine {
     recipient: string,
     mail: DeliveredMail,
   ): Promise<void> {
-    const hosted = this.getHosted(projectId, recipient);
-    if (hosted == null) {
-      throw new Error(
-        `ConductorEngine.routeInject: recipient '${recipient}' is not hosted in project ` +
-          `'${projectId}' — cannot inject routed mail to a pane that is not warm (P2 resolves a ` +
-          'not-yet-hosted recipient from a PlacementRecord).',
-      );
+    const agentKey = ConductorEngine.agentKey(projectId, recipient);
+    this.routeInjectInFlight.set(agentKey, (this.routeInjectInFlight.get(agentKey) ?? 0) + 1);
+    try {
+      const hosted = this.getHosted(projectId, recipient);
+      if (hosted == null) {
+        throw new Error(
+          `ConductorEngine.routeInject: recipient '${recipient}' is not hosted in project ` +
+            `'${projectId}' — cannot inject routed mail to a pane that is not warm (P2 resolves a ` +
+            'not-yet-hosted recipient from a PlacementRecord).',
+        );
+      }
+      await injectMail(hosted.pane, this.renderMail(mail), {
+        provider: hosted.identity.provider,
+        ...this.deps.injectOptions,
+      });
+    } finally {
+      const next = (this.routeInjectInFlight.get(agentKey) ?? 1) - 1;
+      if (next <= 0) this.routeInjectInFlight.delete(agentKey);
+      else this.routeInjectInFlight.set(agentKey, next);
     }
-    await injectMail(hosted.pane, this.renderMail(mail), {
-      provider: hosted.identity.provider,
-      ...this.deps.injectOptions,
-    });
   }
 
   /**
