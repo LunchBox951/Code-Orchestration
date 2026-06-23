@@ -715,6 +715,26 @@ describe('ConductorEngine — concurrent-launch + mid-turn release safety (#73)'
     expect(pty.panes.length).toBe(1); // still exactly one live pane
   });
 
+  it('keeps concurrent ensureHosted launches independent per agent', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    const first = makeIdentity({ agent: 'impl-a', projectId, cwd });
+    const second = makeIdentity({ agent: 'impl-b', projectId, cwd });
+    const { engine, pty } = makeEngine();
+
+    const p1 = engine.ensureHosted(first);
+    const p2 = engine.ensureHosted(second);
+    expect(pty.panes).toHaveLength(2);
+
+    pty.panes[0]!.emit(CLAUDE_READY);
+    pty.panes[1]!.emit(CLAUDE_READY);
+    const [h1, h2] = await Promise.all([p1, p2]);
+    expect(h1).not.toBe(h2);
+    expect(h1.identity.agent).toBe('impl-a');
+    expect(h2.identity.agent).toBe('impl-b');
+    expect(pty.panes).toHaveLength(2);
+  });
+
   it('defers the pane kill to the turn boundary when release() arrives mid-turn', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
@@ -729,16 +749,24 @@ describe('ConductorEngine — concurrent-launch + mid-turn release safety (#73)'
       killed = true;
       origKill();
     };
+    let sessionCloseCount = 0;
+    const origClose = hosted.session.close.bind(hosted.session);
+    hosted.session.close = async () => {
+      sessionCloseCount++;
+      await origClose();
+    };
 
     const item = outstandingItem(projectId, 'impl-x');
     const turnP = engine.runOneTurn(hosted, item);
     await tick(); // turn is in flight (injectMail awaiting echo) → turnInFlight=true
     await engine.release(projectId, 'impl-x'); // deferred — must NOT kill the pane mid-turn
     expect(killed).toBe(false);
+    expect(sessionCloseCount).toBe(0);
 
     await driveTurnToIdle(pane, item, clock, qw);
     await turnP; // the turn's finally finalizes the deferred release
     expect(killed).toBe(true); // killed only after the turn yielded
+    expect(sessionCloseCount).toBe(1);
   });
 
   it('drains a deferred (mid-turn) release in closeAll so teardown leaves no live pane', async () => {
@@ -755,6 +783,12 @@ describe('ConductorEngine — concurrent-launch + mid-turn release safety (#73)'
       killed = true;
       origKill();
     };
+    let sessionCloseCount = 0;
+    const origClose = hosted.session.close.bind(hosted.session);
+    hosted.session.close = async () => {
+      sessionCloseCount++;
+      await origClose();
+    };
 
     const item = outstandingItem(projectId, 'impl-x');
     // The turn is in flight (injectMail awaiting a composer echo that never comes under the test's
@@ -765,12 +799,14 @@ describe('ConductorEngine — concurrent-launch + mid-turn release safety (#73)'
     await tick(); // turn in flight → turnInFlight=true
     await engine.release(projectId, 'impl-x'); // deferred: pane removed from `hosted`, kill stored in releasePending
     expect(killed).toBe(false);
+    expect(sessionCloseCount).toBe(0);
 
     // Teardown arrives BEFORE the turn yields. The pane is no longer in `hosted`, so closeAll's main
     // loop cannot see it — only the releasePending drain (#73) kills it. Without that drain a live pane
     // would leak past teardown.
     await engine.closeAll();
     expect(killed).toBe(true);
+    expect(sessionCloseCount).toBe(1);
   });
 
   it('clears the launch latch when a launch rejects, so a later ensureHosted can spawn a fresh pane', async () => {
