@@ -485,6 +485,57 @@ describe('PlanStore — draft → phase-status transitions → phase.verified �
     }
   });
 
+  it('preserves phase evidence when a replan changes only name/owner under an unchanged deps+criteria contract', () => {
+    // Pins the load-bearing exclusion in samePhaseVerificationContract: the verification contract is
+    // deps+criteria ONLY, so a rename / new owner is NOT a contract change and must NOT drop evidence.
+    const store = openPlanStore('p-plans-replan-preserves-on-rename');
+    try {
+      store.recordDraft({
+        taskId: 'task-1',
+        goal: 'G',
+        taskCriteria: [WIRED_CRITERION],
+        phases: [
+          {
+            phaseId: 'ph-1',
+            name: 'Phase One',
+            deps: [],
+            criteria: [WIRED_CRITERION],
+          },
+        ],
+        actor: ACTOR,
+      });
+      store.changePhaseStatus('task-1', 'ph-1', 'merged', ACTOR);
+      store.recordPhaseVerified('task-1', 'ph-1', 'base-a', true, ACTOR);
+
+      const after = store.recordReplan(
+        'task-1',
+        'rename + reassign only',
+        [
+          {
+            phaseId: 'ph-1',
+            name: 'Phase One Renamed',
+            owner: 'new-lead',
+            deps: [],
+            criteria: [WIRED_CRITERION],
+          },
+        ],
+        ACTOR,
+      );
+
+      const preserved = after.phases[0]!;
+      expect(preserved).toMatchObject({
+        phaseId: 'ph-1',
+        name: 'Phase One Renamed',
+        owner: 'new-lead',
+        status: 'merged',
+        verifiedPass: true,
+        baselineSha: 'base-a',
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it('clears dependent phase evidence when an upstream phase contract changes', () => {
     const store = openPlanStore('p-plans-replan-clears-dependent-verification');
     const updatedCriterion = {
