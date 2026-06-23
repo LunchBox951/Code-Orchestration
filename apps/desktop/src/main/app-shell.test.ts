@@ -1439,3 +1439,100 @@ describe('createAppShell — settings ops (AC-SET-3/4/6)', () => {
     expect(shell.getSettingsState().activeLayer).toBe('global');
   });
 });
+
+// Issue #126 — the post-action refresh sites (`onApprove`, `onSubmitVerdict`, and the disconnected
+// `onState` handler) call `connection.refresh()` fire-and-forget. `refresh()` awaits `client.observe()`,
+// which can REJECT under store contention ("database is locked"). Without a `.catch()` the rejection
+// escapes as an UnhandledPromiseRejectionWarning that can kill the main process under strict mode. These
+// tests pin the guard: the rejection is caught, surfaced as a VISIBLE connection error (Principle 9),
+// and never leaks to the process.
+describe('createAppShell — a failing post-action refresh degrades visibly, never as an unhandled rejection (#126)', () => {
+  const REVIEW_MAIL = {
+    seq: 91,
+    recipient: OPERATOR,
+    sender: 'lead-1',
+    type: MAIL_REVIEW_REQUEST,
+    subject: 'Review merge',
+    body: 'Please review this branch.',
+    ts: 1700000000000,
+    idempotencyKey: 'review-request:rev-lock',
+    resolved: false,
+  } as DeliveredMail;
+
+  let unhandled: unknown[] = [];
+  let onUnhandled: (reason: unknown) => void;
+
+  beforeEach(() => {
+    unhandled = [];
+    onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+  });
+
+  afterEach(() => {
+    process.off('unhandledRejection', onUnhandled);
+  });
+
+  it('catches a "database is locked" refresh rejection after submitting a verdict and reports a visible error', async () => {
+    let inbox: readonly DeliveredMail[] = [REVIEW_MAIL];
+    // reply() (the verdict submission) SUCCEEDS, then the follow-up refresh's observe() REJECTS.
+    const client = {
+      ...makeClient(),
+      observe: vi.fn().mockRejectedValue(new Error('database is locked')),
+      reviewContext: vi.fn().mockResolvedValue({
+        kind: 'resolved',
+        reviewId: 'rev-lock',
+        branch: 'co/review-lock',
+        target: 'main',
+        scope: 'merge',
+        evidenceFingerprint: 'sha256:review-lock',
+        diff: { kind: 'patch', patch: '@@ -1 +1 @@\n-old\n+new' },
+        criteria: {
+          kind: 'criteria',
+          specRef: 'spec:task-review-lock#locked',
+          criteria: [{ text: 'change is reviewable', verify: 'pnpm test' }],
+        },
+      }),
+      reply: vi.fn().mockImplementation(async () => {
+        inbox = [{ ...REVIEW_MAIL, resolved: true } as DeliveredMail];
+      }),
+    } as unknown as OperatorIpcClient;
+    const onConnectionError = vi.fn();
+    const onReviewState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => inbox,
+      outboxReader: () => [],
+      onConnectionError,
+      onReviewState,
+    });
+
+    shell.reviewRefresh();
+    shell.reviewSelect('rev-lock');
+    // Wait for the review context to load (submitVerdict requires loaded evidence).
+    await vi.waitFor(() => {
+      expect(onReviewState.mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({ context: expect.objectContaining({ status: 'loaded' }) }),
+      );
+    });
+    shell.reviewBeginVerdict('PASS');
+    shell.reviewUpdateComposerBody('looks good');
+    await shell.reviewSubmitVerdict();
+
+    // Let the fire-and-forget refresh's rejected observe() settle through the .catch().
+    await flushPromises();
+    await flushPromises();
+
+    // (a) The submission itself went through, and (b) the refresh failure surfaced as a VISIBLE error.
+    expect(client.reply).toHaveBeenCalledOnce();
+    expect(onConnectionError).toHaveBeenCalled();
+    expect(onConnectionError.mock.calls.at(-1)?.[0]).toMatch(/operator IPC refresh failed/i);
+    expect(onConnectionError.mock.calls.at(-1)?.[0]).toMatch(/database is locked/i);
+    // (c) NOTHING leaked to the process as an unhandled rejection.
+    expect(unhandled).toEqual([]);
+
+    await shell.close();
+  });
+});

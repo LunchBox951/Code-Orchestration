@@ -53,7 +53,12 @@ function rowToReviewSummary(row: Record<string, unknown>): ReviewSummary {
 
 /** All review rows in the projection table, in a deterministic order (target, branch). */
 function selectAllReviews(db: DatabaseSync): ReviewSummary[] {
-  ensureReviewTables(db);
+  // The operator dashboard polls this on every refresh tick. Skip the heavy legacy backfills
+  // (`backfillReviewRequestIds` / `backfillReviewVerdictSeq` / `backfillReviewStrikes` — each a
+  // full-table `INSERT ... SELECT` over the event log): they WRITE inside the read path's transaction,
+  // contending with the daemon writer → "database is locked" (#126). A read only needs the idempotent
+  // `CREATE TABLE IF NOT EXISTS` + column migrations, mirroring how the projector's reset/apply call it.
+  ensureReviewTables(db, { backfillStrikes: false, backfillLegacy: false });
   const rows = db
     .prepare(
       'SELECT target, branch, scope, verdict, strikes, serialized, overridden ' +
@@ -95,7 +100,8 @@ export function queryObservability(projectId: string): ObservabilitySnapshot {
         agents: selectAllAgents(db),
         plans: selectAllPlans(db),
         reviews: selectAllReviews(db),
-        costRollups: selectAllCostRollups(db),
+        // Read path: skip the cost backfill (a WRITE) for the same #126 reason as selectAllReviews above.
+        costRollups: selectAllCostRollups(db, { backfillLegacy: false }),
       };
     });
   } finally {

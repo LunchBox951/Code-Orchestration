@@ -78,7 +78,10 @@ const CREATE_COST_TABLES = `
  * Defensive create of the cost read-model tables. Called from the projector's reset/apply AND every
  * read path, so a freshly opened store can be queried before any write has happened.
  */
-export function ensureCostTables(db: DatabaseSync): void {
+export function ensureCostTables(
+  db: DatabaseSync,
+  opts: { readonly backfillLegacy?: boolean } = {},
+): void {
   db.exec(CREATE_COST_TABLES);
   ensureColumn(db, 'cost_rollup', 'cost_usd_observations', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'cost_rollup', 'token_observations', 'INTEGER NOT NULL DEFAULT 0');
@@ -95,7 +98,10 @@ export function ensureCostTables(db: DatabaseSync): void {
   `);
   ensureColumn(db, 'cost_rollup', 'cache_read_tokens', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'cost_rollup', 'cache_creation_tokens', 'INTEGER NOT NULL DEFAULT 0');
-  backfillCostObservationState(db);
+  // `backfillLegacy` re-derives observation-count columns (and, on an old store, re-folds the cost log)
+  // — a WRITE. The operator dashboard READ path opts out (#126: writing on read contends with the
+  // daemon writer → "database is locked"); a read only needs the idempotent CREATE + column migrations.
+  if (opts.backfillLegacy ?? true) backfillCostObservationState(db);
 }
 
 function ensureColumn(db: DatabaseSync, table: string, column: string, definition: string): void {
@@ -248,8 +254,11 @@ export function selectCostRollup(
 }
 
 /** Every rollup total, in a deterministic order (kind, then id). */
-export function selectAllCostRollups(db: DatabaseSync): CostRollup[] {
-  ensureCostTables(db);
+export function selectAllCostRollups(
+  db: DatabaseSync,
+  opts: { readonly backfillLegacy?: boolean } = {},
+): CostRollup[] {
+  ensureCostTables(db, opts);
   const rows = db.prepare(`SELECT ${ROLLUP_COLUMNS} FROM cost_rollup ORDER BY kind, id`).all();
   return rows.map((r) => rowToCostRollup(r as Record<string, unknown>));
 }
