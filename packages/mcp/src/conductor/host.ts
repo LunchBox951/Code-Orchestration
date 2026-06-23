@@ -2036,8 +2036,9 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   console.error(
     ghToken != null
       ? '[co-mcp serve] GitHub auth: configured — gh + remote HTTPS pushes will authenticate to github.com.'
-      : '[co-mcp serve] GitHub auth: NONE — run `gh auth login` (or set CO_GH_TOKEN); remote publish ' +
-          '(co_push / co_pr_merge) will fail until then. Offline/owner-local co_merge still works.',
+      : '[co-mcp serve] GitHub auth: NONE — run `gh auth login` (or set CO_GH_TOKEN), then restart ' +
+          'the Conductor or reopen the project; remote publish (co_push / co_pr_merge) will fail until ' +
+          'then. Offline/owner-local co_merge still works.',
   );
   // [host-live capture] Arm the observation harness when CO_HOST_LIVE_CAPTURE=<dir> is set, so a single
   // real run records the codex paste-preview bytes / MCP-approval prompt / status-line / usage sample

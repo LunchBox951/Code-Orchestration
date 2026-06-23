@@ -611,7 +611,7 @@ ipcMain.handle('github:connect', async (_event, token: unknown) => {
       ok: true,
       warning: `GitHub connected, but the Conductor could not restart automatically: ${
         e instanceof Error ? e.message : String(e)
-      }. Use Retry from the header.`,
+      }. Reopen the project or restart the app so the Conductor picks up the change. If the daemon badge is failed, header Retry can also reprovision it.`,
     };
   }
   sendToRenderer('github:status', githubStatus());
@@ -634,7 +634,7 @@ ipcMain.handle('github:disconnect', async () => {
       ok: true,
       warning: `GitHub disconnected, but the Conductor could not restart automatically: ${
         e instanceof Error ? e.message : String(e)
-      }. Use Retry from the header.`,
+      }. Reopen the project or restart the app so the Conductor picks up the change. If the daemon badge is failed, header Retry can also reprovision it.`,
     };
   }
   sendToRenderer('github:status', githubStatus());

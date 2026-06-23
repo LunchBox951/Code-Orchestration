@@ -193,7 +193,7 @@ describe('fileIssueOutward — fail-fast GitHub-auth pre-check (#95)', () => {
         body: 'B',
         tokenEnv: {}, // no CO_GH_TOKEN / GH_TOKEN / GITHUB_TOKEN
       }),
-    ).toThrow(/connect GitHub in Settings|CO_GH_TOKEN|gh auth login/i);
+    ).toThrow(/restart.*Conductor|reopen.*project/i);
     expect(gh).not.toHaveBeenCalled();
   });
 
@@ -209,6 +209,8 @@ describe('fileIssueOutward — fail-fast GitHub-auth pre-check (#95)', () => {
     } catch (e) {
       message = e instanceof Error ? e.message : String(e);
     }
+    expect(message).toMatch(/set CO_GH_TOKEN.*restart.*Conductor/i);
+    expect(message).toMatch(/gh auth login.*restart.*Conductor/i);
     expect(message).toContain('gh issue create');
     expect(message).toContain('-R acme/co');
     expect(message).toContain('"My title"');

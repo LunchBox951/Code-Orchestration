@@ -222,8 +222,9 @@ export function assertGhTokenForFiling(opts: {
       ? `-R ${opts.coRepoSlug} `
       : '';
   throw new Error(
-    'issue filing: no GitHub token available — connect GitHub in Settings, set CO_GH_TOKEN, or run ' +
-      '`gh auth login`, then retry. To file this issue by hand instead, run:\n' +
+    'issue filing: no GitHub token available — connect GitHub in Settings, or set CO_GH_TOKEN / run ' +
+      '`gh auth login` and restart the Conductor (or reopen the project), then retry. To file this ' +
+      'issue by hand instead, run:\n' +
       `  gh issue create ${repoFlag}--title ${JSON.stringify(opts.title)} --body "<paste the approved body>"`,
   );
 }

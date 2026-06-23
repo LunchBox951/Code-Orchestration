@@ -375,9 +375,7 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     delete process.env.GITHUB_TOKEN;
     delete process.env.CO_GH_TOKEN;
 
-    await expect(file(ctx)).rejects.toThrow(
-      /connect GitHub in Settings|CO_GH_TOKEN|gh auth login/i,
-    );
+    await expect(file(ctx)).rejects.toThrow(/restart.*Conductor|reopen.*project/i);
     expect(createCallCount(gh)).toBe(0);
     // The issue stays diagnosed (not falsely recorded as filed) so a later retry — once connected — works.
     expect(stores.issues.getIssue('iss-1')?.state).toBe('diagnosed');

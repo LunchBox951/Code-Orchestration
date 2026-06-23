@@ -101,7 +101,8 @@ export function createGithubCredentialStore(
         'Connect GitHub: OS credential encryption (safeStorage) is unavailable, so the stored token cannot ' +
           'be stored securely. Refusing to persist a plaintext token. On Linux ensure a keyring ' +
           '(gnome-keyring / kwallet / libsecret) is running, or set CO_GH_TOKEN in the environment ' +
-          'instead (or run `gh auth login`).',
+          'instead (or run `gh auth login`), then restart the app or reopen the project so the ' +
+          'Conductor picks it up.',
       );
     }
     if (process.platform === 'linux') {
@@ -111,7 +112,8 @@ export function createGithubCredentialStore(
           `Connect GitHub: Electron safeStorage selected '${backend}', which does not provide a ` +
             'usable Linux keyring for protecting tokens. Refusing to persist or decrypt a plaintext-equivalent ' +
             'token. Install or unlock gnome-keyring / kwallet / libsecret, set CO_GH_TOKEN in the ' +
-            'environment instead, or run `gh auth login`.',
+            'environment instead, or run `gh auth login`, then restart the app or reopen the project ' +
+            'so the Conductor picks it up.',
         );
       }
     }

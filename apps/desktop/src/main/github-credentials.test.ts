@@ -47,6 +47,15 @@ const TOKEN = 'ghp_SUPERSECRET_test_token_value_0123456789';
 let userDataPath: string;
 const sidecar = (): string => join(userDataPath, 'github-credentials.enc');
 
+function thrownMessage(fn: () => void): string {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+  throw new Error('expected function to throw');
+}
+
 beforeEach(() => {
   userDataPath = mkdtempSync(join(tmpdir(), 'co-gh-creds-'));
 });
@@ -61,7 +70,9 @@ describe('github-credentials — encryption-unavailable refuses (Principle 9, no
     const safeStorage = fakeSafeStorage(false);
     const store = createGithubCredentialStore({ safeStorage, userDataPath });
 
-    expect(() => store.storeToken(TOKEN)).toThrow(/unavailable|plaintext|securely/i);
+    const message = thrownMessage(() => store.storeToken(TOKEN));
+    expect(message).toMatch(/unavailable|plaintext|securely/i);
+    expect(message).toMatch(/restart.*app|reopen.*project/i);
     expect(existsSync(sidecar())).toBe(false);
   });
 
@@ -71,9 +82,9 @@ describe('github-credentials — encryption-unavailable refuses (Principle 9, no
       const safeStorage = fakeSafeStorage(true, backend);
       const store = createGithubCredentialStore({ safeStorage, userDataPath });
 
-      expect(() => store.storeToken(TOKEN)).toThrow(
-        new RegExp(`${backend}|keyring|plaintext`, 'i'),
-      );
+      const message = thrownMessage(() => store.storeToken(TOKEN));
+      expect(message).toMatch(new RegExp(`${backend}|keyring|plaintext`, 'i'));
+      expect(message).toMatch(/restart.*app|reopen.*project/i);
       expect(existsSync(sidecar())).toBe(false);
     },
   );
