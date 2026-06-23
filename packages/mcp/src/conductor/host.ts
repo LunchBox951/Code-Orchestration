@@ -325,8 +325,11 @@ export class ConductorHostRunner {
   private async runBeat(rethrowTickErrors = false): Promise<void> {
     try {
       const outcome = await this.daemon.tick();
-      this.onTick?.(outcome);
-      this.reportReviewerRedriveErrors(outcome);
+      try {
+        this.onTick?.(outcome);
+      } finally {
+        this.reportReviewerRedriveErrors(outcome);
+      }
     } catch (error) {
       if (this.onError != null) this.onError(error);
       else console.error('[co-mcp serve] tick error:', error);

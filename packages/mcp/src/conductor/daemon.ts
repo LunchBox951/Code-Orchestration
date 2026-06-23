@@ -46,6 +46,7 @@ import {
   openWorktreeStore,
   recoverGlobalStore,
   recoverProjectStore,
+  resolveMaxedThresholdPct,
   type AgentRecord,
   type DeliveredMail,
   type DispatchStore,
@@ -305,6 +306,8 @@ export class ConductorDaemon {
   private readonly isSkipped: (projectId: ProjectId, agent: string) => boolean;
   private tickCount = 0;
   private recovered = false;
+  /** Failed reviewer launches rotate behind never-failed seats so one broken low-sorted retry cannot starve the rest. */
+  private readonly reviewerRedriveFailedAt = new Map<string, number>();
   /**
    * Stage 15 (review-375 GUARD) — recovered NON-root agents whose per-tick re-warm via the single launch
    * authority THREW (`ensureHosted → hostSession → recordSession` refuses a recovered agent that still
@@ -613,10 +616,12 @@ export class ConductorDaemon {
         // Cheap pre-gate (canResume's first real caller): if NO suitable provider is healthy + below the
         // maxed threshold, every WAITING seat would re-resolve to waiting. Already-PLACED retry seats still
         // run: they are recovering a post-placement launch failure, not consuming a new dispatch slot.
-        const candidates = candidatesFromStore(dispatch, this.reviewerAccounts, {
-          nowMs: this.now(),
+        const nowMs = this.now();
+        const candidates = candidatesFromStore(dispatch, this.reviewerAccounts, { nowMs });
+        const waitingCanResume = canResume(candidates, {
+          nowMs,
+          maxedThresholdPct: resolveMaxedThresholdPct(this.projectId),
         });
-        const waitingCanResume = canResume(candidates, { nowMs: this.now() });
         if (!waitingCanResume && !seats.some((seat) => seat.kind === 'placed')) return empty;
 
         let reviews: ReviewStore | undefined;
@@ -652,8 +657,12 @@ export class ConductorDaemon {
               try {
                 // Surface a launch failure: drainSpawns rejects if the fire-and-forget spawn failed.
                 await gate.drainSpawns();
-                if (outcome.agent != null) reviewersRedriven.push(outcome.agent);
+                if (outcome.agent != null) {
+                  reviewersRedriven.push(outcome.agent);
+                  this.reviewerRedriveFailedAt.delete(outcome.agent);
+                }
               } catch (error: unknown) {
+                this.reviewerRedriveFailedAt.set(outcome.agent ?? seat.agent, this.tickCount);
                 pushReviewerRedriveError(
                   reviewerRedriveErrors,
                   outcome.agent ?? seat.agent,
@@ -708,7 +717,18 @@ export class ConductorDaemon {
       if (this.engine.isHosted(this.projectId, agent) || liveSessions.has(agent)) continue;
       seats.push({ reviewId, agent, kind: 'placed' });
     }
-    return seats.sort((a, b) => a.reviewId.localeCompare(b.reviewId));
+    return seats.sort((a, b) => this.compareReviewerRedriveSeats(a, b));
+  }
+
+  private compareReviewerRedriveSeats(a: ReviewerRedriveSeat, b: ReviewerRedriveSeat): number {
+    const aFailedAt = this.reviewerRedriveFailedAt.get(a.agent);
+    const bFailedAt = this.reviewerRedriveFailedAt.get(b.agent);
+    if (aFailedAt == null && bFailedAt != null) return -1;
+    if (aFailedAt != null && bFailedAt == null) return 1;
+    if (aFailedAt != null && bFailedAt != null && aFailedAt !== bFailedAt) {
+      return aFailedAt - bFailedAt;
+    }
+    return a.reviewId.localeCompare(b.reviewId);
   }
 
   /**

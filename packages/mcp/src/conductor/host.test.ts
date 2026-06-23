@@ -634,6 +634,52 @@ describe('ConductorHostRunner — recover + arm, drive a tick per beat, disarm o
     ]);
     await runner.stop();
   });
+
+  it('reports reviewer redrive errors even when the tick observer throws', async () => {
+    const scheduler = new FakeScheduler();
+    const errors: string[] = [];
+    const outcome = {
+      observedAt: 1,
+      tick: 1,
+      candidateCount: 0,
+      coldStarted: [],
+      coldStartErrors: [],
+      coldRewoke: [],
+      coldRewakeErrors: [],
+      reWarmed: [],
+      reWarmErrors: [],
+      reviewersRedriven: [],
+      reviewerRedriveErrors: [{ agent: 'reviewer:pr@rev-x', message: 'spawn failed' }],
+      coldCandidates: [],
+      cycle: null,
+      selected: null,
+      cadenceFired: false,
+      clarifyForwarded: [],
+      reconcile: null,
+    } satisfies DaemonTickOutcome;
+    const runner = new ConductorHostRunner({
+      daemon: {
+        recover: () => [],
+        tick: async () => outcome,
+        reconcile: makeReconcile(makeClock()),
+      } as unknown as ConductorDaemon,
+      intervalMs: 1000,
+      scheduler,
+      onTick: () => {
+        throw new Error('tick observer failed');
+      },
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    });
+
+    runner.start();
+    await expect(runner.step()).rejects.toThrow(/tick observer failed/);
+
+    expect(errors).toEqual([
+      "co-mcp serve: reviewer redrive for 'reviewer:pr@rev-x' failed: spawn failed",
+      'tick observer failed',
+    ]);
+    await runner.stop();
+  });
 });
 
 describe('hostLiveCaptureUsageSourceFactory', () => {

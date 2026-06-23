@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   CoReviewGate,
+  DISPATCH_MAXED_THRESHOLD_PCT_KEY,
   FakePty,
   MAIL_CLARIFY_REQUEST,
   MAIL_CLARIFY_RESPONSE,
@@ -25,6 +26,7 @@ import {
   accountForProvider,
   buildCoreRegistry,
   defaultMailRenderer,
+  openConfigStore,
   openDispatchStore,
   openMailStore,
   openRegistry,
@@ -899,6 +901,10 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
 
   /** Record a healthy provider snapshot so the per-tick re-resolution flips waiting → placed. */
   function recoverCapacity(projectId: ProjectId): void {
+    recordCapacity(projectId, 1, '1970-01-01T00:00:00.000Z');
+  }
+
+  function recordCapacity(projectId: ProjectId, usedPct: number, sampledAt: string): void {
     const dispatch = openDispatchStore(projectId);
     try {
       dispatch.recordSnapshot({
@@ -906,8 +912,10 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
         account: accountForProvider('claude'),
         available: true,
         source: 'test',
-        sampled_at: '1970-01-01T00:00:00.000Z',
-        windows: [{ kind: 'five_hour', used_pct: 1, reset_at: '1970-01-01T05:00:00.000Z' }],
+        sampled_at: sampledAt,
+        windows: [
+          { kind: 'five_hour', used_pct: usedPct, reset_at: '1970-01-01T05:00:00.000Z' },
+        ],
       });
     } finally {
       dispatch.close();
@@ -915,19 +923,7 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
   }
 
   function maxCapacity(projectId: ProjectId): void {
-    const dispatch = openDispatchStore(projectId);
-    try {
-      dispatch.recordSnapshot({
-        provider: 'claude',
-        account: accountForProvider('claude'),
-        available: true,
-        source: 'test',
-        sampled_at: '1970-01-01T00:00:01.000Z',
-        windows: [{ kind: 'five_hour', used_pct: 99, reset_at: '1970-01-01T05:00:00.000Z' }],
-      });
-    } finally {
-      dispatch.close();
-    }
+    recordCapacity(projectId, 99, '1970-01-01T00:00:01.000Z');
   }
 
   function seedUnknownWaitingReviewer(projectId: ProjectId, reviewId: string): void {
@@ -1105,6 +1101,34 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
     expect(launches).toEqual(['reviewer:pr@rev-999-valid']);
   });
 
+  it('uses dispatch.maxedThresholdPct for the waiting-reviewer resume pre-gate', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-threshold', `${REVIEW_BRANCH_PREFIX}threshold`);
+    recordCapacity(projectId, 97, '1970-01-01T00:00:00.000Z');
+    const config = openConfigStore();
+    try {
+      config.setProjectOverride(projectId, DISPATCH_MAXED_THRESHOLD_PCT_KEY, 99);
+    } finally {
+      config.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { gate: spawnGate, launches } = routingSpawnGate(engine, cwd);
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => spawnGate,
+      isSkipped: skipReviewerSeats,
+    });
+
+    const out = await drivePanesReady(daemon.tick(), pty);
+
+    expect(out.reviewersRedriven).toEqual(['reviewer:pr@rev-threshold']);
+    expect(out.reviewerRedriveErrors).toEqual([]);
+    expect(launches).toEqual(['reviewer:pr@rev-threshold']);
+  });
+
   it('retries an already-placed reviewer seat after a transient spawn failure', async () => {
     const { projectId, cwd } = makeProject();
     seedParentChain(projectId, 'lead-1');
@@ -1262,6 +1286,82 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
       { agent: 'reviewer:pr@rev-fail-1', message: 'fixture shared spawn failure' },
     ]);
     expect(attempts).toEqual(['reviewer:pr@rev-fail-1']);
+  });
+
+  it('continues to later reviewer seats when one spawn fails and the cap has room', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-mix-a', `${REVIEW_BRANCH_PREFIX}mix-a`);
+    seedWaitingReviewer(projectId, 'rev-mix-b', `${REVIEW_BRANCH_PREFIX}mix-b`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { gate: baseGate } = routingSpawnGate(engine, cwd);
+    const attempts: string[] = [];
+    const mixedGate: ReviewerSpawnGate = {
+      spawn: (projectId, record) => {
+        attempts.push(record.agent);
+        if (record.agent === 'reviewer:pr@rev-mix-a') {
+          return Promise.reject(new Error('fixture first spawn failed'));
+        }
+        return baseGate.spawn(projectId, record);
+      },
+    };
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => mixedGate,
+      maxReviewerRedrivesPerTick: 2,
+      isSkipped: skipReviewerSeats,
+    });
+
+    const out = await drivePanesReady(daemon.tick(), pty);
+
+    expect(out.reviewersRedriven).toEqual(['reviewer:pr@rev-mix-b']);
+    expect(out.reviewerRedriveErrors).toEqual([
+      { agent: 'reviewer:pr@rev-mix-a', message: 'fixture first spawn failed' },
+    ]);
+    expect(attempts).toEqual(['reviewer:pr@rev-mix-a', 'reviewer:pr@rev-mix-b']);
+  });
+
+  it('rotates a failed placed retry behind never-failed seats on later ticks', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-000-fails', `${REVIEW_BRANCH_PREFIX}fails`);
+    seedWaitingReviewer(projectId, 'rev-999-drains', `${REVIEW_BRANCH_PREFIX}drains`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { gate: baseGate } = routingSpawnGate(engine, cwd);
+    const attempts: string[] = [];
+    const fairGate: ReviewerSpawnGate = {
+      spawn: (projectId, record) => {
+        attempts.push(record.agent);
+        if (record.agent === 'reviewer:pr@rev-000-fails') {
+          return Promise.reject(new Error('fixture permanent spawn failure'));
+        }
+        return baseGate.spawn(projectId, record);
+      },
+    };
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => fairGate,
+      maxReviewerRedrivesPerTick: 1,
+      isSkipped: skipReviewerSeats,
+    });
+
+    const first = await daemon.tick();
+    expect(first.reviewersRedriven).toEqual([]);
+    expect(first.reviewerRedriveErrors).toEqual([
+      { agent: 'reviewer:pr@rev-000-fails', message: 'fixture permanent spawn failure' },
+    ]);
+    expect(attempts).toEqual(['reviewer:pr@rev-000-fails']);
+
+    const second = await drivePanesReady(daemon.tick(), pty);
+    expect(second.reviewersRedriven).toEqual(['reviewer:pr@rev-999-drains']);
+    expect(second.reviewerRedriveErrors).toEqual([]);
+    expect(attempts).toEqual(['reviewer:pr@rev-000-fails', 'reviewer:pr@rev-999-drains']);
   });
 
   it('reports per-seat redrive errors and still runs the normal daemon cycle', async () => {
