@@ -34,7 +34,7 @@ Source / Usage`).
 
 The Dashboard shows a **"Start a coordinator session"** form. You have two options:
 
-- **"Start from demo spec"** — launches the predesigned on-ramp coordinator using the bundled
+- **"Use demo spec"** — launches the predesigned on-ramp coordinator using the bundled
   `docs/demo-spec-co-improves-its-docs.md` spec. Enter a coordinator name first; recommended for
   your first session.
 - **"Start session"** — enter a coordinator name, type (or paste) a free-form prompt, and click
@@ -131,7 +131,7 @@ summary gate; the full host-live SH-1 proof lives in [`docs/sh1-runbook.md`](sh1
 Operator host-live acceptance (run before merging):
 [ ] App healthy: daemon status indicator shows "healthy" for the project.
 [ ] Auth: co doctor --live → [ok] provider-compatibility for both monitored providers (claude, codex).
-[ ] Session started: named the coordinator and used "Start from demo spec" or "Start session" in the Dashboard.
+[ ] Session started: named the coordinator and used "Use demo spec" or "Start session" in the Dashboard.
 [ ] Plan-with-operator: the coordinator mails a clarify/brainstorm; you reply in-app; it drafts a spec.
 [ ] Lock: the coordinator sends a spec-lock approval request; approve it in Mail. Agents cannot
     lock their own specs. Use `co spec lock <taskId>` only as the headless/debug fallback.

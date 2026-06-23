@@ -194,6 +194,12 @@ describe('co_mail_send — #91 approve-reply bridges the lock', () => {
       }),
     ).toThrow(/refusing to lock 'task-5'/i);
     expect(specs.getSpec('task-5')?.state).toBe('draft');
+    expect(mail.inbox(OPERATOR).find((m) => m.seq === req.seq)?.resolved).toBe(false);
+    expect(
+      mail
+        .inbox('coord-1')
+        .some((m) => m.type === 'approval_response' && m.causationId === String(req.seq)),
+    ).toBe(false);
   });
 
   it('approve reply on a NON-lock approval does nothing to specs', () => {

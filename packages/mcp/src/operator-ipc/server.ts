@@ -643,6 +643,13 @@ export class OperatorIpcServer {
         throw new Error(`operator IPC reply: mail seq=${seq} is already resolved.`);
       }
       if (draft.type === MAIL_APPROVAL_RESPONSE && draft.decision != null) {
+        const sender = draft.from ?? found.recipient;
+        if (sender !== found.recipient) {
+          throw new Error(
+            `operator IPC reply: approval_response sender '${sender}' must match holder ` +
+              `'${found.recipient}'.`,
+          );
+        }
         this.applySpecLockApprovalSideEffectBeforeResponse(found, draft.decision);
       }
       return mail.reply(found, draft);

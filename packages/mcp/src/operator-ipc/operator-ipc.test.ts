@@ -1511,6 +1511,68 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     expect(verify.getSpec('task-reply-lock')?.state).toBe('locked');
   });
 
+  it('generic approval_response reply rejects forged sender before locking a spec', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const specs = openSpecStore(projectId);
+    let approval: DeliveredMail;
+    try {
+      specs.recordDraft({
+        taskId: 'task-forged-reply',
+        title: 'T',
+        goal: 'G',
+        criteria: [{ text: 'tokens rejected (401)', verify: 'pnpm vitest run packages/core/x' }],
+        body: 'body',
+        actor: 'coord-1',
+      });
+      const seedStore = openMailStore(projectId);
+      try {
+        approval = seedStore.send(
+          buildSpecLockApprovalEnvelope({
+            from: 'coord-1',
+            taskId: 'task-forged-reply',
+            spec: specs.getSpec('task-forged-reply')!,
+          }),
+        );
+      } finally {
+        seedStore.close();
+      }
+    } finally {
+      specs.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { control } = makeControl(engine, projectId);
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(
+      client.reply(
+        { seq: approval.seq, recipient: OPERATOR },
+        {
+          type: MAIL_APPROVAL_RESPONSE,
+          from: 'intruder',
+          decision: 'approve',
+          subject: 're: lock',
+          body: 'approved',
+        },
+      ),
+    ).rejects.toThrow(/approval_response.*sender/i);
+
+    const verify = openSpecStore(projectId);
+    specStores.push(verify);
+    expect(verify.getSpec('task-forged-reply')?.state).toBe('draft');
+    const verifyMail = openMailStore(projectId);
+    mailStores.push(verifyMail);
+    expect(verifyMail.inbox(OPERATOR).find((m) => m.seq === approval.seq)?.resolved).toBe(false);
+    expect(verifyMail.inbox('coord-1')).toHaveLength(0);
+  });
+
   it('decline retry is rejected after the spec-lock side effect already succeeded', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
