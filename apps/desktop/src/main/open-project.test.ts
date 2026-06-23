@@ -545,9 +545,11 @@ describe('open-project — reopenCurrentProject re-provisions the daemon (#95/#7
     const reopening = h.controller.reopenCurrentProject();
     await Promise.all([switching, reopening]);
 
-    // Each open completes (teardown → build) before the next begins — never a build interleaved with
-    // another open's teardown. The last open wins; the current project is well-defined.
-    expect(h.controller.currentProject).not.toBeNull();
+    // Each open completes (teardown → build) before the next begins. The queued project switch must still
+    // win; a following reopen must re-provision B, not resurrect stale project A.
+    expect(h.controller.currentProject).toEqual({ projectId: 'pid-b', path: '/repo/b' });
+    expect(h.supervisors.at(-1)?.startCalls).toEqual(['pid-b']);
+    expect(h.shells.at(-1)?.started).toBe(true);
     // No shell.start appears between a teardown pair — assert ordering is strictly teardown-then-build.
     const starts = h.events.filter((e) => e.startsWith('shell.start'));
     const closes = h.events.filter((e) => e.startsWith('shell.close'));

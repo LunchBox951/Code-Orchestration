@@ -275,7 +275,10 @@ interface DaemonStatusPayload {
 type CurrentProjectState = { projectId: string; path: string | null } | null;
 
 // ── GitHub Connect (#95/#71 — presence + source only, never the token value) ──────────────────
-type GithubStatus = { connected: boolean; source: 'connected' | 'env' | 'gh' | null };
+type GithubStatus = {
+  connected: boolean;
+  source: 'connected' | 'env' | 'gh' | 'stored-unreadable' | null;
+};
 type GithubActionResult = { ok: boolean; error?: string; warning?: string };
 
 // ── Settings (inline mirror of @co/core SettingDescriptor + shared SettingsVM types) ──────────

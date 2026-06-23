@@ -2104,6 +2104,11 @@ function githubSectionHtml(): string {
       'Authenticating from your existing `gh auth login`. Paste a token to store one in-app instead.';
     showConnect = true;
     showDisconnect = false;
+  } else if (source === 'stored-unreadable') {
+    statusLabel = 'GitHub needs attention';
+    hint = 'A stored GitHub credential exists but cannot be decrypted. Reconnect or clear it.';
+    showConnect = true;
+    showDisconnect = true;
   } else {
     statusLabel = status == null ? 'Checking…' : 'Not connected';
     hint =

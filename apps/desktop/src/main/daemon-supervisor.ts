@@ -40,6 +40,11 @@ export interface SpawnDescriptor {
   readonly env: NodeJS.ProcessEnv;
 }
 
+export interface GithubAuthStatus {
+  readonly connected: boolean;
+  readonly source: 'connected' | 'env' | 'gh' | 'stored-unreadable' | null;
+}
+
 /**
  * Resolve the absolute path to the `@co/mcp` daemon entrypoint. The package's `co-mcp` bin maps to
  * `./dist/bin.js`, and `co-mcp serve <projectId>` dispatches to `runServeConductor([projectId])`.
@@ -110,6 +115,26 @@ export function resolveSpawnGithubEnv(args: {
   const token = resolution.token.trim();
   if (token.length === 0) return {};
   return { CO_GH_TOKEN: token, ...ghCommandPathEnv(resolution.command, args.baseEnv) };
+}
+
+export function resolveGithubAuthStatus(args: {
+  readonly storedCredential: 'available' | 'missing' | 'unreadable';
+  readonly baseEnv: NodeJS.ProcessEnv;
+  readonly runGhAuthToken?: GhAuthTokenRunner;
+}): GithubAuthStatus {
+  if (args.storedCredential === 'available') return { connected: true, source: 'connected' };
+  if (args.storedCredential === 'unreadable') {
+    return { connected: false, source: 'stored-unreadable' };
+  }
+  if (resolveGhTokenFromEnv(args.baseEnv) != null) return { connected: true, source: 'env' };
+  const env = resolveSpawnGithubEnv({
+    storedToken: null,
+    baseEnv: args.baseEnv,
+    ...(args.runGhAuthToken != null ? { runGhAuthToken: args.runGhAuthToken } : {}),
+  });
+  return env['CO_GH_TOKEN'] != null
+    ? { connected: true, source: 'gh' }
+    : { connected: false, source: null };
 }
 
 /**

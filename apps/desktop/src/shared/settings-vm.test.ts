@@ -39,6 +39,15 @@ describe('buildGithubSectionView — #95/#71 GitHub Settings section', () => {
     expect(v.showDisconnect).toBe(false);
     expect(v.hint).toMatch(/encrypted/i);
   });
+
+  it('unreadable stored credential: shows a warning and allows reconnect or disconnect', () => {
+    const v = buildGithubSectionView({ connected: false, source: 'stored-unreadable' });
+    expect(v.connected).toBe(false);
+    expect(v.statusLabel).toMatch(/needs attention/i);
+    expect(v.showConnect).toBe(true);
+    expect(v.showDisconnect).toBe(true);
+    expect(v.hint).toMatch(/cannot be decrypted|clear/i);
+  });
 });
 
 function desc(

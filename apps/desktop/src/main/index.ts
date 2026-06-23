@@ -4,7 +4,12 @@ import { join, dirname } from 'node:path';
 import type { ArchiveEntry, ProjectId } from '@co/core';
 import { openArchiveStore, openRegistry } from '@co/core';
 import { createAppShell } from './app-shell.js';
-import { createDaemonSupervisor, resolveSpawnGithubEnv } from './daemon-supervisor.js';
+import {
+  createDaemonSupervisor,
+  resolveGithubAuthStatus,
+  resolveSpawnGithubEnv,
+  type GithubAuthStatus,
+} from './daemon-supervisor.js';
 import { createGithubCredentialStore } from './github-credentials.js';
 import { createProjectController } from './open-project.js';
 import { resolveSourceState } from './source-ipc.js';
@@ -561,29 +566,17 @@ ipcMain.handle('daemon:retry', () => controller.retryDaemon());
 // any IPC payload, log, or error message — `github:status` reports only presence + source.
 
 /** The current GitHub-auth state for the renderer badge — presence + source ONLY, never the token. */
-function githubStatus(): { connected: boolean; source: 'connected' | 'env' | 'gh' | null } {
-  let stored = false;
+function githubStatus(): GithubAuthStatus {
+  let storedCredential: 'available' | 'missing' | 'unreadable';
   try {
-    stored = credentialStore().hasToken();
+    storedCredential = credentialStore().hasToken() ? 'available' : 'missing';
   } catch (e) {
     console.error('Failed to read the GitHub credential status:', e);
+    storedCredential = 'unreadable';
   }
-  if (stored) return { connected: true, source: 'connected' };
   // No stored token — report whether the daemon would still authenticate via env or `gh auth login`,
   // so the operator sees "connected (via gh)" rather than a misleading "not connected".
-  const env = resolveSpawnGithubEnv({ storedToken: null, baseEnv: process.env });
-  if (env['CO_GH_TOKEN'] != null) {
-    return {
-      connected: true,
-      source:
-        process.env['CO_GH_TOKEN'] != null ||
-        process.env['GH_TOKEN'] != null ||
-        process.env['GITHUB_TOKEN'] != null
-          ? 'env'
-          : 'gh',
-    };
-  }
-  return { connected: false, source: null };
+  return resolveGithubAuthStatus({ storedCredential, baseEnv: process.env });
 }
 
 ipcMain.handle('github:status', () => githubStatus());

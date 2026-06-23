@@ -43,7 +43,10 @@ type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped'
 type DaemonStatusPayload = { status: DaemonStatus; detail: string | null };
 type CurrentProjectState = { projectId: string; path: string | null } | null;
 /** GitHub connect state — presence + source ONLY (never the token value). */
-type GithubStatus = { connected: boolean; source: 'connected' | 'env' | 'gh' | null };
+type GithubStatus = {
+  connected: boolean;
+  source: 'connected' | 'env' | 'gh' | 'stored-unreadable' | null;
+};
 type GithubActionResult = { ok: boolean; error?: string; warning?: string };
 
 interface CoShellBridge {

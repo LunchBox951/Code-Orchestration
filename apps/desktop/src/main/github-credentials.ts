@@ -25,6 +25,13 @@ import { dirname, join } from 'node:path';
 /** The minimal Electron `safeStorage` surface this store depends on (a strict subset). */
 export interface SafeStorageLike {
   isEncryptionAvailable(): boolean;
+  getSelectedStorageBackend():
+    | 'basic_text'
+    | 'gnome_libsecret'
+    | 'kwallet'
+    | 'kwallet5'
+    | 'kwallet6'
+    | 'unknown';
   encryptString(plainText: string): Buffer;
   decryptString(encrypted: Buffer): string;
 }
@@ -97,6 +104,17 @@ export function createGithubCredentialStore(
           'instead (or run `gh auth login`).',
       );
     }
+    if (process.platform === 'linux') {
+      const backend = deps.safeStorage.getSelectedStorageBackend();
+      if (backend === 'basic_text' || backend === 'unknown') {
+        throw new Error(
+          `Connect GitHub: Electron safeStorage selected '${backend}', which does not provide a ` +
+            'usable Linux keyring for protecting tokens. Refusing to persist a plaintext-equivalent ' +
+            'token. Install or unlock gnome-keyring / kwallet / libsecret, set CO_GH_TOKEN in the ' +
+            'environment instead, or run `gh auth login`.',
+        );
+      }
+    }
   }
 
   return {
@@ -122,15 +140,22 @@ export function createGithubCredentialStore(
       }
       if (ciphertext.length === 0) return null;
       if (!deps.safeStorage.isEncryptionAvailable()) {
-        // The sidecar exists but the OS can no longer decrypt it (keyring gone). Surface nothing
-        // plaintext; the caller treats this as "not connected" and the operator can reconnect.
-        return null;
+        // The sidecar exists but the OS can no longer decrypt it (keyring gone). Surface the failure
+        // without exposing plaintext so the operator sees a repairable credential problem.
+        throw new Error(
+          'stored GitHub credential exists but cannot be decrypted because OS credential encryption is unavailable.',
+        );
       }
       try {
         const token = deps.safeStorage.decryptString(ciphertext).trim();
         return token.length > 0 ? token : null;
-      } catch {
-        return null; // Corrupt / undecryptable ciphertext — treat as not connected.
+      } catch (e) {
+        throw new Error(
+          `stored GitHub credential exists but cannot be decrypted: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          { cause: e },
+        );
       }
     },
 

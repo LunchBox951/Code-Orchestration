@@ -90,7 +90,7 @@ export function buildSettingsRows(args: {
 /** The GitHub connect state surfaced from main — presence + source ONLY (never the token value). */
 export interface GithubStatus {
   readonly connected: boolean;
-  readonly source: 'connected' | 'env' | 'gh' | null;
+  readonly source: 'connected' | 'env' | 'gh' | 'stored-unreadable' | null;
 }
 
 /** A render-ready view of the Settings → GitHub section. Pure over {@link GithubStatus}, so it is
@@ -134,6 +134,15 @@ export function buildGithubSectionView(status: GithubStatus): GithubSectionView 
       showConnect: true,
       showDisconnect: false,
       hint: 'Authenticating from your existing `gh auth login`. Paste a token to store one in-app instead.',
+    };
+  }
+  if (status.source === 'stored-unreadable') {
+    return {
+      connected: false,
+      statusLabel: 'GitHub needs attention',
+      showConnect: true,
+      showDisconnect: true,
+      hint: 'A stored GitHub credential exists but cannot be decrypted. Reconnect or clear it.',
     };
   }
   return {

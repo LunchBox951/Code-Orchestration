@@ -13,7 +13,10 @@ import { createGithubCredentialStore, type SafeStorageLike } from './github-cred
  */
 
 /** A fake safeStorage: a reversible "encryption" (base64 with a marker) standing in for the OS keychain. */
-function fakeSafeStorage(available = true): SafeStorageLike & { available: boolean } {
+function fakeSafeStorage(
+  available = true,
+  backend: ReturnType<SafeStorageLike['getSelectedStorageBackend']> = 'gnome_libsecret',
+): SafeStorageLike & { available: boolean } {
   const state = { available };
   const PREFIX = 'enc:';
   return {
@@ -24,6 +27,7 @@ function fakeSafeStorage(available = true): SafeStorageLike & { available: boole
       state.available = v;
     },
     isEncryptionAvailable: () => state.available,
+    getSelectedStorageBackend: () => backend,
     encryptString: (plain: string) =>
       Buffer.from(PREFIX + Buffer.from(plain, 'utf8').toString('base64')),
     decryptString: (buf: Buffer) => {
@@ -54,6 +58,14 @@ describe('github-credentials — encryption-unavailable refuses (Principle 9, no
     const store = createGithubCredentialStore({ safeStorage, userDataPath });
 
     expect(() => store.storeToken(TOKEN)).toThrow(/unavailable|plaintext|securely/i);
+    expect(existsSync(sidecar())).toBe(false);
+  });
+
+  it('store() refuses the Linux basic_text backend because it is not protected by a real keyring', () => {
+    const safeStorage = fakeSafeStorage(true, 'basic_text');
+    const store = createGithubCredentialStore({ safeStorage, userDataPath });
+
+    expect(() => store.storeToken(TOKEN)).toThrow(/basic_text|keyring|plaintext/i);
     expect(existsSync(sidecar())).toBe(false);
   });
 });
@@ -105,18 +117,23 @@ describe('github-credentials — round-trip + at-rest security', () => {
     expect(() => store.clearToken()).not.toThrow();
   });
 
-  it('readToken returns null when no sidecar exists or the keyring can no longer decrypt', () => {
+  it('readToken returns null when no sidecar exists', () => {
     const safeStorage = fakeSafeStorage();
     const store = createGithubCredentialStore({ safeStorage, userDataPath });
 
     expect(store.readToken()).toBeNull(); // nothing stored yet
+  });
+
+  it('readToken fails loud when a stored sidecar exists but the keyring can no longer decrypt', () => {
+    const safeStorage = fakeSafeStorage();
+    const store = createGithubCredentialStore({ safeStorage, userDataPath });
 
     store.storeToken(TOKEN);
     expect(store.readToken()).toBe(TOKEN);
 
     // Keyring vanished mid-session: the ciphertext exists but cannot be decrypted — never plaintext.
     safeStorage.available = false;
-    expect(store.readToken()).toBeNull();
+    expect(() => store.readToken()).toThrow(/stored GitHub credential|decrypt/i);
   });
 });
 

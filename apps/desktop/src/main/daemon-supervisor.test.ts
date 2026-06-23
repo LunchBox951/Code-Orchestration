@@ -7,6 +7,7 @@ import {
   createDaemonSupervisor,
   defaultCoMcpBinPath,
   probeOperatorSocketHealthy,
+  resolveGithubAuthStatus,
   resolveSpawnGithubEnv,
   type DaemonSpawnHandle,
   type DaemonStatus,
@@ -241,6 +242,67 @@ describe('resolveSpawnGithubEnv — token precedence (#95/#71)', () => {
       runGhAuthToken: vi.fn().mockReturnValue(undefined),
     });
     expect('CO_GH_TOKEN' in env).toBe(false);
+  });
+});
+
+describe('resolveGithubAuthStatus — Settings status source (#95/#71)', () => {
+  it('reports a stored connected token first', () => {
+    const runGhAuthToken = vi.fn();
+    expect(
+      resolveGithubAuthStatus({
+        storedCredential: 'available',
+        baseEnv: { GH_TOKEN: 'env-tok' },
+        runGhAuthToken,
+      }),
+    ).toEqual({ connected: true, source: 'connected' });
+    expect(runGhAuthToken).not.toHaveBeenCalled();
+  });
+
+  it.each(['CO_GH_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN'] as const)(
+    'reports explicit %s auth as connected via env',
+    (key) => {
+      const runGhAuthToken = vi.fn();
+      expect(
+        resolveGithubAuthStatus({
+          storedCredential: 'missing',
+          baseEnv: { [key]: 'env-token' },
+          runGhAuthToken,
+        }),
+      ).toEqual({ connected: true, source: 'env' });
+      expect(runGhAuthToken).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports gh auto-prime auth as connected via gh', () => {
+    expect(
+      resolveGithubAuthStatus({
+        storedCredential: 'missing',
+        baseEnv: { PATH: '/usr/bin' },
+        runGhAuthToken: vi.fn().mockReturnValue({ token: 'gh-token', command: '/opt/bin/gh' }),
+      }),
+    ).toEqual({ connected: true, source: 'gh' });
+  });
+
+  it('surfaces an unreadable stored credential instead of collapsing it to not connected', () => {
+    const runGhAuthToken = vi.fn();
+    expect(
+      resolveGithubAuthStatus({
+        storedCredential: 'unreadable',
+        baseEnv: {},
+        runGhAuthToken,
+      }),
+    ).toEqual({ connected: false, source: 'stored-unreadable' });
+    expect(runGhAuthToken).not.toHaveBeenCalled();
+  });
+
+  it('reports not connected when no stored, env, or gh token exists', () => {
+    expect(
+      resolveGithubAuthStatus({
+        storedCredential: 'missing',
+        baseEnv: {},
+        runGhAuthToken: vi.fn().mockReturnValue(undefined),
+      }),
+    ).toEqual({ connected: false, source: null });
   });
 });
 

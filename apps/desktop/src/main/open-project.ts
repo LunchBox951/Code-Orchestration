@@ -283,10 +283,12 @@ export function createProjectController(deps: ProjectControllerDeps): ProjectCon
   // restart is fully ordered against any concurrent project switch (it cannot start a shell that was
   // just closed, nor stop a daemon that was just replaced). Resolves to a no-op when no project is open.
   function reopenCurrentProject(): Promise<void> {
-    const projectId = currentProjectId;
-    const path = currentPath;
-    if (projectId == null) return Promise.resolve();
-    const run = openTail.then(() => doOpenProject(projectId, path));
+    const run = openTail.then(() => {
+      const projectId = currentProjectId;
+      const path = currentPath;
+      if (projectId == null) return;
+      return doOpenProject(projectId, path);
+    });
     openTail = run.catch(() => undefined);
     return run;
   }
