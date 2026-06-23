@@ -688,12 +688,17 @@ describe('live provider pinning + bounded operator gates (hermetic, always runs)
       }),
     ).rejects.toThrow(/operator gate automation tick 1 exceeded/u);
   });
+});
 
-  it('resolves the live bridge to the built co-mcp bin instead of the vitest argv entry', () => {
-    const paths = orchestrationLiveCoMcpPaths();
-    expect(paths.coMcpCommand).toBe(process.execPath);
-    expect(paths.coMcpArgs?.[0]).toBe(join(REPO_ROOT, 'packages', 'mcp', 'dist', 'bin.js'));
-  });
+describe('live bridge resolution (requires pnpm build)', () => {
+  it.skipIf(orchestrationLiveCoMcpBinSkipReason() != null)(
+    'resolves the live bridge to the built co-mcp bin instead of the vitest argv entry',
+    () => {
+      const paths = orchestrationLiveCoMcpPaths();
+      expect(paths.coMcpCommand).toBe(process.execPath);
+      expect(paths.coMcpArgs?.[0]).toBe(orchestrationLiveCoMcpBinPath());
+    },
+  );
 });
 
 interface LiveRun {
@@ -904,11 +909,22 @@ async function makeLiveAutomation(
 
 type SpecLockAttempt = () => Promise<void>;
 
+function orchestrationLiveCoMcpBinPath(): string {
+  return join(REPO_ROOT, 'packages', 'mcp', 'dist', 'bin.js');
+}
+
+function orchestrationLiveCoMcpBinSkipReason(): string | undefined {
+  const coMcpBin = orchestrationLiveCoMcpBinPath();
+  return existsSync(coMcpBin)
+    ? undefined
+    : `built co-mcp bin not found at ${coMcpBin}; run pnpm build first`;
+}
+
 function orchestrationLiveCoMcpPaths(): ReturnType<typeof defaultServeCoMcpPaths> {
   // defaultServeCoMcpPaths derives the bridge command from process.argv[1] — correct under `co-mcp
   // serve`, but under vitest argv[1] is the runner, not the bridge. Pin the built co-mcp bin so provider
   // sessions launch `co-mcp bridge <socket>` and exercise the real co_* surface.
-  const coMcpBin = join(REPO_ROOT, 'packages', 'mcp', 'dist', 'bin.js');
+  const coMcpBin = orchestrationLiveCoMcpBinPath();
   if (!existsSync(coMcpBin)) {
     throw new Error(
       `orchestration-benchmark.live: built co-mcp bin not found at ${coMcpBin} — run ` +
