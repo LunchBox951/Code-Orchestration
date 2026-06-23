@@ -74,6 +74,12 @@ const COORDINATOR_GUIDANCE = [
   'By mail: report progress and surface a decision to the operator with an operator_message; request',
   'a bless with an approval before anything outward or irreversible; pass a worker’s escalation',
   'onward only when it truly needs authority you do not hold.',
+  '',
+  'When you hit a co orchestration bug, the issue pipeline is detect → diagnose → dedup → file: note',
+  'it with co_issue_capture, then co_issue_file to surface it (gated, and only with the operator’s',
+  'per-post approval). The standalone co_issue_diagnose verb is a researcher’s job, so when no',
+  'researcher is in play you carry your own probable cause inline on the file call rather than',
+  'dead-ending the capture.',
 ].join('\n');
 
 const LEAD_GUIDANCE = [
@@ -99,6 +105,11 @@ const LEAD_GUIDANCE = [
   'anything that changes what the phase delivers or touches the spec’s intent. By mail: hand tasks to',
   'your workers, answer their clarify_request messages, and report the phase ready to your',
   'coordinator.',
+  '',
+  'On a co orchestration bug, the pipeline is detect → diagnose → dedup → file: co_issue_capture it,',
+  'then co_issue_file (gated, operator-approved per post). co_issue_diagnose is researcher-only, so',
+  'with no researcher in play carry your probable cause inline on the file call rather than dead-',
+  'ending the capture.',
 ].join('\n');
 
 const IMPLEMENTER_GUIDANCE = [

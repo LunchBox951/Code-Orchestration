@@ -47,7 +47,10 @@ the [Vision](../vision.md)'s two asymmetric surfaces.)
    operator (a dedicated mail type), surfaced in the desktop app, and nothing posts until the
    operator approves. Posting publicly under your identity is exactly the kind of outward
    action that warrants a glance, and the app makes that glance cheap. (Scrubbing still
-   matters; the human approval is the real backstop.)
+   matters; the human approval is the real backstop.) The diagnose *verb* is researcher-only,
+   so an owner-tier filer (coordinator/lead) with no researcher in play may carry an **inline
+   probable cause on the file call** — it auto-diagnoses its own still-captured issue under the
+   caller before filing, rather than dead-ending the capture; the operator approval still gates the post.
 5. **Self-assign & fix** *(opt-in, owner-only, gated)* — for a repo you own (the co-on-co
    dogfooding case being the prime example), a filed issue can be self-assigned, turned into
    a task, and fixed through the normal pipeline (`implementer:test` → gate → merge). The

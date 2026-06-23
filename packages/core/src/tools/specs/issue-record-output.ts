@@ -24,7 +24,7 @@ export const issueRecordOutputSchema = z.object({
   diagnosed_by: z
     .string()
     .optional()
-    .describe('The diagnostic researcher (present once diagnosed).'),
+    .describe('The agent that recorded the probable-cause diagnosis (present once diagnosed).'),
   filed_by: z.string().optional().describe('The agent that filed the issue (present once filed).'),
   approval_seq: z
     .number()
