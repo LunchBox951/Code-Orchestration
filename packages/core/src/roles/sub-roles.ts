@@ -5,8 +5,9 @@
  * (soft); only researcher sub-roles carry a permission delta (web-search gating).
  *
  * NOTE (enforcement scope): the web-search capability delta is integrity-checked by narrow-only.ts
- * and is enforced at pane launch for outbound network, GH_TOKEN placement, and provider-native web
- * tools (#127).
+ * and is enforced at pane launch for provider-native web tools, GH_TOKEN placement, and Codex sandbox
+ * egress (`[sandbox_workspace_write] network_access`); Claude shell network is not yet a hard sandbox
+ * boundary (#127).
  *
  * Coordinator and Lead have no sub-roles — they are owner-tier roles.
  */

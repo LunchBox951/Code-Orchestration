@@ -42,6 +42,7 @@ const BASE_IDENTITY = {
   coMcpCommand: CO_MCP,
   coCliCommand: CO_CLI,
 } as const;
+const NON_WEB_RESEARCHER_SUB_ROLES = ['codebase', 'diagnostic', 'decision'] as const;
 
 const SCOPED_MCP_ENV = {
   CO_AGENT: 'impl-1',
@@ -692,19 +693,25 @@ describe('#127 codex gated outbound network for web-research panes', () => {
     expect(toml).not.toContain('network_access');
   });
 
-  it('OMITS the network block for a non-web researcher sub-role (researcher:codebase)', () => {
+  it.each(NON_WEB_RESEARCHER_SUB_ROLES)(
+    'OMITS the network block for a non-web researcher sub-role (researcher:%s)',
+    (subRole) => {
+      const config = buildPaneLaunchConfig('codex', {
+        ...BASE_IDENTITY,
+        role: 'researcher',
+        subRole,
+      });
+      const toml = config.codexConfigToml ?? '';
+      expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
+      expect(toml).not.toContain('network_access');
+    },
+  );
+
+  it('OMITS the network block for a bare researcher role without a resolved web sub-role', () => {
     const config = buildPaneLaunchConfig('codex', {
       ...BASE_IDENTITY,
       role: 'researcher',
-      subRole: 'codebase',
     });
-    const toml = config.codexConfigToml ?? '';
-    expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
-    expect(toml).not.toContain('network_access');
-  });
-
-  it('OMITS the network block for a bare researcher role without a resolved web sub-role', () => {
-    const config = buildPaneLaunchConfig('codex', { ...BASE_IDENTITY, role: 'researcher' });
     const toml = config.codexConfigToml ?? '';
     expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
     expect(toml).not.toContain('network_access');
@@ -947,6 +954,23 @@ describe('claude built-in web tools are explicitly decided at launch (#7 §5 #3)
     expect(disallowed).toContain('WebSearch');
     expect(disallowed).toContain('WebFetch');
   });
+
+  it.each(NON_WEB_RESEARCHER_SUB_ROLES)(
+    'researcher:%s gets an EXPLICIT deny for native WebSearch/WebFetch',
+    (subRole) => {
+      const config = buildPaneLaunchConfig('claude', {
+        ...BASE_IDENTITY,
+        role: 'researcher',
+        subRole,
+      });
+      const allowed = flagValue(config.args, '--allowedTools');
+      expect(allowed).not.toContain('WebSearch');
+      expect(allowed).not.toContain('WebFetch');
+      const disallowed = flagValue(config.args, '--disallowedTools');
+      expect(disallowed).toContain('WebSearch');
+      expect(disallowed).toContain('WebFetch');
+    },
+  );
 
   it('only researcher:external gets an EXPLICIT allow for native WebSearch/WebFetch', () => {
     const config = buildPaneLaunchConfig('claude', {

@@ -48,6 +48,7 @@ const TEST_MCP_PATHS: CoMcpPaths = {
   coMcpCommand: '/usr/local/bin/co-mcp',
   coCliCommand: '/usr/local/bin/co',
 };
+const NON_WEB_RESEARCHER_SUB_ROLES = ['codebase', 'diagnostic', 'decision'] as const;
 
 // Cleanup state
 const ORIGINAL_ENV = process.env;
@@ -427,25 +428,29 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(configToml!.contents).not.toContain('GH_TOKEN');
   });
 
-  it('#127: GH_TOKEN is ABSENT from a non-web researcher sub-role (researcher:codebase) shell env', () => {
-    const { projectId, cwd, dataDir } = makeProject();
-    const placement = recordPlacement(projectId, 'res-cb', 'researcher:codebase', 'codex');
-    const worktree = recordWorktree(projectId, 'res-cb', 'co/research-cb', cwd);
-    const isolatedHomeDir = join(dataDir, 'isolated', 'res-cb');
+  it.each(NON_WEB_RESEARCHER_SUB_ROLES)(
+    '#127: GH_TOKEN is ABSENT from a non-web researcher sub-role (researcher:%s) shell and MCP env',
+    (subRole) => {
+      const { projectId, cwd, dataDir } = makeProject();
+      const agent = `res-${subRole}`;
+      const placement = recordPlacement(projectId, agent, `researcher:${subRole}`, 'codex');
+      const worktree = recordWorktree(projectId, agent, `co/research-${subRole}`, cwd);
+      const isolatedHomeDir = join(dataDir, 'isolated', agent);
 
-    const { spec } = buildPlacementLaunchSpec(
-      placement as PlacementRecord & { kind: 'placed'; provider: string },
-      worktree,
-      projectId,
-      isolatedHomeDir,
-      { ...TEST_MCP_PATHS, ghToken: 'gho_research_token' },
-    );
+      const { spec } = buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        { ...TEST_MCP_PATHS, ghToken: 'gho_research_token' },
+      );
 
-    expect(spec.env).not.toHaveProperty('GH_TOKEN');
-    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
-    expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
-    expect(configToml!.contents).not.toContain('GH_TOKEN');
-  });
+      expect(spec.env).not.toHaveProperty('GH_TOKEN');
+      const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+      expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
+      expect(configToml!.contents).not.toContain('GH_TOKEN');
+    },
+  );
 
   it('#127: GH_TOKEN and network are absent from a bare researcher role without a web sub-role', () => {
     const { projectId, cwd, dataDir } = makeProject();
@@ -485,6 +490,27 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     // No token configured → never an empty/blank credential in the shell env.
     expect(spec.env).not.toHaveProperty('GH_TOKEN');
     // The network opening is still emitted (egress is sub-role-gated, not token-gated).
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).toContain('[mcp_servers.co.env]');
+    expect(configToml!.contents).not.toMatch(/\nGH_TOKEN\s*=/u);
+  });
+
+  it('#127: GH_TOKEN is never whitespace-valued on a web pane when ghToken is blank', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'res-ext-blank', 'researcher:external', 'codex');
+    const worktree = recordWorktree(projectId, 'res-ext-blank', 'co/research-ext-blank', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'res-ext-blank');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      { ...TEST_MCP_PATHS, ghToken: '   ' },
+    );
+
+    expect(spec.env).not.toHaveProperty('GH_TOKEN');
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
     expect(configToml!.contents).toContain('[sandbox_workspace_write]');
     expect(configToml!.contents).toContain('[mcp_servers.co.env]');

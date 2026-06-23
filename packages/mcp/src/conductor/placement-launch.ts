@@ -238,10 +238,9 @@ export function buildHostedLaunchSpec(
     ...(coMcpPaths.coCliArgs != null ? { coCliArgs: coMcpPaths.coCliArgs } : {}),
   };
   const webResearchPane = paneMayResearchWeb(paneIdentityBase);
+  const ghToken = coMcpPaths.ghToken?.trim();
   const researchGhTokenEnv: Record<string, string> =
-    webResearchPane && coMcpPaths.ghToken != null && coMcpPaths.ghToken.length > 0
-      ? { GH_TOKEN: coMcpPaths.ghToken }
-      : {};
+    webResearchPane && ghToken != null && ghToken.length > 0 ? { GH_TOKEN: ghToken } : {};
   const paneIdentity: PaneIdentity = {
     ...paneIdentityBase,
     coMcpEnv: {
