@@ -2797,6 +2797,7 @@ describe('AC-S11-6 — the operator IPC registers NO agent-facing MCP tool (Prin
       'stop',
       'unstick',
       'steer',
+      'reclaim',
       'reply',
       'approve',
       'tick',

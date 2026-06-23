@@ -567,6 +567,11 @@ export class ConductorEngine {
     return this.hosted.has(ConductorEngine.agentKey(projectId, agent));
   }
 
+  /** Whether `agent` currently has a driven turn in flight, including a pane pending deferred release. */
+  isTurnInFlight(projectId: ProjectId, agent: string): boolean {
+    return this.turnInFlight.get(ConductorEngine.agentKey(projectId, agent)) === true;
+  }
+
   /** The warm hosted handle for `agent`, or `undefined`. Use this to reuse a warm pane (no relaunch). */
   getHosted(projectId: ProjectId, agent: string): HostedPane | undefined {
     return this.hosted.get(ConductorEngine.agentKey(projectId, agent));

@@ -1599,6 +1599,56 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     await runner.stop();
   });
 
+  it('control.reclaimChild refuses an in-flight child before suppression or durable teardown', async () => {
+    const { projectId, cwd } = makeProject();
+
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'coord-x', role: 'coordinator', parent: OPERATOR });
+    roster.recordAgent({ agentId: 'leaf-a', role: 'implementer', parent: 'coord-x' });
+    seedActionableMail(projectId, 'leaf-a');
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const pty = new FakePty();
+    const runner = await serveConductor({
+      projectId,
+      pty,
+      makeTransport: () => InMemoryTransport.createLinkedPair(),
+      now: clock.now,
+      quietWindow: qw.quietWindow,
+      scheduler: new FakeScheduler(),
+      autoStart: true,
+    });
+    const engine = (runner as unknown as { daemon: { engine: ConductorEngine } }).daemon.engine;
+
+    const ensureLeaf = engine.ensureHosted({
+      ...makeIdentity('leaf-a', projectId, cwd),
+      agent: 'leaf-a',
+      role: 'implementer',
+      parent: 'coord-x',
+    });
+    pty.panes[pty.panes.length - 1]!.emit(CLAUDE_READY);
+    const hosted = await ensureLeaf;
+    const item = outstandingItem(projectId, 'leaf-a');
+    const turn = engine.runOneTurn(hosted, item);
+    void turn.catch(() => {});
+    await tick();
+
+    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toThrow(/in-flight turn/i);
+
+    expect(runner.control!.router.shouldSkip(projectId, 'leaf-a')).toBe(false);
+    expect(engine.isHosted(projectId, 'leaf-a')).toBe(true);
+    const rosterCheck = openRosterStore(projectId);
+    try {
+      expect(rosterCheck.getAgent('leaf-a')).toBeDefined();
+    } finally {
+      rosterCheck.close();
+    }
+
+    await runner.stop({ waitForInFlight: false });
+  });
+
   it('control.reclaimChild isolates pane-release failures: durable teardown still runs, error surfaced', async () => {
     const { projectId, cwd } = makeProject();
 

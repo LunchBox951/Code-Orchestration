@@ -1651,6 +1651,13 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       // Guard: reclaim is only for non-root child leaves. A child with live descendants must go through
       // deleteAgent (whole subtree) — reclaiming just the parent would orphan its children.
       assertReclaimableChildLeaf(childId);
+      if (engine.isTurnInFlight(projectId, childId)) {
+        throw new Error(
+          `co-mcp serve: reclaimChild: '${childId}' has an in-flight turn — refusing to ` +
+            'delete durable state while the agent can still produce side effects. Stop it and retry ' +
+            'after the turn yields.',
+        );
+      }
 
       // Suppress before releasing the pane so a failed teardown cannot cold-start the surviving row.
       router.recordStopped(childId);

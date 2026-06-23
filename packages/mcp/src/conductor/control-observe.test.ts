@@ -615,6 +615,7 @@ describe('AC-S10-3.6 — control/observe is operator-only (registers ZERO agent 
       'stop',
       'unstick',
       'steer',
+      'reclaim',
       'router',
       'observe',
       'livestate',
