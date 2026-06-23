@@ -75,9 +75,11 @@ export interface HostLiveCapture {
   /**
    * The composer-echo tap for {@link InjectMailOptions.onPasteEcho}. `undefined` when inert, so
    * `{ ...injectOptions, ...(capture.onPasteEcho ? { onPasteEcho: capture.onPasteEcho } : {}) }`
-   * (or a conditional spread) adds nothing in production with the env unset.
+   * (or a conditional spread) adds nothing in production with the env unset. The second arg preserves
+   * the legacy `multiline` semantic; the third arg is the real paste decision (`pasted`): true for
+   * multi-line OR long single-line payloads (#92), false for short single-line ones.
    */
-  readonly onPasteEcho?: (chunk: string, multiline: boolean) => void;
+  readonly onPasteEcho?: (chunk: string, multiline: boolean, pasted: boolean) => void;
   /** Record an MCP-tool approval observation (#78). No-op when inert. */
   readonly captureMcpApproval: (obs: McpApprovalObservation) => void;
   /** Record a Claude status-line observation. No-op when inert. */
@@ -214,9 +216,10 @@ export function openHostLiveCapture(
   return {
     armed: true,
     dir: resolvedDir,
-    onPasteEcho: (chunk, multiline) =>
+    onPasteEcho: (chunk, multiline, pasted) =>
       resolvedSink.append(CAPTURE_FILES.pasteEcho, {
         multiline,
+        pasted,
         chunk,
         // A JSON-safe, escape-visible rendering so a captured ESC/control byte is human-readable.
         chunkEscaped: JSON.stringify(chunk),
