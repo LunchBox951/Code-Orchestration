@@ -309,6 +309,7 @@ describe('maybePassReviews — drives a pending review to PASS over the real ope
           rid,
         ),
       deleteAgent: () => Promise.reject(new Error('mpr: deleteAgent is not used here')),
+      reclaimChild: () => Promise.reject(new Error('mpr: reclaimChild is not used here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () => Promise.reject(new Error('mpr: restoreArchive is not used here')),
       purgeArchive: () => Promise.reject(new Error('mpr: purgeArchive is not used here')),

@@ -1129,6 +1129,7 @@ describe('ConductorEngine — P1b routes emitted mail via LiveDelivery (wake + i
     });
     // LiveDelivery.deliver fired: it woke impl-b and enqueued an inject into its pane; drive the echo.
     const item = outstandingItem(projectId, 'impl-b');
+    expect(engine.isBusy(projectId, 'impl-b')).toBe(true);
     bPane.emit(defaultMailRenderer(item));
     await flush();
 
@@ -1136,6 +1137,7 @@ describe('ConductorEngine — P1b routes emitted mail via LiveDelivery (wake + i
     expect(wakes).toContainEqual({ projectId, recipient: 'impl-b' });
     expect(bPane.written.join('')).toContain('route me');
     expect(bPane.written.filter((w) => w === '\r')).toHaveLength(1);
+    expect(engine.isBusy(projectId, 'impl-b')).toBe(false);
   });
 
   it('scrubs routed warm Codex kickoff handoffs after successful injection', async () => {

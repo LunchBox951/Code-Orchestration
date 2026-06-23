@@ -26,6 +26,7 @@ import {
   GH_AUTH_TOKEN_COMMANDS,
   GH_AUTH_TOKEN_TIMEOUT_MS,
   NodePtyHost,
+  OPERATOR,
   ghCommandPathEnv,
   githubHttpsCredentialEnv,
   resolveGhTokenFromEnv,
@@ -164,6 +165,15 @@ export interface ConductorControlSurface {
    * the IPC layer surfaces partial-failure detail to the operator.
    */
   readonly deleteAgent: (agentId: string) => Promise<void>;
+  /**
+   * #131 (reclaimChild) — GRANULAR reclaim of a SINGLE leaf child: release its warm pane, clear router
+   * suppression, then tear down just that agent's durable roster row / worktree / branch / session via
+   * the same leaf-safe core primitive (`deleteAgentSubtree` on a childless leaf removes exactly that
+   * agent — archiving an unmerged branch, removing the worktree, ending the session, freeing the
+   * dispatch slot, so the active-child cap drops automatically). REFUSES (fails loud, Principle 9) a
+   * child that still has descendants — the caller must use {@link deleteAgent} for a whole subtree.
+   */
+  readonly reclaimChild: (childId: string) => Promise<void>;
   /**
    * B5 (listArchive) — list archived (unmerged) branches. A READ; the app-side facade can fall back
    * to the static archive store when the socket is down (mirrors observe; never hangs, never throws).
@@ -1476,6 +1486,31 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
       ),
   });
   const liveProvider = new EngineLiveStateProvider({ engine, projectId, router });
+  const assertReclaimableChildLeaf = (childId: string): void => {
+    assertDeleteAgentSubtreePreflight(projectId, childId);
+    const roster = openRosterStore(projectId);
+    try {
+      const agent = roster.getAgent(childId);
+      if (agent == null) {
+        throw new Error(`co-mcp serve: reclaimChild: child agent '${childId}' not found.`);
+      }
+      if (agent.parent === OPERATOR) {
+        throw new Error(
+          `co-mcp serve: reclaimChild: '${childId}' is a root/operator-owned agent — ` +
+            'refusing a granular child reclaim. Use deleteAgent to tear down a root subtree.',
+        );
+      }
+      const descendants = descendantsLeafFirst(roster.listAgents(), childId);
+      if (descendants.length > 0) {
+        throw new Error(
+          `co-mcp serve: reclaimChild: '${childId}' still has ${descendants.length} ` +
+            `descendant(s) — refusing a granular reclaim. Use deleteAgent to tear down the whole subtree.`,
+        );
+      }
+    } finally {
+      roster.close();
+    }
+  };
   const control: ConductorControlSurface = {
     router,
     observe: () => queryLiveObservability(projectId, liveProvider),
@@ -1588,6 +1623,93 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
         throw new AggregateError(
           releaseErrors,
           'co-mcp serve: deleteAgent: pane release(s) failed (durable teardown completed)',
+        );
+      }
+    },
+    // #131 (reclaimChild) — GRANULAR reclaim of a SINGLE leaf child. Mirrors deleteAgent's compose
+    // order (suppress → release pane → durable teardown → clear suppression) but refuses a non-leaf
+    // and runs the core primitive on JUST the one childless agent. deleteAgentSubtree is leaf-safe:
+    // on a childless leaf the teardown order is `[child]`, so it removes exactly that agent (archives
+    // an unmerged branch, removes the worktree, ends the session, frees the dispatch slot, removes the
+    // roster row) — the active-child cap then drops automatically. Siblings are untouched.
+    reclaimChild: async (childId: string): Promise<void> => {
+      // Resolve repoCwd per call (mirrors deleteAgent / reviewContext).
+      const registry = openRegistry();
+      let repoCwd: string;
+      try {
+        const p = registry.pathFor(projectId);
+        if (p == null) {
+          throw new Error(
+            `co-mcp serve: reclaimChild: project '${projectId}' is not registered — cannot resolve repoCwd.`,
+          );
+        }
+        repoCwd = p;
+      } finally {
+        registry.close();
+      }
+
+      // Guard: reclaim is only for non-root child leaves. A child with live descendants must go through
+      // deleteAgent (whole subtree) — reclaiming just the parent would orphan its children.
+      assertReclaimableChildLeaf(childId);
+      if (engine.isBusy(projectId, childId)) {
+        throw new Error(
+          `co-mcp serve: reclaimChild: '${childId}' is launching, receiving routed mail, or has an ` +
+            'in-flight turn — ' +
+            'refusing to delete durable state while the agent can still produce side effects. ' +
+            'Stop it and retry after the live work yields.',
+        );
+      }
+
+      // Suppress before releasing the pane so a failed teardown cannot cold-start the surviving row.
+      router.recordStopped(childId);
+
+      // Release the single warm pane — error-isolated so a rejecting close cannot strand the durable
+      // teardown below (mirrors deleteAgent's best-effort spirit; surfaced after teardown — Principle 9).
+      const releaseErrors: Error[] = [];
+      try {
+        await engine.release(projectId, childId, {});
+      } catch (e) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        releaseErrors.push(err);
+        reportServeControlDiagnostic(
+          opts.onError,
+          new Error(
+            `co-mcp serve: reclaimChild: pane release for '${childId}' failed: ${err.message}`,
+          ),
+        );
+      }
+
+      // A turn can finish work while release is being requested. Re-read the durable roster immediately
+      // before deletion so a child that stopped being a leaf is refused instead of cascade-deleted.
+      assertReclaimableChildLeaf(childId);
+
+      // Durable leaf teardown via the core primitive. Runs REGARDLESS of pane-release failures.
+      try {
+        deleteAgentSubtree(projectId, childId, {
+          repoCwd,
+          nowMs: Date.now(),
+          gitExec,
+          gitReader: defaultGitReader,
+        });
+      } catch (teardownError) {
+        const teardownErrors =
+          teardownError instanceof AggregateError
+            ? teardownError.errors
+            : [teardownError instanceof Error ? teardownError : new Error(String(teardownError))];
+        throw new AggregateError(
+          [...releaseErrors, ...teardownErrors],
+          'co-mcp serve: reclaimChild: teardown failure',
+          { cause: teardownError },
+        );
+      }
+
+      // The leaf is gone; clear stale suppression so a future reused id is not poisoned.
+      router.unstop(childId);
+
+      if (releaseErrors.length > 0) {
+        throw new AggregateError(
+          releaseErrors,
+          'co-mcp serve: reclaimChild: pane release failed (durable teardown completed)',
         );
       }
     },

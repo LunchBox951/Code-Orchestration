@@ -1116,6 +1116,7 @@ async function operatorPassViaIpc(
         rid,
       ),
     deleteAgent: () => Promise.reject(new Error('sh1-dry-run: deleteAgent is not used here')),
+    reclaimChild: () => Promise.reject(new Error('sh1-dry-run: reclaimChild is not used here')),
     listArchive: () => Promise.resolve([]),
     restoreArchive: () => Promise.reject(new Error('sh1-dry-run: restoreArchive is not used here')),
     purgeArchive: () => Promise.reject(new Error('sh1-dry-run: purgeArchive is not used here')),

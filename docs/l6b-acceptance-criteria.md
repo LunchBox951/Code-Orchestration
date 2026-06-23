@@ -62,14 +62,19 @@ proves it.
   reviewers excluded; REGRESSION 2 — WAITING-but-merged complete) and `phase-status.test.ts`. Design
   note: D5's `criteria ∧ no-regression ∧ phase-tester` is attested by a single green `phase.verified`
   record, so the fold reads `verifiedPass`. Ladders to `ST-1`, `RG-4`.
-- `AC-L6b-8` — Max-active-children cap enforced per parent (configurable; excludes reviewers; excess
-  queues → WAITING); per-target review+merge serialization **reuses** `review/serialize.ts` verbatim
+- `AC-L6b-8` — Max-active-children cap enforced per parent (configurable; active means non-reviewer,
+  unmerged, and not durably stopped/inactive; excess queues → WAITING). Operator Stop releases the
+  child slot; re-wake must re-check the cap before making that child selectable again; leaf-only
+  `reclaimChild` frees one childless child slot while `deleteAgent` remains the whole-subtree/root
+  teardown control. Per-target review+merge serialization **reuses** `review/serialize.ts` verbatim
   (a distinct primitive, not rebuilt). Evidence:
   `packages/core/src/plans/child-cap.ts:33` (`resolveMaxActiveChildren`, config key
   `dispatch.maxActiveChildren`, default 2) and `:89` (`childCapDisposition`), enforced at the dispatch
-  decision in `packages/core/src/tools/specs/sling.ts` (over-cap → first-class `waiting` disposition);
-  the reused merge lock is `packages/core/src/review/serialize.ts` (`acquireMergeSlot`). Proven by
-  `child-cap.test.ts` and `sling.test.ts`. Ladders to `ST-1`.
+  decision in `packages/core/src/tools/specs/sling.ts` (over-cap → first-class `waiting` disposition)
+  and at operator re-wake in `packages/mcp/src/operator-ipc/server.ts`; `reclaimChild` is wired in
+  `packages/mcp/src/conductor/host.ts`. The reused merge lock is
+  `packages/core/src/review/serialize.ts` (`acquireMergeSlot`). Proven by `child-cap.test.ts`,
+  `sling.test.ts`, `context.test.ts`, `operator-ipc.test.ts`, and `host.test.ts`. Ladders to `ST-1`.
 - `AC-L6b-9` — Re-planning on escalation amends the plan with an event-sourced audit trail. Evidence:
   the `plan.replanned` event in `packages/core/src/plans/events.ts` and
   `packages/core/src/plans/plans-store.ts:50` (`recordReplan` with caller actor); proven by

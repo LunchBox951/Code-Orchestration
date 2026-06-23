@@ -309,6 +309,7 @@ function makeControl(
       }),
     reviewContext,
     deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+    reclaimChild: () => Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
     listArchive: () => Promise.resolve([]),
     restoreArchive: () =>
       Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -873,6 +874,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -926,6 +929,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -979,6 +984,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -1035,6 +1042,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -1088,6 +1097,8 @@ describe('AC-S12-4 — live transcript forwards hosted pane bytes cross-process 
       reviewContext: (reviewId: string) =>
         Promise.resolve({ kind: 'not-found' as const, reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -2786,6 +2797,7 @@ describe('AC-S11-6 — the operator IPC registers NO agent-facing MCP tool (Prin
       'stop',
       'unstick',
       'steer',
+      'reclaim',
       'reply',
       'approve',
       'tick',
@@ -2841,6 +2853,8 @@ describe('operator-IPC client — close concurrency + unexpected-error diagnosti
       onTranscript: () => () => {},
       reviewContext: (reviewId) => Promise.resolve({ kind: 'not-found', reviewId }),
       deleteAgent: () => Promise.reject(new Error('operator-ipc-test: deleteAgent not wired here')),
+      reclaimChild: () =>
+        Promise.reject(new Error('operator-ipc-test: reclaimChild not wired here')),
       listArchive: () => Promise.resolve([]),
       restoreArchive: () =>
         Promise.reject(new Error('operator-ipc-test: restoreArchive not wired here')),
@@ -3583,6 +3597,38 @@ describe('B4 — deleteAgent + rewake operator-IPC verbs', () => {
     void router;
   });
 
+  // #131 — the reclaimChild operator-IPC verb routes the childId to control.reclaimChild end-to-end.
+  it('reclaimChild dispatches end-to-end: control.reclaimChild is called with the right childId', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+
+    const reclaimedChildIds: string[] = [];
+    const { router, control: baseControl } = makeControl(engine, projectId);
+    const control: ConductorControlSurface = {
+      ...baseControl,
+      reclaimChild: (childId) => {
+        reclaimedChildIds.push(childId);
+        return Promise.resolve();
+      },
+    };
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await client.reclaimChild('impl-x');
+
+    expect(reclaimedChildIds).toEqual(['impl-x']);
+    expect(client.connected).toBe(true);
+
+    void router;
+  });
+
   it('rewake clears suppression and posts an actionable clarify_request from @operator', async () => {
     const { projectId } = makeProject();
     seedParentChain(projectId);
@@ -3621,6 +3667,38 @@ describe('B4 — deleteAgent + rewake operator-IPC verbs', () => {
     const mail = openMailStore(projectId);
     mailStores.push(mail);
     expect(mail.outstanding('impl-x').some((m) => m.seq === delivered.seq)).toBe(true);
+  });
+
+  it('rewake refuses to reactivate a stopped child when that would exceed the active-child cap', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId);
+    const roster = openRosterStore(projectId);
+    rosterStores.push(roster);
+    roster.recordAgent({ agentId: 'impl-stopped', role: 'implementer', parent: 'lead-1' });
+    roster.recordAgent({ agentId: 'impl-active-a', role: 'implementer', parent: 'lead-1' });
+    roster.recordAgent({ agentId: 'impl-active-b', role: 'implementer', parent: 'lead-1' });
+    const socketPath = makeSocketPath();
+    if (!(await unixSocketsAvailable(socketPath))) return;
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { router, control } = makeControl(engine, projectId);
+    router.stop('impl-stopped');
+    expect(router.isStopped('impl-stopped')).toBe(true);
+
+    await startServer(control, projectId, socketPath);
+    const client = makeClient(projectId, socketPath);
+
+    await expect(client.rewake('impl-stopped', 'resume')).rejects.toThrow(
+      /max active children|cap/i,
+    );
+
+    expect(router.isStopped('impl-stopped')).toBe(true);
+
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    expect(mail.outstanding('impl-stopped')).toHaveLength(0);
   });
 
   it('rewake rejects whitespace-only messages before clearing suppression or posting mail', async () => {

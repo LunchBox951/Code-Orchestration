@@ -78,6 +78,26 @@ describe('activeChildCount — excludes reviewers and excludes merged children',
     const children = [child('impl-1', 'implementer')];
     expect(activeChildCount(children, mergedBy(new Set()))).toBe(1);
   });
+
+  // #131 — a durably STOPPED child no longer occupies a slot. The optional isInactive predicate
+  // EXCLUDES it; omitting the predicate (default `() => false`) preserves the existence-only count.
+  it('excludes a child where isInactive returns true (stopped frees the slot — #131)', () => {
+    const children = [
+      child('impl-1', 'implementer', 'co/a'), // active
+      child('impl-2', 'implementer', 'co/b'), // stopped → excluded
+    ];
+    const stopped = new Set(['impl-2']);
+    const count = activeChildCount(children, mergedBy(new Set()), (c) => stopped.has(c.childId));
+    expect(count).toBe(1); // only impl-1
+  });
+
+  it('the isInactive predicate defaults to false (existence-only count unchanged)', () => {
+    const children = [
+      child('impl-1', 'implementer', 'co/a'),
+      child('impl-2', 'implementer', 'co/b'),
+    ];
+    expect(activeChildCount(children, mergedBy(new Set()))).toBe(2);
+  });
 });
 
 describe('childCapDisposition — at/over cap queues → WAITING (first-class, never a throw)', () => {
@@ -105,6 +125,32 @@ describe('childCapDisposition — at/over cap queues → WAITING (first-class, n
     const d = childCapDisposition(children, mergedBy(new Set(['co/b'])), 2);
     expect(d.activeCount).toBe(1);
     expect(d.queued).toBe(false);
+  });
+
+  // #131 — at a cap of 2 with 2 children, one STOPPED, the activeCount drops to 1 and the new
+  // dispatch is NOT queued (the stopped child freed its slot).
+  it('a stopped child frees a slot so a new dispatch is not queued (activeCount 1, queued false)', () => {
+    const children = [
+      child('impl-1', 'implementer', 'co/a'),
+      child('impl-2', 'implementer', 'co/b'),
+    ];
+    const stopped = new Set(['impl-2']);
+    const d = childCapDisposition(
+      children,
+      () => false,
+      2,
+      (c) => stopped.has(c.childId),
+    );
+    expect(d).toEqual({ queued: false, activeCount: 1, cap: 2 });
+  });
+
+  it('without an isInactive predicate, two children at a cap of 2 still queue (unchanged)', () => {
+    const children = [
+      child('impl-1', 'implementer', 'co/a'),
+      child('impl-2', 'implementer', 'co/b'),
+    ];
+    const d = childCapDisposition(children, () => false, 2);
+    expect(d).toEqual({ queued: true, activeCount: 2, cap: 2 });
   });
 });
 

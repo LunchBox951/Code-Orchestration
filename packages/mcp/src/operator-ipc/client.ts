@@ -200,6 +200,11 @@ export class OperatorIpcConnection implements OperatorIpcSurface {
     await this.call(OPERATOR_IPC_METHODS.deleteAgent, { agentId });
   }
 
+  /** #131 — reclaim a single leaf `childId` (frees its dispatch slot; refuses a non-leaf). */
+  async reclaimChild(childId: string): Promise<void> {
+    await this.call(OPERATOR_IPC_METHODS.reclaimChild, { childId });
+  }
+
   /** B4 — re-wake `agentId`: post follow-up mail, then clear suppression. */
   async rewake(agentId: string, message: string): Promise<DeliveredMail> {
     return (await this.call(OPERATOR_IPC_METHODS.rewake, {
@@ -548,6 +553,15 @@ export class OperatorIpcClient {
    */
   async deleteAgent(agentId: string): Promise<void> {
     await this.withConnection((c) => c.deleteAgent(agentId));
+  }
+
+  /**
+   * #131 — reclaim a single leaf `childId`: tear down just that childless agent (freeing its dispatch
+   * slot). A control verb: throws a clear {@link ConductorUnavailableError} when the socket is down
+   * (Principle 9). Refuses a child that still has descendants (use {@link deleteAgent}).
+   */
+  async reclaimChild(childId: string): Promise<void> {
+    await this.withConnection((c) => c.reclaimChild(childId));
   }
 
   /**

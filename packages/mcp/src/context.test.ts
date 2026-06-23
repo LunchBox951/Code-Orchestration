@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildCoreRegistry,
+  accountForProvider,
   invokeTool,
+  openAgentControlStore,
   openDispatchStore,
   openRegistry,
   openReviewStore,
@@ -17,6 +19,7 @@ import {
   MAIL_WORKER_DONE,
   OPERATOR,
   type Role,
+  type UsageSnapshot,
 } from '@co/core';
 import {
   CO_AGENT_ENV,
@@ -31,6 +34,9 @@ import {
 const ORIGINAL_ENV = process.env;
 const ORIGINAL_CWD = cwd();
 let tmpDirs: string[] = [];
+
+const FAR_FUTURE_SAMPLED = '2999-01-01T00:00:00.000Z';
+const FAR_FUTURE_RESET = '2999-01-01T05:00:00.000Z';
 
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
@@ -77,6 +83,24 @@ function makeMainRepo(): string {
   git(dir, 'add', '.');
   git(dir, 'commit', '-m', 'init');
   return dir;
+}
+
+function recordFreshUsageCache(projectId: string): void {
+  const dispatch = openDispatchStore(projectId);
+  try {
+    const snapshot = (provider: 'claude' | 'codex', usedPct: number): UsageSnapshot => ({
+      provider,
+      account: accountForProvider(provider),
+      available: true,
+      source: 'fake',
+      sampled_at: FAR_FUTURE_SAMPLED,
+      windows: [{ kind: 'primary', used_pct: usedPct, reset_at: FAR_FUTURE_RESET }],
+    });
+    dispatch.recordSnapshot(snapshot('claude', 20));
+    dispatch.recordSnapshot(snapshot('codex', 80));
+  } finally {
+    dispatch.close();
+  }
 }
 
 describe('toolsFromEnv — role-scoped tool-list from launch environment', () => {
@@ -623,6 +647,10 @@ describe('defaultContextFactory — production context resolution', () => {
       expect(ctx.reviews).toBeDefined();
       expect(ctx.roster).toBeDefined();
       expect(ctx.archive).toBeDefined();
+      expect(ctx.agentControl).toBeDefined();
+      expect(Object.hasOwn(ctx.agentControl as object, 'recordStopped')).toBe(false);
+      expect(Object.hasOwn(ctx.agentControl as object, 'clearStopped')).toBe(false);
+      expect(Object.hasOwn(ctx.agentControl as object, 'close')).toBe(false);
       expect(typeof ctx.usageSourceFactory).toBe('function');
     } finally {
       ctx.mail.close();
@@ -975,6 +1003,75 @@ describe('defaultContextFactory — gated verbs reach domain gate (review store 
       expect(ctx.mail.inbox('impl-1').some((m) => m.subject === 'kickback: co/gate-test')).toBe(
         true,
       );
+    } finally {
+      ctx.mail.close();
+      ctx.worktrees?.close();
+      ctx.dispatch?.close();
+      ctx.reviews?.close();
+      ctx.roster?.close();
+      ctx.registry.close();
+    }
+  });
+
+  it('#131: mounted co_sling sees persisted stopped children through agentControl', async () => {
+    useDataDir();
+    const repo = makeMainRepo();
+    const reg = openRegistry();
+    const projectId = reg.register(repo);
+    reg.close();
+    const seededRoster = openRosterStore(projectId);
+    seededRoster.recordAgent({ agentId: 'coord-1', role: 'coordinator', parent: '@operator' });
+    seededRoster.recordAgent({ agentId: 'lead-7', role: 'lead', parent: 'coord-1' });
+    seededRoster.close();
+    const seededWorktrees = openWorktreeStore(projectId);
+    const slung = slingWorktree(
+      seededWorktrees,
+      {
+        parent: 'coord-1',
+        agent: 'lead-7',
+        branch: 'co/mounted-lead',
+        repoCwd: repo,
+        projectId,
+        role: 'lead',
+      },
+      { probe: () => [] },
+    );
+    seededWorktrees.close();
+    recordFreshUsageCache(projectId);
+
+    const roster = openRosterStore(projectId);
+    try {
+      roster.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+      roster.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
+    } finally {
+      roster.close();
+    }
+
+    const control = openAgentControlStore(projectId);
+    try {
+      control.recordStopped('impl-b');
+    } finally {
+      control.close();
+    }
+
+    process.env[CO_AGENT_ENV] = 'lead-7';
+    process.env[CO_PROJECT_ID_ENV] = projectId;
+    process.env[CO_ROLE_ENV] = 'lead';
+    process.env[CO_PARENT_ENV] = 'coord-1';
+    chdir(slung.worktreePath);
+    const registry = buildCoreRegistry();
+    const ctx = defaultContextFactory()();
+    try {
+      expect(ctx.agentControl?.isStopped('impl-b')).toBe(true);
+
+      const out = (await invokeTool(registry, ctx, 'co_sling', {
+        parent: 'lead-7',
+        agent: 'impl-c',
+        branch: 'co/mounted-stopped-freed-slot',
+      })) as { status: string };
+
+      expect(out.status).toBe('placed');
+      expect(ctx.worktrees?.getWorktree('co/mounted-stopped-freed-slot')).toBeDefined();
     } finally {
       ctx.mail.close();
       ctx.worktrees?.close();

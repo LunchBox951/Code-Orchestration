@@ -16,6 +16,7 @@ import type { ResearchStore } from '../research/research-store.js';
 import type { UsageSourceFactory } from '../dispatch/cli-render.js';
 import type { GhExec } from '../worktrees/repo-mode.js';
 import type { ArchiveStore } from '../archive/archive-store.js';
+import type { AgentControlStore } from '../operator-control/control-store.js';
 
 /**
  * What every tool handler receives. Assembled by whoever MOUNTS the surface — the
@@ -97,6 +98,16 @@ export interface ToolContext {
    * teardown residue loud-fail when it is absent rather than creating invisible refs.
    */
   readonly archive?: ArchiveStore;
+  /**
+   * OPTIONAL operator-control state seam (#131): a read-only window onto the durable operator
+   * Stop/suppression store so dispatch-cap accounting can EXCLUDE stopped children from the
+   * active-child cap (a STOPPED child holds no live slot). Opened + injected by the mcp/cli mount
+   * alongside the other stores; reduced to the two reads the cap needs (`isStopped` / `listStopped`)
+   * so a tool can never mutate suppression. Optional + additive: when ABSENT (headless/tests), the
+   * cap conservatively counts every existing non-reviewer child (preserving prior behaviour),
+   * mirroring the other optional store seams (Principle 9 — a tool never opens its own store).
+   */
+  readonly agentControl?: Pick<AgentControlStore, 'isStopped' | 'listStopped'>;
   /** Optional deterministic clock seam for tool-created records that need payload timestamps. */
   readonly nowMs?: number;
   /**

@@ -37,14 +37,20 @@ import {
   buildHumanReviewVerdict,
   isSpecLockApprovalKey,
   mintAvailableCoordinatorId,
+  activeChildCount,
+  branchMerged,
   openMailStore,
   openRegistry,
   openReviewStore,
   openRosterStore,
   openSpecStore,
+  openWorktreeStore,
+  resolveAgentBranch,
+  resolveMaxActiveChildren,
   startCoordinatorSession,
   type ArchiveStore,
   type ApprovalDecision,
+  type CapChild,
   type DeliveredMail,
   type LiveObservabilitySnapshot,
   type MailStore,
@@ -442,6 +448,10 @@ export class OperatorIpcServer {
         // B4 — cascade-delete the agent and its entire subtree via the daemon's control surface.
         await this.control.deleteAgent(requireString(params, 'agentId'));
         return {};
+      case OPERATOR_IPC_METHODS.reclaimChild:
+        // #131 — GRANULAR reclaim of a single leaf child (frees its dispatch slot). Refuses a non-leaf.
+        await this.control.reclaimChild(requireString(params, 'childId'));
+        return {};
       case OPERATOR_IPC_METHODS.rewake:
         // B4 — post actionable follow-up work, then clear suppression.
         return (await this.handleRewake(params)) as unknown as WirePayload;
@@ -559,6 +569,53 @@ export class OperatorIpcServer {
     }
   }
 
+  private assertRewakeWithinChildCap(agentId: string): void {
+    const roster = this.openRoster(this.projectId);
+    try {
+      const agent = roster.getAgent(agentId);
+      if (agent == null) {
+        throw new Error(`operator IPC rewake: unknown or unregistered agent '${agentId}'.`);
+      }
+      if (!this.control.router.isStopped(agentId)) return;
+      if (agent.parent === OPERATOR || agent.role === 'reviewer') return;
+
+      const agents = roster.listAgents();
+      const worktrees = openWorktreeStore(this.projectId);
+      try {
+        const reviews = this.openReview(this.projectId);
+        try {
+          const parentBranch = resolveAgentBranch(worktrees, agent.parent);
+          const children: CapChild[] = agents
+            .filter((candidate) => candidate.parent === agent.parent)
+            .map((candidate) => ({
+              childId: candidate.agentId,
+              role: candidate.role,
+              branch: resolveAgentBranch(worktrees, candidate.agentId),
+            }));
+          const cap = resolveMaxActiveChildren(this.projectId);
+          const activeCount = activeChildCount(
+            children,
+            (child) => branchMerged(reviews, parentBranch, child.branch),
+            (child) => child.childId !== agentId && this.control.router.isStopped(child.childId),
+          );
+          if (activeCount > cap) {
+            throw new Error(
+              `operator IPC rewake: refusing to re-wake stopped child '${agentId}' because parent ` +
+                `'${agent.parent}' would have ${activeCount} active child(ren), exceeding the cap ` +
+                `of ${cap}. Reclaim or delete an active child before re-waking this stopped agent.`,
+            );
+          }
+        } finally {
+          reviews.close();
+        }
+      } finally {
+        worktrees.close();
+      }
+    } finally {
+      roster.close();
+    }
+  }
+
   /**
    * Re-wake an agent: post an actionable `clarify_request` from `@operator` through the daemon's own
    * store (single writer — MNR #2), then clear suppression via `this.control.router.unstop`, so
@@ -573,14 +630,7 @@ export class OperatorIpcServer {
         "operator IPC: missing/invalid 'message' (expected a non-empty string).",
       );
     }
-    const roster = this.openRoster(this.projectId);
-    try {
-      if (roster.getAgent(agentId) == null) {
-        throw new Error(`operator IPC rewake: unknown or unregistered agent '${agentId}'.`);
-      }
-    } finally {
-      roster.close();
-    }
+    this.assertRewakeWithinChildCap(agentId);
     const mail = this.openMail(this.projectId);
     let delivered: DeliveredMail;
     try {
