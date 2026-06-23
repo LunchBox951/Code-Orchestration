@@ -914,6 +914,22 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
     }
   }
 
+  function maxCapacity(projectId: ProjectId): void {
+    const dispatch = openDispatchStore(projectId);
+    try {
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:01.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 99, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+    } finally {
+      dispatch.close();
+    }
+  }
+
   function seedUnknownWaitingReviewer(projectId: ProjectId, reviewId: string): void {
     const dispatch = openDispatchStore(projectId);
     try {
@@ -1131,6 +1147,7 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
     } finally {
       dispatch.close();
     }
+    maxCapacity(projectId); // placed retry must bypass waiting-capacity gating.
 
     const second = await drivePanesReady(daemon.tick(), pty);
 
@@ -1147,6 +1164,104 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
     } finally {
       dispatchAfterRetry.close();
     }
+  });
+
+  it('does not retry a placed reviewer that already has a live session after daemon restart', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-live-session', `${REVIEW_BRANCH_PREFIX}live-session`);
+    recoverCapacity(projectId);
+    const dispatch = openDispatchStore(projectId);
+    try {
+      dispatch.recordPlacement('reviewer:pr@rev-live-session', {
+        kind: 'placed',
+        role: 'reviewer:pr',
+        work_size: 'technical',
+        reasoning_budget: 'standard',
+        review_id: 'rev-live-session',
+        review_target: 'co/dev-rev-live-session',
+        review_branch: `${REVIEW_BRANCH_PREFIX}live-session`,
+        review_scope: 'pr_merge',
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        model: 'claude-sonnet-4-5',
+        effort: 'high',
+        context: 'standard',
+      });
+    } finally {
+      dispatch.close();
+    }
+    const sessions = openSessionStore(projectId);
+    try {
+      sessions.recordSession({
+        agentId: 'reviewer:pr@rev-live-session',
+        pane: 'pane-reviewer:pr@rev-live-session',
+        cwd: '/tmp/reviewer-live-session',
+        provider: 'claude',
+        resume: { provider: 'claude', sessionId: 'reviewer:pr@rev-live-session' },
+      });
+    } finally {
+      sessions.close();
+    }
+    const roster = openRosterStore(projectId);
+    try {
+      roster.recordAgent({ agentId: 'reviewer:pr@rev-live-session', role: 'reviewer', parent: 'lead-1' });
+    } finally {
+      roster.close();
+    }
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const attempts: string[] = [];
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => ({
+        spawn: (_projectId, record) => {
+          attempts.push(record.agent);
+          return Promise.resolve();
+        },
+      }),
+      isSkipped: skipReviewerSeats,
+    });
+
+    const out = await daemon.tick();
+
+    expect(out.reviewersRedriven).toEqual([]);
+    expect(out.reviewerRedriveErrors).toEqual([]);
+    expect(attempts).toEqual([]);
+  });
+
+  it('counts failed spawn attempts against the per-tick redrive cap', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    for (const id of ['rev-fail-1', 'rev-fail-2', 'rev-fail-3']) {
+      seedWaitingReviewer(projectId, id, `${REVIEW_BRANCH_PREFIX}${id}`);
+    }
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const attempts: string[] = [];
+    const failingGate: ReviewerSpawnGate = {
+      spawn: (_projectId, record) => {
+        attempts.push(record.agent);
+        return Promise.reject(new Error('fixture shared spawn failure'));
+      },
+    };
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => failingGate,
+      maxReviewerRedrivesPerTick: 1,
+      isSkipped: skipReviewerSeats,
+    });
+
+    const out = await daemon.tick();
+
+    expect(out.reviewersRedriven).toEqual([]);
+    expect(out.reviewerRedriveErrors).toEqual([
+      { agent: 'reviewer:pr@rev-fail-1', message: 'fixture shared spawn failure' },
+    ]);
+    expect(attempts).toEqual(['reviewer:pr@rev-fail-1']);
   });
 
   it('reports per-seat redrive errors and still runs the normal daemon cycle', async () => {
@@ -1182,6 +1297,62 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
     expect(out.reviewerRedriveErrors).toEqual([
       { agent: 'reviewer:pr@rev-mailfail', message: 'fixture kickoff mail failed' },
     ]);
+  });
+
+  it('attempts every redrive store close even when an earlier close throws', async () => {
+    const { projectId } = makeProject();
+    seedUnknownWaitingReviewer(projectId, 'rev-closefail');
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { gate: spawnGate } = routingSpawnGate(engine, '/tmp/unused');
+    let reviewsClosed = false;
+    let worktreesClosed = false;
+    let mailClosed = false;
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => spawnGate,
+      openReviews: (pid) => {
+        const reviews = openReviewStore(pid);
+        return {
+          ...reviews,
+          close: () => {
+            reviewsClosed = true;
+            reviews.close();
+          },
+        };
+      },
+      openWorktrees: (pid) => {
+        const worktrees = openWorktreeStore(pid);
+        return {
+          ...worktrees,
+          close: () => {
+            worktreesClosed = true;
+            worktrees.close();
+          },
+        };
+      },
+      openMail: () =>
+        ({
+          outstanding: () => [],
+          inbox: () => [],
+          close: () => {
+            mailClosed = true;
+            throw new Error('mail close failed');
+          },
+        }) as unknown as MailStore,
+    });
+
+    const out = await daemon.tick();
+
+    expect(mailClosed).toBe(true);
+    expect(worktreesClosed).toBe(true);
+    expect(reviewsClosed).toBe(true);
+    expect(out.reviewerRedriveErrors).toContainEqual({
+      agent: 'reviewer:redrive',
+      message: 'mail.close: mail close failed',
+    });
   });
 
   it('a still-maxed window leaves waiting seats untouched (no launch, no churn)', async () => {

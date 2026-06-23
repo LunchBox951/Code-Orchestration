@@ -326,10 +326,21 @@ export class ConductorHostRunner {
     try {
       const outcome = await this.daemon.tick();
       this.onTick?.(outcome);
+      this.reportReviewerRedriveErrors(outcome);
     } catch (error) {
       if (this.onError != null) this.onError(error);
       else console.error('[co-mcp serve] tick error:', error);
       if (rethrowTickErrors) throw error;
+    }
+  }
+
+  private reportReviewerRedriveErrors(outcome: DaemonTickOutcome): void {
+    for (const error of outcome.reviewerRedriveErrors) {
+      const diagnostic = new Error(
+        `co-mcp serve: reviewer redrive for '${error.agent}' failed: ${error.message}`,
+      );
+      if (this.onError != null) this.onError(diagnostic);
+      else console.error('[co-mcp serve] reviewer redrive error:', diagnostic);
     }
   }
 }

@@ -243,6 +243,19 @@ function pushReviewerRedriveError(errors: LaunchError[], agent: string, error: u
   errors.push({ agent, message: errorMessage(error) });
 }
 
+function closeReviewerRedriveStore(
+  errors: LaunchError[],
+  label: string,
+  store: { close(): void } | undefined,
+): void {
+  if (store == null) return;
+  try {
+    store.close();
+  } catch (error: unknown) {
+    pushReviewerRedriveError(errors, 'reviewer:redrive', new Error(`${label}.close: ${errorMessage(error)}`));
+  }
+}
+
 /**
  * #133 — the default THUNDERING-HERD cap for waiting-reviewer re-drive: at most this many seats flip from
  * `waiting` to `placed` (and launch) per tick. Small + deterministic so a recovered capacity window
@@ -613,10 +626,12 @@ export class ConductorDaemon {
           reviews = this.openReviews(this.projectId);
           worktrees = this.openWorktrees(this.projectId);
           mail = this.openMail(this.projectId);
+          let launchAttempts = 0;
           // Scan deterministic seats until K launches are accepted. No-op/still-waiting/error seats do not
-          // consume the launch cap, so stale low-sorted seats cannot starve a valid later reviewer forever.
+          // consume the launch cap, but failed live spawns do: the cap protects the launch authority from
+          // systemic failures as well as successful herds.
           for (const seat of seats) {
-            if (reviewersRedriven.length >= this.maxReviewerRedrivesPerTick) break;
+            if (launchAttempts >= this.maxReviewerRedrivesPerTick) break;
             if (seat.kind === 'waiting' && !waitingCanResume) continue;
             try {
               const gate = new CoReviewGate({
@@ -632,6 +647,7 @@ export class ConductorDaemon {
                 retryPlaced: seat.kind === 'placed',
               });
               if (outcome.kind !== 'launched') continue;
+              launchAttempts += 1;
 
               try {
                 // Surface a launch failure: drainSpawns rejects if the fire-and-forget spawn failed.
@@ -649,9 +665,9 @@ export class ConductorDaemon {
             }
           }
         } finally {
-          mail?.close();
-          worktrees?.close();
-          reviews?.close();
+          closeReviewerRedriveStore(reviewerRedriveErrors, 'mail', mail);
+          closeReviewerRedriveStore(reviewerRedriveErrors, 'worktrees', worktrees);
+          closeReviewerRedriveStore(reviewerRedriveErrors, 'reviews', reviews);
         }
         return { reviewersRedriven, reviewerRedriveErrors };
       } finally {
