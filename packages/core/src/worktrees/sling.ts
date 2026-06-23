@@ -247,7 +247,10 @@ export function slingWorktree(
     }
 
     // 2c) Provision the gitignored working essentials into the sandbox (phase B): reads from the main
-    //     repo, writes only the sandbox, so it is runnable before the baseline is captured.
+    //     repo, writes only the sandbox, so it is runnable before the baseline is captured. In a pnpm
+    //     workspace, `provisionWorktree` expands the single `node_modules` entry into a writable
+    //     hybrid per leaf (root + every workspace package) so a slung worker can actually run verify
+    //     (#129); the expanded leaves are what `provisionResult.provisioned` records.
     const provisionResult = provisioner({ repoCwd, worktreePath, projectId });
 
     // 3) Capture the branch-off baseline (L5 compares; we only capture + store).

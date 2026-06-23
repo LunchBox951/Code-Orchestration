@@ -17,11 +17,16 @@ import { openConfigStore, type ConfigStore } from '../config/config-store.js';
 import {
   DEFAULT_PROVISION_MANIFEST,
   WORKTREE_PROVISION_CONFIG_KEY,
+  WorkspaceDepsNotProvisionedError,
+  detectWorkspacePackages,
+  expandWorkspaceManifest,
   mergeProvisioningManifest,
+  parseWorkspacePackageGlobs,
   provisionWorktree,
   resolveProvisioningManifest,
   type ProvisioningManifest,
 } from './provision.js';
+import { symlinkSync } from 'node:fs';
 
 // AC-L3-2 (provisioning applier + manifest): the gitignored working essentials are placed into a
 // sandbox by the RIGHT mechanism (symlink large/stable deps · copy small/mutable env · isolated-copy
@@ -291,5 +296,220 @@ describe('manifest defaults + per-project overrides', () => {
     expect(resolved.find((e) => e.path === '.env.local')).toBeUndefined();
     // An untouched default entry is still present.
     expect(resolved.find((e) => e.path === '.env')?.mechanism).toBe('copy');
+  });
+});
+
+// ---- #129: workspace-aware expansion ----------------------------------------------------------
+
+/** A pnpm-WORKSPACE source repo: `pnpm-workspace.yaml` + workspace package dirs with `package.json`. */
+function makeWorkspaceSource(globs: string[], pkgs: string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), 'co-prov-ws-'));
+  tmpDirs.push(dir);
+  writeFileSync(
+    join(dir, 'pnpm-workspace.yaml'),
+    `packages:\n${globs.map((g) => `  - "${g}"`).join('\n')}\n`,
+  );
+  for (const pkg of pkgs) {
+    mkdirSync(join(dir, pkg), { recursive: true });
+    writeFileSync(
+      join(dir, pkg, 'package.json'),
+      JSON.stringify({ name: pkg.replace(/\//g, '-') }),
+    );
+  }
+  return dir;
+}
+
+describe('parseWorkspacePackageGlobs — minimal pnpm-workspace.yaml parsing', () => {
+  it('reads the packages: list and ignores comments / other top-level keys', () => {
+    const yaml = [
+      'packages:',
+      '  - "packages/*"',
+      "  - 'apps/*'   # a comment",
+      '  - tools/cli',
+      'overrides:',
+      '  - "ignored/*"',
+    ].join('\n');
+    expect(parseWorkspacePackageGlobs(yaml)).toEqual(['packages/*', 'apps/*', 'tools/cli']);
+  });
+});
+
+describe('detectWorkspacePackages — only when pnpm-workspace.yaml is present', () => {
+  it('returns null for a single-package repo (no pnpm-workspace.yaml)', () => {
+    const repo = makeSourceRepo();
+    expect(detectWorkspacePackages(repo)).toBeNull();
+  });
+
+  it('expands trailing-* globs to package dirs that have a package.json', () => {
+    const repo = makeWorkspaceSource(
+      ['packages/*', 'apps/*'],
+      ['packages/core', 'packages/cli', 'apps/desktop'],
+    );
+    // A non-package dir under the glob (no package.json) is ignored.
+    mkdirSync(join(repo, 'packages', 'not-a-pkg'), { recursive: true });
+    expect(detectWorkspacePackages(repo)?.sort()).toEqual([
+      'apps/desktop',
+      'packages/cli',
+      'packages/core',
+    ]);
+  });
+});
+
+describe('expandWorkspaceManifest — node_modules symlink → per-leaf hybrid ONLY in a workspace', () => {
+  it('single-package repo: manifest unchanged (no pnpm-workspace.yaml)', () => {
+    const repo = makeSourceRepo();
+    const expanded = expandWorkspaceManifest(DEFAULT_PROVISION_MANIFEST, repo);
+    expect(expanded).toEqual([...DEFAULT_PROVISION_MANIFEST]);
+  });
+
+  it('workspace repo: node_modules expands to root + every package leaf as workspace-node-modules', () => {
+    const repo = makeWorkspaceSource(['packages/*'], ['packages/core', 'packages/cli']);
+    const expanded = expandWorkspaceManifest(DEFAULT_PROVISION_MANIFEST, repo);
+    const wsm = expanded.filter((e) => e.mechanism === 'workspace-node-modules').map((e) => e.path);
+    expect(wsm[0]).toBe('node_modules'); // root leaf is always first
+    expect(wsm.slice(1).sort()).toEqual([
+      'packages/cli/node_modules',
+      'packages/core/node_modules',
+    ]);
+    // The single root `node_modules` symlink entry is gone (replaced by the hybrid leaves).
+    expect(
+      expanded.find((e) => e.path === 'node_modules' && e.mechanism === 'symlink'),
+    ).toBeUndefined();
+    // Non-node_modules entries (env files) are untouched.
+    expect(expanded.find((e) => e.path === '.env')?.mechanism).toBe('copy');
+  });
+
+  it('workspace repo: an operator override away from symlink (isolated-copy) suppresses expansion', () => {
+    const repo = makeWorkspaceSource(['packages/*'], ['packages/core']);
+    const overridden = mergeProvisioningManifest(DEFAULT_PROVISION_MANIFEST, {
+      node_modules: 'isolated-copy',
+    });
+    const expanded = expandWorkspaceManifest(overridden, repo);
+    expect(expanded.find((e) => e.path === 'node_modules')?.mechanism).toBe('isolated-copy');
+    expect(expanded.some((e) => e.mechanism === 'workspace-node-modules')).toBe(false);
+  });
+});
+
+describe('provisionWorktree — pnpm-workspace hybrid leaves + structured deps error (#129)', () => {
+  /**
+   * A realistic pnpm-workspace source: a root `.pnpm` store, root `node_modules` with a dep symlink
+   * into it, and a package leaf whose dep link is RELATIVE into the root store plus a `@scope/*`
+   * self-link to the sibling package source.
+   */
+  function makeWorkspaceWithStore(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'co-prov-wsstore-'));
+    tmpDirs.push(dir);
+    writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n');
+    // The real dep content lives in the shared .pnpm store.
+    mkdirSync(join(dir, 'node_modules', '.pnpm', 'zod@1.0.0', 'node_modules', 'zod'), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(dir, 'node_modules', '.pnpm', 'zod@1.0.0', 'node_modules', 'zod', 'index.js'),
+      'export const z = 1;\n',
+    );
+    // Root node_modules: a top-level symlink into the store + a metadata file.
+    symlinkSync('.pnpm/zod@1.0.0/node_modules/zod', join(dir, 'node_modules', 'zod'));
+    writeFileSync(join(dir, 'node_modules', '.modules.yaml'), 'hoistPattern:\n');
+    // Two workspace packages.
+    for (const p of ['pkg-a', 'pkg-b']) {
+      mkdirSync(join(dir, 'packages', p), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages', p, 'package.json'),
+        JSON.stringify({ name: `@scope/${p}` }),
+      );
+    }
+    // pkg-a's node_modules: a RELATIVE dep link into the root store + a self-link to pkg-b's source.
+    mkdirSync(join(dir, 'packages', 'pkg-a', 'node_modules', '@scope'), { recursive: true });
+    symlinkSync(
+      '../../../node_modules/.pnpm/zod@1.0.0/node_modules/zod',
+      join(dir, 'packages', 'pkg-a', 'node_modules', 'zod'),
+    );
+    symlinkSync(
+      '../../../pkg-b',
+      join(dir, 'packages', 'pkg-a', 'node_modules', '@scope', 'pkg-b'),
+    );
+    return dir;
+  }
+
+  it('mirrors each leaf writable, shares .pnpm read-only, and keeps relative/self-links resolving in-sandbox', () => {
+    const repo = makeWorkspaceWithStore();
+    const wt = makeSandbox();
+    // The sandbox is a worktree: it has the package SOURCES checked out (so the @scope self-link target exists).
+    mkdirSync(join(wt, 'packages', 'pkg-b'), { recursive: true });
+    writeFileSync(join(wt, 'packages', 'pkg-b', 'package.json'), '{}');
+
+    const res = provisionWorktree({
+      repoCwd: repo,
+      worktreePath: wt,
+      manifest: DEFAULT_PROVISION_MANIFEST,
+    });
+
+    // (1) Every leaf is a REAL writable dir (not a single root symlink).
+    for (const leaf of ['node_modules', 'packages/pkg-a/node_modules']) {
+      expect(lstatSync(join(wt, leaf)).isSymbolicLink()).toBe(false);
+      expect(lstatSync(join(wt, leaf)).isDirectory()).toBe(true);
+    }
+    // The heavy `.pnpm` store IS shared by symlink (read-only), not copied.
+    expect(lstatSync(join(wt, 'node_modules', '.pnpm')).isSymbolicLink()).toBe(true);
+    // (2) The dep resolves THROUGH the mirror at the root.
+    expect(readFileSync(join(wt, 'node_modules', 'zod', 'index.js'), 'utf8')).toContain('z = 1');
+    // (3) The package's RELATIVE dep link is recreated verbatim and resolves THROUGH the sandbox's
+    //     own `node_modules/.pnpm` (the shared store) — the dep is readable from the package leaf, and
+    //     the resolution traverses the sandbox, never a single root symlink into the source tree.
+    const pkgZod = join(wt, 'packages', 'pkg-a', 'node_modules', 'zod');
+    expect(lstatSync(pkgZod).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(pkgZod, 'index.js'), 'utf8')).toContain('z = 1');
+    // It resolves to the SAME content as the sandbox-root `.pnpm` store entry (shared read-only store).
+    expect(realpathSync(pkgZod)).toBe(
+      realpathSync(join(wt, 'node_modules', '.pnpm', 'zod@1.0.0', 'node_modules', 'zod')),
+    );
+    // (4) The `@scope/*` self-link resolves into the sandbox's OWN package source (not the source repo).
+    const selfLink = join(wt, 'packages', 'pkg-a', 'node_modules', '@scope', 'pkg-b');
+    expect(realpathSync(selfLink)).toBe(realpathSync(join(wt, 'packages', 'pkg-b')));
+
+    const placed = res.provisioned
+      .filter((e) => e.mechanism === 'workspace-node-modules')
+      .map((e) => e.path);
+    expect(placed).toContain('node_modules');
+    expect(placed).toContain('packages/pkg-a/node_modules');
+    // pkg-b has no node_modules in the source → skipped (an un-built package is legitimate).
+    expect(res.skipped).toContain('packages/pkg-b/node_modules');
+  });
+
+  it('writing under a provisioned leaf does NOT touch the source repo (EROFS class fixed)', () => {
+    const repo = makeWorkspaceWithStore();
+    const wt = makeSandbox();
+    mkdirSync(join(wt, 'packages', 'pkg-b'), { recursive: true });
+
+    assertRepoPristine(repo, () =>
+      provisionWorktree({ repoCwd: repo, worktreePath: wt, manifest: DEFAULT_PROVISION_MANIFEST }),
+    );
+
+    // Tooling scratch (vite's `.vite-temp`) writes into the leaf — must stay in-sandbox.
+    writeFileSync(join(wt, 'packages', 'pkg-a', 'node_modules', '.vite-temp'), 'scratch\n');
+    expect(existsSync(join(repo, 'packages', 'pkg-a', 'node_modules', '.vite-temp'))).toBe(false);
+    // The source repo's node_modules is byte-identical (proven by assertRepoPristine above).
+    expect(readFileSync(join(repo, 'node_modules', '.modules.yaml'), 'utf8')).toBe(
+      'hoistPattern:\n',
+    );
+  });
+
+  it('throws the structured WorkspaceDepsNotProvisionedError (not raw EROFS) when a dep cannot resolve', () => {
+    const repo = makeWorkspaceWithStore();
+    const wt = makeSandbox();
+    mkdirSync(join(wt, 'packages', 'pkg-b'), { recursive: true });
+    // Break resolvability: remove the store content the pkg-a dep link points at, so the mirrored
+    // relative link dangles → deps not provisioned.
+    rmSync(join(repo, 'node_modules', '.pnpm'), { recursive: true, force: true });
+
+    let thrown: unknown;
+    try {
+      provisionWorktree({ repoCwd: repo, worktreePath: wt, manifest: DEFAULT_PROVISION_MANIFEST });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(WorkspaceDepsNotProvisionedError);
+    expect((thrown as WorkspaceDepsNotProvisionedError).message).toMatch(/deps not provisioned/);
+    expect((thrown as WorkspaceDepsNotProvisionedError).message).not.toMatch(/EROFS/);
   });
 });
