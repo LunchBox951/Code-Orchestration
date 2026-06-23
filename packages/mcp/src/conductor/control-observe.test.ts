@@ -30,6 +30,7 @@ import {
   openRegistry,
   openRosterStore,
   openSessionStore,
+  openWorktreeStore,
   queryObservability,
   queryLiveObservability,
   WEDGE_MS,
@@ -43,6 +44,7 @@ import {
   type RosterStore,
   type RunningAgent,
   type SessionStore,
+  type WorktreeStore,
 } from '@co/core';
 import { ConductorEngine, type ConductorEngineDeps, type HostedPane } from './engine.js';
 import { ConductorDaemon } from './daemon.js';
@@ -63,6 +65,7 @@ let registries: ProjectRegistry[] = [];
 let mailStores: MailStore[] = [];
 let rosterStores: RosterStore[] = [];
 let sessionStores: SessionStore[] = [];
+let worktreeStores: WorktreeStore[] = [];
 
 beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
@@ -72,6 +75,7 @@ beforeEach(() => {
   mailStores = [];
   rosterStores = [];
   sessionStores = [];
+  worktreeStores = [];
 });
 
 afterEach(async () => {
@@ -82,7 +86,13 @@ afterEach(async () => {
       /* best-effort */
     }
   }
-  for (const closeable of [...mailStores, ...rosterStores, ...sessionStores, ...registries]) {
+  for (const closeable of [
+    ...mailStores,
+    ...rosterStores,
+    ...sessionStores,
+    ...worktreeStores,
+    ...registries,
+  ]) {
     try {
       closeable.close();
     } catch {
@@ -596,6 +606,54 @@ describe('AC-S10-3.5 — queryLiveObservability returns the live overlay (distin
     expect(x.paused).toBe(false);
     expect(x.stuck).toBe(false);
     expect(x.stopped).toBe(false);
+    expect(x.finished).toBe(false); // no finish recorded for its branch
+  });
+
+  // #166 — a WARM pane whose branch recorded co_finish surfaces `finished: true` through the live
+  // overlay, so the dashboard can render FINISHED instead of WARM. The provider reads the worktree
+  // store (here a real store seeded via the openWorktrees seam — the daemon read against a live pane
+  // is the host-live remainder).
+  it('#166: surfaces finished:true when the agent branch recorded co_finish', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId);
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    await hostPane(engine, pty, makeIdentity({ agent: 'impl-x', projectId, cwd })); // WARM
+
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    worktrees.recordWorktree({
+      branch: 'co/impl-x',
+      baseRef: 'main',
+      baseSha: 'deadbeef',
+      path: join(cwd, 'wt-x'),
+      parent: 'lead-1',
+      agent: 'impl-x',
+      role: 'implementer',
+    });
+    worktrees.recordFinish({
+      branch: 'co/impl-x',
+      baseSha: 'deadbeef',
+      commitSha: 'cafef00d',
+      tests: [],
+      agent: 'impl-x',
+    });
+
+    const provider = new EngineLiveStateProvider({
+      engine,
+      projectId,
+      openWorktrees: () => worktrees,
+    });
+
+    const live = queryLiveObservability(projectId, provider);
+    const x = live.agents.find((a) => a.agentId === 'impl-x')!;
+    expect(x.hosted).toBe(true);
+    expect(x.finished).toBe(true);
+
+    // A roster agent with NO recorded finish stays not-finished.
+    const lead = live.agents.find((a) => a.agentId === 'lead-1')!;
+    expect(lead.finished).toBe(false);
   });
 });
 

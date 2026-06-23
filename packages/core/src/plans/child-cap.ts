@@ -72,10 +72,12 @@ export interface ChildCapDisposition {
 /**
  * Count a parent's ACTIVE children: non-reviewer children whose branch is NOT merged AND that are
  * NOT inactive. Reviewers are EXCLUDED (they never occupy a slot); a child for which `isMerged`
- * returns true has freed its slot; a child for which `isInactive` returns true (e.g. durably STOPPED
- * by the operator — #131) no longer occupies a slot either. `isInactive` defaults to `() => false`,
- * preserving the existence-only behaviour for every caller that does not supply it. Pure +
- * deterministic over the injected `children` + the two predicates.
+ * returns true has freed its slot; a child for which `isInactive` returns true no longer occupies a
+ * slot either — the caller OR-composes every lifecycle-terminal signal into `isInactive` (durably
+ * STOPPED by the operator — #131; a researcher that FINALIZED its result — #158; a worker that
+ * recorded `co_finish` — #166). `isInactive` defaults to `() => false`, preserving the
+ * existence-only behaviour for every caller that does not supply it. Pure + deterministic over the
+ * injected `children` + the two predicates.
  */
 export function activeChildCount(
   children: readonly CapChild[],

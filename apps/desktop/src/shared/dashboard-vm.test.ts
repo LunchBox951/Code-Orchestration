@@ -31,6 +31,7 @@ function makeAgent(
     paused: false,
     stuck: false,
     stopped: false,
+    finished: false,
     costUsd: 0,
     ...overrides,
   };
@@ -83,6 +84,7 @@ describe('DashboardVM — initial state', () => {
     expect(vm.state.stats).toEqual({
       total: 0,
       warm: 0,
+      finished: 0,
       waiting: 0,
       stopped: 0,
       stuck: 0,
@@ -132,6 +134,21 @@ describe('DashboardVM — live observation', () => {
     const agents = [makeAgent('a1', '@operator', { hosted: true })];
     vm.update(liveObs(agents), []);
     expect(vm.state.tree[0]?.status).toBe('warm');
+  });
+
+  it('maps finished agent to finished status, not warm (#166)', () => {
+    const vm = new DashboardVM();
+    const agents = [makeAgent('a1', '@operator', { hosted: true, finished: true })];
+    vm.update(liveObs(agents), []);
+    expect(vm.state.tree[0]?.status).toBe('finished');
+  });
+
+  it('finished takes priority over warm (#166)', () => {
+    const vm = new DashboardVM();
+    const agents = [makeAgent('a1', '@operator', { hosted: true, finished: true })];
+    vm.update(liveObs(agents), []);
+    expect(vm.state.tree[0]?.status).not.toBe('warm');
+    expect(vm.state.tree[0]?.status).toBe('finished');
   });
 
   it('maps stuck agent to stuck status', () => {
@@ -203,10 +220,29 @@ describe('DashboardVM — live observation', () => {
     expect(vm.state.stats).toEqual({
       total: 6,
       warm: 1,
+      finished: 0,
       waiting: 1,
       stopped: 1,
       stuck: 1,
       paused: 1,
+    });
+  });
+
+  it('counts a finished agent in the finished stat, not warm (#166)', () => {
+    const vm = new DashboardVM();
+    const agents = [
+      makeAgent('a1', '@operator', { hosted: true }),
+      makeAgent('a2', '@operator', { hosted: true, finished: true }),
+    ];
+    vm.update(liveObs(agents), []);
+    expect(vm.state.stats).toEqual({
+      total: 2,
+      warm: 1,
+      finished: 1,
+      waiting: 0,
+      stopped: 0,
+      stuck: 0,
+      paused: 0,
     });
   });
 

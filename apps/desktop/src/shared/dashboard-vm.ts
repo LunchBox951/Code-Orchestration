@@ -1,7 +1,14 @@
 import { assertNever } from '@co/core';
 import type { OperatorObservation, DeliveredMail, AgentLiveView, AgentRecord } from '@co/core';
 
-export type AgentStatus = 'warm' | 'waiting' | 'stopped' | 'stuck' | 'paused' | 'unknown';
+export type AgentStatus =
+  | 'warm'
+  | 'finished'
+  | 'waiting'
+  | 'stopped'
+  | 'stuck'
+  | 'paused'
+  | 'unknown';
 
 export interface TreeNode {
   readonly agentId: string;
@@ -16,6 +23,7 @@ export interface TreeNode {
 export interface FleetStats {
   readonly total: number;
   readonly warm: number;
+  readonly finished: number;
   readonly waiting: number;
   readonly stopped: number;
   readonly stuck: number;
@@ -49,6 +57,9 @@ function deriveStatusLive(a: AgentLiveView): AgentStatus {
   if (a.stuck) return 'stuck';
   if (a.stopped) return 'stopped';
   if (a.paused) return 'paused';
+  // FINISHED (terminal: branch recorded co_finish) takes priority over WARM — a finished-but-not-yet
+  // torn-down pane is still hosted, but it is done, not working (#166).
+  if (a.finished) return 'finished';
   if (a.hosted) return 'warm';
   if (a.outstandingMail > 0) return 'waiting';
   return 'unknown';
@@ -117,7 +128,15 @@ function deriveFromObservation(observation: OperatorObservation | null): {
   stats: FleetStats;
   connection: 'live' | 'degraded';
 } {
-  const empty: FleetStats = { total: 0, warm: 0, waiting: 0, stopped: 0, stuck: 0, paused: 0 };
+  const empty: FleetStats = {
+    total: 0,
+    warm: 0,
+    finished: 0,
+    waiting: 0,
+    stopped: 0,
+    stuck: 0,
+    paused: 0,
+  };
 
   if (observation == null) {
     return { tree: [], stats: empty, connection: 'degraded' };
@@ -133,6 +152,7 @@ function deriveFromObservation(observation: OperatorObservation | null): {
       const stats: FleetStats = {
         total: agents.length,
         warm: agents.filter((a) => statusMap.get(a.agentId) === 'warm').length,
+        finished: agents.filter((a) => statusMap.get(a.agentId) === 'finished').length,
         waiting: agents.filter((a) => statusMap.get(a.agentId) === 'waiting').length,
         stopped: agents.filter((a) => statusMap.get(a.agentId) === 'stopped').length,
         stuck: agents.filter((a) => statusMap.get(a.agentId) === 'stuck').length,
@@ -149,6 +169,7 @@ function deriveFromObservation(observation: OperatorObservation | null): {
       const stats: FleetStats = {
         total: agents.length,
         warm: 0,
+        finished: 0,
         waiting: 0,
         stopped: 0,
         stuck: 0,
@@ -164,7 +185,7 @@ function deriveFromObservation(observation: OperatorObservation | null): {
 export class DashboardVM {
   private _state: DashboardState = {
     tree: [],
-    stats: { total: 0, warm: 0, waiting: 0, stopped: 0, stuck: 0, paused: 0 },
+    stats: { total: 0, warm: 0, finished: 0, waiting: 0, stopped: 0, stuck: 0, paused: 0 },
     actionables: [],
     connection: 'degraded',
   };

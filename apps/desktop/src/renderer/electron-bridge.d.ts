@@ -7,7 +7,7 @@ type ConnectionStatus = 'connecting' | 'live' | 'degraded';
 interface ProjectInfo {
   id: string;
 }
-type AgentStatus = 'warm' | 'waiting' | 'stopped' | 'stuck' | 'paused' | 'unknown';
+type AgentStatus = 'warm' | 'finished' | 'waiting' | 'stopped' | 'stuck' | 'paused' | 'unknown';
 
 interface ConnectionObservation {
   kind: 'live' | 'static';
@@ -32,6 +32,7 @@ interface TreeNode {
 interface FleetStats {
   total: number;
   warm: number;
+  finished: number;
   waiting: number;
   stopped: number;
   stuck: number;

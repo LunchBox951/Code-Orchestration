@@ -49,6 +49,9 @@ function deriveStatusLive(a: AgentLiveView): AgentStatus {
   if (a.stuck) return 'stuck';
   if (a.stopped) return 'stopped';
   if (a.paused) return 'paused';
+  // FINISHED (terminal: branch recorded co_finish) takes priority over WARM — a finished-but-not-yet
+  // torn-down pane is still hosted, but it is done, not working (#166).
+  if (a.finished) return 'finished';
   if (a.hosted) return 'warm';
   if (a.outstandingMail > 0) return 'waiting';
   return 'unknown';
