@@ -11,7 +11,9 @@ through a large codebase or the web.
 ### Sub-roles = different sources, different reach
 
 Web access is a **sub-role-gated capability** — a researcher makes web-search calls only if its
-sub-role grants them:
+sub-role grants them. When dispatching, sling `researcher:external` for any task needing the web,
+`api.github.com`, or `gh`; a bare `researcher` (and the `codebase`/`diagnostic`/`decision` sub-roles)
+is offline by design.
 
 | Sub-role | Sources | Web? | Job |
 |---|---|---|---|

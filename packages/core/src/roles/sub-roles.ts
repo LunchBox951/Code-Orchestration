@@ -142,6 +142,24 @@ export function findSubRole(baseRole: Role, name: string): SubRoleSpec | undefin
 }
 
 /**
+ * Whether a RESOLVED `(role, subRole)` carries the `web-search` capability — the single source of
+ * truth for "may this agent reach the web / api.github.com / gh". This is the PURE capability check
+ * that {@link import('../permissions/pane-launch-config.js').paneMayResearchWeb} delegates to, so the
+ * dispatch-time advisory and the launch-time network gate can never drift (both read the same
+ * narrow-only-checked `web-search` delta).
+ *
+ * True iff the resolved sub-role profile holds `web-search` — today the sole holder is
+ * `researcher:external`. A bare researcher (no sub-role), the non-web researcher sub-roles
+ * (`codebase`/`diagnostic`/`decision`, which narrow it away), and all code-worker roles are false.
+ * A missing role or unknown sub-role is false (least-privilege default-deny).
+ */
+export function roleMayResearchWeb(role: string | undefined, subRole: string | undefined): boolean {
+  if (role == null || subRole == null) return false;
+  const profile = findSubRole(role as Role, subRole)?.profile;
+  return profile?.capabilities.has('web-search') ?? false;
+}
+
+/**
  * Parse a `base:sub` identity string into its components. Tolerates a bare base role (no colon).
  * Does NOT validate that the base role or sub-role name are known — use `findSubRole` for that.
  */
