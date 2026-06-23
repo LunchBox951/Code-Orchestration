@@ -230,6 +230,11 @@ export async function injectMail(
     // loop-safety guarantee (the engine's #77 attempt cap is). See CODEX_COLLAPSED_PASTE_NEEDLES.
     // Keep this tied to explicit newlines until host-live capture verifies the real Codex preview bytes;
     // long single-line pastes must prove landing by literal echo rather than unverified common words.
+    // #155: the `hasNewline` gate stays AS-IS here (loosening it risks false-positive submits on the
+    // unverified placeholder needles). For over-threshold codex mail — including a long SINGLE-LINE
+    // routed body that would otherwise land on this literal-echo-only path — the engine supplies a
+    // `codexHandoff` seam (above), so injectMail diverts to a SHORT pointer that echoes literally and
+    // never reaches this needle fast-path at all.
     return (
       hasNewline &&
       opts.provider === 'codex' &&
