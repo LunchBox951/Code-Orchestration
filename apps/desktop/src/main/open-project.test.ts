@@ -550,10 +550,15 @@ describe('open-project — reopenCurrentProject re-provisions the daemon (#95/#7
     expect(h.controller.currentProject).toEqual({ projectId: 'pid-b', path: '/repo/b' });
     expect(h.supervisors.at(-1)?.startCalls).toEqual(['pid-b']);
     expect(h.shells.at(-1)?.started).toBe(true);
-    // No shell.start appears between a teardown pair — assert ordering is strictly teardown-then-build.
-    const starts = h.events.filter((e) => e.startsWith('shell.start'));
-    const closes = h.events.filter((e) => e.startsWith('shell.close'));
-    expect(starts.length).toBeGreaterThanOrEqual(1);
-    expect(closes.length).toBeGreaterThanOrEqual(1);
+    expect(h.events).toEqual([
+      'supervisor.stop:pid-a',
+      'shell.close:pid-a',
+      'supervisor.start:pid-b',
+      'shell.start:pid-b',
+      'supervisor.stop:pid-b',
+      'shell.close:pid-b',
+      'supervisor.start:pid-b',
+      'shell.start:pid-b',
+    ]);
   });
 });

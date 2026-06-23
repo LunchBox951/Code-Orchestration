@@ -1220,6 +1220,31 @@ describe('serveConductor — wires the full stack over injected seams (no real b
       expect(env.PATH?.split(':')[0]).toBe('/usr/local/bin');
     });
 
+    it.each(['CO_GH_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN'] as const)(
+      'resolveAndApplyDaemonGithubAuth: strips explicit %s from gh command discovery env',
+      (key) => {
+        const env: NodeJS.ProcessEnv = { [key]: 'gho_secret', PATH: '/usr/bin:/bin' };
+        let seen: NodeJS.ProcessEnv | undefined;
+        const token = resolveAndApplyDaemonGithubAuth(
+          env,
+          () => {
+            throw new Error('runner should not be called for explicit env tokens');
+          },
+          (resolverEnv) => {
+            seen = { ...resolverEnv };
+            return '/usr/local/bin/gh';
+          },
+        );
+
+        expect(token).toBe('gho_secret');
+        expect(seen).not.toHaveProperty('CO_GH_TOKEN');
+        expect(seen).not.toHaveProperty('GH_TOKEN');
+        expect(seen).not.toHaveProperty('GITHUB_TOKEN');
+        expect(seen?.PATH).toBe('/usr/bin:/bin');
+        expect(env.PATH?.split(':')[0]).toBe('/usr/local/bin');
+      },
+    );
+
     it('resolveAndApplyDaemonGithubAuth: no token → env untouched, returns undefined', () => {
       const env: NodeJS.ProcessEnv = {};
       expect(resolveAndApplyDaemonGithubAuth(env, () => undefined)).toBeUndefined();
