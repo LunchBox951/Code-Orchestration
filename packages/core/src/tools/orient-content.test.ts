@@ -150,6 +150,7 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
       'co_pr_merge',
       'co_phase_update',
       'co_task_complete',
+      'co_mail_send',
     ]) {
       expect(out, `coordinator orient should name ${verb}`).toContain(verb);
     }

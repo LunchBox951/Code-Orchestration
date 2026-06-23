@@ -38,12 +38,17 @@ export function specLockApprovalKey(taskId: string): string {
   return SPEC_LOCK_APPROVAL_PREFIX + taskId;
 }
 
+/** True when `key` is in the reserved spec-lock approval namespace. */
+export function isSpecLockApprovalKey(key: string | undefined): boolean {
+  return key != null && key.startsWith(SPEC_LOCK_APPROVAL_PREFIX);
+}
+
 /**
  * Parse a spec-lock approval key back to its `taskId`, or `undefined` when `key` is not a
  * spec-lock key (e.g. an `issue-file:` key, or no key at all). An empty task id is rejected.
  */
 export function taskIdFromSpecLockApprovalKey(key: string | undefined): string | undefined {
-  if (key == null || !key.startsWith(SPEC_LOCK_APPROVAL_PREFIX)) return undefined;
+  if (key == null || !isSpecLockApprovalKey(key)) return undefined;
   const taskId = key.slice(SPEC_LOCK_APPROVAL_PREFIX.length);
   return taskId.length > 0 ? taskId : undefined;
 }

@@ -35,6 +35,7 @@ import {
   OPERATOR_IPC_TRANSCRIPT,
   applyApprovalLockSideEffect,
   buildHumanReviewVerdict,
+  isSpecLockApprovalKey,
   mintAvailableCoordinatorId,
   openMailStore,
   openRegistry,
@@ -789,7 +790,6 @@ export class OperatorIpcServer {
     const body = requireString(reply, 'body');
     const mail = this.openMail(this.projectId);
     let approval: DeliveredMail;
-    let response: DeliveredMail;
     try {
       // Approvals are operator-terminal (validateEnvelope: `approval` must be addressed to @operator),
       // so the approval always lives in @operator's inbox — the single place to resolve it from.
@@ -806,23 +806,21 @@ export class OperatorIpcServer {
         throw new Error(`operator IPC approve: mail seq=${approvalSeq} is already resolved.`);
       }
       approval = found;
-      response = mail.reply(approval, { type: MAIL_APPROVAL_RESPONSE, decision, subject, body });
+      // Issue #91 — bridge an approve of a `spec-lock:<taskId>` approval to the real lock path. Run
+      // the lock BEFORE recording the approval_response: if D3 refuses the lock, the operator action
+      // must remain unresolved/retryable instead of being consumed by a failed side effect.
+      if (isSpecLockApprovalKey(approval.idempotencyKey)) {
+        const specs = this.openSpec(this.projectId);
+        try {
+          applyApprovalLockSideEffect(specs, approval, decision);
+        } finally {
+          specs.close();
+        }
+      }
+      return mail.reply(approval, { type: MAIL_APPROVAL_RESPONSE, decision, subject, body });
     } finally {
       mail.close();
     }
-    // Issue #91 — bridge an approve of a `spec-lock:<taskId>` approval to the real lock path. The
-    // approval_response is recorded FIRST (above); we then run the shared core primitive, which goes
-    // through `lockSpec` (the D3 fuzzy-criteria gate is NEVER bypassed) and records the lock as
-    // @operator. A genuine D3 refusal propagates as the JSON-RPC error so the operator sees why the
-    // lock was refused (re-draft, then re-approve — the keyed approval lets the retry re-ask). A
-    // non-lock / declined approval is a strict no-op here (the primitive returns undefined).
-    const specs = this.openSpec(this.projectId);
-    try {
-      applyApprovalLockSideEffect(specs, approval, decision);
-    } finally {
-      specs.close();
-    }
-    return response;
   }
 
   /** Mark `recipient`'s informational mail at `seq` read, through the daemon's own store (single writer). */

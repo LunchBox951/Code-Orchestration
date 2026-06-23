@@ -1503,11 +1503,22 @@ describe('MNR #2 — mail writes execute in the daemon process against the daemo
     await expect(
       client.approve(approval.seq, { decision: 'approve', subject: 're', body: 'approved' }),
     ).rejects.toThrow(/refusing to lock 'task-fuzzy'/i);
+    await expect(
+      client.approve(approval.seq, { decision: 'approve', subject: 're', body: 'approved' }),
+    ).rejects.toThrow(/refusing to lock 'task-fuzzy'/i);
 
-    // The approval_response was recorded (recorded first), but the spec did NOT transition.
+    // The failed lock must not consume the operator action; the approval remains retryable.
     const verify = openSpecStore(projectId);
     specStores.push(verify);
     expect(verify.getSpec('task-fuzzy')?.state).toBe('draft');
+    const verifyMail = openMailStore(projectId);
+    mailStores.push(verifyMail);
+    expect(verifyMail.inbox(OPERATOR).find((m) => m.seq === approval.seq)?.resolved).toBe(false);
+    expect(
+      verifyMail
+        .inbox('coord-1')
+        .some((m) => m.type === MAIL_APPROVAL_RESPONSE && m.causationId === String(approval.seq)),
+    ).toBe(false);
   });
 
   it('a non-lock approval, approved via handleApprove, touches no spec', async () => {

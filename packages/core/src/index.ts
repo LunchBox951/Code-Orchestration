@@ -1142,6 +1142,7 @@ export { lockSpec } from './specs/lock-spec.js';
 // @operator). Adapters (packages/mcp) import these — they must not re-implement the bridge.
 export {
   specLockApprovalKey,
+  isSpecLockApprovalKey,
   taskIdFromSpecLockApprovalKey,
   buildSpecLockApprovalEnvelope,
   applyApprovalLockSideEffect,

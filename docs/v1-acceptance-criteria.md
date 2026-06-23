@@ -52,9 +52,9 @@ These are the top-level conditions that, all met, *are* v1.
   slings → finish → gated review-merge round-trip → land — over `FakePty` with **zero hand-stitched
   transitions** after lock; Stage 13 landed the operator [`sh1-runbook.md`](sh1-runbook.md) + the
   desktop Review view the live gate uses. A green `FakePty` run is **not** host-live evidence
-  (Principle 9). The spec-lock path is now public-CLI driven (`co spec lock`, PR #50) — the operator
-  approval gate, not an automation gap — so a clean host-live run can flip `SH-1` to `☑`; the host
-  run itself remains the only gate.
+  (Principle 9). The spec-lock path is now Mail-approval driven — the operator approval gate, not an
+  automation gap — so a clean host-live run can flip `SH-1` to `☑`; the host run itself remains the
+  only gate.
 - `SH-2` ☑ `co` reads all of its own state/specs/plans from its **own program-data** — no `.co/`
   dependency remains (Principle 12 — `pristine-repo`; Principle 14 — `recoverable`). Met: the
   read-side guard (`packages/core/src/tools/sh2-no-co-read.test.ts`) + write-side `assertRepoPristine`
@@ -154,8 +154,8 @@ These are the top-level conditions that, all met, *are* v1.
 - `RG-4` ◐ Acceptance criteria are the **cohesion contract**: the spec produces them, the plan
   structures them, the implementer targets them, tests encode them, the reviewer enforces them
   (Principle 10) — and they trace to this document. L6b lands the mechanism: the spec produces criteria
-  (`co_spec_draft` → operator `co_spec_lock`, **lock-gated by the validator**), the plan structures and
-  validates them (`co_plan_ingest` requires a locked spec, rejects spec/plan criteria drift, and
+  (`co_spec_draft` → operator spec-lock approval / `co_spec_lock`, **lock-gated by the validator**),
+  the plan structures and validates them (`co_plan_ingest` requires a locked spec, rejects spec/plan criteria drift, and
   mechanically rejects fuzzy criteria — no wired command / vacuous text), and the review-gate resolver
   can resolve them from the **locked spec record** (`resolveSpecRefFromStore`, never a `<TODO>`);
   see [`l6b-acceptance-criteria.md`](l6b-acceptance-criteria.md) (AC-L6b-2/3/6). Remaining: the live

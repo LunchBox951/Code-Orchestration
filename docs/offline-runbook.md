@@ -67,8 +67,8 @@ reachable remote you can push to).
 ## Operator procedure — run `co` on a local-only repo
 
 The app-first on-ramp makes this the same flow as any other run (the CLI is the power-user path).
-Spec lock uses the public `co spec lock <taskId>` CLI (PR #50) — the operator approval gate; an
-in-app Lock button is a remaining UX nicety, not a blocker.
+Spec lock uses the coordinator-sent Mail approval request; the public `co spec lock <taskId>` CLI
+remains the headless/debug fallback.
 
 1. `pnpm install && pnpm build`.
 2. `co doctor --live` → confirm `[ok] provider-compatibility` for both monitored providers
@@ -78,8 +78,9 @@ in-app Lock button is a remaining UX nicety, not a blocker.
    **Offline** automatically. The current desktop surface and `co status` do not yet render repo mode
    directly; capture it from the gated tool results below.
 5. **Launch a coordinator from a predesigned spec**; watch it cold-start in the Agents Console.
-6. Plan-with-operator → operator approves via `co spec lock <taskId>` → autonomous drive →
-   **PASS in the Review view** → confirm the gated **local** merge lands on the integration branch.
+6. Plan-with-operator → coordinator sends spec-lock approval mail → operator approves in Mail →
+   autonomous drive → **PASS in the Review view** → confirm the gated **local** merge lands on the
+   integration branch.
 7. Confirm the publishing surface is genuinely closed: attempt a `co_push` / `co_pr_merge` and verify
    each **fails loud** (not a silent no-op).
 

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   MAIL_APPROVAL,
+  MAIL_APPROVAL_RESPONSE,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
@@ -10,6 +11,8 @@ import {
 import {
   applyApprovalLockSideEffect,
   buildSpecLockApprovalEnvelope,
+  isSpecLockApprovalKey,
+  taskIdFromSpecLockApprovalKey,
 } from '../../specs/spec-lock-approval.js';
 import type { ToolSpec } from '../registry.js';
 import { deliveredMailSchema, toWireMail } from './wire.js';
@@ -72,6 +75,10 @@ type MailSendInput = z.infer<typeof mailSendInput>;
 const mailSendOutput = deliveredMailSchema.omit({ review_verdict: true });
 type MailSendOutput = z.infer<typeof mailSendOutput>;
 
+function isSpecLockApproval(mail: DeliveredMail): boolean {
+  return mail.type === MAIL_APPROVAL && taskIdFromSpecLockApprovalKey(mail.idempotencyKey) != null;
+}
+
 export const mailSendTool: ToolSpec<MailSendInput, MailSendOutput> = {
   name: 'co_mail_send',
   title: 'Send mail',
@@ -93,6 +100,32 @@ export const mailSendTool: ToolSpec<MailSendInput, MailSendOutput> = {
             `${ctx.agent}'s inbox (you must be its recipient).`,
         );
       }
+      if (input.lock_task_id != null) {
+        throw new Error(
+          'co_mail_send: lock_task_id is only valid for a new approval request; omit ' +
+            'in_reply_to and use the spec-lock request path.',
+        );
+      }
+      if (input.decision != null && input.type !== MAIL_APPROVAL_RESPONSE) {
+        throw new Error(
+          `co_mail_send: decision is only valid on an '${MAIL_APPROVAL_RESPONSE}' reply ` +
+            `(got type '${input.type}').`,
+        );
+      }
+      if (
+        input.type === MAIL_APPROVAL_RESPONSE &&
+        input.decision != null &&
+        isSpecLockApproval(answered)
+      ) {
+        if (ctx.specs == null) {
+          throw new Error(
+            'co_mail_send: cannot resolve a spec-lock approval_response without an injected spec store.',
+          );
+        }
+        // Run the lock bridge before recording the response. If D3 refuses the lock, the approval
+        // remains unresolved/retryable instead of consuming the operator action.
+        applyApprovalLockSideEffect(ctx.specs, answered, input.decision);
+      }
       const replyDraft = {
         type: input.type,
         subject: input.subject,
@@ -102,12 +135,6 @@ export const mailSendTool: ToolSpec<MailSendInput, MailSendOutput> = {
         ...(input.decision != null ? { decision: input.decision } : {}),
       };
       delivered = ctx.mail.reply(answered, replyDraft);
-      // Issue #91 — surface parity with the operator-IPC `handleApprove` bridge: an approve reply on a
-      // `spec-lock:<taskId>` approval runs the SAME shared lock primitive (D3 gate then recordLock as
-      // @operator). A non-lock / declined reply is a strict no-op (the primitive returns undefined).
-      if (input.decision != null && ctx.specs != null) {
-        applyApprovalLockSideEffect(ctx.specs, answered, input.decision);
-      }
     } else if (input.lock_task_id != null) {
       // Mint a self-identifying spec-lock REQUEST: the operator-approve of it bridges to the lock.
       if (input.type !== MAIL_APPROVAL) {
@@ -132,6 +159,12 @@ export const mailSendTool: ToolSpec<MailSendInput, MailSendOutput> = {
         buildSpecLockApprovalEnvelope({ from: ctx.agent, taskId: input.lock_task_id, spec }),
       );
     } else {
+      if (isSpecLockApprovalKey(input.idempotency_key)) {
+        throw new Error(
+          'co_mail_send: spec-lock idempotency keys are reserved; use lock_task_id to mint a ' +
+            'spec-lock approval request.',
+        );
+      }
       if (input.to == null || input.to.length === 0) {
         throw new Error(
           'co_mail_send: `to` is required for a new message (omit it only when replying via in_reply_to).',

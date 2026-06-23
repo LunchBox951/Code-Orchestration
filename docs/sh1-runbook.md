@@ -16,10 +16,11 @@ proof first if you have not already.
 > is not SH-1 evidence. The desktop app now owns and supervises the Conductor daemon, cold-starts
 > registered root coordinators, and drives the live self-drive loop through the app on-ramp; SH-1
 > still requires host-live evidence from real provider binaries and the desktop review gate.
-> Spec lock is the public `co spec lock <taskId>` CLI (PR #50) — the operator's approval gate,
-> running the same core `lockSpec` primitive as the `co_spec_lock` MCP tool; only an in-app Lock
-> button remains a UX nicety. Treat any manual tool calls that remain necessary during the host run
-> as evidence to capture, not as hidden automation.
+> Spec lock is the operator's Mail approval gate: the coordinator sends a keyed spec-lock approval
+> request, and the operator approves it in-app. The public `co spec lock <taskId>` CLI remains a
+> headless/debug fallback that runs the same core `lockSpec` primitive as the `co_spec_lock` MCP tool.
+> Treat any manual tool calls that remain necessary during the host run as evidence to capture, not
+> as hidden automation.
 >
 > **A green `fake` proof is likewise NOT SH-1 evidence.** The unified host-proof driver
 > `runProof({fake|claude|codex})` (`packages/mcp/src/conductor/host-proof.ts`) runs the same sequence
@@ -75,23 +76,23 @@ If you do not already have a coordinator for this run, start one from the deskto
 enter a coordinator name first. For the standard proof, click **Start from demo spec**; for a custom
 proof, use **Start session** with a small prompt such as "Draft a small doc clarification for co."
 
-Once the coordinator has drafted the spec and mailed you the task id:
+Once the coordinator has drafted the spec and sent a spec-lock approval request:
 
-1. Review the draft spec (`co spec <taskId>`) and confirm each acceptance criterion carries a
-   `verify` command.
-2. Lock it through the operator surface:
+1. Review the spec-lock approval mail. It carries the criteria preview the coordinator is asking you
+   to freeze; confirm each acceptance criterion carries a `verify` command.
+2. Approve the request in Mail. That approval runs the same core `lockSpec` primitive as
+   `co_spec_lock`, including the D3 criteria validator.
+3. If you are running headless or debugging without the app, the fallback CLI path is:
 
    ```sh
-   co spec <taskId>          # review the drafted spec content, then approve it:
-   co spec lock <taskId>     # public operator CLI (PR #50); same core lockSpec as the co_spec_lock MCP tool
+   co spec <taskId>          # review the drafted spec content
+   co spec lock <taskId>     # fallback operator CLI; same core lockSpec as the app approval bridge
    ```
 
-   `co spec lock` is the operator's approval gate — operator-only (an agent persona cannot lock a
-   spec), running the same core `lockSpec` primitive as the `co_spec_lock` MCP tool. This is the
-   intended human gate, **not** an automation gap: a host-live run can lock via this public CLI
-   command with no ad-hoc operator MCP tool call. Once locked, the spec id is fixed — record it.
+   A host-live run should prefer the Mail approval path. Once locked, the spec id is fixed — record
+   it.
 
-3. Note the **task id** (shown by `co spec <taskId>` after lock). You will need it in Step 6.
+4. Note the **task id**. You will need it in Step 6.
 
 ---
 
@@ -114,9 +115,9 @@ surfaces:
 If any of these steps require a manual operator/coordinator tool invocation because the live daemon
 does not yet select the next transition on its own, record that invocation in the evidence bundle.
 Those notes are not failures of the Stage 13 review view, but they are remaining SH-1 automation
-work before the acceptance criterion can be marked complete. The operator's `co spec lock` approval
-is **not** such a gap — it is the public-CLI human gate (PR #50), by design — so a run whose only
-operator actions are spec approval and the PASS verdict has no ad-hoc-tool-call gap and can flip SH-1.
+work before the acceptance criterion can be marked complete. The operator's spec-lock Mail approval
+is the intended human gate, by design, so a run whose only operator actions are spec approval and the
+PASS verdict has no ad-hoc-tool-call gap and can flip SH-1.
 
 ### Watching progress
 
@@ -237,7 +238,7 @@ marked met in `docs/v1-acceptance-criteria.md`:
 | "Conductor unavailable" shown in Reviews | The desktop app supervises the daemon — check the **daemon status badge** in the header and click **Retry** if it shows `failed` (no need to run `co-mcp serve` by hand). |
 | No agents appear in the Agents Console | Daemon did not tick, the spec is not yet locked, or the next transition still needs an explicit operator/coordinator tool call; run `co status` and `co spec <taskId>` to confirm |
 | Reviews view empty / no pending review | The gated merge was not queued yet; confirm or rerun the Lead/coordinator `co_merge` transition for the finished worktree and check the operator inbox for `review_request` |
-| "No locked spec" error from coordinator | Run `co spec <taskId>` to review, then `co spec lock <taskId>` (operator-only) before planning/merge review |
+| "No locked spec" error from coordinator | Check the operator inbox for a spec-lock approval request and approve it in Mail; if you are headless/debugging, fall back to `co spec <taskId>` then `co spec lock <taskId>` |
 | SH-2 guard fails | A `.co/` literal was introduced in production source; grep `packages/*/src` for the offending path and remove it |
 | Clicking PASS has no effect | The desktop app lost its connection to the daemon it supervises — check the header **daemon status badge**: wait if it shows `restarting`, or click **Retry** if it shows `failed`, then resubmit the verdict |
 | Gated merge blocked after PASS | Confirm the `review_response` was recorded, then rerun/resume the Lead's `co_merge` for the same branch/target |
