@@ -233,24 +233,28 @@ describe('AgentsConsoleVM — selectAgent', () => {
     expect(vm.state.selectedAgentId).toBe('a1');
   });
 
-  it('resets transcript to empty on selection', () => {
+  it('clears the displayed transcript on same-agent re-entry but preserves the generation (#148)', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail(tail('a1', 'some text'));
-    vm.selectAgent('a1'); // no-op (same id)
-    expect(vm.state.transcript).toBe('some text'); // unchanged — same agent
+    vm.setTranscriptTail(tail('a1', 'some text', 0, 2));
+    expect(vm.state.transcript).toBe('some text');
+    expect(vm.state.transcriptGeneration).toBe(2);
+    vm.selectAgent('a1'); // same id — re-entry
+    expect(vm.state.transcript).toBe(''); // history visibly clears until backfill
+    expect(vm.state.transcriptGeneration).toBe(2); // generation preserved, not zeroed
     vm.selectAgent(null);
     expect(vm.state.transcript).toBe('');
   });
 
-  it('resets transcript when switching to a different agent', () => {
+  it('resets transcript and zeroes the generation when switching to a different agent', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator'), makeAgent('a2', '@operator')]));
     vm.selectAgent('a1');
-    vm.setTranscriptTail(tail('a1', 'agent1 output'));
+    vm.setTranscriptTail(tail('a1', 'agent1 output', 0, 3));
     vm.selectAgent('a2');
     expect(vm.state.transcript).toBe('');
+    expect(vm.state.transcriptGeneration).toBe(0); // generation zeroed on agent change
     expect(vm.state.selectedAgentId).toBe('a2');
   });
 
@@ -288,14 +292,16 @@ describe('AgentsConsoleVM — selectAgent', () => {
     expect(listener).toHaveBeenCalledOnce();
   });
 
-  it('does not emit when selecting the same agentId again', () => {
+  it('emits on same-agent re-entry (history is wiped pending backfill) (#148)', () => {
     const vm = new AgentsConsoleVM();
     vm.update(liveObs([makeAgent('a1', '@operator')]));
     vm.selectAgent('a1');
+    vm.setTranscriptTail(tail('a1', 'some text', 0, 2));
     const listener = vi.fn();
     vm.subscribe(listener);
-    vm.selectAgent('a1'); // same — no-op
-    expect(listener).not.toHaveBeenCalled();
+    vm.selectAgent('a1'); // same id — re-entry wipes transcript and emits
+    expect(listener).toHaveBeenCalledOnce();
+    expect(vm.state.transcript).toBe('');
   });
 });
 
@@ -491,6 +497,54 @@ describe('AgentsConsoleVM — appendChunk', () => {
     vm.setTranscriptTail(tail('a1', oversize));
     expect(vm.state.transcript).toHaveLength(CONSOLE_TRANSCRIPT_MAX_CHARS);
     expect(vm.state.transcript.endsWith('X')).toBe(true);
+  });
+});
+
+describe('AgentsConsoleVM — agent re-entry preserves transcript history (#148)', () => {
+  it('a generation-advancing mid-stream live chunk arriving before backfill does not render a fragment', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('codex', '@operator')]));
+    vm.selectAgent('codex');
+
+    // A mid-stream alt-screen redraw of the recreated engine pane (generation jump, large absolute offset)
+    // races in before the backfill resolves. It must NOT paint a bare fragment; it signals a gap so a fresh
+    // backfill is re-issued, and leaves the displayed transcript empty.
+    const result = vm.appendChunk(push('codex', '<redraw fragment>', 600000, 3));
+    expect(result).toBe('gap');
+    expect(vm.state.transcript).toBe('');
+
+    // The backfill lands at the same generation, leading with the alt-screen-enter at its real offset.
+    const fullTail = '[?1049h...full backfilled tail with history';
+    vm.setTranscriptTail(tail('codex', fullTail, 5000, 3));
+    expect(vm.state.transcript).toBe(fullTail); // history preserved, not discarded
+    expect(vm.state.transcriptOffset).toBe(5000);
+  });
+
+  it('a generation-advancing chunk at offset 0 with no segments still applies directly', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('codex', '@operator')]));
+    vm.selectAgent('codex');
+
+    const result = vm.appendChunk(push('codex', 'start', 0, 3));
+    expect(result).toBe('applied');
+    expect(vm.state.transcript).toBe('start');
+  });
+
+  it('same-agent re-select keeps the last generation so a stale-gen chunk is ignored', () => {
+    const vm = new AgentsConsoleVM();
+    vm.update(liveObs([makeAgent('codex', '@operator')]));
+    vm.selectAgent('codex');
+    // Establish generation 3 via a backfill.
+    vm.setTranscriptTail(tail('codex', '[?1049hestablished', 0, 3));
+    expect(vm.state.transcriptGeneration).toBe(3);
+
+    // Re-enter the same agent — generation must be preserved (not zeroed).
+    vm.selectAgent('codex');
+    expect(vm.state.transcriptGeneration).toBe(3);
+
+    // A late chunk from an older generation must be ignored, not treated as a fresh start.
+    const result = vm.appendChunk(push('codex', 'stale-gen bytes', 0, 2));
+    expect(result).toBe('ignored');
   });
 });
 

@@ -142,7 +142,12 @@ export class AgentsConsoleVM {
   }
 
   selectAgent(agentId: string | null): void {
-    if (this._state.selectedAgentId === agentId) return;
+    // #148 — a same-agent re-entry still wipes the displayed transcript/segments/accumulator (history
+    // must visibly clear until the backfill lands) but PRESERVES `transcriptGeneration`. Zeroing the
+    // generation only when the agentId actually changes prevents a same-agent re-select from transiently
+    // advertising generation 0 — a stale value that would let a late, mid-stream live chunk masquerade as
+    // a generation jump and stomp the backfill before it resolves.
+    const sameAgent = this._state.selectedAgentId === agentId;
     const selectedStatus =
       agentId != null
         ? (this._state.roster.find((r) => r.agentId === agentId)?.status ?? null)
@@ -152,7 +157,7 @@ export class AgentsConsoleVM {
       selectedAgentId: agentId,
       selectedStatus,
       transcript: '',
-      transcriptGeneration: 0,
+      transcriptGeneration: sameAgent ? this._state.transcriptGeneration : 0,
       transcriptOffset: 0,
     };
     this.transcriptSegments = [];
@@ -189,9 +194,18 @@ export class AgentsConsoleVM {
     const generation = chunk.generation ?? 0;
     if (generation < this._state.transcriptGeneration) return 'ignored';
     if (generation > this._state.transcriptGeneration) {
+      // #148 — a generation-advancing chunk that arrives into a post-select empty state (no segments) at a
+      // non-zero absolute offset is a mid-stream alt-screen redraw of a recreated engine pane (e.g. codex's
+      // alt-screen TUI). Applying it alone would write a bare fragment with no leading `ESC[?1049h` and
+      // discard the in-flight backfill. Bump the generation and signal a gap so app-shell re-issues a fresh
+      // backfill (which leads with the alt-screen enter at the correct offset) to drive the pane. A chunk at
+      // offset 0 is a true stream start and is still applied directly; the steady-state (non-empty segments)
+      // generation jump keeps the original clear-and-apply behaviour.
+      const hadSegments = this.transcriptSegments.length > 0;
       this.transcriptSegments = [];
       this.transcriptAccumulator.clear();
       this._state = { ...this._state, transcriptGeneration: generation };
+      if (!hadSegments && chunk.offset > 0) return 'gap';
     }
     let offset = chunk.offset;
     let text = chunk.chunk;

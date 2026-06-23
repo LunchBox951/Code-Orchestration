@@ -1089,6 +1089,59 @@ describe('createAppShell — agentsConsole VM wiring', () => {
     });
   });
 
+  it('re-entry: a racing generation-advancing mid-stream chunk triggers a fresh backfill (#148)', async () => {
+    const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
+    const client = {
+      connected: false,
+      connect: vi.fn().mockResolvedValue(false),
+      observe: vi.fn().mockResolvedValue(staticObs),
+      onTick: vi.fn().mockReturnValue(() => {}),
+      onTranscript: vi.fn().mockImplementation((cb: (t: OperatorIpcTranscript) => void) => {
+        transcriptListeners.push(cb);
+        return () => {};
+      }),
+      transcript: vi
+        .fn()
+        .mockResolvedValueOnce(transcriptTail('codex', '[?1049hbase tail', 5000, 2))
+        .mockResolvedValueOnce(transcriptTail('codex', '[?1049hre-entry tail', 5000, 2))
+        .mockResolvedValueOnce(transcriptTail('codex', '[?1049hfresh full tail', 7000, 3)),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as OperatorIpcClient;
+
+    const onAgentsConsoleState = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      onAgentsConsoleState,
+    });
+    await shell.start();
+
+    shell.selectAgent('codex');
+    await vi.waitFor(() => {
+      expect(client.transcript).toHaveBeenCalledTimes(1);
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        transcript: '[?1049hbase tail',
+        transcriptGeneration: 2,
+      });
+    });
+
+    // Re-enter the same agent: the VM wipes the displayed transcript but PRESERVES generation 2 and
+    // re-issues a backfill (call #2). Then a recreated-pane redraw for the next turn (generation 3, large
+    // offset) races in before that backfill resolves; the preserved generation makes it a genuine jump, so
+    // the VM must signal a gap that triggers a fresh backfill (call #3) rather than painting the fragment.
+    shell.selectAgent('codex');
+    transcriptListeners[0]?.(transcriptPush('codex', '<mid-stream redraw>', 600000, 3));
+
+    await vi.waitFor(() => {
+      expect(client.transcript).toHaveBeenCalledTimes(3);
+      expect(onAgentsConsoleState.mock.calls.at(-1)?.[0]).toMatchObject({
+        transcript: '[?1049hfresh full tail',
+        transcriptOffset: 7000,
+      });
+    });
+  });
+
   it('live append: newer transcript generation resets same-offset stale selected output', async () => {
     const transcriptListeners: Array<(t: OperatorIpcTranscript) => void> = [];
     const client = {
