@@ -153,6 +153,28 @@ export interface MergeTeardown {
 }
 
 /**
+ * The structured outcome of {@link CoReviewGate.redriveWaitingReviewer} (#133). A daemon-tick backstop
+ * (and the lead's manual co_merge re-call) drains a `kind:'waiting'` reviewer seat through the SAME
+ * policy+record+spawn path the trigger uses. The discriminant names exactly WHY a redrive did or did not
+ * launch, so the daemon can mirror it into its tick outcome without re-deriving the reason.
+ *
+ *   - `launched`    — capacity recovered: the seat re-resolved to a `placed` placement, the new
+ *                     placement was recorded, the reviewer kickoff seeded, and the live spawn fired.
+ *   - `still-waiting` — re-resolution stayed `waiting` (still maxed); nothing was launched, no churn.
+ *   - `no-op`       — a NEGATIVE guard short-circuited before any re-resolution (no dispatch wired, the
+ *                     review is unknown / already has a recorded verdict / is not the active-serialized
+ *                     branch, or the seat already has a `placed` placement — already redriven). `reason`
+ *                     carries the specific guard for observability (never a silent drop — Principle 9).
+ */
+export interface RedriveReviewerOutcome {
+  readonly kind: 'launched' | 'still-waiting' | 'no-op';
+  /** The reviewer seat agent id (`<role>@<reviewId>`) when one was resolved; absent on an early no-op. */
+  readonly agent?: string;
+  /** A short human-readable reason, present on `no-op` (which guard) and `still-waiting` (why maxed). */
+  readonly reason?: string;
+}
+
+/**
  * The L7 placement-SPAWN seam (AC-L5-11). The review gate RESOLVES + RECORDS a reviewer placement
  * (`placement.decided`) over injected inputs (pure decision), while `co_sling` records a slung-child
  * placement; LAUNCHING either placed agent's live turn is L7. This is a TYPED boundary — mirroring
@@ -509,6 +531,121 @@ export class CoReviewGate implements FinishReviewGate {
   /** Await live reviewer spawns fired by the trigger path. Sync callers may ignore this. */
   async drainSpawns(): Promise<void> {
     await Promise.all(this.pendingSpawns);
+  }
+
+  /**
+   * #133 — DURABLE RE-DRIVE for a `kind:'waiting'` reviewer seat. `co_merge` creates the review gate +
+   * review_id but, under provider capacity pressure, records a `waiting` placement and launches NO
+   * reviewer; the trigger's only existing recovery is a MANUAL lead re-call. This is the daemon-tick
+   * backstop that re-evaluates the SAME placement resolution once capacity recovers, so a worktree-less
+   * waiting reviewer seat (invisible to the cold-rewake path) is no longer stranded at the gate. It runs
+   * the SAME policy+record+spawn helper as the trigger ({@link recordReviewerPlacement}) — byte-identical
+   * to the lead re-call — so the two paths can never drift.
+   *
+   * NEGATIVE GUARDS (each a `no-op`, never a throw — Principle 9): no dispatch store wired; the
+   * `reviewId` has no recorded review request; the review already has a recorded verdict (resolved); the
+   * review is no longer the active-serialized branch for its target; or the seat already carries a
+   * `placed` placement (already redriven — the idempotency guard against a concurrent tick OR a lead
+   * re-call double-launching). On a clean re-resolution it returns `launched` (capacity recovered: the
+   * seat flipped to `placed`, the placement was recorded ONCE, the kickoff seeded, the spawn fired) or
+   * `still-waiting` (still maxed — no churn, no new launch). IDEMPOTENT across repeated invocations: the
+   * placed-seat idempotency guard makes a second call a `no-op` (single placement append, single launch).
+   *
+   * The live spawn is fire-and-forget (pushed onto {@link pendingSpawns}); async callers await
+   * {@link drainSpawns} to surface a launch failure. `projectId` is the review's project — the daemon
+   * (and the tool) pass the project whose stores back this gate; the spawn launches into it.
+   */
+  redriveWaitingReviewer(reviewId: string, projectId: string): RedriveReviewerOutcome {
+    if (this.deps.dispatch == null) {
+      return { kind: 'no-op', reason: 'no dispatch store wired' };
+    }
+    const request = this.deps.reviews.getReviewRequestById(reviewId);
+    if (request == null) {
+      return { kind: 'no-op', reason: `no review request recorded for reviewId '${reviewId}'` };
+    }
+    if (request.reviewerKind !== 'agent') {
+      return { kind: 'no-op', reason: `review '${reviewId}' is a human review (no reviewer seat)` };
+    }
+    // NEGATIVE: a recorded verdict for THIS review means the reviewer already reported — nothing to drive.
+    const verdict = this.deps.reviews.getVerdict(request.target, request.branch, request.scope);
+    if (verdict?.reviewId === reviewId) {
+      return { kind: 'no-op', reason: `review '${reviewId}' already has a recorded verdict` };
+    }
+    // NEGATIVE: only the ACTIVE-serialized branch may be driven (a stale seat must never re-launch).
+    if (this.deps.reviews.activeSerialized(request.target) !== request.branch) {
+      return {
+        kind: 'no-op',
+        reason: `'${request.branch}' is no longer the active-serialized branch for '${request.target}'`,
+      };
+    }
+
+    const req: ReviewTriggerRequest = {
+      reviewId: request.reviewId,
+      target: request.target,
+      branch: request.branch,
+      requestedBy: request.requestedBy,
+      scope: request.scope,
+      projectId,
+      ...(request.specRef.kind === 'criteria'
+        ? { specRef: `criteria:${request.specRef.ref}` }
+        : {}),
+    };
+    // IDEMPOTENCY GUARD (the placement store is NOT a transactional queue): a compatible `placed`
+    // placement already exists ⇒ this seat was redriven by a prior tick or the lead re-call — a re-drive
+    // would double-launch. Refuse before re-resolution so concurrent ticks cannot both record + launch.
+    const seatPlacements = this.deps.dispatch
+      .readPlacements()
+      .filter((placement) =>
+        isReviewerPlacementForReview(placement.agent, placement.role, reviewId),
+      )
+      .filter((placement) => placementMatchesReview(placement, req, request.scope));
+    const alreadyPlaced = seatPlacements.find((placement) => placement.kind === 'placed');
+    if (alreadyPlaced != null) {
+      return {
+        kind: 'no-op',
+        agent: alreadyPlaced.agent,
+        reason: `reviewer seat '${alreadyPlaced.agent}' already placed (already redriven)`,
+      };
+    }
+    if (!seatPlacements.some((placement) => placement.kind === 'waiting')) {
+      return {
+        kind: 'no-op',
+        reason: `no waiting reviewer seat recorded for review '${reviewId}'`,
+      };
+    }
+
+    // Re-run the SAME placement resolution the trigger uses — record + spawn are byte-identical to the
+    // lead re-call (single authority). Detect the outcome by the seat's placed-count delta afterwards.
+    const placedBefore = this.deps.dispatch
+      .readPlacements()
+      .filter(
+        (placement) =>
+          isReviewerPlacementForReview(placement.agent, placement.role, reviewId) &&
+          placement.kind === 'placed',
+      ).length;
+    const config = this.deps.config ?? openConfigStore();
+    const ownsConfig = this.deps.config === undefined;
+    try {
+      this.recordReviewerPlacement(req, request.scope, projectId, config);
+    } finally {
+      if (ownsConfig) config.close();
+    }
+    const placedAfter = this.deps.dispatch
+      .readPlacements()
+      .filter(
+        (placement) =>
+          isReviewerPlacementForReview(placement.agent, placement.role, reviewId) &&
+          placement.kind === 'placed',
+      );
+    if (placedAfter.length > placedBefore) {
+      const placed = placedAfter.at(-1)!;
+      return { kind: 'launched', agent: placed.agent };
+    }
+    return {
+      kind: 'still-waiting',
+      ...(seatPlacements[0]?.agent != null ? { agent: seatPlacements[0].agent } : {}),
+      reason: `reviewer placement for '${reviewId}' re-resolved to waiting (still at capacity)`,
+    };
   }
 
   /**

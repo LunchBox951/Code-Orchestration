@@ -3025,6 +3025,265 @@ describe('CoReviewGate.fireSpawn — spawn errors are surfaced, never silent (Pr
   });
 });
 
+// ── #133: durable re-drive for a WAITING reviewer seat (the daemon-tick + lead re-call shared path) ──
+describe('CoReviewGate.redriveWaitingReviewer (#133)', () => {
+  const REDRIVE_REVIEW_ID = 'rev-redrive';
+
+  /** A recording spawn gate (mirrors the EngineReviewerSpawnGate seam) — counts launches per agent. */
+  function recordingSpawnGate(): {
+    spawn: (projectId: string, record: { agent: string }) => Promise<void>;
+    launches: string[];
+  } {
+    const launches: string[] = [];
+    return {
+      launches,
+      spawn: (_projectId, record) => {
+        launches.push(record.agent);
+        return Promise.resolve();
+      },
+    };
+  }
+
+  /** Seed a healthy provider snapshot so the dispatch policy re-resolves to 'placed'. */
+  function seedCapacity(dispatch: DispatchStore): void {
+    dispatch.recordSnapshot({
+      provider: 'claude',
+      account: accountForProvider('claude'),
+      available: true,
+      source: 'test',
+      sampled_at: '1970-01-01T00:00:00.000Z',
+      windows: [{ kind: 'five_hour', used_pct: 1, reset_at: '1970-01-01T05:00:00.000Z' }],
+    });
+  }
+
+  /**
+   * Stand up a review with a recorded `waiting` reviewer placement (NO usage ⇒ the trigger records a
+   * waiting seat + launches nothing), returning the open stores + the project id. The branch is the
+   * active-serialized one (the trigger acquired the slot) and no verdict is recorded.
+   */
+  function seedWaitingReviewer(projectId: string): {
+    reviews: ReviewStore;
+    worktrees: WorktreeStore;
+    dispatch: DispatchStore;
+    mail: MailStore;
+  } {
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const mail = openMailStore(projectId);
+    mailStores.push(mail);
+    const dispatch = openDispatchStore(projectId);
+    mailStores.push({ close: () => dispatch.close() } as unknown as MailStore);
+    const setupGate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      resolveMode: () => 'offline',
+      config: fakeConfig(),
+      dispatch,
+      nowMs: 0,
+    });
+    setupGate.triggerReview({
+      reviewId: REDRIVE_REVIEW_ID,
+      target: TARGET,
+      branch: BRANCH,
+      requestedBy: 'lead-1',
+      scope: 'pr_merge',
+      projectId,
+    });
+    expect(dispatch.readPlacements(`reviewer:pr@${REDRIVE_REVIEW_ID}`).map((p) => p.kind)).toEqual([
+      'waiting',
+    ]);
+    return { reviews, worktrees, dispatch, mail };
+  }
+
+  it('flips a waiting seat to placed, fires the spawn ONCE, and seeds the reviewer kickoff', async () => {
+    const projectId = 'p-redrive-happy';
+    const { reviews, worktrees, dispatch, mail } = seedWaitingReviewer(projectId);
+    seedCapacity(dispatch);
+    const spawnGate = recordingSpawnGate();
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      resolveMode: () => 'offline',
+      config: fakeConfig(),
+      dispatch,
+      nowMs: 1,
+      reviewerSpawnGate: spawnGate,
+    });
+
+    const outcome = gate.redriveWaitingReviewer(REDRIVE_REVIEW_ID, projectId);
+    await gate.drainSpawns();
+
+    expect(outcome.kind).toBe('launched');
+    expect(outcome.agent).toBe(`reviewer:pr@${REDRIVE_REVIEW_ID}`);
+    // The SAME seat flipped waiting → placed (single placement append; no second waiting row).
+    expect(dispatch.readPlacements(`reviewer:pr@${REDRIVE_REVIEW_ID}`).map((p) => p.kind)).toEqual([
+      'waiting',
+      'placed',
+    ]);
+    // The spawn fired EXACTLY once through the single launch authority.
+    expect(spawnGate.launches).toEqual([`reviewer:pr@${REDRIVE_REVIEW_ID}`]);
+    // The reviewer kickoff was seeded (idempotencyKey reviewer-kickoff:<reviewId>).
+    const kickoff = mail.outstanding(`reviewer:pr@${REDRIVE_REVIEW_ID}`);
+    expect(kickoff).toHaveLength(1);
+    expect(kickoff[0]!.subject).toMatch(/Review requested/);
+  });
+
+  it('is IDEMPOTENT — a repeated re-drive does not double-launch or append a second placement', async () => {
+    const projectId = 'p-redrive-idempotent';
+    const { reviews, worktrees, dispatch, mail } = seedWaitingReviewer(projectId);
+    seedCapacity(dispatch);
+    const spawnGate = recordingSpawnGate();
+    const makeGate = (): CoReviewGate =>
+      new CoReviewGate({
+        reviews,
+        worktrees,
+        mail,
+        resolveMode: () => 'offline',
+        config: fakeConfig(),
+        dispatch,
+        nowMs: 1,
+        reviewerSpawnGate: spawnGate,
+      });
+
+    const first = makeGate();
+    expect(first.redriveWaitingReviewer(REDRIVE_REVIEW_ID, projectId).kind).toBe('launched');
+    await first.drainSpawns();
+
+    // A SECOND tick (or a concurrent lead re-call) must be a no-op — the seat is already placed.
+    const second = makeGate();
+    const secondOutcome = second.redriveWaitingReviewer(REDRIVE_REVIEW_ID, projectId);
+    await second.drainSpawns();
+
+    expect(secondOutcome.kind).toBe('no-op');
+    expect(secondOutcome.reason).toMatch(/already placed/);
+    // Single placement append (the one 'placed' row), single launch — no thundering herd / double-launch.
+    expect(dispatch.readPlacements(`reviewer:pr@${REDRIVE_REVIEW_ID}`).map((p) => p.kind)).toEqual([
+      'waiting',
+      'placed',
+    ]);
+    expect(spawnGate.launches).toEqual([`reviewer:pr@${REDRIVE_REVIEW_ID}`]);
+  });
+
+  it('stays still-waiting (no launch, no churn) while the provider is still maxed', async () => {
+    const projectId = 'p-redrive-maxed';
+    const { reviews, worktrees, dispatch, mail } = seedWaitingReviewer(projectId);
+    // NO capacity seeded ⇒ the re-resolution stays waiting.
+    const spawnGate = recordingSpawnGate();
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      resolveMode: () => 'offline',
+      config: fakeConfig(),
+      dispatch,
+      nowMs: 1,
+      reviewerSpawnGate: spawnGate,
+    });
+
+    const outcome = gate.redriveWaitingReviewer(REDRIVE_REVIEW_ID, projectId);
+    await gate.drainSpawns();
+
+    expect(outcome.kind).toBe('still-waiting');
+    expect(spawnGate.launches).toEqual([]);
+    // No churn: the original single waiting row is unchanged (the dedupe guard suppresses a re-append).
+    expect(dispatch.readPlacements(`reviewer:pr@${REDRIVE_REVIEW_ID}`).map((p) => p.kind)).toEqual([
+      'waiting',
+    ]);
+  });
+
+  it('NEGATIVE: a no-op once a verdict is recorded for the review (already resolved)', async () => {
+    const projectId = 'p-redrive-verdict';
+    const { reviews, worktrees, dispatch, mail } = seedWaitingReviewer(projectId);
+    seedCapacity(dispatch);
+    // The reviewer reported: record a verdict for THIS reviewId.
+    reviews.recordVerdict({
+      reviewId: REDRIVE_REVIEW_ID,
+      target: TARGET,
+      branch: BRANCH,
+      scope: 'pr_merge',
+      reviewer: `reviewer:pr@${REDRIVE_REVIEW_ID}`,
+      verdict: 'ISSUES',
+      blockers: [{ summary: 'a blocker' }],
+      suggestions: [],
+    });
+    const spawnGate = recordingSpawnGate();
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      resolveMode: () => 'offline',
+      config: fakeConfig(),
+      dispatch,
+      nowMs: 1,
+      reviewerSpawnGate: spawnGate,
+    });
+
+    const outcome = gate.redriveWaitingReviewer(REDRIVE_REVIEW_ID, projectId);
+    await gate.drainSpawns();
+
+    expect(outcome.kind).toBe('no-op');
+    expect(outcome.reason).toMatch(/already has a recorded verdict/);
+    expect(spawnGate.launches).toEqual([]);
+    expect(dispatch.readPlacements(`reviewer:pr@${REDRIVE_REVIEW_ID}`).map((p) => p.kind)).toEqual([
+      'waiting',
+    ]);
+  });
+
+  it('NEGATIVE: a no-op when the review is no longer the active-serialized branch for its target', async () => {
+    const projectId = 'p-redrive-stale';
+    const { reviews, worktrees, dispatch, mail } = seedWaitingReviewer(projectId);
+    seedCapacity(dispatch);
+    // Release the reviewed branch's slot and hand the target to another branch (this seat is now stale).
+    releaseMergeSlot(reviews, TARGET, BRANCH);
+    acquireMergeSlot(reviews, TARGET, 'co/other-branch');
+    expect(reviews.activeSerialized(TARGET)).toBe('co/other-branch');
+    const spawnGate = recordingSpawnGate();
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      mail,
+      resolveMode: () => 'offline',
+      config: fakeConfig(),
+      dispatch,
+      nowMs: 1,
+      reviewerSpawnGate: spawnGate,
+    });
+
+    const outcome = gate.redriveWaitingReviewer(REDRIVE_REVIEW_ID, projectId);
+    await gate.drainSpawns();
+
+    expect(outcome.kind).toBe('no-op');
+    expect(outcome.reason).toMatch(/no longer the active-serialized branch/);
+    expect(spawnGate.launches).toEqual([]);
+  });
+
+  it('NEGATIVE: a no-op for an unknown reviewId (no review request recorded)', () => {
+    const projectId = 'p-redrive-unknown';
+    const reviews = openReviewStore(projectId);
+    reviewStores.push(reviews);
+    const worktrees = openWorktreeStore(projectId);
+    worktreeStores.push(worktrees);
+    const dispatch = openDispatchStore(projectId);
+    mailStores.push({ close: () => dispatch.close() } as unknown as MailStore);
+    const gate = new CoReviewGate({
+      reviews,
+      worktrees,
+      resolveMode: () => 'offline',
+      config: fakeConfig(),
+      dispatch,
+      nowMs: 0,
+      reviewerSpawnGate: recordingSpawnGate(),
+    });
+    const outcome = gate.redriveWaitingReviewer('rev-does-not-exist', projectId);
+    expect(outcome.kind).toBe('no-op');
+    expect(outcome.reason).toMatch(/no review request recorded/);
+  });
+});
+
 // ── #135 nit: the human-path mail guard fails loud (Principle 9) ─────────────────────────────────
 describe('CoReviewGate.triggerReview — #135 human-path mail guard', () => {
   it('a human review without locked criteria fails loud and records nothing', () => {

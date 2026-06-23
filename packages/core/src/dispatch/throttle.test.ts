@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { Provider } from './usage-source.js';
 import type {
   Placement,
@@ -621,5 +623,24 @@ describe('determinism', () => {
     const r1 = resolveDispatch(decision, candidates, opts);
     const r2 = resolveDispatch(decision, candidates, opts);
     expect(r1).toEqual(r2);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// canResume is no longer DEAD (#133): the daemon's waiting-reviewer re-drive is its first real caller.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('canResume — has a real (non-test) production caller (#133)', () => {
+  it('the daemon re-drive backstop imports + calls canResume to pre-gate a waiting reviewer drain', () => {
+    // The documented predicate was previously reachable only from tests (a DEAD seam). The #133
+    // daemon-tick reviewer re-drive (packages/mcp/src/conductor/daemon.ts) is its first real caller:
+    // it gates the per-tick drain on canResume so a still-maxed window never churns a placement.
+    const daemonSrc = readFileSync(
+      fileURLToPath(new URL('../../../mcp/src/conductor/daemon.ts', import.meta.url)),
+      'utf8',
+    );
+    expect(daemonSrc).toMatch(/canResume/);
+    // It is a genuine CALL (cheap pre-gate), not merely an import re-export.
+    expect(daemonSrc).toMatch(/canResume\(/);
   });
 });

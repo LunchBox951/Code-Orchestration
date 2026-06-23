@@ -33,9 +33,14 @@
  * engine is never hidden behind it.
  */
 import {
+  CoReviewGate,
   OPERATOR,
+  candidatesFromStore,
+  canResume,
+  defaultProviderAccounts,
   openDispatchStore,
   openMailStore,
+  openReviewStore,
   openRosterStore,
   openSessionStore,
   openWorktreeStore,
@@ -45,10 +50,14 @@ import {
   type DeliveredMail,
   type DispatchStore,
   type MailStore,
+  type PlacementRecord,
   type Provider,
+  type ProviderAccount,
   type ProjectId,
   type ReconcileLoop,
   type ReconcileTickResult,
+  type ReviewerSpawnGate,
+  type ReviewStore,
   type RosterStore,
   type SessionRecord,
   type SessionStore,
@@ -109,6 +118,30 @@ export interface ConductorDaemonDeps {
   readonly openMail?: (projectId: ProjectId) => MailStore;
   /** Opens dispatch placement records so cold-started agents honor their recorded provider. */
   readonly openDispatch?: (projectId: ProjectId) => DispatchStore;
+  /**
+   * #133 — opens the review store so the daemon can drain `kind:'waiting'` reviewer seats (read the
+   * review request + verdict + active-serialized branch). Default: {@link openReviewStore}.
+   */
+  readonly openReviews?: (projectId: ProjectId) => ReviewStore;
+  /**
+   * #133 — the SAME single launch authority the reviewer trigger uses ({@link EngineReviewerSpawnGate} →
+   * `engine.ensureHosted`). When wired, the daemon-tick reviewer re-drive launches a recovered placement
+   * through it — NEVER a second dispatcher. Lazy (a thunk) because the gate wraps the engine, exactly as
+   * the engine's own `reviewerSpawnGate` seam in `host.ts`. Absent ⇒ the re-drive records but never
+   * launches (mirrors the headless trigger path; no thundering herd against a missing gate).
+   */
+  readonly reviewerSpawnGate?: () => ReviewerSpawnGate | undefined;
+  /**
+   * #133 — provider-account candidates the cheap `canResume` pre-gate ranks over (default
+   * {@link defaultProviderAccounts}). Injectable for headless tests.
+   */
+  readonly reviewerAccounts?: readonly ProviderAccount[];
+  /**
+   * #133 — THUNDERING-HERD CAP: at most this many waiting reviewer seats are re-driven per tick
+   * (deterministic per-seat ordering; one re-resolution per seat per tick). Must be a positive integer.
+   * Default {@link DEFAULT_MAX_REVIEWER_REDRIVES_PER_TICK}.
+   */
+  readonly maxReviewerRedrivesPerTick?: number;
   /** Resolve the isolated CODEX_HOME for a cold-started Codex identity. Host-live passes its isolated-home seam. */
   readonly codexHomeFor?: (agent: string) => string;
   /**
@@ -169,6 +202,17 @@ export interface DaemonTickOutcome {
    * reconciliation.
    */
   readonly coldCandidates: readonly string[];
+  /**
+   * #133 — waiting reviewer seats RE-DRIVEN this tick: each seat whose recorded `kind:'waiting'`
+   * placement was re-evaluated once capacity recovered and flipped to `placed`, launching the reviewer
+   * through the single launch authority ({@link ConductorEngine.ensureHosted}) + seeding its kickoff +
+   * nudging the lead. Empty on every tick that launches no reviewer (the common case: still maxed, no
+   * waiting seat, or `canResume` false). Capped at {@link ConductorDaemonDeps.maxReviewerRedrivesPerTick}
+   * per tick (no thundering herd). Each agent id is the reviewer seat (`<role>@<reviewId>`).
+   */
+  readonly reviewersRedriven: readonly string[];
+  /** #133 — reviewer re-drive launch failures surfaced this tick; other seats still drain. */
+  readonly reviewerRedriveErrors: readonly LaunchError[];
   /** The engine's ≤1-turn outcome, or `null` when no candidate was eligible. */
   readonly cycle: CycleOutcome | null;
   /** The agent the engine selected + drove this tick, or `null` when none was eligible. */
@@ -194,6 +238,13 @@ export interface LaunchError {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+/**
+ * #133 — the default THUNDERING-HERD cap for waiting-reviewer re-drive: at most this many seats flip from
+ * `waiting` to `placed` (and launch) per tick. Small + deterministic so a recovered capacity window
+ * cannot stampede the launch authority; the rest drain on subsequent ticks.
+ */
+export const DEFAULT_MAX_REVIEWER_REDRIVES_PER_TICK = 2;
 
 // TODO(host-live): duplicate-active-session is detected by regex-matching the error message, which
 // is brittle across provider/store wording changes. Replace with a typed/sentinel error once the
@@ -222,6 +273,10 @@ export class ConductorDaemon {
   private readonly openWorktrees: (projectId: ProjectId) => WorktreeStore;
   private readonly openMail: (projectId: ProjectId) => MailStore;
   private readonly openDispatch: (projectId: ProjectId) => DispatchStore;
+  private readonly openReviews: (projectId: ProjectId) => ReviewStore;
+  private readonly reviewerSpawnGate: (() => ReviewerSpawnGate | undefined) | undefined;
+  private readonly reviewerAccounts: readonly ProviderAccount[];
+  private readonly maxReviewerRedrivesPerTick: number;
   private readonly codexHomeFor: ((agent: string) => string) | undefined;
   private readonly isSkipped: (projectId: ProjectId, agent: string) => boolean;
   private tickCount = 0;
@@ -254,6 +309,17 @@ export class ConductorDaemon {
     this.openWorktrees = deps.openWorktrees ?? openWorktreeStore;
     this.openMail = deps.openMail ?? openMailStore;
     this.openDispatch = deps.openDispatch ?? openDispatchStore;
+    this.openReviews = deps.openReviews ?? openReviewStore;
+    this.reviewerSpawnGate = deps.reviewerSpawnGate;
+    this.reviewerAccounts = deps.reviewerAccounts ?? defaultProviderAccounts();
+    const maxRedrives = deps.maxReviewerRedrivesPerTick ?? DEFAULT_MAX_REVIEWER_REDRIVES_PER_TICK;
+    if (!Number.isInteger(maxRedrives) || maxRedrives < 1) {
+      throw new Error(
+        `ConductorDaemon: maxReviewerRedrivesPerTick must be a positive integer, got ${maxRedrives} ` +
+          '(the per-tick reviewer re-drive cap; Principle 9 — fail loud).',
+      );
+    }
+    this.maxReviewerRedrivesPerTick = maxRedrives;
     this.codexHomeFor = deps.codexHomeFor;
     this.isSkipped = deps.isSkipped ?? (() => false);
   }
@@ -373,6 +439,10 @@ export class ConductorDaemon {
     const { launched: coldStarted, errors: coldStartErrors } =
       await this.coldStartRootCoordinators();
     const { launched: coldRewoke, errors: coldRewakeErrors } = await this.coldRewakeNonRootAgents();
+    // Step 0b (#133): re-drive WAITING reviewer seats whose review gate was stranded under capacity
+    // pressure (co_merge recorded `waiting` + launched no reviewer; nothing re-drives it). Like step 0a
+    // this launches through the SAME single launch authority — capped per tick (no thundering herd).
+    const { reviewersRedriven, reviewerRedriveErrors } = await this.drainWaitingReviewers();
 
     const candidates = this.buildCandidates();
     // Step 1a (AC-S15-2 / ST-2): offer the cold recovered NON-root agents to the SAME single launch
@@ -412,6 +482,8 @@ export class ConductorDaemon {
       coldRewakeErrors,
       reWarmed,
       reWarmErrors,
+      reviewersRedriven,
+      reviewerRedriveErrors,
       coldCandidates,
       cycle,
       selected: cycle?.hosted.identity.agent ?? null,
@@ -469,6 +541,108 @@ export class ConductorDaemon {
       }
     }
     return { launched, errors };
+  }
+
+  /**
+   * #133 — DRAIN waiting reviewer seats. `co_merge` creates the review gate + review_id but, under
+   * provider capacity pressure, records a `kind:'waiting'` placement and launches NO reviewer; the only
+   * existing recovery is a MANUAL lead re-call of `co_merge` (worktree-less, so the cold-rewake path
+   * cannot see it). This is the backstop: each tick, discover the waiting reviewer seats whose review is
+   * still the active-serialized branch and has no recorded verdict, gate cheaply on {@link canResume}
+   * (its FIRST real caller), and re-run the SAME placement resolution via
+   * {@link CoReviewGate.redriveWaitingReviewer} — byte-identical to the lead re-call, launching a flipped
+   * `placed` seat through the SAME single launch authority (the injected {@link reviewerSpawnGate} →
+   * `EngineReviewerSpawnGate` → `engine.ensureHosted`), seeding its kickoff + nudging the lead.
+   *
+   * THUNDERING-HERD SAFETY (required): the discovered seats are sorted DETERMINISTICALLY (by reviewId)
+   * and drained at most {@link maxReviewerRedrivesPerTick} per tick — one re-resolution per seat per tick.
+   * The placement store is not a transactional queue, so the gate's placed-seat IDEMPOTENCY guard (and a
+   * fresh `readPlacements` per seat) is what stops a concurrent tick OR a lead re-call from
+   * double-launching. A still-maxed window leaves seats waiting with no churn (no record, no launch).
+   *
+   * No-op (returns empty) when no spawn gate is wired (headless / no `co-mcp serve` reviewer launcher) —
+   * there is nothing to launch through, so the daemon never records a churned waiting placement. Pure
+   * store reads + the injected clock; no wall clock.
+   */
+  private async drainWaitingReviewers(): Promise<{
+    readonly reviewersRedriven: readonly string[];
+    readonly reviewerRedriveErrors: readonly LaunchError[];
+  }> {
+    const empty = { reviewersRedriven: [] as string[], reviewerRedriveErrors: [] as LaunchError[] };
+    const spawnGate = this.reviewerSpawnGate?.();
+    if (spawnGate == null) return empty; // nothing to launch through — never churn a waiting placement.
+
+    const dispatch = this.openDispatch(this.projectId);
+    try {
+      const seats = this.discoverWaitingReviewerSeats(dispatch);
+      if (seats.length === 0) return empty;
+      // Cheap pre-gate (canResume's first real caller): if NO suitable provider is healthy + below the
+      // maxed threshold, every seat would re-resolve to waiting — skip the whole drain (no churn).
+      const candidates = candidatesFromStore(dispatch, this.reviewerAccounts, {
+        nowMs: this.now(),
+      });
+      if (!canResume(candidates, { nowMs: this.now() })) return empty;
+
+      const reviews = this.openReviews(this.projectId);
+      const worktrees = this.openWorktrees(this.projectId);
+      const mail = this.openMail(this.projectId);
+      const reviewersRedriven: string[] = [];
+      const reviewerRedriveErrors: LaunchError[] = [];
+      try {
+        // Drain at most K seats per tick, in deterministic reviewId order (THUNDERING-HERD cap).
+        for (const reviewId of seats.slice(0, this.maxReviewerRedrivesPerTick)) {
+          const gate = new CoReviewGate({
+            reviews,
+            worktrees,
+            dispatch,
+            mail,
+            nowMs: this.now(),
+            reviewerAccounts: this.reviewerAccounts,
+            reviewerSpawnGate: spawnGate,
+          });
+          const outcome = gate.redriveWaitingReviewer(reviewId, this.projectId);
+          if (outcome.kind === 'launched') {
+            try {
+              // Surface a launch failure: drainSpawns rejects if the fire-and-forget spawn failed.
+              await gate.drainSpawns();
+              if (outcome.agent != null) reviewersRedriven.push(outcome.agent);
+            } catch (error: unknown) {
+              reviewerRedriveErrors.push({
+                agent: outcome.agent ?? `reviewer@${reviewId}`,
+                message: errorMessage(error),
+              });
+            }
+          }
+        }
+      } finally {
+        mail.close();
+        worktrees.close();
+        reviews.close();
+      }
+      return { reviewersRedriven, reviewerRedriveErrors };
+    } finally {
+      dispatch.close();
+    }
+  }
+
+  /**
+   * #133 — the deterministic list of reviewId seats to re-drive this tick: every reviewId with a recorded
+   * `kind:'waiting'` reviewer placement (`<role>@<reviewId>`) and NO `placed` reviewer placement yet
+   * (an already-placed seat was redriven on a prior tick — excluding it here keeps the per-tick K cap
+   * from being consumed by no-ops so genuinely-waiting seats still drain). Deduped to one per reviewId and
+   * sorted by reviewId (replay-stable per-seat ordering — no thundering herd). The per-review NEGATIVE
+   * guards (no verdict yet, active-serialized branch) live in {@link CoReviewGate.redriveWaitingReviewer},
+   * the single source of truth shared with the lead re-call; this only narrows the candidate set cheaply.
+   */
+  private discoverWaitingReviewerSeats(dispatch: DispatchStore): readonly string[] {
+    const waiting = new Set<string>();
+    const placed = new Set<string>();
+    for (const placement of dispatch.readPlacements()) {
+      if (!isReviewerSeatPlacement(placement) || placement.reviewId == null) continue;
+      if (placement.kind === 'waiting') waiting.add(placement.reviewId);
+      else if (placement.kind === 'placed') placed.add(placement.reviewId);
+    }
+    return [...waiting].filter((reviewId) => !placed.has(reviewId)).sort();
   }
 
   /**
@@ -707,4 +881,16 @@ export class ConductorDaemon {
 
 function isProvider(value: unknown): value is Provider {
   return value === 'claude' || value === 'codex';
+}
+
+/**
+ * #133 — is this placement a reviewer seat? The seat agent is `<role>@<reviewId>` with the base or a
+ * sub-`reviewer` role (mirrors core's `isReviewerPlacementForReview` without re-deriving the reviewId).
+ * Used only to NARROW the waiting-seat candidate set; the authoritative match is the core re-drive.
+ */
+function isReviewerSeatPlacement(placement: PlacementRecord): boolean {
+  return (
+    (placement.role === 'reviewer' || placement.role.startsWith('reviewer:')) &&
+    placement.agent === `${placement.role}@${placement.reviewId ?? ''}`
+  );
 }

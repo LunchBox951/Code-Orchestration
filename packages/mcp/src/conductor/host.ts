@@ -1769,6 +1769,9 @@ export async function serveConductor(opts: ServeConductorOptions): Promise<Condu
     now,
     reconcileEvery: opts.reconcileEvery ?? 5,
     ...(isolatedHomeDirFor != null ? { codexHomeFor: isolatedHomeDirFor } : {}),
+    // #133 — the daemon-tick reviewer re-drive launches a recovered `waiting` seat through the SAME
+    // single launch authority the `co_merge` trigger uses (lazy thunk — the gate wraps the engine).
+    reviewerSpawnGate: () => spawnGate,
     // P3 §3c — honor `pause`/STUCK: filter the router's suppressed agents out of candidate selection.
     isSkipped: (pid, agent) => router.shouldSkip(pid, agent),
   });

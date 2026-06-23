@@ -17,14 +17,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
+  CoReviewGate,
   FakePty,
   MAIL_CLARIFY_REQUEST,
   MAIL_CLARIFY_RESPONSE,
   ReconcileLoop,
+  accountForProvider,
   buildCoreRegistry,
   defaultMailRenderer,
+  openDispatchStore,
   openMailStore,
   openRegistry,
+  openReviewStore,
   openRosterStore,
   openSessionStore,
   openWorktreeStore,
@@ -35,9 +39,11 @@ import {
   type DetectorEvent,
   type LivenessInput,
   type MailStore,
+  type PlacementRecord,
   type ProjectId,
   type ProjectRegistry,
   type ReconcileSeams,
+  type ReviewerSpawnGate,
   type RosterStore,
   type RunningAgent,
   type SessionStore,
@@ -844,6 +850,250 @@ describe('ConductorDaemon — §3c isSkipped seam filters suppressed agents from
 
     daemon.buildCandidates();
     expect(calls).toContainEqual({ pid: projectId, agent: 'impl-x' });
+  });
+});
+
+// ── #133: the daemon-tick re-drive for WAITING reviewer seats ───────────────────────────────────
+describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => {
+  const REVIEW_BRANCH_PREFIX = 'co/feat-';
+
+  /**
+   * Seed a recorded `waiting` reviewer placement + its review request via the SAME trigger path. Each
+   * review uses a DISTINCT target so several can coexist as the active-serialized branch for their own
+   * target (reviews into ONE target serialize — AC-L5-7).
+   */
+  function seedWaitingReviewer(
+    projectId: ProjectId,
+    reviewId: string,
+    branch: string,
+    target = `co/dev-${reviewId}`,
+  ): void {
+    const reviews = openReviewStore(projectId);
+    const worktrees = openWorktreeStore(projectId);
+    const mail = openMailStore(projectId);
+    const dispatch = openDispatchStore(projectId);
+    try {
+      const setupGate = new CoReviewGate({
+        reviews,
+        worktrees,
+        mail,
+        resolveMode: () => 'offline',
+        dispatch,
+        nowMs: 0,
+      });
+      setupGate.triggerReview({
+        reviewId,
+        target,
+        branch,
+        requestedBy: 'lead-1',
+        scope: 'pr_merge',
+        projectId,
+      });
+    } finally {
+      dispatch.close();
+      mail.close();
+      worktrees.close();
+      reviews.close();
+    }
+  }
+
+  /** Record a healthy provider snapshot so the per-tick re-resolution flips waiting → placed. */
+  function recoverCapacity(projectId: ProjectId): void {
+    const dispatch = openDispatchStore(projectId);
+    try {
+      dispatch.recordSnapshot({
+        provider: 'claude',
+        account: accountForProvider('claude'),
+        available: true,
+        source: 'test',
+        sampled_at: '1970-01-01T00:00:00.000Z',
+        windows: [{ kind: 'five_hour', used_pct: 1, reset_at: '1970-01-01T05:00:00.000Z' }],
+      });
+    } finally {
+      dispatch.close();
+    }
+  }
+
+  /**
+   * A fake reviewer spawn gate that routes EVERY launch through `engine.ensureHosted` (single authority).
+   * It does NOT drive readiness inline — the test concurrently drives the freshly-spawned panes via
+   * {@link drivePanesReady} while the daemon tick awaits the launch (mirrors the cold-rewake re-host test).
+   */
+  function routingSpawnGate(
+    engine: ConductorEngine,
+    cwd: string,
+  ): { gate: ReviewerSpawnGate; launches: string[] } {
+    const launches: string[] = [];
+    const gate: ReviewerSpawnGate = {
+      spawn: async (projectId: string, record: PlacementRecord): Promise<void> => {
+        launches.push(record.agent);
+        await engine.ensureHosted({
+          agent: record.agent,
+          role: 'reviewer',
+          parent: 'lead-1',
+          pane: `pane-${record.agent}`,
+          projectId,
+          cwd,
+          provider: 'claude',
+          resume: { provider: 'claude', sessionId: `session-${record.agent}` },
+        });
+      },
+    };
+    return { gate, launches };
+  }
+
+  /**
+   * Resolve `tickP` while concurrently driving every newly-spawned FakePty pane to ready (emit
+   * CLAUDE_READY once per pane). The daemon tick blocks on the re-drive's `engine.ensureHosted` →
+   * `driveToReady`, so the tick cannot settle until each reviewer pane is driven; this loop unblocks it.
+   * The re-driven reviewer is suppressed from candidate selection (the test's `isSkipped`), so the SAME
+   * tick's `runCycle` never DRIVES the fresh reviewer — only ready-driving is needed here.
+   */
+  async function drivePanesReady<T>(tickP: Promise<T>, pty: FakePty): Promise<T> {
+    const driven = new Set<FakePty['panes'][number]>();
+    let settled = false;
+    const result = tickP.then((value) => {
+      settled = true;
+      return value;
+    });
+    while (!settled) {
+      for (const pane of pty.panes) {
+        if (!driven.has(pane)) {
+          driven.add(pane);
+          pane.emit(CLAUDE_READY);
+        }
+      }
+      await tick();
+    }
+    return result;
+  }
+
+  /** Skip every re-driven reviewer seat from candidate selection so `runCycle` never drives it this tick. */
+  function skipReviewerSeats(_pid: ProjectId, agent: string): boolean {
+    return agent.includes('@rev-');
+  }
+
+  it('ONE tick launches the recovered reviewer through engine.ensureHosted + reports it in the outcome', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-A', `${REVIEW_BRANCH_PREFIX}a`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { gate: spawnGate, launches } = routingSpawnGate(engine, cwd);
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => spawnGate,
+      isSkipped: skipReviewerSeats, // launch the reviewer this tick, but don't drive its kickoff turn here
+    });
+
+    const out = await drivePanesReady(daemon.tick(), pty);
+
+    expect(launches).toEqual(['reviewer:pr@rev-A']); // launched EXACTLY once via the single authority.
+    expect(out.reviewersRedriven).toEqual(['reviewer:pr@rev-A']);
+    expect(out.reviewerRedriveErrors).toEqual([]);
+    expect(engine.isHosted(projectId, 'reviewer:pr@rev-A')).toBe(true);
+    // The seat flipped waiting → placed (single placement append).
+    const dispatch = openDispatchStore(projectId);
+    try {
+      expect(dispatch.readPlacements('reviewer:pr@rev-A').map((p) => p.kind)).toEqual([
+        'waiting',
+        'placed',
+      ]);
+    } finally {
+      dispatch.close();
+    }
+  });
+
+  it('drains N waiting seats at ≤K per tick (no thundering herd), the rest next tick', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    // Three waiting reviewer seats; the per-tick cap is 2.
+    for (const id of ['rev-1', 'rev-2', 'rev-3']) {
+      seedWaitingReviewer(projectId, id, `${REVIEW_BRANCH_PREFIX}${id}`);
+    }
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { gate: spawnGate, launches } = routingSpawnGate(engine, cwd);
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => spawnGate,
+      maxReviewerRedrivesPerTick: 2,
+      isSkipped: skipReviewerSeats, // launch reviewers, but don't drive their kickoff turns this tick
+    });
+
+    const first = await drivePanesReady(daemon.tick(), pty);
+    expect(first.reviewersRedriven).toHaveLength(2); // capped at K=2 this tick.
+    expect(launches).toHaveLength(2);
+
+    const second = await drivePanesReady(daemon.tick(), pty);
+    expect(second.reviewersRedriven).toHaveLength(1); // the third drains next tick.
+    expect(launches).toHaveLength(3);
+    expect(new Set(launches)).toEqual(
+      new Set(['reviewer:pr@rev-1', 'reviewer:pr@rev-2', 'reviewer:pr@rev-3']),
+    );
+
+    // A third tick is idle — all seats are placed (idempotent; no churn).
+    const third = await daemon.tick();
+    expect(third.reviewersRedriven).toEqual([]);
+    expect(launches).toHaveLength(3);
+  });
+
+  it('a still-maxed window leaves waiting seats untouched (no launch, no churn)', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-maxed', `${REVIEW_BRANCH_PREFIX}maxed`);
+    // NO capacity recovered ⇒ canResume is false ⇒ the drain is skipped entirely.
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const { gate: spawnGate, launches } = routingSpawnGate(engine, cwd);
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+      reviewerSpawnGate: () => spawnGate,
+    });
+
+    const out = await daemon.tick();
+
+    expect(out.reviewersRedriven).toEqual([]);
+    expect(launches).toEqual([]);
+    const dispatch = openDispatchStore(projectId);
+    try {
+      // Unchanged — still a single waiting row (no churn).
+      expect(dispatch.readPlacements('reviewer:pr@rev-maxed').map((p) => p.kind)).toEqual([
+        'waiting',
+      ]);
+    } finally {
+      dispatch.close();
+    }
+  });
+
+  it('no spawn gate wired ⇒ the drain is a no-op (never churns a waiting placement)', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-nogate', `${REVIEW_BRANCH_PREFIX}nogate`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock); // no reviewerSpawnGate
+
+    const out = await daemon.tick();
+
+    expect(out.reviewersRedriven).toEqual([]);
+    expect(out.reviewerRedriveErrors).toEqual([]);
+    const dispatch = openDispatchStore(projectId);
+    try {
+      expect(dispatch.readPlacements('reviewer:pr@rev-nogate').map((p) => p.kind)).toEqual([
+        'waiting',
+      ]);
+    } finally {
+      dispatch.close();
+    }
   });
 });
 
