@@ -143,6 +143,13 @@ export interface ConductorDaemonDeps {
    * Default {@link DEFAULT_MAX_REVIEWER_REDRIVES_PER_TICK}.
    */
   readonly maxReviewerRedrivesPerTick?: number;
+  /**
+   * #171 — PER-SEAT FAILURE BACKOFF: after a reviewer seat's re-drive spawn rejects, the seat is skipped
+   * from re-discovery for this many ticks (counted from the failing tick), so a deterministically-failing
+   * seat retries at most once per window instead of every tick. Must be a positive integer.
+   * Default {@link DEFAULT_REVIEWER_REDRIVE_RETRY_BACKOFF_TICKS}.
+   */
+  readonly reviewerRedriveRetryBackoffTicks?: number;
   /** Resolve the isolated CODEX_HOME for a cold-started Codex identity. Host-live passes its isolated-home seam. */
   readonly codexHomeFor?: (agent: string) => string;
   /**
@@ -268,6 +275,16 @@ function closeReviewerRedriveStore(
  */
 export const DEFAULT_MAX_REVIEWER_REDRIVES_PER_TICK = 2;
 
+/**
+ * #171 — the default per-seat failure-backoff window (in ticks) for reviewer re-drive. After a seat's
+ * fire-and-forget spawn rejects, the seat is SKIPPED from re-discovery while
+ * `tickCount - reviewerRedriveFailedAt < backoffTicks`, so a DETERMINISTICALLY-failing seat (e.g. a
+ * Codex PTY that exits code=1 before ready every boot) retries at most once per window instead of every
+ * tick — capping the duplicate `reviewerRedriveError` diagnostic to one-per-window. Small so a recovered
+ * reviewer retries promptly; a successful launch clears the timestamp (no lingering suppression).
+ */
+export const DEFAULT_REVIEWER_REDRIVE_RETRY_BACKOFF_TICKS = 3;
+
 interface ReviewerRedriveSeat {
   readonly reviewId: string;
   readonly agent: string;
@@ -306,11 +323,19 @@ export class ConductorDaemon {
   private readonly reviewerSpawnGate: (() => ReviewerSpawnGate | undefined) | undefined;
   private readonly reviewerAccounts: readonly ProviderAccount[];
   private readonly maxReviewerRedrivesPerTick: number;
+  private readonly reviewerRedriveRetryBackoffTicks: number;
   private readonly codexHomeFor: ((agent: string) => string) | undefined;
   private readonly isSkipped: (projectId: ProjectId, agent: string) => boolean;
   private tickCount = 0;
   private recovered = false;
-  /** Failed reviewer launches rotate behind never-failed seats so one broken low-sorted retry cannot starve the rest. */
+  /**
+   * #133 ordering hint + #171 per-seat throttle: the tickCount at which an agent's reviewer re-drive
+   * spawn last FAILED. Used two ways — (1) {@link compareReviewerRedriveSeats} rotates failed seats
+   * behind never-failed ones so one broken low-sorted retry cannot starve the rest; (2)
+   * {@link discoverReviewerRedriveSeats} SKIPS a seat while `tickCount - failedAt < backoffTicks`, so a
+   * deterministically-failing seat retries at most once per window instead of every tick. Cleared on a
+   * successful launch (see drainWaitingReviewers) so a recovered reviewer is no longer suppressed.
+   */
   private readonly reviewerRedriveFailedAt = new Map<string, number>();
   /**
    * Stage 15 (review-375 GUARD) — recovered NON-root agents whose per-tick re-warm via the single launch
@@ -351,6 +376,15 @@ export class ConductorDaemon {
       );
     }
     this.maxReviewerRedrivesPerTick = maxRedrives;
+    const backoffTicks =
+      deps.reviewerRedriveRetryBackoffTicks ?? DEFAULT_REVIEWER_REDRIVE_RETRY_BACKOFF_TICKS;
+    if (!Number.isInteger(backoffTicks) || backoffTicks < 1) {
+      throw new Error(
+        `ConductorDaemon: reviewerRedriveRetryBackoffTicks must be a positive integer, got ${backoffTicks} ` +
+          '(the per-seat reviewer re-drive failure backoff window; Principle 9 — fail loud).',
+      );
+    }
+    this.reviewerRedriveRetryBackoffTicks = backoffTicks;
     this.codexHomeFor = deps.codexHomeFor;
     this.isSkipped = deps.isSkipped ?? (() => false);
   }
@@ -652,6 +686,12 @@ export class ConductorDaemon {
                 nowMs: this.now(),
                 reviewerAccounts: this.reviewerAccounts,
                 reviewerSpawnGate: spawnGate,
+                // #171 — inject onSpawnError so CoReviewGate.fireSpawn short-circuits its
+                // "(no onSpawnError injected)" raw console.error default branch. The rejection is still
+                // captured below via drainSpawns into a structured reviewerRedriveError (the single
+                // canonical surface), so this handler is intentionally a no-op — it only silences the
+                // duplicate raw log. fireSpawn still re-throws, so drainSpawns rejects exactly as before.
+                onSpawnError: () => {},
               });
               const outcome = gate.redriveWaitingReviewer(seat.reviewId, this.projectId, {
                 retryPlaced: seat.kind === 'placed',
@@ -698,6 +738,12 @@ export class ConductorDaemon {
    * thundering herd). The per-review NEGATIVE guards (no verdict yet, active-serialized branch) live in
    * {@link CoReviewGate.redriveWaitingReviewer}, the single source of truth shared with the lead re-call;
    * this only narrows the candidate set cheaply.
+   *
+   * #171 — a seat whose last re-drive spawn FAILED is SKIPPED while still inside its backoff window
+   * ({@link isWithinRedriveBackoff}), so a deterministically-failing seat (e.g. a Codex PTY that exits
+   * code=1 before ready every boot) is re-driven at most once per window instead of every tick — capping
+   * the duplicate diagnostic. A successful launch clears the timestamp (drainWaitingReviewers), so a
+   * recovered reviewer is no longer suppressed on the next tick.
    */
   private discoverReviewerRedriveSeats(
     dispatch: DispatchStore,
@@ -713,14 +759,29 @@ export class ConductorDaemon {
     const seats: ReviewerRedriveSeat[] = [];
     for (const [reviewId, agent] of waiting) {
       if (this.isSkipped(this.projectId, agent)) continue;
+      if (this.isWithinRedriveBackoff(agent)) continue;
       if (!placed.has(reviewId)) seats.push({ reviewId, agent, kind: 'waiting' });
     }
     for (const [reviewId, agent] of placed) {
       if (this.engine.isHosted(this.projectId, agent) || liveSessions.has(agent)) continue;
       if (this.isSkipped(this.projectId, agent)) continue;
+      if (this.isWithinRedriveBackoff(agent)) continue;
       seats.push({ reviewId, agent, kind: 'placed' });
     }
     return seats.sort((a, b) => this.compareReviewerRedriveSeats(a, b));
+  }
+
+  /**
+   * #171 — true while a seat's agent is inside its per-seat failure-backoff window: it had a recorded
+   * {@link reviewerRedriveFailedAt} within {@link reviewerRedriveRetryBackoffTicks} of the current tick.
+   * Deterministic (tickCount + injected timestamps only, no wall clock) so replay is stable. The window
+   * is `tickCount - failedAt < backoffTicks`: a seat that failed on tick N is re-driven again on tick
+   * `N + backoffTicks`, not every intervening tick.
+   */
+  private isWithinRedriveBackoff(agent: string): boolean {
+    const failedAt = this.reviewerRedriveFailedAt.get(agent);
+    if (failedAt == null) return false;
+    return this.tickCount - failedAt < this.reviewerRedriveRetryBackoffTicks;
   }
 
   private compareReviewerRedriveSeats(a: ReviewerRedriveSeat, b: ReviewerRedriveSeat): number {

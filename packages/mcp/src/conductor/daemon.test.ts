@@ -11,7 +11,7 @@
  * launch authority. Determinism: NO wall clock in the testable path — `now` reads a mutable counter;
  * `quietWindow` is a controllable settle seam. The harness mirrors `engine.test.ts`.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1221,6 +1221,10 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
     const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
       reviewerSpawnGate: () => flakyGate,
       isSkipped: skipHostedReviewerSeats(engine),
+      // #171 — a 1-tick backoff lets this transient-failure seat retry on the immediately-following
+      // tick (this test recovers after exactly one failure); the deterministic-failure de-loop with a
+      // wider window is covered by the dedicated #171 backoff tests below.
+      reviewerRedriveRetryBackoffTicks: 1,
     });
 
     const first = await daemon.tick();
@@ -1645,6 +1649,146 @@ describe('ConductorDaemon — waiting-reviewer re-drive backstop (#133)', () => 
       ]);
     } finally {
       dispatch.close();
+    }
+  });
+
+  // ── #171: onSpawnError seam + per-seat backoff de-loop ─────────────────────────────────────────
+  it('#171 injects onSpawnError so the raw "(no onSpawnError injected)" stderr is silenced and the failure surfaces exactly once', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-seam', `${REVIEW_BRANCH_PREFIX}seam`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    // Analogue of the host-live "Codex PTY exits code=1 before ready": the fire-and-forget spawn rejects.
+    const rejectingGate: ReviewerSpawnGate = {
+      spawn: () => Promise.reject(new Error('fixture spawn rejected (code=1 before ready)')),
+    };
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+        reviewerSpawnGate: () => rejectingGate,
+        isSkipped: skipHostedReviewerSeats(engine),
+      });
+
+      const out = await daemon.tick();
+
+      // The default-branch raw console.error is short-circuited by the injected onSpawnError.
+      const noHandlerLogged = consoleError.mock.calls.some((args) =>
+        args.some((arg) => typeof arg === 'string' && arg.includes('(no onSpawnError injected)')),
+      );
+      expect(noHandlerLogged).toBe(false);
+      // The rejection is still captured exactly once via drainSpawns → the canonical structured surface.
+      expect(out.reviewerRedriveErrors).toEqual([
+        {
+          agent: 'reviewer:pr@rev-seam',
+          message: 'fixture spawn rejected (code=1 before ready)',
+        },
+      ]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('#171 de-loops a deterministically-failing seat: re-driven on tick 1 but SKIPPED inside the backoff window', async () => {
+    const { projectId } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-deloop', `${REVIEW_BRANCH_PREFIX}deloop`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine } = makeEngine(clock, qw);
+    const attempts: string[] = [];
+    const alwaysRejects: ReviewerSpawnGate = {
+      spawn: (_projectId, record) => {
+        attempts.push(record.agent);
+        return Promise.reject(new Error('fixture deterministic spawn failure'));
+      },
+    };
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+        reviewerSpawnGate: () => alwaysRejects,
+        isSkipped: skipHostedReviewerSeats(engine),
+        reviewerRedriveRetryBackoffTicks: 3,
+      });
+
+      // Tick 1: the waiting seat flips to placed, the spawn rejects, the failure surfaces once.
+      const tick1 = await daemon.tick();
+      expect(tick1.reviewersRedriven).toEqual([]);
+      expect(tick1.reviewerRedriveErrors).toEqual([
+        { agent: 'reviewer:pr@rev-deloop', message: 'fixture deterministic spawn failure' },
+      ]);
+      maxCapacity(projectId); // placed retries bypass capacity gating; nothing here re-warms the seat.
+
+      // Ticks 2 & 3 are inside the backoff window (tickCount - failedAt < 3) ⇒ the seat is SKIPPED:
+      // NO re-spawn, NO duplicate error carried every tick (the hot loop is broken).
+      const tick2 = await daemon.tick();
+      const tick3 = await daemon.tick();
+      expect(tick2.reviewerRedriveErrors).toEqual([]);
+      expect(tick3.reviewerRedriveErrors).toEqual([]);
+
+      // The spawn was attempted exactly ONCE across the suppressed window (one-per-window, not per-tick).
+      expect(attempts).toEqual(['reviewer:pr@rev-deloop']);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('#171 recovers after the backoff window: a now-succeeding spawn redrives the seat and clears the suppression', async () => {
+    const { projectId, cwd } = makeProject();
+    seedParentChain(projectId, 'lead-1');
+    seedWaitingReviewer(projectId, 'rev-recover', `${REVIEW_BRANCH_PREFIX}recover`);
+    recoverCapacity(projectId);
+
+    const clock = makeClock();
+    const qw = makeQuietWindow();
+    const { engine, pty } = makeEngine(clock, qw);
+    const { gate: baseGate, launches } = routingSpawnGate(engine, cwd);
+    const attempts: string[] = [];
+    let failSpawn = true;
+    const recoveringGate: ReviewerSpawnGate = {
+      spawn: (spawnProjectId, record) => {
+        attempts.push(record.agent);
+        if (failSpawn) {
+          return Promise.reject(new Error('fixture spawn failure (pre-recovery)'));
+        }
+        return baseGate.spawn(spawnProjectId, record);
+      },
+    };
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const daemon = makeDaemon(engine, makeReconcile(clock), projectId, clock, {
+        reviewerSpawnGate: () => recoveringGate,
+        isSkipped: skipHostedReviewerSeats(engine),
+        reviewerRedriveRetryBackoffTicks: 2,
+      });
+
+      // Tick 1: fails (failedAt = 1). Tick 2: inside backoff (2 - 1 < 2) ⇒ skipped.
+      const tick1 = await daemon.tick();
+      expect(tick1.reviewerRedriveErrors).toEqual([
+        { agent: 'reviewer:pr@rev-recover', message: 'fixture spawn failure (pre-recovery)' },
+      ]);
+      maxCapacity(projectId);
+      const tick2 = await daemon.tick();
+      expect(tick2.reviewerRedriveErrors).toEqual([]);
+      expect(attempts).toEqual(['reviewer:pr@rev-recover']); // suppressed on tick 2
+
+      // Tick 3: window elapsed (3 - 1 = 2, not < 2) ⇒ the seat re-drives, now the spawn succeeds.
+      failSpawn = false;
+      const tick3 = await drivePanesReady(daemon.tick(), pty);
+      expect(tick3.reviewersRedriven).toEqual(['reviewer:pr@rev-recover']);
+      expect(tick3.reviewerRedriveErrors).toEqual([]);
+      expect(launches).toEqual(['reviewer:pr@rev-recover']);
+      expect(attempts).toEqual(['reviewer:pr@rev-recover', 'reviewer:pr@rev-recover']);
+
+      // The suppression is cleared on the successful launch — no lingering park.
+      expect(engine.isHosted(projectId, 'reviewer:pr@rev-recover')).toBe(true);
+    } finally {
+      consoleError.mockRestore();
     }
   });
 });
