@@ -1,11 +1,16 @@
 import { z } from 'zod';
 import {
+  MAIL_APPROVAL,
   MAIL_REVIEW_REQUEST,
   MAIL_REVIEW_RESPONSE,
   MAIL_TYPES,
   MAIL_WORKER_DONE,
   type DeliveredMail,
 } from '../../mail/events.js';
+import {
+  applyApprovalLockSideEffect,
+  buildSpecLockApprovalEnvelope,
+} from '../../specs/spec-lock-approval.js';
 import type { ToolSpec } from '../registry.js';
 import { deliveredMailSchema, toWireMail } from './wire.js';
 
@@ -52,6 +57,15 @@ const mailSendInput = z
       .enum(['approve', 'decline'])
       .optional()
       .describe('Only for an approval_response reply: approve or decline the requested action.'),
+    lock_task_id: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Only for a NEW approval request: mint a self-identifying spec-lock request for this task ' +
+          'id (the operator-approve of it locks the spec). Sets the spec-lock idempotency key and a ' +
+          'criteria preview body; requires a drafted spec for the task.',
+      ),
   })
   .strict();
 type MailSendInput = z.infer<typeof mailSendInput>;
@@ -88,6 +102,35 @@ export const mailSendTool: ToolSpec<MailSendInput, MailSendOutput> = {
         ...(input.decision != null ? { decision: input.decision } : {}),
       };
       delivered = ctx.mail.reply(answered, replyDraft);
+      // Issue #91 — surface parity with the operator-IPC `handleApprove` bridge: an approve reply on a
+      // `spec-lock:<taskId>` approval runs the SAME shared lock primitive (D3 gate then recordLock as
+      // @operator). A non-lock / declined reply is a strict no-op (the primitive returns undefined).
+      if (input.decision != null && ctx.specs != null) {
+        applyApprovalLockSideEffect(ctx.specs, answered, input.decision);
+      }
+    } else if (input.lock_task_id != null) {
+      // Mint a self-identifying spec-lock REQUEST: the operator-approve of it bridges to the lock.
+      if (input.type !== MAIL_APPROVAL) {
+        throw new Error(
+          `co_mail_send: lock_task_id is only valid for a new '${MAIL_APPROVAL}' request ` +
+            `(got type '${input.type}').`,
+        );
+      }
+      if (ctx.specs == null) {
+        throw new Error('co_mail_send: the mount did not inject a spec store (ctx.specs absent).');
+      }
+      const spec = ctx.specs.getSpec(input.lock_task_id);
+      if (spec == null) {
+        throw new Error(
+          `co_mail_send: no spec record for task '${input.lock_task_id}' — draft it before ` +
+            'requesting a lock.',
+        );
+      }
+      // buildSpecLockApprovalEnvelope addresses @operator and stamps `spec-lock:<taskId>` by
+      // construction; the subject/body the coordinator passes is overridden by the criteria preview.
+      delivered = ctx.mail.send(
+        buildSpecLockApprovalEnvelope({ from: ctx.agent, taskId: input.lock_task_id, spec }),
+      );
     } else {
       if (input.to == null || input.to.length === 0) {
         throw new Error(
