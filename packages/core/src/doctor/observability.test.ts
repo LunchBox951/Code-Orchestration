@@ -155,6 +155,22 @@ function seedLegacyDuplicateStrikeRows(): void {
   }
 }
 
+function seedLegacyStrikeOnlyEvent(): void {
+  const store = openProjectStore(PROJECT_ID);
+  try {
+    store.append([
+      makeReviewStrikeEvent(PROJECT_ID, {
+        reviewId: 'rev-strike-only',
+        target: 'main',
+        branch: 'co/strike-only',
+        reason: 'legacy strike with missing projection row',
+      }),
+    ]);
+  } finally {
+    store.close();
+  }
+}
+
 function seedLegacyCostRollups(): void {
   const store = openProjectStore(PROJECT_ID);
   try {
@@ -431,6 +447,28 @@ describe('queryObservability — the read path does NOT write (#126)', () => {
     expect(
       snap.reviews.find((r) => r.target === 'main' && r.branch === 'co/legacy-strikes')?.strikes,
     ).toBe(1);
+    expect(countRows('review_strikes')).toBe(0);
+  });
+
+  it('returns a synthetic review summary for legacy strike events without a reviews row', () => {
+    seedLegacyStrikeOnlyEvent();
+    expect(countRows('reviews')).toBe(0);
+    expect(countRows('review_strikes')).toBe(0);
+
+    const snap = queryObservability(PROJECT_ID);
+
+    expect(snap.reviews).toContainEqual(
+      expect.objectContaining({
+        target: 'main',
+        branch: 'co/strike-only',
+        scope: 'worker_merge',
+        verdict: undefined,
+        strikes: 1,
+        serialized: false,
+        overridden: false,
+      }),
+    );
+    expect(countRows('reviews')).toBe(0);
     expect(countRows('review_strikes')).toBe(0);
   });
 

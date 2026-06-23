@@ -127,6 +127,19 @@ function columnOrDefault(columns: ReadonlySet<string>, column: string, defaultSq
   return columns.has(column) ? column : `${defaultSql} AS ${column}`;
 }
 
+function requireColumns(
+  table: string,
+  columns: ReadonlySet<string>,
+  required: readonly string[],
+): void {
+  const missing = required.filter((column) => !columns.has(column));
+  if (missing.length > 0) {
+    throw new Error(
+      `cost-projector: ${table} is missing required column(s): ${missing.join(', ')}`,
+    );
+  }
+}
+
 function countRows(db: DatabaseSync, table: string): number {
   const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as
     | { readonly count?: unknown }
@@ -533,8 +546,26 @@ export function selectNearBudgetBySeq(db: DatabaseSync, seq: number): NearBudget
 }
 
 /** Every recorded near-budget crossing in seq order; optionally filtered to one task. */
-export function selectNearBudgetEvents(db: DatabaseSync, task?: string): NearBudgetRecord[] {
-  ensureCostTables(db);
+export function selectNearBudgetEvents(
+  db: DatabaseSync,
+  task?: string,
+  opts: { readonly backfillLegacy?: boolean } = {},
+): NearBudgetRecord[] {
+  if (opts.backfillLegacy === false) {
+    if (!tableExists(db, 'cost_near_budget')) return [];
+    requireColumns('cost_near_budget', tableColumns(db, 'cost_near_budget'), [
+      'seq',
+      'task',
+      'agent',
+      'provider',
+      'total_cost_usd',
+      'cap_cents',
+      'threshold_pct',
+      'ts',
+    ]);
+  } else {
+    ensureCostTables(db);
+  }
   const rows =
     task === undefined
       ? db.prepare(`SELECT ${NEAR_BUDGET_COLUMNS} FROM cost_near_budget ORDER BY seq`).all()

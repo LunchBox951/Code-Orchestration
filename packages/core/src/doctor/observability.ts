@@ -79,8 +79,14 @@ function reviewKey(target: string, branch: string): string {
   return `${target}\0${branch}`;
 }
 
-function selectReplayStrikeCounts(db: DatabaseSync): Map<string, number> {
-  const counts = new Map<string, number>();
+interface ReplayStrikeState {
+  readonly target: string;
+  readonly branch: string;
+  readonly strikes: number;
+}
+
+function selectReplayStrikeCounts(db: DatabaseSync): Map<string, ReplayStrikeState> {
+  const counts = new Map<string, ReplayStrikeState>();
   if (!tableExists(db, 'events')) return counts;
   const rows = db
     .prepare(
@@ -98,7 +104,12 @@ function selectReplayStrikeCounts(db: DatabaseSync): Map<string, number> {
 
   const states = new Map<
     string,
-    { readonly consumed: Set<string>; readonly visible: Set<string> }
+    {
+      readonly target: string;
+      readonly branch: string;
+      readonly consumed: Set<string>;
+      readonly visible: Set<string>;
+    }
   >();
   for (const row of rows) {
     const target = typeof row.target === 'string' ? row.target : undefined;
@@ -107,7 +118,7 @@ function selectReplayStrikeCounts(db: DatabaseSync): Map<string, number> {
     const key = reviewKey(target, branch);
     let state = states.get(key);
     if (state == null) {
-      state = { consumed: new Set<string>(), visible: new Set<string>() };
+      state = { target, branch, consumed: new Set<string>(), visible: new Set<string>() };
       states.set(key, state);
     }
     if (row.type === EVENT_REVIEW_STRIKE) {
@@ -123,7 +134,9 @@ function selectReplayStrikeCounts(db: DatabaseSync): Map<string, number> {
     }
   }
 
-  for (const [key, state] of states) counts.set(key, state.visible.size);
+  for (const [key, state] of states) {
+    counts.set(key, { target: state.target, branch: state.branch, strikes: state.visible.size });
+  }
   return counts;
 }
 
@@ -218,33 +231,60 @@ function selectAllPlansReadOnly(db: DatabaseSync): PlanRecord[] {
 
 /** All review rows in the projection table, in a deterministic order (target, branch). */
 function selectAllReviews(db: DatabaseSync): ReviewSummary[] {
-  if (!tableExists(db, 'reviews')) return [];
-  const columns = tableColumns(db, 'reviews');
-  requireColumns('reviews', columns, ['target', 'branch']);
   const strikeCounts = selectReplayStrikeCounts(db);
-  const rows = db
-    .prepare(
-      `SELECT
-         target,
-         branch,
-         ${columnOrDefault(columns, 'scope', "'worker_merge'")},
-         ${columnOrDefault(columns, 'verdict', 'NULL')},
-         ${columnOrDefault(columns, 'strikes', '0')},
-         ${columnOrDefault(columns, 'serialized', '0')},
-         ${columnOrDefault(columns, 'overridden', '0')}
-       FROM reviews
-       ORDER BY target, branch`,
-    )
-    .all();
-  return rows.map((r) => {
-    const row = r as Record<string, unknown>;
-    const target = String(row.target);
-    const branch = String(row.branch);
-    return rowToReviewSummary({
-      ...row,
-      strikes: strikeCounts.get(reviewKey(target, branch)) ?? row.strikes,
-    });
-  });
+  const summaries: ReviewSummary[] = [];
+  const seen = new Set<string>();
+
+  if (tableExists(db, 'reviews')) {
+    const columns = tableColumns(db, 'reviews');
+    requireColumns('reviews', columns, ['target', 'branch']);
+    const rows = db
+      .prepare(
+        `SELECT
+           target,
+           branch,
+           ${columnOrDefault(columns, 'scope', "'worker_merge'")},
+           ${columnOrDefault(columns, 'verdict', 'NULL')},
+           ${columnOrDefault(columns, 'strikes', '0')},
+           ${columnOrDefault(columns, 'serialized', '0')},
+           ${columnOrDefault(columns, 'overridden', '0')}
+         FROM reviews
+         ORDER BY target, branch`,
+      )
+      .all();
+    for (const r of rows) {
+      const row = r as Record<string, unknown>;
+      const target = String(row.target);
+      const branch = String(row.branch);
+      const key = reviewKey(target, branch);
+      seen.add(key);
+      summaries.push(
+        rowToReviewSummary({
+          ...row,
+          strikes: strikeCounts.get(key)?.strikes ?? row.strikes,
+        }),
+      );
+    }
+  }
+
+  for (const [key, replay] of strikeCounts) {
+    if (seen.has(key)) continue;
+    summaries.push(
+      rowToReviewSummary({
+        target: replay.target,
+        branch: replay.branch,
+        scope: 'worker_merge',
+        verdict: undefined,
+        strikes: replay.strikes,
+        serialized: 0,
+        overridden: 0,
+      }),
+    );
+  }
+
+  return summaries.sort(
+    (a, b) => a.target.localeCompare(b.target) || a.branch.localeCompare(b.branch),
+  );
 }
 
 // ─── Snapshot type ────────────────────────────────────────────────────────────

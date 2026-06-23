@@ -67,6 +67,54 @@ function makeRepo(): string {
   return dir;
 }
 
+function tableExists(pid: string, table: string): boolean {
+  const project = openProjectStore(pid);
+  try {
+    return project.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      return (
+        db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !==
+        undefined
+      );
+    });
+  } finally {
+    project.close();
+  }
+}
+
+function hasColumn(pid: string, table: string, column: string): boolean {
+  const project = openProjectStore(pid);
+  try {
+    return project.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+        readonly name: string;
+      }>;
+      return rows.some((row) => row.name === column);
+    });
+  } finally {
+    project.close();
+  }
+}
+
+function primaryKeyColumns(pid: string, table: string): string[] {
+  const project = openProjectStore(pid);
+  try {
+    return project.transaction((tx) => {
+      const db = tx.raw as DatabaseSync;
+      return db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .map((row) => row as { readonly name: string; readonly pk: number })
+        .filter((row) => row.pk > 0)
+        .sort((a, b) => a.pk - b.pk)
+        .map((row) => row.name);
+    });
+  } finally {
+    project.close();
+  }
+}
+
 const claudeSnap: UsageSnapshot = {
   provider: 'claude',
   account: 'claude:max',
@@ -583,6 +631,61 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
     }
   });
 
+  it('readRollups fails loud on conflicting legacy source observations at different turns', () => {
+    const pid = 'p-rollup-readonly-legacy-source-conflict';
+    const obs = {
+      provider: 'claude' as const,
+      agent: 'a1',
+      task: 't1',
+      turn: 0,
+      source_id: 'claude-jsonl:v1:path:12',
+      input_tokens: 100,
+      output_tokens: 200,
+    };
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        tx.append([
+          makeCostRecordedEvent(pid, obs),
+          makeCostRecordedEvent(pid, { ...obs, turn: 1, input_tokens: 999 }),
+        ]);
+        const db = tx.raw as DatabaseSync;
+        ensureCostTables(db, { backfillLegacy: false });
+        db.prepare(
+          `INSERT INTO cost_rollup
+             (kind, id, total_cost_usd, input_tokens, output_tokens, total_tokens, used_pct, observations)
+           VALUES
+             ('agent', 'a1', 0, 1099, 400, 1499, 0, 2),
+             ('task', 't1', 0, 1099, 400, 1499, 0, 2)`,
+        ).run();
+      });
+    } finally {
+      project.close();
+    }
+
+    const store = openDispatchStore(pid);
+    try {
+      expect(() => store.readRollups()).toThrow(/conflicting duplicate cost observation/);
+    } finally {
+      store.close();
+    }
+
+    expect(tableExists(pid, 'cost_observations')).toBe(true);
+    const audit = openProjectStore(pid);
+    try {
+      expect(
+        audit.transaction((tx) => {
+          const db = tx.raw as DatabaseSync;
+          return Number(
+            (db.prepare('SELECT COUNT(*) AS n FROM cost_observations').get() as { n: number }).n,
+          );
+        }),
+      ).toBe(0);
+    } finally {
+      audit.close();
+    }
+  });
+
   it('fails loud on conflicting duplicate cost observations', () => {
     const store = openDispatchStore('p-rollup-conflict');
     const budget = { capCents: 1000 };
@@ -714,6 +817,47 @@ describe('recordCost — near-budget crossing emits the observability event (and
     } finally {
       store.close();
     }
+  });
+
+  it('readNearBudget does not migrate old cost rollups when the near-budget table is absent', () => {
+    const pid = 'p-near-readonly-old-cost-schema';
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        db.exec(`
+          CREATE TABLE cost_rollup (
+            kind           TEXT NOT NULL,
+            id             TEXT NOT NULL,
+            total_cost_usd REAL NOT NULL DEFAULT 0,
+            input_tokens   INTEGER NOT NULL DEFAULT 0,
+            output_tokens  INTEGER NOT NULL DEFAULT 0,
+            total_tokens   INTEGER NOT NULL DEFAULT 0,
+            used_pct       REAL NOT NULL DEFAULT 0,
+            observations   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (kind, id)
+          );
+          INSERT INTO cost_rollup
+            (kind, id, total_cost_usd, input_tokens, output_tokens, total_tokens, used_pct, observations)
+          VALUES ('task', 't1', 0, 0, 0, 0, 0, 0);
+        `);
+      });
+    } finally {
+      project.close();
+    }
+    expect(hasColumn(pid, 'cost_rollup', 'token_observations')).toBe(false);
+    expect(tableExists(pid, 'cost_near_budget')).toBe(false);
+
+    const store = openDispatchStore(pid);
+    try {
+      expect(store.readNearBudget()).toEqual([]);
+      expect(store.readNearBudget('t1')).toEqual([]);
+    } finally {
+      store.close();
+    }
+
+    expect(hasColumn(pid, 'cost_rollup', 'token_observations')).toBe(false);
+    expect(tableExists(pid, 'cost_near_budget')).toBe(false);
   });
 });
 
@@ -873,6 +1017,72 @@ describe('fail-loud (AC6, Principle 9) — unavailable usage never reads as heal
     } finally {
       store.close();
     }
+  });
+
+  it('readBuckets and readAccountStatuses do not repair old usage projection schemas', () => {
+    const pid = 'p-old-usage-schema-readonly';
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        const db = tx.raw as DatabaseSync;
+        db.exec(`
+          CREATE TABLE usage_buckets (
+            account     TEXT NOT NULL,
+            window_kind TEXT NOT NULL,
+            provider    TEXT NOT NULL,
+            used_pct    REAL NOT NULL,
+            reset_at    TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            sampled_at  TEXT NOT NULL,
+            ts          INTEGER NOT NULL,
+            PRIMARY KEY (account, window_kind)
+          );
+          CREATE TABLE usage_accounts (
+            account    TEXT PRIMARY KEY,
+            provider   TEXT NOT NULL,
+            available  INTEGER NOT NULL,
+            reason     TEXT,
+            source     TEXT NOT NULL,
+            sampled_at TEXT NOT NULL,
+            ts         INTEGER NOT NULL
+          );
+          INSERT INTO usage_buckets
+            (account, window_kind, provider, used_pct, reset_at, source, sampled_at, ts)
+          VALUES
+            ('default', 'primary', 'claude', 80, '2026-06-03T05:00:00.000Z', 'legacy', '2026-06-03T00:00:00.000Z', 1);
+          INSERT INTO usage_accounts
+            (account, provider, available, reason, source, sampled_at, ts)
+          VALUES
+            ('default', 'claude', 1, NULL, 'legacy', '2026-06-03T00:00:00.000Z', 1);
+        `);
+      });
+    } finally {
+      project.close();
+    }
+    expect(primaryKeyColumns(pid, 'usage_buckets')).toEqual(['account', 'window_kind']);
+    expect(primaryKeyColumns(pid, 'usage_accounts')).toEqual(['account']);
+
+    const store = openDispatchStore(pid);
+    try {
+      expect(store.readBuckets()).toEqual([
+        expect.objectContaining({
+          provider: 'claude',
+          account: 'default',
+          windowKind: 'primary',
+          usedPct: 80,
+        }),
+      ]);
+      expect(store.readAccountStatuses()).toEqual([
+        expect.objectContaining({ provider: 'claude', account: 'default', available: true }),
+      ]);
+    } finally {
+      store.close();
+    }
+
+    expect(primaryKeyColumns(pid, 'usage_buckets')).toEqual(['account', 'window_kind']);
+    expect(primaryKeyColumns(pid, 'usage_accounts')).toEqual(['account']);
+    expect(tableExists(pid, 'usage_buckets_legacy')).toBe(false);
+    expect(tableExists(pid, 'usage_accounts_legacy')).toBe(false);
   });
 
   it('a source THROW with an account marks that account unavailable and shadows stale healthy buckets', async () => {

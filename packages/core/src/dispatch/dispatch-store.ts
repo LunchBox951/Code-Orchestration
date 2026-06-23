@@ -61,7 +61,9 @@ import {
   UsageProjector,
   ensureUsageTables,
   selectAllUsageAccounts,
+  selectAllUsageAccountsReadOnly,
   selectAllUsageBuckets,
+  selectAllUsageBucketsReadOnly,
   selectUsageAccount,
   selectUsageBucket,
 } from './usage-projector.js';
@@ -302,11 +304,11 @@ export function openDispatchStore(projectId: string): DispatchStore {
     },
 
     readBuckets(): readonly UsageBucket[] {
-      return store.transaction((tx) => selectAllUsageBuckets(tx.raw as DatabaseSync));
+      return store.transaction((tx) => selectAllUsageBucketsReadOnly(tx.raw as DatabaseSync));
     },
 
     readAccountStatuses(): readonly UsageAccountStatus[] {
-      return store.transaction((tx) => selectAllUsageAccounts(tx.raw as DatabaseSync));
+      return store.transaction((tx) => selectAllUsageAccountsReadOnly(tx.raw as DatabaseSync));
     },
 
     getBucket(
@@ -467,7 +469,9 @@ export function openDispatchStore(projectId: string): DispatchStore {
     },
 
     readNearBudget(task?: string): readonly NearBudgetRecord[] {
-      return store.transaction((tx) => selectNearBudgetEvents(tx.raw as DatabaseSync, task));
+      return store.transaction((tx) =>
+        selectNearBudgetEvents(tx.raw as DatabaseSync, task, { backfillLegacy: false }),
+      );
     },
 
     getAgentCostRollup(agentId: string): AgentCostRollup | undefined {
