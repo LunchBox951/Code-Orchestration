@@ -17,8 +17,8 @@ sub-role grants them:
 |---|---|---|---|
 | **`codebase`** | the repo (read-only) | no | the **locator/navigator**: *"what's relevant to X?"* → a focused map (files + one-line *why* each + key symbols + suggested read order). **Pointers, not a content dump.** |
 | **`external`** | the web + docs | **yes** | web research: library behavior, API docs, prior art — fan-out searches, fetch sources, cite. |
-| **`diagnostic`** | source (repo + `co`'s public repo) | optional | bug-cause analysis for the issue pipeline ([SPECS-and-ISSUES](specs-and-issues.md)). |
-| **`decision`** | codebase and/or web, as the question needs | as needed | a cited answer to a specific question. |
+| **`diagnostic`** | source (repo + `co`'s public repo) | no | bug-cause analysis for the issue pipeline ([SPECS-and-ISSUES](specs-and-issues.md)). |
+| **`decision`** | codebase/local evidence | no | a cited answer to a specific question; route web-backed questions to `external`. |
 
 Web access is **enforced at pane launch**, not just declared (#127): only a pane whose resolved
 sub-role carries the `web-search` capability — today `external` — gets outbound network re-opened in

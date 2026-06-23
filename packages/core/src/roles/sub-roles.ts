@@ -4,12 +4,10 @@
  * permission profile and may narrow it, never widen it"). Most specialization is prompt-shaped
  * (soft); only researcher sub-roles carry a permission delta (web-search gating).
  *
- * NOTE (enforcement scope): the web-search capability delta is DECLARED and integrity-checked by
- * narrow-only.ts (a sub-role may only narrow it), but it is NOT yet enforced at pane launch —
- * buildPaneLaunchConfig does not gate the provider's native WebSearch/WebFetch tools per capability,
- * so today the narrowing is declarative, not a hard runtime boundary. Wiring the resolved profile
- * into the launch builder (and deciding whether the non-researcher base roles, which all have empty
- * capabilities, should likewise lose the native web tools) is a deliberate follow-up.
+ * NOTE (enforcement scope): the web-search capability delta is integrity-checked by narrow-only.ts
+ * and is enforced for outbound network + GH_TOKEN placement (#127). The provider's native
+ * WebSearch/WebFetch tool setting remains grant-all for now; tightening that separate axis to the
+ * resolved profile is a deliberate follow-up.
  *
  * Coordinator and Lead have no sub-roles — they are owner-tier roles.
  */

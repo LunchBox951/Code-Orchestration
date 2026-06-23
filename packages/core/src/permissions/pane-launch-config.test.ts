@@ -639,6 +639,17 @@ describe('#78 codex MCP-tool pre-approval', () => {
 // researcher sub-roles stay default-deny.
 
 describe('#127 codex gated outbound network for web-research panes', () => {
+  function expectTomlSectionContains(toml: string, section: string, expectedLine: string): void {
+    const header = `[${section}]`;
+    const sectionStart = toml.indexOf(header);
+    expect(sectionStart).toBeGreaterThanOrEqual(0);
+    const afterHeader = toml.slice(sectionStart + header.length);
+    const nextSectionStart = afterHeader.search(/\n\[/u);
+    const sectionBody =
+      nextSectionStart === -1 ? afterHeader : afterHeader.slice(0, nextSectionStart);
+    expect(sectionBody).toContain(expectedLine);
+  }
+
   it('paneMayResearchWeb is true ONLY for the web-search-holding sub-role (researcher:external)', () => {
     expect(paneMayResearchWeb({ ...BASE_IDENTITY, role: 'researcher', subRole: 'external' })).toBe(
       true,
@@ -652,6 +663,8 @@ describe('#127 codex gated outbound network for web-research panes', () => {
     );
     // Code workers never research the web.
     expect(paneMayResearchWeb({ ...BASE_IDENTITY, role: 'implementer' })).toBe(false);
+    // Bare researcher is not a resolved web-research sub-role → no egress.
+    expect(paneMayResearchWeb({ ...BASE_IDENTITY, role: 'researcher' })).toBe(false);
     // No role threaded → default-deny (the production no-op posture).
     expect(paneMayResearchWeb(BASE_IDENTITY)).toBe(false);
   });
@@ -664,7 +677,7 @@ describe('#127 codex gated outbound network for web-research panes', () => {
     });
     const toml = config.codexConfigToml ?? '';
     expect(toml).toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
-    expect(toml).toContain('network_access = true');
+    expectTomlSectionContains(toml, CODEX_SANDBOX_NETWORK_SECTION, 'network_access = true');
     // The top-level policy scalars the drift check reads stay at the document root (no regression).
     expect(toml).toContain('sandbox_mode = "workspace-write"');
     expect(toml).toContain('approval_policy = "never"');
@@ -685,6 +698,13 @@ describe('#127 codex gated outbound network for web-research panes', () => {
       role: 'researcher',
       subRole: 'codebase',
     });
+    const toml = config.codexConfigToml ?? '';
+    expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
+    expect(toml).not.toContain('network_access');
+  });
+
+  it('OMITS the network block for a bare researcher role without a resolved web sub-role', () => {
+    const config = buildPaneLaunchConfig('codex', { ...BASE_IDENTITY, role: 'researcher' });
     const toml = config.codexConfigToml ?? '';
     expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
     expect(toml).not.toContain('network_access');

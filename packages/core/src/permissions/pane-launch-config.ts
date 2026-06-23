@@ -29,7 +29,7 @@ import { assertNever } from '../assert-never.js';
 import type { Provider } from '../dispatch/usage-source.js';
 import { CO_CLAUDE_STATUSLINE_PATH_ENV } from '../dispatch/statusline-env.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
-import { ROLE_PROFILES, profileFor, roleBasePrompt, type Capability } from '../roles/profile.js';
+import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
 import { findSubRole } from '../roles/sub-roles.js';
 import type { Role } from '../tools/scoping.js';
 import type { BlockRule } from './block-list.js';
@@ -217,12 +217,9 @@ export function paneMayUseWebTools(capabilities: ReadonlySet<Capability>): boole
  * one sub-role that documents needing them.
  */
 export function paneMayResearchWeb(identity: PaneIdentity): boolean {
-  if (identity.role == null) return false;
-  const profile =
-    identity.subRole != null
-      ? findSubRole(identity.role, identity.subRole)?.profile
-      : profileFor(identity.role);
-  return profile != null && profile.capabilities.has('web-search');
+  if (identity.role == null || identity.subRole == null) return false;
+  const profile = findSubRole(identity.role, identity.subRole)?.profile;
+  return profile?.capabilities.has('web-search') ?? false;
 }
 
 function claudeDisallowedPatterns(blockList: readonly BlockRule[]): string[] {
