@@ -380,9 +380,9 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
     expect(configToml!.contents).toContain('[sandbox_workspace_write]');
     expect(configToml!.contents).toMatch(/\[sandbox_workspace_write\]\nnetwork_access = true/u);
-    expect(configToml!.contents).toMatch(
-      /\[mcp_servers\.co\.env\][\s\S]*\nGH_TOKEN = "gho_research_token"/u,
-    );
+    // #145 security: the token is NOT persisted into the on-disk codex bridge config (config.toml);
+    // it reaches the web-research agent only via the pane shell env (spec.env) asserted above.
+    expect(configToml!.contents).not.toContain('GH_TOKEN');
   });
 
   it('#127: GH_TOKEN is ABSENT from a code worker pane shell env even when ghToken is configured', () => {
