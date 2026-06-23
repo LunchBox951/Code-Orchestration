@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { sanitizeClaudeStateJson, type CoMcpPaths } from './placement-launch.js';
+import { resolveGhTokenFromEnv } from '@co/core';
 
 export interface HostLaunchPathOptions {
   readonly argv?: readonly string[];
