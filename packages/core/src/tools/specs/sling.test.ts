@@ -474,6 +474,20 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
     expect(roleDescription).toMatch(/co_merge/);
   });
 
+  // #157: the role describe must tell the dispatcher that web/GitHub work needs researcher:external,
+  // and that a bare researcher has NO outbound network — guards the guidance against silent regression.
+  it('#157: role schema guidance names researcher:external and "no outbound network"', () => {
+    const roleDescription =
+      (
+        slingTool.inputSchema as unknown as {
+          readonly shape: { readonly role: { readonly description?: string } };
+        }
+      ).shape.role.description ?? '';
+
+    expect(roleDescription).toMatch(/researcher:external/);
+    expect(roleDescription).toMatch(/no outbound network/i);
+  });
+
   // #94: an ad-hoc reviewer dispatch establishes a worktree + placement with NO review.requested
   // event / review_id / `${role}@${reviewId}` seat, so co_review_finalize can never record a verdict
   // and co_merge stalls at review_pending. Reviewer dispatch is gate-internal (co_merge only); a
@@ -528,6 +542,81 @@ describe('co_sling — with routing inputs (Phase 5 dispatch integration)', () =
 
     expect(out['status']).toBe('placed');
     expect(ctx.dispatch!.readPlacements('impl-1')[0]?.role).toBe('researcher');
+  });
+
+  // #157: a bare researcher is offline by design — placed output must flag web_research_enabled=false
+  // and carry an advisory naming researcher:external, so a wrong dispatch is caught after the fact.
+  it('#157: a bare researcher is placed with web_research_enabled=false + a researcher:external advisory', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'researcher-bare',
+      branch: 'co/bare-researcher',
+      role: 'researcher',
+    })) as Record<string, unknown>;
+
+    expect(out['status']).toBe('placed');
+    expect(out['web_research_enabled']).toBe(false);
+    expect(out['web_research_advisory']).toMatch(/researcher:external/);
+    expect(out['web_research_advisory']).toMatch(/no outbound network/i);
+  });
+
+  // #157: researcher:external is the sole web-search holder — web_research_enabled=true, no advisory.
+  it('#157: researcher:external is placed with web_research_enabled=true and no advisory', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'researcher-ext',
+      branch: 'co/external-researcher',
+      role: 'researcher:external',
+    })) as Record<string, unknown>;
+
+    expect(out['status']).toBe('placed');
+    expect(out['web_research_enabled']).toBe(true);
+    expect(out['web_research_advisory']).toBeUndefined();
+  });
+
+  // #157: a non-researcher (code worker) is offline too, but carries NO advisory (the advisory only
+  // fires for researchers, who are the ones a dispatcher would wrongly put on a web task).
+  it('#157: an implementer is placed with web_research_enabled=false and no advisory', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-offline',
+      branch: 'co/impl-offline',
+      role: 'implementer',
+    })) as Record<string, unknown>;
+
+    expect(out['status']).toBe('placed');
+    expect(out['web_research_enabled']).toBe(false);
+    expect(out['web_research_advisory']).toBeUndefined();
+  });
+
+  // #157: a non-web researcher sub-role (codebase) is offline → flag false + advisory.
+  it('#157: researcher:codebase is placed with web_research_enabled=false + advisory', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    const reg = buildCoreRegistry();
+
+    const out = (await invokeTool(reg, ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'researcher-cb',
+      branch: 'co/codebase-researcher',
+      role: 'researcher:codebase',
+    })) as Record<string, unknown>;
+
+    expect(out['status']).toBe('placed');
+    expect(out['web_research_enabled']).toBe(false);
+    expect(out['web_research_advisory']).toMatch(/researcher:external/);
   });
 
   it('waiting: records placement.decided(waiting) and returns loud message; does NOT create sandbox', async () => {
@@ -859,6 +948,51 @@ describe('co_sling — output schema shape', () => {
             reason: 'statusLine missing',
           },
         ],
+      }),
+    ).toThrow();
+  });
+
+  // #157: the web-research diagnostic is an additive PLACED-only fact — it validates on a placed
+  // output and is mutually exclusive with WAITING (mirrors the placement/worktree exclusivity).
+  it('#157: accepts web_research_enabled on a placed output and rejects it on a waiting output', () => {
+    const placed = {
+      status: 'placed',
+      branch: 'co/x',
+      base_ref: 'main',
+      base_sha: 'abc123',
+      worktree_path: '/tmp/worktree',
+      baseline_captured: true,
+      placement: {
+        provider: 'claude',
+        model: 'claude-sonnet-4-6',
+        effort: 'high',
+        context: 'standard',
+      },
+    };
+
+    // Placed WITH the additive diagnostic (and advisory) validates.
+    expect(() =>
+      slingTool.outputSchema.parse({
+        ...placed,
+        web_research_enabled: false,
+        web_research_advisory: 'use researcher:external',
+      }),
+    ).not.toThrow();
+    // Placed without it still validates (additive/optional — never required).
+    expect(() => slingTool.outputSchema.parse(placed)).not.toThrow();
+
+    // A waiting output carrying the placed-only diagnostic is rejected.
+    expect(() =>
+      slingTool.outputSchema.parse({
+        status: 'waiting',
+        web_research_enabled: true,
+        waiting: {
+          message: 'delayed',
+          next_step: 'retry later',
+          reason: 'usage source unavailable',
+          maxed_providers: ['claude'],
+          unavailable_providers: [],
+        },
       }),
     ).toThrow();
   });

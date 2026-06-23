@@ -30,7 +30,7 @@ import type { Provider } from '../dispatch/usage-source.js';
 import { CO_CLAUDE_STATUSLINE_PATH_ENV } from '../dispatch/statusline-env.js';
 import type { PrelaunchFile } from '../pty/pty-host.js';
 import { ROLE_PROFILES, roleBasePrompt } from '../roles/profile.js';
-import { findSubRole } from '../roles/sub-roles.js';
+import { findSubRole, roleMayResearchWeb } from '../roles/sub-roles.js';
 import type { Role } from '../tools/scoping.js';
 import type { BlockRule } from './block-list.js';
 import { BLOCK_LIST } from './block-list.js';
@@ -213,9 +213,7 @@ export function paneMayUseWebTools(identity: PaneIdentity): boolean {
  * token + explicit web affordances confined to the one sub-role that documents needing them.
  */
 export function paneMayResearchWeb(identity: PaneIdentity): boolean {
-  if (identity.role == null || identity.subRole == null) return false;
-  const profile = findSubRole(identity.role, identity.subRole)?.profile;
-  return profile?.capabilities.has('web-search') ?? false;
+  return roleMayResearchWeb(identity.role, identity.subRole);
 }
 
 function claudeDisallowedPatterns(blockList: readonly BlockRule[]): string[] {

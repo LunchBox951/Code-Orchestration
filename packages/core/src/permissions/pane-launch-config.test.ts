@@ -29,7 +29,8 @@ import {
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
 import { roleBasePrompt } from '../roles/profile.js';
-import { SUB_ROLES } from '../roles/sub-roles.js';
+import { SUB_ROLES, roleMayResearchWeb } from '../roles/sub-roles.js';
+import { BASE_ROLES } from '../tools/scoping.js';
 import type { SpawnSpec } from '../pty/pty-host.js';
 
 const ISOLATED_HOME = '/tmp/co-pane-isolated-test';
@@ -670,6 +671,28 @@ describe('#127 codex gated outbound network for web-research panes', () => {
     expect(paneMayResearchWeb({ ...BASE_IDENTITY, role: 'researcher' })).toBe(false);
     // No role threaded → default-deny (the production no-op posture).
     expect(paneMayResearchWeb(BASE_IDENTITY)).toBe(false);
+  });
+
+  it('roleMayResearchWeb AGREES with paneMayResearchWeb for all base roles and researcher sub-roles (#157)', () => {
+    // Every base role with no sub-role threaded → both report the same (false) posture.
+    for (const role of BASE_ROLES) {
+      expect(roleMayResearchWeb(role, undefined)).toBe(
+        paneMayResearchWeb({ ...BASE_IDENTITY, role }),
+      );
+    }
+    // All four researcher sub-roles: the pure helper must equal the launch gate exactly.
+    for (const subRole of ['codebase', 'external', 'diagnostic', 'decision'] as const) {
+      expect(roleMayResearchWeb('researcher', subRole)).toBe(
+        paneMayResearchWeb({ ...BASE_IDENTITY, role: 'researcher', subRole }),
+      );
+    }
+    // Only researcher:external is web-enabled; a bare researcher locks the offline-by-default.
+    expect(roleMayResearchWeb('researcher', 'external')).toBe(true);
+    expect(roleMayResearchWeb('researcher', undefined)).toBe(false);
+    expect(roleMayResearchWeb('researcher', 'codebase')).toBe(false);
+    expect(roleMayResearchWeb('researcher', 'diagnostic')).toBe(false);
+    expect(roleMayResearchWeb('researcher', 'decision')).toBe(false);
+    expect(roleMayResearchWeb('implementer', undefined)).toBe(false);
   });
 
   it('emits [sandbox_workspace_write] network_access=true for a web-enabled researcher:external pane', () => {

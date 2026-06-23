@@ -26,7 +26,7 @@ import type { WorkSize, ReasoningBudget } from '../../dispatch/tier.js';
 import type { DispatchDiagnostic, DispatchResolution } from '../../dispatch/throttle.js';
 import type { Provider } from '../../dispatch/usage-source.js';
 import { checkSpawnPlan } from '../../roles/spawn-rules.js';
-import { findSubRole, parseSubRoleId } from '../../roles/sub-roles.js';
+import { findSubRole, parseSubRoleId, roleMayResearchWeb } from '../../roles/sub-roles.js';
 import { BASE_ROLES, type Role } from '../scoping.js';
 import { assertToolCallerRole } from '../caller-auth.js';
 import { readWorktreeInfo } from '../worktree.js';
@@ -78,11 +78,13 @@ const slingInput = z
       .optional()
       .describe(
         'The role of the agent being dispatched (e.g. "implementer", "implementer:test", ' +
-          '"researcher"). Reviewer dispatch is gate-internal: do not sling "reviewer" or ' +
-          '"reviewer:*" ad-hoc; finish the branch and call co_merge so the review gate records ' +
-          'review.requested, places the reviewer seat, and supplies the review_id. Dispatch is ' +
-          'always resolved before sandbox creation; placed decisions are recorded after successful ' +
-          'sandbox creation. This overrides the default role.',
+          '"researcher"). A bare researcher (and the codebase/diagnostic/decision sub-roles) has NO ' +
+          'outbound network and no GitHub/web access — use researcher:external for any task needing ' +
+          'the web, api.github.com, or gh. Reviewer dispatch is gate-internal: do not sling ' +
+          '"reviewer" or "reviewer:*" ad-hoc; finish the branch and call co_merge so the review gate ' +
+          'records review.requested, places the reviewer seat, and supplies the review_id. Dispatch ' +
+          'is always resolved before sandbox creation; placed decisions are recorded after ' +
+          'successful sandbox creation. This overrides the default role.',
       ),
     work_size: workSizeSchema
       .optional()
@@ -143,6 +145,25 @@ const slingOutput = z
       .boolean()
       .optional()
       .describe('True once a test baseline has been recorded at branch-off (absent when WAITING).'),
+    // ── #157 web-research availability diagnostic (PLACED-only; additive/optional) ────────────────
+    web_research_enabled: z
+      .boolean()
+      .optional()
+      .describe(
+        'PLACED diagnostic: whether the landed pane may reach the web / api.github.com / gh — true ' +
+          'iff the resolved role+sub-role carries the web-search capability (today only ' +
+          'researcher:external). False for a bare researcher, the codebase/diagnostic/decision ' +
+          'sub-roles, and code workers — those panes are offline by design. Agrees with the ' +
+          'launch-time network gate (paneMayResearchWeb). Absent when WAITING.',
+      ),
+    web_research_advisory: z
+      .string()
+      .optional()
+      .describe(
+        'PLACED diagnostic: present only when a researcher was slung WITHOUT web access, naming ' +
+          'researcher:external as the sub-role to use for web/GitHub work. Absent when the pane ' +
+          'already has web access or is not a researcher.',
+      ),
     // ── Dispatch output fields ──────────────────────────────────────────────────
     placement: z
       .object({
@@ -191,7 +212,12 @@ const slingOutput = z
       value.base_ref !== undefined ||
       value.base_sha !== undefined ||
       value.worktree_path !== undefined ||
-      value.baseline_captured !== undefined;
+      value.baseline_captured !== undefined ||
+      // #157: the web-research diagnostic is a PLACED-only fact (it describes a landed pane).
+      // It is additive/optional — NOT required when placed — but it is mutually exclusive with
+      // WAITING, exactly like the worktree facts above (a WAITING result has no pane to describe).
+      value.web_research_enabled !== undefined ||
+      value.web_research_advisory !== undefined;
     if (value.status === 'placed') {
       for (const field of [
         'branch',
@@ -577,6 +603,17 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       throwWithRollbackErrors('co_sling: placement recording failed', cause, rollbackErrors);
     }
 
+    // #157: surface whether the landed pane may reach the web / api.github.com / gh. Computed from
+    // the resolved role+sub-role via the SAME pure capability check the launch network gate uses
+    // (roleMayResearchWeb), so the advisory cannot drift from paneMayResearchWeb. When a researcher
+    // is slung WITHOUT web access (bare researcher or a non-web sub-role), name researcher:external.
+    const webResearchEnabled = roleMayResearchWeb(childRole, parsedRole.name);
+    const webResearchAdvisory =
+      !webResearchEnabled && childRole === 'researcher'
+        ? 'This researcher pane has NO outbound network — no web, api.github.com, or gh access. ' +
+          'Sling role="researcher:external" for any task that needs web/GitHub research.'
+        : undefined;
+
     return {
       status: 'placed',
       branch: result.branch,
@@ -584,6 +621,8 @@ export const slingTool: ToolSpec<SlingInput, SlingOutput> = {
       base_sha: result.baseSha,
       worktree_path: result.worktreePath,
       baseline_captured: result.baselineCaptured,
+      web_research_enabled: webResearchEnabled,
+      ...(webResearchAdvisory !== undefined ? { web_research_advisory: webResearchAdvisory } : {}),
       placement: {
         provider: resolution.placement.provider,
         model: resolution.placement.model,
