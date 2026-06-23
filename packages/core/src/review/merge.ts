@@ -1195,19 +1195,21 @@ export class CoReviewGate implements FinishReviewGate {
   }
 
   private fireSpawn(agentId: string, projectId: string, record: PlacementRecord): void {
-    const spawn = this.deps.reviewerSpawnGate!.spawn(projectId, record).catch((err: unknown) => {
-      if (this.deps.onSpawnError != null) {
-        this.deps.onSpawnError(agentId, err);
-      } else {
-        // Loud by default (Principle 9): a spawn failure is never silently discarded.
-        // Hosts SHOULD inject onSpawnError for structured observability in production.
-        console.error(
-          `co: reviewer spawn for '${agentId}' failed (no onSpawnError injected):`,
-          err,
-        );
-      }
-      throw err;
-    });
+    const spawn = Promise.resolve()
+      .then(() => this.deps.reviewerSpawnGate!.spawn(projectId, record))
+      .catch((err: unknown) => {
+        if (this.deps.onSpawnError != null) {
+          this.deps.onSpawnError(agentId, err);
+        } else {
+          // Loud by default (Principle 9): a spawn failure is never silently discarded.
+          // Hosts SHOULD inject onSpawnError for structured observability in production.
+          console.error(
+            `co: reviewer spawn for '${agentId}' failed (no onSpawnError injected):`,
+            err,
+          );
+        }
+        throw err;
+      });
     this.pendingSpawns.push(spawn);
     void spawn.catch(() => {});
   }

@@ -253,7 +253,11 @@ function closeReviewerRedriveStore(
   try {
     store.close();
   } catch (error: unknown) {
-    pushReviewerRedriveError(errors, 'reviewer:redrive', new Error(`${label}.close: ${errorMessage(error)}`));
+    pushReviewerRedriveError(
+      errors,
+      'reviewer:redrive',
+      new Error(`${label}.close: ${errorMessage(error)}`),
+    );
   }
 }
 
@@ -581,11 +585,12 @@ export class ConductorDaemon {
    * `placed` seat through the SAME single launch authority (the injected {@link reviewerSpawnGate} →
    * `EngineReviewerSpawnGate` → `engine.ensureHosted`), seeding its kickoff + nudging the lead.
    *
-   * THUNDERING-HERD SAFETY (required): the discovered seats are sorted DETERMINISTICALLY (by reviewId)
-   * and drained at most {@link maxReviewerRedrivesPerTick} per tick — one re-resolution per seat per tick.
-   * The placement store is not a transactional queue, so the gate's placed-seat IDEMPOTENCY guard (and a
-   * fresh `readPlacements` per seat) is what stops a concurrent tick OR a lead re-call from
-   * double-launching. A still-maxed window leaves seats waiting with no churn (no record, no launch).
+   * THUNDERING-HERD SAFETY (required): the discovered seats are sorted DETERMINISTICALLY (never-failed
+   * seats first, then failed retries by failure tick + reviewId) and drained at most
+   * {@link maxReviewerRedrivesPerTick} per tick — one re-resolution per seat per tick. The placement
+   * store is not a transactional queue, so the gate's placed-seat IDEMPOTENCY guard (and a fresh
+   * `readPlacements` per seat) is what stops a concurrent tick OR a lead re-call from double-launching.
+   * A still-maxed window leaves seats waiting with no churn (no record, no launch).
    *
    * No-op (returns empty) when no spawn gate is wired (headless / no `co-mcp serve` reviewer launcher) —
    * there is nothing to launch through, so the daemon never records a churned waiting placement. Pure
@@ -663,11 +668,7 @@ export class ConductorDaemon {
                 }
               } catch (error: unknown) {
                 this.reviewerRedriveFailedAt.set(outcome.agent ?? seat.agent, this.tickCount);
-                pushReviewerRedriveError(
-                  reviewerRedriveErrors,
-                  outcome.agent ?? seat.agent,
-                  error,
-                );
+                pushReviewerRedriveError(reviewerRedriveErrors, outcome.agent ?? seat.agent, error);
               }
             } catch (error: unknown) {
               pushReviewerRedriveError(reviewerRedriveErrors, seat.agent, error);
@@ -693,8 +694,8 @@ export class ConductorDaemon {
    *   - `waiting` seats with no placed row yet (re-run placement when capacity recovers).
    *   - `placed` seats with no warm pane and no active session (retry a post-placement spawn failure).
    *
-   * Deduped to one per reviewId and sorted by reviewId (replay-stable per-seat ordering — no thundering
-   * herd). The per-review NEGATIVE guards (no verdict yet, active-serialized branch) live in
+   * Deduped to one per reviewId and sorted deterministically (replay-stable per-seat ordering — no
+   * thundering herd). The per-review NEGATIVE guards (no verdict yet, active-serialized branch) live in
    * {@link CoReviewGate.redriveWaitingReviewer}, the single source of truth shared with the lead re-call;
    * this only narrows the candidate set cheaply.
    */
@@ -711,10 +712,12 @@ export class ConductorDaemon {
     }
     const seats: ReviewerRedriveSeat[] = [];
     for (const [reviewId, agent] of waiting) {
+      if (this.isSkipped(this.projectId, agent)) continue;
       if (!placed.has(reviewId)) seats.push({ reviewId, agent, kind: 'waiting' });
     }
     for (const [reviewId, agent] of placed) {
       if (this.engine.isHosted(this.projectId, agent) || liveSessions.has(agent)) continue;
+      if (this.isSkipped(this.projectId, agent)) continue;
       seats.push({ reviewId, agent, kind: 'placed' });
     }
     return seats.sort((a, b) => this.compareReviewerRedriveSeats(a, b));
