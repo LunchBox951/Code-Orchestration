@@ -31,6 +31,9 @@ beforeEach(() => {
   const dir = mkdtempSync(join(tmpdir(), 'co-issue-file-'));
   dataDirs.push(dir);
   process.env.CO_DATA_DIR = dir;
+  // Model a daemon with GitHub auth provisioned (the production norm) so the approved-path tests
+  // exercise the gate, not the #95 fail-fast no-token pre-check (which has its own dedicated test).
+  process.env.GH_TOKEN = 'test-gh-token';
 });
 
 afterEach(() => {
@@ -362,6 +365,36 @@ describe('co_issue_file — the per-post approval round-trip', () => {
     expect(again['status']).toBe('filed');
     expect(again['posted_ref']).toBe('https://github.com/acme/co/issues/5');
     expect(createCallCount(gh)).toBe(1);
+  });
+
+  it('no GitHub token (#95): the approved filing fails fast with the connect-GitHub message, gh never runs', async () => {
+    const id = 'p-if-no-token';
+    configure(id);
+    const stores = openStores(id);
+    seedDiagnosedIssue(stores);
+    const gh = fakeGh('https://github.com/acme/co/issues/9');
+    const ctx = makeCtx(id, stores, gh);
+
+    const req = (await file(ctx)) as Record<string, unknown>;
+    const held = stores.mail
+      .inbox(OPERATOR)
+      .find((m) => m.seq === (req['approval_seq'] as number))!;
+    stores.mail.reply(held, {
+      type: MAIL_APPROVAL_RESPONSE,
+      subject: 're',
+      body: 'approved',
+      decision: 'approve',
+    });
+
+    // The daemon has NO token (no Connect-GitHub, no env, no gh login).
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.CO_GH_TOKEN;
+
+    await expect(file(ctx)).rejects.toThrow(/restart.*Conductor|reopen.*project/i);
+    expect(createCallCount(gh)).toBe(0);
+    // The issue stays diagnosed (not falsely recorded as filed) so a later retry — once connected — works.
+    expect(stores.issues.getIssue('iss-1')?.state).toBe('diagnosed');
   });
 
   it('posts the approved title even if a later retry supplies a different title', async () => {

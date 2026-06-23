@@ -1,6 +1,54 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { SettingDescriptor } from '@co/core';
-import { buildSettingsRows, SettingsVM, type SettingsData } from './settings-vm.js';
+import {
+  buildGithubSectionView,
+  buildSettingsRows,
+  SettingsVM,
+  type SettingsData,
+} from './settings-vm.js';
+
+describe('buildGithubSectionView — #95/#71 GitHub Settings section', () => {
+  it('a stored (connected) token: Connected, disconnect only, no connect field', () => {
+    const v = buildGithubSectionView({ connected: true, source: 'connected' });
+    expect(v.connected).toBe(true);
+    expect(v.statusLabel).toBe('Connected');
+    expect(v.showConnect).toBe(false);
+    expect(v.showDisconnect).toBe(true);
+  });
+
+  it('env-token connected: shows the env source, keeps the connect field, no disconnect', () => {
+    const v = buildGithubSectionView({ connected: true, source: 'env' });
+    expect(v.connected).toBe(true);
+    expect(v.statusLabel).toMatch(/environment/i);
+    expect(v.showConnect).toBe(true);
+    expect(v.showDisconnect).toBe(false);
+  });
+
+  it('gh-login connected: shows the gh source, keeps the connect field, no disconnect', () => {
+    const v = buildGithubSectionView({ connected: true, source: 'gh' });
+    expect(v.statusLabel).toMatch(/gh auth login/i);
+    expect(v.showConnect).toBe(true);
+    expect(v.showDisconnect).toBe(false);
+  });
+
+  it('not connected: connect field shown, no disconnect, hint mentions encrypted storage', () => {
+    const v = buildGithubSectionView({ connected: false, source: null });
+    expect(v.connected).toBe(false);
+    expect(v.statusLabel).toBe('Not connected');
+    expect(v.showConnect).toBe(true);
+    expect(v.showDisconnect).toBe(false);
+    expect(v.hint).toMatch(/encrypted/i);
+  });
+
+  it('unreadable stored credential: shows a warning and allows reconnect or disconnect', () => {
+    const v = buildGithubSectionView({ connected: false, source: 'stored-unreadable' });
+    expect(v.connected).toBe(false);
+    expect(v.statusLabel).toMatch(/needs attention/i);
+    expect(v.showConnect).toBe(true);
+    expect(v.showDisconnect).toBe(true);
+    expect(v.hint).toMatch(/cannot be decrypted|clear/i);
+  });
+});
 
 function desc(
   over: Partial<SettingDescriptor> & Pick<SettingDescriptor, 'key'>,

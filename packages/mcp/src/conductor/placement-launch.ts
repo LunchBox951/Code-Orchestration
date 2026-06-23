@@ -58,8 +58,9 @@ export interface CoMcpPaths {
    * Optional GitHub token resolved by {@link defaultCoMcpPaths}. Authoritative publish auth stays
    * daemon-side; pane-level auth is only provisioned for a web-research pane
    * ({@link import('@co/core').paneMayResearchWeb}: today `researcher:external`) so authenticated
-   * agent-side `gh` / api.github.com research works in the same pane whose outbound network is opened.
-   * Code workers and non-web researcher sub-roles receive neither MCP-server nor shell `GH_TOKEN`.
+   * agent-side `gh` / api.github.com research works in that pane. The token is injected ONLY into the
+   * pane's own shell env (`spec.env`), never persisted into the on-disk co-mcp bridge config; code
+   * workers and non-web researcher sub-roles receive no `GH_TOKEN` at all.
    */
   readonly ghToken?: string;
   /**
@@ -250,11 +251,9 @@ export function buildHostedLaunchSpec(
       [CO_PARENT_ENV]: identity.parent,
       [CO_PROJECT_ID_ENV]: identity.projectId,
       ...bridgeDiagnosticEnv(isolatedHomeDir, bridgeSocketPath),
-      // #127: web-research-gated GitHub token for the pane MCP server env.
-      ...researchGhTokenEnv,
       // RC-1: carry ELECTRON_RUN_AS_NODE=1 (and any other host-required server env) so the provider
-      // runs the co-mcp bridge as Node when `coMcpCommand` is the Electron binary. Reserved
-      // token/identity/bridge keys are rejected before this merge; extra env cannot override them.
+      // runs the co-mcp bridge as Node when `coMcpCommand` is the Electron binary. Last so an explicit
+      // host override wins; the values here never collide with the CO_* keys above.
       ...(coMcpPaths.coMcpExtraEnv ?? {}),
     },
     ...(coMcpPaths.coCliExtraEnv != null ? { coCliEnv: coMcpPaths.coCliExtraEnv } : {}),

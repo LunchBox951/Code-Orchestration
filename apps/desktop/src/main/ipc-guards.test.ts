@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   requireComposerField,
   requireFiniteSeq,
+  requireGithubToken,
   requireMailTab,
   requireMailType,
   requireNavView,
@@ -55,6 +56,27 @@ describe('main IPC runtime guards', () => {
     expect(() => requireAgentId('')).toThrow(/agentId/i);
     expect(() => requireAgentId('   ')).toThrow(/agentId/i);
     expect(() => requireAgentId(42)).toThrow(/agentId/i);
+  });
+
+  it('github:connect guard accepts a non-blank token (trimmed) and rejects empty/blank/non-string', () => {
+    expect(requireGithubToken('ghp_abc123')).toBe('ghp_abc123');
+    expect(requireGithubToken('  ghp_trimmed  ')).toBe('ghp_trimmed');
+    expect(() => requireGithubToken('')).toThrow(/GitHub token/i);
+    expect(() => requireGithubToken('   ')).toThrow(/GitHub token/i);
+    expect(() => requireGithubToken(null)).toThrow(/GitHub token/i);
+    expect(() => requireGithubToken(42)).toThrow(/GitHub token/i);
+  });
+
+  it('github:connect guard never echoes the token value into the error message (no secret leak)', () => {
+    // A non-string with a recognizable payload — the message must describe the failure, not the value.
+    let message = '';
+    try {
+      requireGithubToken({ secret: 'ghp_LEAK_ME' });
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    expect(message).toMatch(/GitHub token/i);
+    expect(message).not.toContain('ghp_LEAK_ME');
   });
 
   it('accepts PASS/ISSUES verdicts and rejects arbitrary strings', () => {

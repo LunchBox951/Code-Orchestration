@@ -1290,6 +1290,7 @@ export {
   ghIssueCreateArgs,
   renderIssueBody,
   fileIssueOutward,
+  assertGhTokenForFiling,
 } from './issues/filing.js';
 
 // ── L6b H — RESEARCH: the locator map contract + durable finalize records (research.md) ────────

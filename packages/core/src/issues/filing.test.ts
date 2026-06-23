@@ -8,6 +8,7 @@ import { approvalOutcome } from '../mail/approval.js';
 import type { GhExec } from '../worktrees/repo-mode.js';
 import type { IssueRecord } from './events.js';
 import {
+  assertGhTokenForFiling,
   assertIssueDestinationAllowed,
   buildIssueFilingApproval,
   fileIssueOutward,
@@ -140,6 +141,7 @@ describe('fileIssueOutward — gateOutwardAction is the gate', () => {
       issueId: 'iss-12',
       title: 'T',
       body: 'B',
+      tokenEnv: { GH_TOKEN: 'test-token' }, // a token is present — exercise the gate, not the auth check
     });
 
   it('BLOCKS while the approval is pending — gh never runs', () => {
@@ -176,6 +178,76 @@ describe('fileIssueOutward — gateOutwardAction is the gate', () => {
   });
 });
 
+describe('fileIssueOutward — fail-fast GitHub-auth pre-check (#95)', () => {
+  it('throws a CLEAR connect-GitHub message (not a raw gh failure) when no token is available, and gh never runs', () => {
+    const gh = vi.fn<GhExec>();
+    expect(() =>
+      fileIssueOutward({
+        outcome: 'approved',
+        ghExec: gh,
+        cwd: '/tmp/repo',
+        destination: 'co',
+        coRepoSlug: 'acme/co',
+        issueId: 'iss-99',
+        title: 'My title',
+        body: 'B',
+        tokenEnv: {}, // no CO_GH_TOKEN / GH_TOKEN / GITHUB_TOKEN
+      }),
+    ).toThrow(/restart.*Conductor|reopen.*project/i);
+    expect(gh).not.toHaveBeenCalled();
+  });
+
+  it('the actionable message includes a ready-to-run `gh issue create` fallback', () => {
+    let message = '';
+    try {
+      assertGhTokenForFiling({
+        destination: 'co',
+        coRepoSlug: 'acme/co',
+        title: 'My title',
+        env: {},
+      });
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    expect(message).toMatch(/set CO_GH_TOKEN.*restart.*Conductor/i);
+    expect(message).toMatch(/gh auth login.*restart.*Conductor/i);
+    expect(message).toContain('gh issue create');
+    expect(message).toContain('-R acme/co');
+    expect(message).toContain('"My title"');
+  });
+
+  it('a present token (any of the three vars) passes the pre-check', () => {
+    expect(() =>
+      assertGhTokenForFiling({ destination: 'target', title: 'T', env: { GH_TOKEN: 'x' } }),
+    ).not.toThrow();
+    expect(() =>
+      assertGhTokenForFiling({ destination: 'target', title: 'T', env: { GITHUB_TOKEN: 'x' } }),
+    ).not.toThrow();
+    expect(() =>
+      assertGhTokenForFiling({ destination: 'target', title: 'T', env: { CO_GH_TOKEN: 'x' } }),
+    ).not.toThrow();
+  });
+
+  it('the pending/declined gate still wins over the token check (gh + token check both skipped)', () => {
+    const gh = vi.fn<GhExec>();
+    // No token AND pending: the gate BLOCKS first; the token check (inside the gate) never runs.
+    expect(() =>
+      fileIssueOutward({
+        outcome: 'pending',
+        ghExec: gh,
+        cwd: '/tmp/repo',
+        destination: 'co',
+        coRepoSlug: 'acme/co',
+        issueId: 'iss-1',
+        title: 'T',
+        body: 'B',
+        tokenEnv: {},
+      }),
+    ).toThrow(/blocked|pending/i);
+    expect(gh).not.toHaveBeenCalled();
+  });
+});
+
 describe('end-to-end approval thread → outcome → gated filing', () => {
   it('approval sent → operator approves in-thread → outcome approved → filing proceeds', () => {
     const mail = openMailStore('p-filing-e2e');
@@ -203,6 +275,7 @@ describe('end-to-end approval thread → outcome → gated filing', () => {
         issueId: ISSUE.issueId,
         title: 'T',
         body: renderIssueBody(ISSUE),
+        tokenEnv: { GH_TOKEN: 'test-token' },
       });
       expect(ref).toBe('https://github.com/acme/co/issues/3');
     } finally {

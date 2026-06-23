@@ -2003,9 +2003,10 @@ export function defaultServeCoMcpPaths(
 // ── GitHub auth provisioning for the daemon (RC-2/3/4) ──────────────────────────────────────────────
 //
 // The gated publish (`co_push`/`co_pr_merge`) and remote detection run DAEMON-side, inheriting the
-// daemon's `process.env`. A GUI-launched desktop app inherits no shell exports and there is no
-// Connect-GitHub UI, so the token must be SOURCED (from the operator's existing `gh auth login`) and
-// the env PROVISIONED so both `gh` and `git push https` authenticate. See {@link githubHttpsCredentialEnv}.
+// daemon's `process.env`. Desktop Connect-GitHub can provision `CO_GH_TOKEN` into the GUI-spawned
+// daemon; CLI/desktop fallback paths can also source the operator's existing `gh auth login`. Either
+// way, auth is applied to the daemon env only so both daemon-side `gh` and `git push https` authenticate.
+// See {@link githubHttpsCredentialEnv}.
 
 /** Resolved `gh auth token` output plus the command that produced it. */
 export interface GhAuthTokenResolution {
@@ -2086,8 +2087,8 @@ export const defaultGhAuthTokenRunner: GhAuthTokenRunner = makeGhAuthTokenRunner
 /**
  * Resolve a GitHub token for the daemon: explicit env (`CO_GH_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`,
  * via the shared {@link resolveGhTokenFromEnv} policy) wins; otherwise fall back to the operator's
- * existing login via `gh auth token`. So a self-hosting operator authenticates GitHub with the
- * standard one-time `gh auth login` — no co-specific UI needed.
+ * existing login via `gh auth token`. Desktop operators can use Connect-GitHub to provision
+ * `CO_GH_TOKEN`; CLI/self-hosting operators can use the standard one-time `gh auth login`.
  */
 export function resolveGhToken(
   env: NodeJS.ProcessEnv = process.env,
@@ -2104,8 +2105,18 @@ function resolveGhAuth(
   commandResolver: GhCommandResolver,
 ): GhAuthTokenResolution | undefined {
   const explicit = resolveGhTokenFromEnv(env);
-  if (explicit != null) return { token: explicit, command: commandResolver(env) ?? 'gh' };
+  if (explicit != null) {
+    return { token: explicit, command: commandResolver(envWithoutGithubTokens(env)) ?? 'gh' };
+  }
   return runner(env);
+}
+
+function envWithoutGithubTokens(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean = { ...env };
+  delete clean.CO_GH_TOKEN;
+  delete clean.GH_TOKEN;
+  delete clean.GITHUB_TOKEN;
+  return clean;
 }
 
 /**
@@ -2156,16 +2167,17 @@ export async function runServeConductor(argv: readonly string[]): Promise<void> 
   // prompt — even on the no-token path (Principle 9 fail-loud: error out, do not hang). Set this
   // unconditionally; githubHttpsCredentialEnv also sets it when a token is provisioned.
   process.env['GIT_TERMINAL_PROMPT'] = '0';
-  // RC-2/3/4: provision GitHub auth onto the daemon env BEFORE building coMcpPaths so (a) the
-  // daemon-side git/gh publish + detection authenticate, and (b) defaultServeCoMcpPaths() picks up the
-  // now-set GH_TOKEN for the pane (defense-in-depth). Sourced from explicit env or the operator's
-  // existing `gh auth login`. Surface the result LOUDLY so a logged-out operator is never left guessing.
+  // RC-2/3/4: provision GitHub auth onto the daemon env before building coMcpPaths so daemon-side
+  // git/gh publish + detection authenticate. Sourced from desktop Connect-GitHub (`CO_GH_TOKEN`),
+  // explicit env, or the operator's existing `gh auth login`. Surface the result LOUDLY so a logged-out
+  // operator is never left guessing.
   const ghToken = resolveAndApplyDaemonGithubAuth();
   console.error(
     ghToken != null
       ? '[co-mcp serve] GitHub auth: configured — gh + remote HTTPS pushes will authenticate to github.com.'
-      : '[co-mcp serve] GitHub auth: NONE — run `gh auth login` (or set CO_GH_TOKEN); remote publish ' +
-          '(co_push / co_pr_merge) will fail until then. Offline/owner-local co_merge still works.',
+      : '[co-mcp serve] GitHub auth: NONE — run `gh auth login` (or set CO_GH_TOKEN), then restart ' +
+          'the Conductor or reopen the project; remote publish (co_push / co_pr_merge) will fail until ' +
+          'then. Offline/owner-local co_merge still works.',
   );
   // [host-live capture] Arm the observation harness when CO_HOST_LIVE_CAPTURE=<dir> is set, so a single
   // real run records the codex paste-preview bytes / MCP-approval prompt / status-line / usage sample

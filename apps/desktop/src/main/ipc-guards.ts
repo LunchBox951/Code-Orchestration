@@ -59,6 +59,16 @@ export function requireAgentId(value: unknown): string {
   return requireNonBlankString(value, 'agentId').trim();
 }
 
+/**
+ * Guard the `github:connect` token at the IPC boundary (#95/#71): a non-blank string only. Returns the
+ * trimmed token. NEVER include the token value in the thrown message — that would leak a secret into the
+ * renderer-facing error surface; the value is validated, not echoed.
+ */
+export function requireGithubToken(value: unknown): string {
+  if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  throw new Error('Invalid GitHub token: expected a non-empty string.');
+}
+
 export function requireReviewVerdict(value: unknown): 'PASS' | 'ISSUES' {
   return requireOneOf(value, ['PASS', 'ISSUES'] as const, 'review verdict');
 }

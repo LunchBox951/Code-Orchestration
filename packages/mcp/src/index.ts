@@ -54,6 +54,14 @@ export {
   monotonicNowMs,
   realQuietWindow,
   hostLiveTransportRequired,
+  // GitHub-auth provisioning seams (RC-2/3/4) — re-exported so the desktop adapter can REUSE the
+  // single-sourced `gh auth token` resolver (its GUI auto-prime fallback) instead of duplicating it.
+  makeGhAuthTokenRunner,
+  defaultGhAuthTokenRunner,
+  makeGhCommandResolver,
+  defaultGhCommandResolver,
+  resolveGhToken,
+  resolveAndApplyDaemonGithubAuth,
   type ConductorHostRunnerDeps,
   type ConductorHostRunnerStopOptions,
   type ConductorControlSurface,
@@ -61,6 +69,10 @@ export {
   type OperatorIpcServeConfig,
   type IntervalScheduler,
   type IntervalHandle,
+  type GhAuthTokenResolution,
+  type GhAuthTokenRunner,
+  type GhCommandResolver,
+  type GhSpawnSync,
 } from './conductor/host.js';
 // L7-CTLOBS (Stage 10 P3) — the transport-agnostic operator CONTROL + OBSERVE surface over the running
 // engine: the daemon-backed `AgentRouterSeam` (unstick/pause/stop/steer act on LIVE agents, replacing

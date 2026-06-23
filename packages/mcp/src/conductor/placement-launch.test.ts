@@ -332,48 +332,26 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     expect(parsed.mcpServers?.co?.env).not.toHaveProperty('GH_TOKEN');
   });
 
-  it('F3/#127: a configured ghToken is provisioned only for a web-research pane', () => {
-    const { projectId, cwd, dataDir } = makeProject();
-    const placement = recordPlacement(projectId, 'res-gh', 'researcher:external', 'claude');
-    const worktree = recordWorktree(projectId, 'res-gh', 'co/research-gh', cwd);
-    const isolatedHomeDir = join(dataDir, 'isolated', 'res-gh');
-
-    const { spec } = buildPlacementLaunchSpec(
-      placement as PlacementRecord & { kind: 'placed'; provider: string },
-      worktree,
-      projectId,
-      isolatedHomeDir,
-      { ...TEST_MCP_PATHS, ghToken: 'gho_test_token' },
-    );
-
-    const mcpConfig = spec.prelaunchFiles?.find((f) => f.path.endsWith('co-mcp.json'));
-    const parsed = JSON.parse(mcpConfig!.contents) as {
-      mcpServers?: { co?: { env?: Record<string, string> } };
-    };
-    // Web research is the only pane class that receives the token, in both the MCP relay env and
-    // the pane shell env used by agent-side `gh` / api.github.com calls.
-    expect(parsed.mcpServers?.co?.env?.['GH_TOKEN']).toBe('gho_test_token');
-    expect(spec.env['GH_TOKEN']).toBe('gho_test_token');
-  });
-
-  it('#127: GH_TOKEN is absent from a non-web pane MCP env even when ghToken is configured', () => {
+  it('does not persist a legacy ghToken into the pane MCP env', () => {
     const { projectId, cwd, dataDir } = makeProject();
     const placement = recordPlacement(projectId, 'impl-gh', 'implementer', 'claude');
     const worktree = recordWorktree(projectId, 'impl-gh', 'co/feat-gh', cwd);
     const isolatedHomeDir = join(dataDir, 'isolated', 'impl-gh');
 
+    const legacyPaths = { ...TEST_MCP_PATHS, ghToken: 'gho_test_token' };
     const { spec } = buildPlacementLaunchSpec(
       placement as PlacementRecord & { kind: 'placed'; provider: string },
       worktree,
       projectId,
       isolatedHomeDir,
-      { ...TEST_MCP_PATHS, ghToken: 'gho_test_token' },
+      legacyPaths,
     );
 
     const mcpConfig = spec.prelaunchFiles?.find((f) => f.path.endsWith('co-mcp.json'));
     const parsed = JSON.parse(mcpConfig!.contents) as {
       mcpServers?: { co?: { env?: Record<string, string> } };
     };
+    // GitHub auth is daemon-owned; the pane bridge config must not persist plaintext tokens.
     expect(parsed.mcpServers?.co?.env).not.toHaveProperty('GH_TOKEN');
     expect(spec.env).not.toHaveProperty('GH_TOKEN');
   });

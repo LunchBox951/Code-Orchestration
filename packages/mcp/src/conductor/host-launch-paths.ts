@@ -2,7 +2,6 @@ import { accessSync, constants as fsConstants, existsSync, readFileSync } from '
 import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-import { resolveGhTokenFromEnv } from '@co/core';
 import { sanitizeClaudeStateJson, type CoMcpPaths } from './placement-launch.js';
 
 export interface HostLaunchPathOptions {
@@ -22,7 +21,7 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
   // F3/#127: source an optional GitHub token candidate from the daemon env via the shared policy
   // ({@link resolveGhTokenFromEnv}: CO_GH_TOKEN > GH_TOKEN > GITHUB_TOKEN). Authoritative publish auth
   // is provisioned daemon-side at serve boot; buildHostedLaunchSpec injects this candidate only into
-  // web-research panes.
+  // web-research panes (their own shell env, never the on-disk bridge config).
   const ghToken = resolveGhTokenFromEnv(env);
   return {
     coMcpCommand: opts.nodeCommand ?? process.execPath,
@@ -30,7 +29,6 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
     coCliCommand: coCli.command,
     ...(coCli.args.length > 0 ? { coCliArgs: coCli.args } : {}),
     coMcpBridgeSocketPath: defaultBridgeSocketPath,
-    ...(ghToken != null ? { ghToken } : {}),
     // RC-1: when the daemon runs under Electron (the desktop spawns `co-mcp serve` as the Electron
     // binary with ELECTRON_RUN_AS_NODE=1), `coMcpCommand` IS that Electron binary. The provider must
     // therefore run the co-mcp bridge with ELECTRON_RUN_AS_NODE=1 too, or `electron <bin> bridge` boots

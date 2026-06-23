@@ -506,3 +506,59 @@ describe('open-project — daemon Retry + env-path resolution', () => {
     expect(h.controller.currentProject).toEqual({ projectId: 'pid-unknown', path: null });
   });
 });
+
+describe('open-project — reopenCurrentProject re-provisions the daemon (#95/#71)', () => {
+  it('tears down + rebuilds the current project (new supervisor + shell) so a fresh token re-provisions', async () => {
+    const h = makeHarness();
+    await h.controller.openProject('pid-gh' as ProjectId, '/repo/gh');
+    expect(h.supervisors).toHaveLength(1);
+    expect(h.shells).toHaveLength(1);
+
+    await h.controller.reopenCurrentProject();
+
+    // A brand-new supervisor + shell were built for the SAME project — exactly the path that re-reads
+    // resolveExtraEnv at spawn time, so a just-connected CO_GH_TOKEN takes effect.
+    expect(h.supervisors).toHaveLength(2);
+    expect(h.shells).toHaveLength(2);
+    expect(h.supervisors[0]!.stopCount).toBe(1); // old daemon stopped
+    expect(h.shells[0]!.closed).toBe(true); // old shell closed
+    expect(h.supervisors[1]!.startCalls).toEqual(['pid-gh']);
+    expect(h.shells[1]!.started).toBe(true);
+    expect(h.controller.currentProject).toEqual({ projectId: 'pid-gh', path: '/repo/gh' });
+  });
+
+  it('is a no-op when no project is open', async () => {
+    const h = makeHarness();
+    await h.controller.reopenCurrentProject();
+    expect(h.supervisors).toHaveLength(0);
+    expect(h.shells).toHaveLength(0);
+    expect(h.controller.currentProject).toBeNull();
+  });
+
+  it('serializes behind an in-flight open — the reopen never interleaves with a project switch', async () => {
+    const h = makeHarness();
+    await h.controller.openProject('pid-a' as ProjectId, '/repo/a');
+    h.events.length = 0;
+
+    // Fire a switch and a reopen back-to-back; both run through the same serialized open tail.
+    const switching = h.controller.openProject('pid-b' as ProjectId, '/repo/b');
+    const reopening = h.controller.reopenCurrentProject();
+    await Promise.all([switching, reopening]);
+
+    // Each open completes (teardown → build) before the next begins. The queued project switch must still
+    // win; a following reopen must re-provision B, not resurrect stale project A.
+    expect(h.controller.currentProject).toEqual({ projectId: 'pid-b', path: '/repo/b' });
+    expect(h.supervisors.at(-1)?.startCalls).toEqual(['pid-b']);
+    expect(h.shells.at(-1)?.started).toBe(true);
+    expect(h.events).toEqual([
+      'supervisor.stop:pid-a',
+      'shell.close:pid-a',
+      'supervisor.start:pid-b',
+      'shell.start:pid-b',
+      'supervisor.stop:pid-b',
+      'shell.close:pid-b',
+      'supervisor.start:pid-b',
+      'shell.start:pid-b',
+    ]);
+  });
+});
