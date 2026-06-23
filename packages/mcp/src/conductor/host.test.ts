@@ -1635,7 +1635,9 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     void turn.catch(() => {});
     await tick();
 
-    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toThrow(/launching|in-flight turn/i);
+    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toThrow(
+      /launching|in-flight turn/i,
+    );
 
     expect(runner.control!.router.shouldSkip(projectId, 'leaf-a')).toBe(false);
     expect(engine.isHosted(projectId, 'leaf-a')).toBe(true);
@@ -1681,7 +1683,9 @@ describe('serveConductor — wires the full stack over injected seams (no real b
     await tick();
     expect(pty.panes).toHaveLength(1);
 
-    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toThrow(/launching|in-flight turn/i);
+    await expect(runner.control!.reclaimChild('leaf-a')).rejects.toThrow(
+      /launching|in-flight turn/i,
+    );
 
     expect(runner.control!.router.shouldSkip(projectId, 'leaf-a')).toBe(false);
     expect(engine.isHosted(projectId, 'leaf-a')).toBe(false);
