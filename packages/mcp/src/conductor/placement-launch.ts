@@ -95,6 +95,28 @@ const CLAUDE_STATE_ALLOWLIST = [
   'sonnet1m45MigrationComplete',
 ] as const;
 
+const RESERVED_EXTRA_ENV_KEYS = new Set([
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'CO_GH_TOKEN',
+  CO_AGENT_ENV,
+  CO_ROLE_ENV,
+  CO_PARENT_ENV,
+  CO_PROJECT_ID_ENV,
+  CO_MCP_BRIDGE_LOG_ENV,
+]);
+
+function assertNoReservedExtraEnv(
+  label: 'coMcpExtraEnv' | 'coCliExtraEnv',
+  env: Readonly<Record<string, string>> | undefined,
+): void {
+  for (const key of Object.keys(env ?? {})) {
+    if (RESERVED_EXTRA_ENV_KEYS.has(key)) {
+      throw new Error(`buildHostedLaunchSpec: ${label} key '${key}' is reserved.`);
+    }
+  }
+}
+
 export function sanitizeClaudeStateJson(raw: string): string | undefined {
   const parsed = JSON.parse(raw) as unknown;
   if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -186,6 +208,9 @@ export function buildHostedLaunchSpec(
   isolatedHomeDir: string,
   coMcpPaths: CoMcpPaths,
 ): SpawnSpec {
+  assertNoReservedExtraEnv('coMcpExtraEnv', coMcpPaths.coMcpExtraEnv);
+  assertNoReservedExtraEnv('coCliExtraEnv', coMcpPaths.coCliExtraEnv);
+
   const provider = identity.provider;
   const mountedRole =
     identity.subRole != null ? `${identity.role}:${identity.subRole}` : identity.role;

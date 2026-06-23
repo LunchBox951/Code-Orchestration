@@ -5,9 +5,8 @@
  * (soft); only researcher sub-roles carry a permission delta (web-search gating).
  *
  * NOTE (enforcement scope): the web-search capability delta is integrity-checked by narrow-only.ts
- * and is enforced for outbound network + GH_TOKEN placement (#127). The provider's native
- * WebSearch/WebFetch tool setting remains grant-all for now; tightening that separate axis to the
- * resolved profile is a deliberate follow-up.
+ * and is enforced at pane launch for outbound network, GH_TOKEN placement, and provider-native web
+ * tools (#127).
  *
  * Coordinator and Lead have no sub-roles — they are owner-tier roles.
  */
@@ -44,8 +43,7 @@ const researcherNoWebProfile: RoleProfile = {
  * - **Reviewer** sub-roles (`feature`, `bugfix`, `pr`) are soft/posture specializations — same
  *   profile as the base reviewer (writeScope `read-only-for-code`).
  * - **Researcher** sub-roles carry a declared permission delta: only `external` retains the base
- *   researcher's `web-search` capability; `codebase`, `diagnostic`, and `decision` narrow it away
- *   (declared + integrity-checked, but not yet enforced at launch — see the header note).
+ *   researcher's `web-search` capability; `codebase`, `diagnostic`, and `decision` narrow it away.
  */
 export const SUB_ROLES: readonly SubRoleSpec[] = [
   // ── Implementer sub-roles (soft/approach, writeScope: code) ──────────────────

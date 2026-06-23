@@ -400,6 +400,9 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
     expect(configToml!.contents).toContain('[sandbox_workspace_write]');
     expect(configToml!.contents).toMatch(/\[sandbox_workspace_write\]\nnetwork_access = true/u);
+    expect(configToml!.contents).toMatch(
+      /\[mcp_servers\.co\.env\][\s\S]*\nGH_TOKEN = "gho_research_token"/u,
+    );
   });
 
   it('#127: GH_TOKEN is ABSENT from a code worker pane shell env even when ghToken is configured', () => {
@@ -554,6 +557,57 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
       'command = "ELECTRON_RUN_AS_NODE=\\"1\\" \\"/electron\\" \\"/repo/packages/cli/dist/index.js\\" hook codex-block-list',
     );
     expect(spec.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+  });
+
+  it('#127: rejects reserved token keys in coMcpExtraEnv before they can bypass the web-research gate', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-reserved-token', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-reserved-token', 'co/reserved-token', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-reserved-token');
+
+    expect(() =>
+      buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        { ...TEST_MCP_PATHS, coMcpExtraEnv: { GH_TOKEN: 'gho_bypass' } },
+      ),
+    ).toThrow(/coMcpExtraEnv.*GH_TOKEN.*reserved/i);
+  });
+
+  it('#127: rejects reserved identity keys in coMcpExtraEnv before they can override mounted identity', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-reserved-role', 'implementer', 'claude');
+    const worktree = recordWorktree(projectId, 'impl-reserved-role', 'co/reserved-role', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-reserved-role');
+
+    expect(() =>
+      buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        { ...TEST_MCP_PATHS, coMcpExtraEnv: { CO_ROLE: 'researcher:external' } },
+      ),
+    ).toThrow(/coMcpExtraEnv.*CO_ROLE.*reserved/i);
+  });
+
+  it('#127: rejects reserved keys in coCliExtraEnv before they can alter hook identity or credentials', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'impl-reserved-cli', 'implementer', 'codex');
+    const worktree = recordWorktree(projectId, 'impl-reserved-cli', 'co/reserved-cli', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'impl-reserved-cli');
+
+    expect(() =>
+      buildPlacementLaunchSpec(
+        placement as PlacementRecord & { kind: 'placed'; provider: string },
+        worktree,
+        projectId,
+        isolatedHomeDir,
+        { ...TEST_MCP_PATHS, coCliExtraEnv: { CO_MCP_BRIDGE_LOG: '/tmp/override.log' } },
+      ),
+    ).toThrow(/coCliExtraEnv.*CO_MCP_BRIDGE_LOG.*reserved/i);
   });
 
   it('RC-5: the pane HOME is the ISOLATED home dir, never the operator home', () => {

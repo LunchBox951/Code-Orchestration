@@ -187,20 +187,14 @@ function rolePromptFor(identity: PaneIdentity): string | undefined {
 }
 
 /**
- * Whether a pane with these capabilities may use the built-in web tools (#7 §5 #3).
+ * Whether a pane may use provider-native web tools (#7 §5 #3).
  *
  * Closes the finding that, under `--permission-mode bypassPermissions`, `WebSearch`/`WebFetch`
  * were neither allowed NOR denied — an undefined posture. The launch config now ALWAYS states the
  * decision explicitly (the tools appear in `--allowedTools` or `--disallowedTools`).
- *
- * POLICY (operator decision): GRANT to all roles. The decision is intentionally routed through the
- * capability set so tightening to least-privilege is a one-line change — return
- * `capabilities.has('web-search')` here and only the Researcher (the sole `web-search` holder)
- * keeps web access.
  */
-export function paneMayUseWebTools(capabilities: ReadonlySet<Capability>): boolean {
-  void capabilities; // grant-all today; flip to `capabilities.has('web-search')` to enforce
-  return true;
+export function paneMayUseWebTools(identity: PaneIdentity): boolean {
+  return paneMayResearchWeb(identity);
 }
 
 /**
@@ -519,7 +513,7 @@ function buildClaudeLaunchConfig(
   }
   // Built-in web tools (#7 §5 #3): state the decision EXPLICITLY rather than leaving it undefined
   // under bypassPermissions — allow when the role may browse, hard-deny otherwise.
-  const webAllowed = paneMayUseWebTools(identity.capabilities ?? new Set<Capability>());
+  const webAllowed = paneMayUseWebTools(identity);
   const allowedTools = [...CLAUDE_ALLOWED_CO_MCP_TOOLS, ...(webAllowed ? WEB_SEARCH_TOOLS : [])];
   if (allowedTools.length > 0) {
     args.push('--allowedTools', allowedTools.join(','));

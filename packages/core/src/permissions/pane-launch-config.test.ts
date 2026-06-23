@@ -28,7 +28,7 @@ import {
   CODEX_SANDBOX_NETWORK_SECTION,
   type PaneLaunchConfig,
 } from './pane-launch-config.js';
-import { ROLE_PROFILES, roleBasePrompt, type Capability } from '../roles/profile.js';
+import { roleBasePrompt } from '../roles/profile.js';
 import type { SpawnSpec } from '../pty/pty-host.js';
 
 const ISOLATED_HOME = '/tmp/co-pane-isolated-test';
@@ -922,12 +922,37 @@ describe('claude built-in web tools are explicitly decided at launch (#7 §5 #3)
     return i < 0 ? [] : (args[i + 1] ?? '').split(',');
   };
 
-  it('a role with NO web-search capability still gets an EXPLICIT allow (grant-all policy)', () => {
-    // The gap was that, under bypassPermissions, WebSearch/WebFetch were neither allowed nor
-    // denied. Now the decision is always stated: grant-all puts them in --allowedTools.
+  it('a non-web pane gets an EXPLICIT deny for native WebSearch/WebFetch', () => {
     const config = buildPaneLaunchConfig('claude', {
       ...BASE_IDENTITY,
-      capabilities: new Set<Capability>(),
+      role: 'implementer',
+    });
+    const allowed = flagValue(config.args, '--allowedTools');
+    expect(allowed).not.toContain('WebSearch');
+    expect(allowed).not.toContain('WebFetch');
+    const disallowed = flagValue(config.args, '--disallowedTools');
+    expect(disallowed).toContain('WebSearch');
+    expect(disallowed).toContain('WebFetch');
+  });
+
+  it('a bare researcher without a resolved web sub-role gets an EXPLICIT deny for native WebSearch/WebFetch', () => {
+    const config = buildPaneLaunchConfig('claude', {
+      ...BASE_IDENTITY,
+      role: 'researcher',
+    });
+    const allowed = flagValue(config.args, '--allowedTools');
+    expect(allowed).not.toContain('WebSearch');
+    expect(allowed).not.toContain('WebFetch');
+    const disallowed = flagValue(config.args, '--disallowedTools');
+    expect(disallowed).toContain('WebSearch');
+    expect(disallowed).toContain('WebFetch');
+  });
+
+  it('only researcher:external gets an EXPLICIT allow for native WebSearch/WebFetch', () => {
+    const config = buildPaneLaunchConfig('claude', {
+      ...BASE_IDENTITY,
+      role: 'researcher',
+      subRole: 'external',
     });
     const allowed = flagValue(config.args, '--allowedTools');
     expect(allowed).toContain('WebSearch');
@@ -937,19 +962,15 @@ describe('claude built-in web tools are explicitly decided at launch (#7 §5 #3)
     expect(disallowed).not.toContain('WebFetch');
   });
 
-  it('the researcher (the web-search holder) gets the same explicit allow', () => {
-    const config = buildPaneLaunchConfig('claude', {
-      ...BASE_IDENTITY,
-      capabilities: ROLE_PROFILES.researcher.capabilities,
-    });
-    const allowed = flagValue(config.args, '--allowedTools');
-    expect(allowed).toContain('WebSearch');
-    expect(allowed).toContain('WebFetch');
-  });
-
-  it('paneMayUseWebTools is grant-all and capability-driven (one-line flip to least-privilege)', () => {
-    expect(paneMayUseWebTools(new Set<Capability>())).toBe(true);
-    expect(paneMayUseWebTools(ROLE_PROFILES.researcher.capabilities)).toBe(true);
+  it('paneMayUseWebTools follows the resolved web-research sub-role gate', () => {
+    expect(paneMayUseWebTools({ ...BASE_IDENTITY, role: 'researcher', subRole: 'external' })).toBe(
+      true,
+    );
+    expect(paneMayUseWebTools({ ...BASE_IDENTITY, role: 'researcher' })).toBe(false);
+    expect(paneMayUseWebTools({ ...BASE_IDENTITY, role: 'researcher', subRole: 'codebase' })).toBe(
+      false,
+    );
+    expect(paneMayUseWebTools({ ...BASE_IDENTITY, role: 'implementer' })).toBe(false);
   });
 });
 

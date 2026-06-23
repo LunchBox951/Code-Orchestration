@@ -19,9 +19,10 @@ export function defaultCoMcpPaths(opts: HostLaunchPathOptions = {}): CoMcpPaths 
   const coMcpBin = currentCoMcpBin(argv);
   const homeDir = opts.homeDir ?? homedir();
   const coCli = resolveCoCliCommand(coMcpBin, env, opts.nodeCommand ?? process.execPath);
-  // F3 (defense-in-depth): source the GitHub token from the daemon env via the single shared policy
-  // ({@link resolveGhTokenFromEnv}: CO_GH_TOKEN > GH_TOKEN > GITHUB_TOKEN). The AUTHORITATIVE publish
-  // auth is provisioned daemon-side at serve boot; this propagates the token to the pane MCP config too.
+  // F3/#127: source an optional GitHub token candidate from the daemon env via the shared policy
+  // ({@link resolveGhTokenFromEnv}: CO_GH_TOKEN > GH_TOKEN > GITHUB_TOKEN). Authoritative publish auth
+  // is provisioned daemon-side at serve boot; buildHostedLaunchSpec injects this candidate only into
+  // web-research panes.
   const ghToken = resolveGhTokenFromEnv(env);
   return {
     coMcpCommand: opts.nodeCommand ?? process.execPath,
