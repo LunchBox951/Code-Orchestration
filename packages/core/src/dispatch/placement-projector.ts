@@ -8,7 +8,7 @@ import {
   type PlacementDecided,
   type PlacementRecord,
 } from './events.js';
-import { accountForProvider } from './provider-source.js';
+import { accountForProvider } from './provider-account.js';
 import type { Provider } from './usage-source.js';
 
 const CREATE_PLACEMENT_TABLE = `

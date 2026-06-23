@@ -1571,4 +1571,69 @@ describe('createAppShell — seeds initial account statuses on a fresh box (#122
       await shell.close();
     }
   });
+
+  it('keeps seed placeholders aligned with dispatch.enabledProviders changes in the current shell', async () => {
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+    });
+    try {
+      shell.refreshLimitsCost();
+      expect(shell.limitsCost.state.headroomRows.map((row) => row.provider).sort()).toEqual([
+        'claude',
+        'codex',
+      ]);
+
+      const codexOnly = shell.setSetting('project', DISPATCH_ENABLED_PROVIDERS_KEY, ['codex']);
+      expect(codexOnly.ok).toBe(true);
+      expect(shell.limitsCost.state.headroomRows.map((row) => row.provider)).toEqual(['codex']);
+
+      const both = shell.setSetting('project', DISPATCH_ENABLED_PROVIDERS_KEY, ['claude', 'codex']);
+      expect(both.ok).toBe(true);
+      expect(shell.limitsCost.state.headroomRows.map((row) => row.provider).sort()).toEqual([
+        'claude',
+        'codex',
+      ]);
+    } finally {
+      await shell.close();
+    }
+  });
+
+  it('seeds a provider enabled after startup without requiring a restart', async () => {
+    const cfg = openConfigStore();
+    try {
+      cfg.setProjectOverride(FAKE_PROJECT_ID, DISPATCH_ENABLED_PROVIDERS_KEY, ['codex']);
+    } finally {
+      cfg.close();
+    }
+
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client: makeClient(),
+      actionablesReader: () => [],
+    });
+    try {
+      shell.refreshLimitsCost();
+      expect(shell.limitsCost.state.headroomRows.map((row) => row.provider)).toEqual(['codex']);
+
+      const both = shell.setSetting('project', DISPATCH_ENABLED_PROVIDERS_KEY, ['claude', 'codex']);
+      expect(both.ok).toBe(true);
+      const rowsByKey = new Map(
+        shell.limitsCost.state.headroomRows.map((row) => [`${row.provider}:${row.account}`, row]),
+      );
+      expect(rowsByKey.get(`claude:${accountForProvider('claude')}`)?.headroom).toEqual({
+        kind: 'unknown',
+        reason: 'no usage observed yet',
+      });
+      expect(rowsByKey.get(`codex:${accountForProvider('codex')}`)?.headroom).toEqual({
+        kind: 'unknown',
+        reason: 'no usage observed yet',
+      });
+    } finally {
+      await shell.close();
+    }
+  });
 });

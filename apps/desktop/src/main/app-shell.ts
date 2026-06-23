@@ -7,6 +7,7 @@ import type {
   OperatorIpcTick,
   OperatorMailRef,
   OperatorObservation,
+  Provider,
   ProjectId,
   RendererRegistry,
   ReplyDraft,
@@ -185,16 +186,21 @@ export function createAppShell(deps: AppShellDeps): AppShell {
   const ownedConfigStore = deps.configStore == null ? openConfigStore() : null;
   const configStore: ConfigStore | null = deps.configStore ?? ownedConfigStore;
 
+  function resolveLimitsProviders(): readonly Provider[] | undefined {
+    return configStore != null ? resolveEnabledProviders(deps.projectId, configStore) : undefined;
+  }
+
+  function seedConfiguredAccountStatuses(): void {
+    if (ownedDispatchStore == null) return;
+    seedInitialAccountStatuses(ownedDispatchStore, resolveLimitsProviders());
+  }
+
   // Seed an initial `available: false` status per configured provider so a FRESH box renders a
   // "headroom / no data" card instead of the empty "No usage recorded yet" state (#122/#125/#88).
   // Production only: guarded on ownedDispatchStore so test-injected readers (no real store) skip it.
   // The seed is idempotent and non-destructive — a later real provider read upserts over it.
   try {
-    if (ownedDispatchStore != null) {
-      const providers =
-        configStore != null ? resolveEnabledProviders(deps.projectId, configStore) : undefined;
-      seedInitialAccountStatuses(ownedDispatchStore, providers);
-    }
+    seedConfiguredAccountStatuses();
   } catch (cause) {
     ownedStore?.close();
     ownedDispatchStore?.close();
@@ -245,6 +251,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     if (layer === 'global') configStore.setGlobal(key, value);
     else configStore.setProjectOverride(deps.projectId, key, value);
     doRefreshSettings();
+    doRefreshLimitsCost();
     return { ok: true };
   }
 
@@ -253,6 +260,7 @@ export function createAppShell(deps: AppShellDeps): AppShell {
     if (layer === 'global') configStore.clearGlobal(key);
     else configStore.clearProjectOverride(deps.projectId, key);
     doRefreshSettings();
+    doRefreshLimitsCost();
     return { ok: true };
   }
   let transcriptRequestSeq = 0;
@@ -297,10 +305,13 @@ export function createAppShell(deps: AppShellDeps): AppShell {
 
   function doRefreshLimitsCost(): void {
     if (closed) return;
+    const enabledProviders = resolveLimitsProviders();
+    seedConfiguredAccountStatuses();
     limitsCostVm.update({
       buckets: readBuckets(),
       accountStatuses: readAccountStatuses(),
       rollups: readRollups(),
+      enabledProviders,
     });
     publish(deps.onLimitsCostState, limitsCostVm.state);
   }

@@ -310,6 +310,43 @@ describe('LimitsCostVM', () => {
     expect(vm.state.headroomRows.map((r) => r.account)).toEqual(['claude:team']);
   });
 
+  it('filters seed-only placeholders for disabled providers while preserving real disabled-provider usage', () => {
+    const vm = new LimitsCostVM();
+    vm.update({
+      buckets: [
+        makeBucket({
+          provider: 'claude',
+          account: 'claude:team',
+          windowKind: 'five_hour',
+          usedPct: 12,
+        }),
+      ],
+      accountStatuses: [
+        makeStatus({
+          provider: 'claude',
+          account: 'claude:max',
+          available: false,
+          reason: 'no usage observed yet',
+          source: 'seed',
+        }),
+        makeStatus({ provider: 'claude', account: 'claude:team', source: 'fake' }),
+        makeStatus({
+          provider: 'codex',
+          account: 'codex:pro',
+          available: false,
+          reason: 'no usage observed yet',
+          source: 'seed',
+        }),
+      ],
+      rollups: [],
+      enabledProviders: ['codex'],
+    });
+    expect(vm.state.headroomRows.map((r) => `${r.provider}:${r.account}`)).toEqual([
+      'claude:claude:team',
+      'codex:codex:pro',
+    ]);
+  });
+
   it('a Codex bucket + a Claude status-with-no-bucket yields TWO provider groups', () => {
     const vm = new LimitsCostVM();
     vm.update({

@@ -1,5 +1,5 @@
 import { ACCOUNT_STATUS_SEED_SOURCE, deriveHeadroom } from '@co/core';
-import type { CostRollup, Headroom, UsageAccountStatus, UsageBucket } from '@co/core';
+import type { CostRollup, Headroom, Provider, UsageAccountStatus, UsageBucket } from '@co/core';
 
 export type { Headroom };
 
@@ -55,13 +55,23 @@ export interface LimitsCostInputs {
   readonly buckets: readonly UsageBucket[];
   readonly accountStatuses: readonly UsageAccountStatus[];
   readonly rollups: readonly CostRollup[];
+  readonly enabledProviders?: readonly Provider[];
 }
 
 const EMPTY_STATE: LimitsCostState = { headroomRows: [], agentCosts: [], taskCosts: [] };
 
 function deriveState(inputs: LimitsCostInputs): LimitsCostState {
+  const enabledProviderSet =
+    inputs.enabledProviders !== undefined ? new Set(inputs.enabledProviders) : undefined;
   const statusMap = new Map<string, UsageAccountStatus>();
   for (const s of inputs.accountStatuses) {
+    if (
+      s.source === ACCOUNT_STATUS_SEED_SOURCE &&
+      enabledProviderSet !== undefined &&
+      !enabledProviderSet.has(s.provider)
+    ) {
+      continue;
+    }
     statusMap.set(`${s.provider}:${s.account}`, s);
   }
   const providersWithRealUsage = new Set<string>();
@@ -86,6 +96,13 @@ function deriveState(inputs: LimitsCostInputs): LimitsCostState {
   for (const status of inputs.accountStatuses) {
     const key = `${status.provider}:${status.account}`;
     if (accountsWithBuckets.has(key)) continue;
+    if (
+      status.source === ACCOUNT_STATUS_SEED_SOURCE &&
+      enabledProviderSet !== undefined &&
+      !enabledProviderSet.has(status.provider)
+    ) {
+      continue;
+    }
     if (
       status.source === ACCOUNT_STATUS_SEED_SOURCE &&
       providersWithRealUsage.has(status.provider)
