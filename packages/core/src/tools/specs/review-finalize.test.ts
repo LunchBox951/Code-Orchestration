@@ -547,4 +547,146 @@ describe('co_review_finalize (AC-L5-1, AC-L5-3)', () => {
     ).rejects.toThrow(/requires reviewer/i);
     expect(lead.review!.getVerdict('co/l5-review-gate', 'co/l5-phase-a')).toBeUndefined();
   });
+
+  // #170: a co_merge re-call minted a fresh review_id for the same (target,branch). The
+  // ReviewProjector upsert re-keys the request row to rev-NEW; a reviewer pinned at rev-OLD must be
+  // told its seat is superseded (naming BOTH ids) rather than hitting the generic "no matching
+  // request" error or recording nothing silently.
+  it('rejects a superseded review_id naming both ids, records nothing, gate still pending', async () => {
+    const reg = buildCoreRegistry();
+    const { ctx, review } = setup('reviewer@rev-OLD');
+    requestReview(review!, 'rev-OLD');
+    // A later co_merge re-call re-requested the same (target,branch) under a fresh id.
+    requestReview(review!, 'rev-NEW');
+
+    await expect(
+      invokeTool(reg, ctx, 'co_review_finalize', {
+        target: TARGET,
+        branch: BRANCH,
+        review_id: 'rev-OLD',
+        verdict: 'PASS',
+        blockers: [],
+        suggestions: [],
+        verification: {
+          commands_run: ['pnpm test'],
+          suite_result: 'pass',
+          baseline_compared: true,
+        },
+      }),
+    ).rejects.toThrow(/superseded.*rev-OLD.*rev-NEW|rev-OLD.*superseded.*rev-NEW/is);
+    // Recording nothing for a stale seat is correct — the gate stays pending.
+    expect(review!.getVerdict(TARGET, BRANCH)).toBeUndefined();
+  });
+
+  it('PASS verdict emits exactly one wake mail to requestedBy of a wake-eligible type', async () => {
+    const reg = buildCoreRegistry();
+    const { ctx, review } = setup('reviewer@rev-1');
+    requestReview(review!);
+
+    const out = (await invokeTool(reg, ctx, 'co_review_finalize', {
+      target: TARGET,
+      branch: BRANCH,
+      review_id: 'rev-1',
+      verdict: 'PASS',
+      blockers: [],
+      suggestions: [],
+      verification: { commands_run: ['pnpm test'], suite_result: 'pass', baseline_compared: true },
+    })) as FinalizeOut;
+    expect(out.verdict).toBe('PASS');
+
+    const inbox = ctx.mail.inbox('lead-1').filter((m) => m.type === 'worker_done');
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]!.sender).toBe('reviewer@rev-1');
+    expect(inbox[0]!.subject).toMatch(/review PASS:.*l5-phase-a.*l5-review-gate/i);
+    expect(inbox[0]!.body).toMatch(/re-call co_merge/i);
+    expect(inbox[0]!.body).toContain('rev-1');
+  });
+
+  it('ISSUES verdict wakes the lead too and the branch is released', async () => {
+    const reg = buildCoreRegistry();
+    const { ctx, review } = setup('reviewer@rev-1');
+    requestReview(review!);
+
+    const out = (await invokeTool(reg, ctx, 'co_review_finalize', {
+      target: TARGET,
+      branch: BRANCH,
+      review_id: 'rev-1',
+      verdict: 'ISSUES',
+      blockers: [{ summary: 'a test regressed' }],
+      suggestions: [],
+    })) as FinalizeOut;
+    expect(out.verdict).toBe('ISSUES');
+    expect(review!.getVerdict(TARGET, BRANCH)?.verdict).toBe('ISSUES');
+
+    const inbox = ctx.mail.inbox('lead-1').filter((m) => m.type === 'worker_done');
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]!.subject).toMatch(/review ISSUES:/i);
+    expect(inbox[0]!.body).toMatch(/blocker|kick back/i);
+  });
+
+  it('a retried finalize posts exactly one wake mail (idempotencyKey)', async () => {
+    const reg = buildCoreRegistry();
+    const { ctx, review } = setup('reviewer@rev-1');
+    requestReview(review!);
+    // The store rejects a second verdict record, so model the genuine retry where the verdict was
+    // already recorded: recordVerdict returns the existing row idempotently instead of throwing. The
+    // wake-mail's deterministic idempotencyKey must then collapse the two sends to one inbox row.
+    const idempotentReview: ReviewStore = {
+      ...review!,
+      recordVerdict: () => review!.getVerdict(TARGET, BRANCH)!,
+    };
+    const input = {
+      target: TARGET,
+      branch: BRANCH,
+      review_id: 'rev-1',
+      verdict: 'PASS' as const,
+      blockers: [],
+      suggestions: [],
+      verification: {
+        commands_run: ['pnpm test'],
+        suite_result: 'pass' as const,
+        baseline_compared: true,
+      },
+    };
+    // First call records for real (uses the real store).
+    await invokeTool(reg, ctx, 'co_review_finalize', input);
+    // Retry: the verdict already exists; the idempotent store returns it, the handler re-sends with
+    // the same idempotencyKey, which must NOT create a second mail row.
+    await invokeTool(reg, { ...ctx, reviews: idempotentReview }, 'co_review_finalize', input);
+
+    const inbox = ctx.mail.inbox('lead-1').filter((m) => m.type === 'worker_done');
+    expect(inbox).toHaveLength(1);
+  });
+
+  it('a human-routed review throws BEFORE any wake mail is sent', async () => {
+    const reg = buildCoreRegistry();
+    const { ctx, review } = setup('reviewer:pr@rev-human');
+    review!.recordReviewRequested({
+      reviewId: 'rev-human',
+      target: TARGET,
+      branch: BRANCH,
+      scope: 'pr_merge',
+      requestedBy: 'lead-1',
+      reviewerKind: 'human',
+      specRefKind: 'no-locked-spec',
+    });
+
+    await expect(
+      invokeTool(reg, ctx, 'co_review_finalize', {
+        target: TARGET,
+        branch: BRANCH,
+        scope: 'pr_merge',
+        review_id: 'rev-human',
+        verdict: 'PASS',
+        blockers: [],
+        suggestions: [],
+        verification: {
+          commands_run: ['pnpm test'],
+          suite_result: 'pass',
+          baseline_compared: true,
+        },
+      }),
+    ).rejects.toThrow(/human review/i);
+    expect(ctx.mail.inbox('lead-1').filter((m) => m.type === 'worker_done')).toHaveLength(0);
+  });
 });

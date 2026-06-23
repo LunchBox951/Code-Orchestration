@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAIL_WORKER_DONE } from '../../mail/events.js';
 import type { ReviewRequestRecord } from '../../review/events.js';
 import type { ReviewScope } from '../../review/ladder.js';
 import { resolveReviewerProfiles, reviewerRoleForScope } from '../../review/merge.js';
@@ -162,10 +163,23 @@ export const reviewFinalizeTool: ToolSpec<ReviewFinalizeInput, ReviewFinalizeOut
     }
     assertToolCallerRole('co_review_finalize', ctx.roster, ctx.agent, ['reviewer']);
     const request = ctx.reviews.getReviewRequest(input.target, input.branch);
-    if (request == null || request.reviewId !== input.review_id) {
+    if (request == null) {
       throw new Error(
         `co_review_finalize: refused — no matching review request exists for ` +
           `'${input.branch}' into '${input.target}' with review_id '${input.review_id}'.`,
+      );
+    }
+    if (request.reviewId !== input.review_id) {
+      // #170: a request row EXISTS for (target,branch) but carries a different (newer) review_id than
+      // the caller's — the (target,branch) review was re-requested (e.g. a co_merge re-call minted a
+      // fresh review_id) and this reviewer seat is now stale. Recording nothing is correct (the seat
+      // is pinned to a superseded id), but it must be SURFACED, not silent: name BOTH ids so the
+      // coordinator knows to re-place the reviewer under the current review_id.
+      throw new Error(
+        `co_review_finalize: refused — your review_id '${input.review_id}' was superseded by a ` +
+          `newer review request '${request.reviewId}' for '${input.branch}' into '${input.target}'; ` +
+          'this reviewer seat is stale and its verdict cannot be recorded. The coordinator must ' +
+          `re-place the reviewer under '${request.reviewId}'.`,
       );
     }
     const scope = input.scope ?? request.scope;
@@ -227,6 +241,26 @@ export const reviewFinalizeTool: ToolSpec<ReviewFinalizeInput, ReviewFinalizeOut
       input.verdict === 'ISSUES'
         ? recordIssuesVerdictAndRelease(ctx.reviews, recordedVerdict, scope)
         : ctx.reviews.recordVerdict(recordedVerdict);
+    // #167 reviewer-verdict-wake: the verdict is now durably recorded, but the gate owner
+    // (request.requestedBy — the lead/coordinator) is asleep and will never re-call co_merge on its
+    // own. Wake it with ONE mail. MAIL_WORKER_DONE is already in isUnreadTurnWakeMail's set (reuse it;
+    // do NOT touch the wake set). A deterministic idempotencyKey makes a retried finalize a no-op so we
+    // never double-post. Sent AFTER the record so a thrown send can never lose the verdict.
+    const verdictDirective =
+      record.verdict === 'PASS'
+        ? `PASS recorded — re-call co_merge for '${input.branch}' into '${input.target}' to publish.`
+        : `ISSUES recorded — address the named blockers (or kick back to the worker) for ` +
+          `'${input.branch}' into '${input.target}'; the branch was released.`;
+    ctx.mail.send({
+      type: MAIL_WORKER_DONE,
+      to: request.requestedBy,
+      from: ctx.agent,
+      subject: `review ${record.verdict}: ${input.branch} into ${input.target}`,
+      body:
+        `${verdictDirective} (review_id '${record.reviewId}', scope '${scope}', reviewer ` +
+        `'${ctx.agent}').`,
+      idempotencyKey: `review-verdict-wake:${record.reviewId}`,
+    });
     return {
       review_id: record.reviewId,
       verdict: record.verdict,

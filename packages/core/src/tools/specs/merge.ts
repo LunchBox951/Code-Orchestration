@@ -237,6 +237,24 @@ function latestReviewerPlacementKind(
     .at(-1)?.kind;
 }
 
+// #170: an outstanding review is RESUMABLE when an actual reviewer seat keyed `reviewer*@${reviewId}`
+// is present in dispatch (kind 'placed' OR 'waiting'). The reviewer was pinned at spawn as
+// `reviewer@rev-OLD` and will finalize against that id; minting a fresh rev-NEW here would orphan its
+// seat (the ReviewProjector upsert NULLs the verdict for the (target,branch) row and re-keys it to
+// rev-NEW, so the reviewer's finalize against rev-OLD throws). Gate reuse on a present placement so we
+// never resume a review that was never actually launched.
+function hasResumableReviewerPlacement(
+  placements: readonly PlacementRecord[],
+  reviewId: string,
+): boolean {
+  return placements.some(
+    (placement) =>
+      placement.agent === `${placement.role}@${reviewId}` &&
+      (placement.role === 'reviewer' || placement.role.startsWith('reviewer:')) &&
+      (placement.kind === 'placed' || placement.kind === 'waiting'),
+  );
+}
+
 function assertMergeIdentities(
   repoCwd: string,
   range: string,
@@ -434,9 +452,21 @@ export const mergeTool: ToolSpec<MergeInput, MergeOutput> = {
           ...(ctx.dispatch != null ? { dispatch: ctx.dispatch, nowMs: Date.now() } : {}),
           reviewerSpawnGate: ctx.reviewerSpawnGate,
         });
+        // #170: RESUME an outstanding (target,branch) review by its existing review_id whenever a
+        // reviewer seat keyed `reviewer*@${existingReq.reviewId}` is actually present in dispatch
+        // (placed OR waiting) and the prior verdict is not PASS. Only mint a fresh review_id when
+        // there is genuinely no resumable outstanding review (no existing request, or the prior
+        // review closed/PASS). The `verdict?.verdict !== 'PASS'` guard above already prevents reuse
+        // after a merge; this gates reuse on an ACTUAL present placement so a stale request row whose
+        // reviewer never launched does not pin a dead review_id.
         const existingReq = ctx.reviews.getReviewRequest(into, input.branch);
-        const reviewId =
-          existingReq != null && verdict == null ? existingReq.reviewId : `rev-${randomUUID()}`;
+        // We are already inside the `verdict?.verdict !== 'PASS'` guard above, so the prior verdict
+        // (if any) is ISSUES or absent — never PASS — and an outstanding review is genuinely resumable.
+        const canResumeExisting =
+          existingReq != null &&
+          ctx.dispatch != null &&
+          hasResumableReviewerPlacement(ctx.dispatch.readPlacements(), existingReq.reviewId);
+        const reviewId = canResumeExisting ? existingReq.reviewId : `rev-${randomUUID()}`;
         const scope: ReviewScope = 'worker_merge';
         const trigger = triggerGate.triggerReview({
           reviewId,
