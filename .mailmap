@@ -1,0 +1,8 @@
+# .mailmap — canonicalize commit identities for `git log/blame/shortlog`.
+#
+# A placeholder identity (user.name=v / user.email=v@v.com) had leaked into a
+# local .git/config and was inherited by tooling that committed in this repo,
+# landing `Signed-off-by: v <v@v.com>` on a run of commits already in history.
+# The local config has been corrected; this map re-attributes those existing
+# commits to the canonical GitHub identity without rewriting shared history.
+LunchBox951 <95397613+LunchBox951@users.noreply.github.com> <v@v.com>
