@@ -376,10 +376,12 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
 
     // The token lands in the pane's interactive shell env so `gh`/`curl api.github.com` authenticate.
     expect(spec.env['GH_TOKEN']).toBe('gho_research_token');
-    // And the codex sandbox has outbound network re-opened for this web-research pane.
+    // And the codex sandbox has outbound network re-opened for this web-research pane — merged into
+    // the SAME [sandbox_workspace_write] table as the #169 writable_roots grant.
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
     expect(configToml!.contents).toContain('[sandbox_workspace_write]');
-    expect(configToml!.contents).toMatch(/\[sandbox_workspace_write\]\nnetwork_access = true/u);
+    expect(configToml!.contents).toMatch(/\[sandbox_workspace_write\]\nwritable_roots = \[/u);
+    expect(configToml!.contents).toContain('network_access = true');
     // #145 security: the token is NOT persisted into the on-disk codex bridge config (config.toml);
     // it reaches the web-research agent only via the pane shell env (spec.env) asserted above.
     expect(configToml!.contents).not.toContain('GH_TOKEN');
@@ -402,7 +404,10 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
     // A code worker never researches the web → no live token in its shell, no open egress.
     expect(spec.env).not.toHaveProperty('GH_TOKEN');
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
-    expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
+    // #169: the [sandbox_workspace_write] table is now PRESENT (writable_roots grants /tmp so gated
+    // verify can run), but the network gate stays web-only → network_access absent for a code worker.
+    expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).toContain(`writable_roots = ["${tmpdir()}"]`);
     expect(configToml!.contents).not.toContain('network_access');
     expect(configToml!.contents).not.toContain('GH_TOKEN');
   });
@@ -426,7 +431,10 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
 
       expect(spec.env).not.toHaveProperty('GH_TOKEN');
       const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
-      expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
+      // #169: table present for the writable_roots grant, but network stays web-only (egress off).
+      expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+      expect(configToml!.contents).toContain(`writable_roots = ["${tmpdir()}"]`);
+      expect(configToml!.contents).not.toContain('network_access');
       expect(configToml!.contents).not.toContain('GH_TOKEN');
     },
   );
@@ -447,9 +455,34 @@ describe('MNR-6 — SpawnSpec env references ONLY the isolated home dir', () => 
 
     expect(spec.env).not.toHaveProperty('GH_TOKEN');
     const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
-    expect(configToml!.contents).not.toContain('[sandbox_workspace_write]');
+    // #169: table present for the writable_roots grant, but network stays web-only (egress off).
+    expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).toContain(`writable_roots = ["${tmpdir()}"]`);
     expect(configToml!.contents).not.toContain('network_access');
     expect(configToml!.contents).not.toContain('GH_TOKEN');
+  });
+
+  it('#169: a codex reviewer pane config.toml grants os.tmpdir() as a sandbox writable_root', () => {
+    const { projectId, cwd, dataDir } = makeProject();
+    const placement = recordPlacement(projectId, 'rev-1', 'reviewer', 'codex');
+    const worktree = recordWorktree(projectId, 'rev-1', 'co/review-1', cwd);
+    const isolatedHomeDir = join(dataDir, 'isolated', 'rev-1');
+
+    const { spec } = buildPlacementLaunchSpec(
+      placement as PlacementRecord & { kind: 'placed'; provider: string },
+      worktree,
+      projectId,
+      isolatedHomeDir,
+      TEST_MCP_PATHS,
+    );
+
+    // The pure-core writable_roots grant is tied to the real launch path: os.tmpdir() is threaded by
+    // the adapter so gated verify (mkdtemp+git-init inside /tmp) can run without EPERM.
+    const configToml = spec.prelaunchFiles!.find((f) => f.path.endsWith('config.toml'));
+    expect(configToml!.contents).toContain('[sandbox_workspace_write]');
+    expect(configToml!.contents).toContain(`writable_roots = ["${tmpdir()}"]`);
+    // Reviewer is not a web pane → egress stays default-denied.
+    expect(configToml!.contents).not.toContain('network_access');
   });
 
   it('#127: GH_TOKEN is never empty-valued on a web pane when no ghToken is configured', () => {

@@ -34,6 +34,7 @@ import type { SpawnSpec } from '../pty/pty-host.js';
 
 const ISOLATED_HOME = '/tmp/co-pane-isolated-test';
 const PANE_CWD = '/tmp/co-worktree-test';
+const TMP_FIXTURE = '/tmp/co-os-tmp-fixture';
 const CO_MCP = '/opt/co/bin/co-mcp';
 const CO_CLI = '/opt/co/bin/co';
 
@@ -721,6 +722,83 @@ describe('#127 codex gated outbound network for web-research panes', () => {
   it('OMITS the network block when no role is threaded (default-deny no-op posture)', () => {
     const config = buildPaneLaunchConfig('codex', BASE_IDENTITY);
     const toml = config.codexConfigToml ?? '';
+    expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #169 — writable temp root so gated verify can run inside the codex sandbox
+// ---------------------------------------------------------------------------
+//
+// Codex's `sandbox_mode = "workspace-write"` grants writes to the pane cwd (the worktree) only;
+// /tmp is read-only / spawn-denied. The gated verify (`pnpm vitest run packages/mcp`) runs
+// git-fixture suites that mkdtemp+git-init inside /tmp → EPERM → false IS-FAILING. Threading
+// PaneIdentity.tmpDir emits `writable_roots = ["<tmp>"]` for EVERY code pane (reviewer + worker),
+// merged into the SAME `[sandbox_workspace_write]` table as the #127 network gate.
+
+describe('#169 codex writable temp root for gated verify', () => {
+  function sectionBody(toml: string, section: string): string {
+    const header = `[${section}]`;
+    const start = toml.indexOf(header);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const after = toml.slice(start + header.length);
+    const next = after.search(/\n\[/u);
+    return next === -1 ? after : after.slice(0, next);
+  }
+
+  it.each(['implementer', 'reviewer'] as const)(
+    'emits [sandbox_workspace_write] writable_roots for a plain %s codex pane (regression guard)',
+    (role) => {
+      const config = buildPaneLaunchConfig('codex', {
+        ...BASE_IDENTITY,
+        role,
+        tmpDir: TMP_FIXTURE,
+      });
+      const toml = config.codexConfigToml ?? '';
+      expect(toml).toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
+      const body = sectionBody(toml, CODEX_SANDBOX_NETWORK_SECTION);
+      expect(body).toContain(`writable_roots = ["${TMP_FIXTURE}"]`);
+      // Non-web pane: egress stays default-denied even though the table is now present.
+      expect(body).not.toContain('network_access');
+      // The block-list drift roundtrip is undisturbed by the new table.
+      expect(checkBlockListDrift(BLOCK_LIST, readEnforcedConfig(config))).toEqual([]);
+    },
+  );
+
+  it('merges writable_roots AND network_access into ONE table for researcher:external', () => {
+    const config = buildPaneLaunchConfig('codex', {
+      ...BASE_IDENTITY,
+      role: 'researcher',
+      subRole: 'external',
+      tmpDir: TMP_FIXTURE,
+    });
+    const toml = config.codexConfigToml ?? '';
+    // Exactly one table header (no duplicate `[sandbox_workspace_write]`).
+    const headerCount = toml.split(`[${CODEX_SANDBOX_NETWORK_SECTION}]`).length - 1;
+    expect(headerCount).toBe(1);
+    const body = sectionBody(toml, CODEX_SANDBOX_NETWORK_SECTION);
+    expect(body).toContain(`writable_roots = ["${TMP_FIXTURE}"]`);
+    expect(body).toContain('network_access = true');
+  });
+
+  it('keeps sandbox_mode/approval_policy at the document root (drift-check invariant)', () => {
+    const config = buildPaneLaunchConfig('codex', {
+      ...BASE_IDENTITY,
+      role: 'implementer',
+      tmpDir: TMP_FIXTURE,
+    });
+    const toml = config.codexConfigToml ?? '';
+    // Both scalars appear BEFORE the first table header → at the document root.
+    const firstTable = toml.indexOf('[');
+    const rootSlice = toml.slice(0, firstTable);
+    expect(rootSlice).toContain('sandbox_mode = "workspace-write"');
+    expect(rootSlice).toContain('approval_policy = "never"');
+  });
+
+  it('OMITS writable_roots when tmpDir is absent (pure-core default)', () => {
+    const config = buildPaneLaunchConfig('codex', { ...BASE_IDENTITY, role: 'implementer' });
+    const toml = config.codexConfigToml ?? '';
+    expect(toml).not.toContain('writable_roots');
     expect(toml).not.toContain(`[${CODEX_SANDBOX_NETWORK_SECTION}]`);
   });
 });
