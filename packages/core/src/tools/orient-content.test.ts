@@ -7,6 +7,8 @@ import { z } from 'zod';
 import { buildCoreRegistry } from './core-registry.js';
 import { orientContent } from './orient-content.js';
 import { BASE_ROLES } from './scoping.js';
+import { lifecycleVerbsFor } from '../roles/profile.js';
+import { SUB_ROLES } from '../roles/sub-roles.js';
 
 // AC-L2-4: `co_orient` is workflow-only + role-scoped, and `co` never bakes project memory. Two
 // assertions, mirroring the GREEN/RED discipline of mail/no-stub.test.ts:
@@ -24,19 +26,71 @@ import { BASE_ROLES } from './scoping.js';
 function distinctiveFieldIdentifiers(): string[] {
   const out = new Set<string>();
   for (const spec of buildCoreRegistry().list()) {
-    const schema = spec.inputSchema;
-    if (schema instanceof z.ZodObject) {
-      for (const field of Object.keys(schema.shape)) {
-        if (field.includes('_')) out.add(field);
-      }
-    }
+    collectDistinctiveFieldIdentifiers(spec.inputSchema, out);
   }
   return [...out];
+}
+
+function collectDistinctiveFieldIdentifiers(schema: unknown, out: Set<string>): void {
+  const seen = new Set<unknown>();
+
+  function visit(current: unknown): void {
+    if (current == null || typeof current !== 'object' || seen.has(current)) return;
+    seen.add(current);
+
+    if (current instanceof z.ZodObject) {
+      for (const [field, fieldSchema] of Object.entries(current.shape)) {
+        if (field.includes('_')) out.add(field);
+        visit(fieldSchema);
+      }
+      return;
+    }
+
+    if (current instanceof z.ZodArray) {
+      visit(current.element);
+      return;
+    }
+
+    const wrapped = current as {
+      readonly def?: {
+        readonly innerType?: unknown;
+        readonly schema?: unknown;
+        readonly type?: unknown;
+      };
+    };
+    visit(wrapped.def?.innerType);
+    visit(wrapped.def?.schema);
+    visit(wrapped.def?.type);
+  }
+
+  visit(schema);
 }
 
 /** The distinctive field identifiers restated in `text` — a field-list restatement. [] ⇒ clean. */
 function fieldRestatementsIn(text: string, fields: readonly string[]): string[] {
   return fields.filter((f) => text.includes(f));
+}
+
+const ORIENT_TOPICS = [undefined, 'finish', 'mail', 'review', 'escalate', 'escalation'] as const;
+
+function orientRoleInputs(): Array<string | undefined> {
+  return [
+    undefined,
+    ...BASE_ROLES,
+    ...SUB_ROLES.map((subRole) => `${subRole.baseRole}:${subRole.name}`),
+  ];
+}
+
+function lifecycleNudgeVerbs(text: string): string[] {
+  const match = text.match(/Your lifecycle verbs \(([^)]*)\) may be deferred[^\n]*/);
+  expect(match, 'expected a lifecycle tool_search nudge').not.toBeNull();
+  return match![1]!.split(', ');
+}
+
+function lifecycleNudgeText(text: string): string {
+  const match = text.match(/Your lifecycle verbs \([^)]*\) may be deferred[^\n]*/);
+  expect(match, 'expected a lifecycle tool_search nudge').not.toBeNull();
+  return match![0]!;
 }
 
 describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas are the syntax source)', () => {
@@ -46,15 +100,16 @@ describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas
     expect(distinctive.length).toBeGreaterThan(0);
     expect(distinctive.every((field) => field.includes('_'))).toBe(true);
     expect(new Set(distinctive).size).toBe(distinctive.length);
+    expect(distinctive).toEqual(expect.arrayContaining(['baseline_sha']));
+    expect(distinctive).toEqual(expect.arrayContaining(['commands_run', 'baseline_compared']));
   });
 
-  it('GREEN: every base role’s orient content restates none of them', () => {
-    for (const role of BASE_ROLES) {
-      expect(fieldRestatementsIn(orientContent(role), distinctive)).toEqual([]);
+  it('GREEN: every shipped orient variant restates none of them', () => {
+    for (const role of orientRoleInputs()) {
+      for (const topic of ORIENT_TOPICS) {
+        expect(fieldRestatementsIn(orientContent(role, topic), distinctive)).toEqual([]);
+      }
     }
-    // …and the generic (no-role) and topic-focused content too.
-    expect(fieldRestatementsIn(orientContent(), distinctive)).toEqual([]);
-    expect(fieldRestatementsIn(orientContent('implementer', 'finish'), distinctive)).toEqual([]);
   });
 
   it('RED: the SAME checker flags an injected field-list restatement', () => {
@@ -177,6 +232,30 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
     }
     expect(out).toContain('finish only your own phase branch');
     expect(out).not.toContain('You do not finish through the gate yourself');
+  });
+
+  it('#128 — each role’s lifecycle nudge names its exact verbs and says to load them now', () => {
+    for (const role of BASE_ROLES) {
+      const out = orientContent(role);
+      const nudge = lifecycleNudgeText(out);
+      expect(lifecycleNudgeVerbs(out)).toEqual(lifecycleVerbsFor(role));
+      expect(nudge).toMatch(/tool_search/);
+      expect(nudge).toMatch(/deferred/i);
+      expect(nudge).toMatch(
+        /load.*(before acting|up front|now)|(before acting|up front|now).*load/is,
+      );
+    }
+
+    for (const subRole of SUB_ROLES) {
+      const out = orientContent(`${subRole.baseRole}:${subRole.name}`);
+      const nudge = lifecycleNudgeText(out);
+      expect(lifecycleNudgeVerbs(out)).toEqual(lifecycleVerbsFor(subRole.baseRole));
+      expect(nudge).toMatch(/tool_search/);
+      expect(nudge).toMatch(/deferred/i);
+      expect(nudge).toMatch(
+        /load.*(before acting|up front|now)|(before acting|up front|now).*load/is,
+      );
+    }
   });
 
   it('the implementer arc NAMES co_finish as the verb that advances the gate (F4)', () => {

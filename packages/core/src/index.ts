@@ -990,6 +990,7 @@ export type { RoleProfile, WriteScope, Capability, RoleProfileViolation } from '
 export {
   ROLE_PROFILES,
   profileFor,
+  lifecycleVerbsFor,
   roleBasePrompt,
   checkRoleProfileCompleteness,
 } from './roles/profile.js';
