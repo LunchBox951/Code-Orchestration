@@ -31,6 +31,7 @@ function makeAgent(
     paused: false,
     stuck: false,
     stopped: false,
+    finished: false,
     costUsd: 0,
     ...overrides,
   };

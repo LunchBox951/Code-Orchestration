@@ -356,6 +356,9 @@ export interface LiveAgentState {
   readonly stuck: boolean;
   /** True iff the operator stopped this agent; it is suppressed until Re-wake clears stopped state. */
   readonly stopped: boolean;
+  /** True iff this agent reached a FINISHED terminal state (its branch recorded `co_finish`) but its
+   * pane is not yet torn down — distinguished from a still-working WARM pane (#166). */
+  readonly finished: boolean;
 }
 
 /**
@@ -389,6 +392,8 @@ export interface AgentLiveView {
   readonly paused: boolean;
   readonly stuck: boolean;
   readonly stopped: boolean;
+  /** True iff this agent FINISHED (its branch recorded `co_finish`) but its pane is not torn down (#166). */
+  readonly finished: boolean;
   /** This agent's cost rollup total in USD, or 0 when none is recorded. */
   readonly costUsd: number;
 }
@@ -436,6 +441,7 @@ export function queryLiveObservability(
       paused: l?.paused ?? false,
       stuck: l?.stuck ?? false,
       stopped: l?.stopped ?? false,
+      finished: l?.finished ?? false,
       costUsd: costByAgent.get(a.agentId) ?? 0,
     };
   });

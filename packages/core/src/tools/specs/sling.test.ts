@@ -8,6 +8,7 @@ import { openRegistry, type ProjectRegistry } from '../../registry/registry.js';
 import { openWorktreeStore, type WorktreeStore } from '../../worktrees/worktree-store.js';
 import { openDispatchStore, type DispatchStore } from '../../dispatch/dispatch-store.js';
 import { openRosterStore, type RosterStore } from '../../roles/roster-store.js';
+import { openResearchStore, type ResearchStore } from '../../research/research-store.js';
 import { accountForProvider } from '../../dispatch/provider-source.js';
 import {
   FakeUsageSource,
@@ -35,6 +36,7 @@ let mails: MailStore[] = [];
 let worktreeStores: WorktreeStore[] = [];
 let dispatchStores: DispatchStore[] = [];
 let rosterStores: RosterStore[] = [];
+let researchStores: ResearchStore[] = [];
 let regs: ProjectRegistry[] = [];
 
 beforeEach(() => {
@@ -44,6 +46,7 @@ beforeEach(() => {
   worktreeStores = [];
   dispatchStores = [];
   rosterStores = [];
+  researchStores = [];
   regs = [];
   const data = mkdtempSync(join(tmpdir(), 'co-sling-tool-data-'));
   tmpDirs.push(data);
@@ -55,6 +58,7 @@ afterEach(() => {
   for (const w of worktreeStores) w.close();
   for (const d of dispatchStores) d.close();
   for (const r of rosterStores) r.close();
+  for (const r of researchStores) r.close();
   for (const r of regs) r.close();
   process.env = ORIGINAL_ENV;
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
@@ -63,6 +67,7 @@ afterEach(() => {
   worktreeStores = [];
   dispatchStores = [];
   rosterStores = [];
+  researchStores = [];
   regs = [];
 });
 
@@ -964,6 +969,133 @@ describe('co_sling — L6b E4 child-cap (queue-as-WAITING for excess dispatches)
 
     expect(out.status).toBe('waiting');
     expect(ctx.worktrees?.getWorktree('co/no-control-store-still-queues')).toBeUndefined();
+  });
+
+  // #166 — a worker child that recorded co_finish (a finish exists for its branch) is in a
+  // lifecycle-terminal state and no longer occupies a slot, even though its branch never merged and
+  // it was never operator-stopped. With one of two children finished, the 3rd sling is PLACED.
+  it('#166: a finished child (co_finish recorded) frees a slot so a 3rd sling is PLACED', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    ctx.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
+    // impl-b owns a worktree branch and recorded a finish for it (worker done, branch not merged).
+    ctx.worktrees!.recordWorktree({
+      branch: 'co/impl-b',
+      baseRef: 'main',
+      baseSha: 'deadbeef',
+      path: join(repo, 'wt-b'),
+      parent: 'lead-7',
+      agent: 'impl-b',
+      role: 'implementer',
+    });
+    ctx.worktrees!.recordFinish({
+      branch: 'co/impl-b',
+      baseSha: 'deadbeef',
+      commitSha: 'cafef00d',
+      tests: [],
+      agent: 'impl-b',
+    });
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/finished-freed-slot',
+    })) as { status: string };
+
+    expect(out.status).toBe('placed');
+    expect(ctx.worktrees?.getWorktree('co/finished-freed-slot')).toBeDefined();
+    expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(1);
+  });
+
+  // #166 negative companion — a worker child whose branch has NO finish recorded is still active, so
+  // two such children keep the parent at the cap and the 3rd sling QUEUES → WAITING (regression guard).
+  it('#166: a NOT-finished child still occupies a slot — at cap, the 3rd sling WAITS', async () => {
+    const repo = makeMainRepo();
+    const ctx = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    ctx.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    ctx.roster!.recordAgent({ agentId: 'impl-b', role: 'implementer', parent: 'lead-7' });
+    // impl-b owns a worktree branch but recorded NO finish — still active.
+    ctx.worktrees!.recordWorktree({
+      branch: 'co/impl-b',
+      baseRef: 'main',
+      baseSha: 'deadbeef',
+      path: join(repo, 'wt-b'),
+      parent: 'lead-7',
+      agent: 'impl-b',
+      role: 'implementer',
+    });
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/not-finished-still-waits',
+    })) as { status: string; waiting?: { reason: string } };
+
+    expect(out.status).toBe('waiting');
+    expect(out.waiting?.reason).toMatch(/max active children reached \(2\/2\)/);
+    expect(ctx.worktrees?.getWorktree('co/not-finished-still-waits')).toBeUndefined();
+  });
+
+  // #158 — a read-only researcher child that recorded research.finalized is lifecycle-terminal and no
+  // longer occupies a slot, even though it has no branch (so it can never merge) and was never stopped.
+  // With one of two children a finalized researcher, the 3rd sling is PLACED (the slot was freed).
+  it('#158: a finalized researcher frees a slot so a 3rd sling is PLACED', async () => {
+    const repo = makeMainRepo();
+    const base = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    base.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    base.roster!.recordAgent({ agentId: 'res-1', role: 'researcher', parent: 'lead-7' });
+    const research = openResearchStore(base.projectId);
+    researchStores.push(research);
+    // res-1 finalized a locator map → terminal; it no longer holds a slot.
+    research.recordFinalize({
+      researchId: 'r-1',
+      question: 'where is the gate?',
+      requestedBy: 'lead-7',
+      researcher: 'res-1',
+      kind: 'map',
+      map: {
+        question: 'where is the gate?',
+        entries: [
+          { path: 'packages/core/src/review/merge.ts', why: 'the gate', symbols: ['Gate'] },
+        ],
+        readOrder: ['packages/core/src/review/merge.ts'],
+      },
+    });
+    const ctx: ToolContext = { ...base, research };
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/finalized-freed-slot',
+    })) as { status: string };
+
+    expect(out.status).toBe('placed');
+    expect(ctx.worktrees?.getWorktree('co/finalized-freed-slot')).toBeDefined();
+    expect(ctx.dispatch?.readPlacements('lead-7')).toHaveLength(1);
+  });
+
+  // #158 negative companion — a researcher child that did NOT finalize is still active, so two children
+  // keep the parent at the cap and the 3rd sling QUEUES → WAITING (regression guard).
+  it('#158: a NOT-finalized researcher still occupies a slot — at cap, the 3rd sling WAITS', async () => {
+    const repo = makeMainRepo();
+    const base = makeContextWithDispatch('lead-7', repo, healthySnapshot);
+    base.roster!.recordAgent({ agentId: 'impl-a', role: 'implementer', parent: 'lead-7' });
+    base.roster!.recordAgent({ agentId: 'res-1', role: 'researcher', parent: 'lead-7' });
+    const research = openResearchStore(base.projectId);
+    researchStores.push(research);
+    // No recordFinalize for res-1 — it is still active.
+    const ctx: ToolContext = { ...base, research };
+
+    const out = (await invokeTool(buildCoreRegistry(), ctx, 'co_sling', {
+      parent: 'lead-7',
+      agent: 'impl-c',
+      branch: 'co/not-finalized-still-waits',
+    })) as { status: string; waiting?: { reason: string } };
+
+    expect(out.status).toBe('waiting');
+    expect(out.waiting?.reason).toMatch(/max active children reached \(2\/2\)/);
+    expect(ctx.worktrees?.getWorktree('co/not-finalized-still-waits')).toBeUndefined();
   });
 
   it('reviewer children do NOT occupy a slot — a parent with only reviewer children still places', async () => {

@@ -91,6 +91,24 @@ describe('activeChildCount — excludes reviewers and excludes merged children',
     expect(count).toBe(1); // only impl-1
   });
 
+  // #158 / #166 — the SAME injected isInactive predicate OR-composes every lifecycle-terminal
+  // signal. Here a finalized researcher (no branch) AND a finished worker (a finish exists for its
+  // branch) are both excluded by one predicate; only the still-working worker is counted.
+  it('excludes a child the injected isInactive marks terminal via finish/finalize (#158, #166)', () => {
+    const children = [
+      child('res-1', 'researcher'), // finalized researcher → excluded (no branch, never merges)
+      child('impl-finished', 'implementer', 'co/done'), // finished worker → excluded
+      child('impl-working', 'implementer', 'co/wip'), // still working → counted
+    ];
+    const finalizedResearchers = new Set(['res-1']);
+    const finishedBranches = new Set(['co/done']);
+    const isInactive = (c: CapChild): boolean =>
+      (c.role === 'researcher' && finalizedResearchers.has(c.childId)) ||
+      (c.branch != null && finishedBranches.has(c.branch));
+    const count = activeChildCount(children, mergedBy(new Set()), isInactive);
+    expect(count).toBe(1); // only impl-working
+  });
+
   it('the isInactive predicate defaults to false (existence-only count unchanged)', () => {
     const children = [
       child('impl-1', 'implementer', 'co/a'),

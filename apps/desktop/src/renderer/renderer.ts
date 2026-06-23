@@ -56,6 +56,8 @@ function statusMeta(status: AgentStatus): StatusMeta {
   switch (status) {
     case 'warm':
       return { color: 'var(--st-running)', label: 'WARM', pulse: true };
+    case 'finished':
+      return { color: 'var(--st-done, var(--st-waiting))', label: 'FINISHED', pulse: false };
     case 'waiting':
       return { color: 'var(--st-waiting)', label: 'WAITING', pulse: false };
     case 'stopped':
@@ -308,6 +310,13 @@ function coordinatorPhaseCopy(status: AgentStatus): CoordinatorPhaseCopy {
           'it fans out after you approve the spec-lock request in Mail.',
         subline: 'Conductor driving 1 agent · coordinator session live',
         pulse: true,
+      };
+    case 'finished':
+      return {
+        title: 'Coordinator finished',
+        body: 'The root coordinator recorded a finish; its pane is winding down and no longer occupies a slot.',
+        subline: '1 coordinator registered · finished',
+        pulse: false,
       };
     case 'waiting':
       return {
@@ -673,6 +682,7 @@ function renderDashboard(): void {
   const stats = dash?.stats ?? {
     total: 0,
     warm: 0,
+    finished: 0,
     waiting: 0,
     stopped: 0,
     stuck: 0,

@@ -11,10 +11,13 @@
  */
 import {
   openMailStore,
+  openWorktreeStore,
+  resolveAgentBranch,
   type LiveAgentState,
   type LiveStateProvider,
   type MailStore,
   type ProjectId,
+  type WorktreeStore,
 } from '@co/core';
 import type { ConductorEngine } from './engine.js';
 import type { DaemonBackedAgentRouter } from './agent-router.js';
@@ -27,6 +30,11 @@ export interface EngineLiveStateProviderDeps {
   readonly projectId: ProjectId;
   /** Opens the project mail bus for the outstanding-actionable count. Default: {@link openMailStore}. */
   readonly openMail?: (projectId: ProjectId) => MailStore;
+  /**
+   * Opens the project worktree store for the FINISHED overlay (the agent's branch recorded
+   * `co_finish` — #166). Default: {@link openWorktreeStore}.
+   */
+  readonly openWorktrees?: (projectId: ProjectId) => WorktreeStore;
   /**
    * The operator-control router, for the paused/stuck overlay. Absent ⇒ paused/stuck reported `false`
    * (a pure engine-observe with no control surface wired).
@@ -44,28 +52,36 @@ export class EngineLiveStateProvider implements LiveStateProvider {
   private readonly engine: ConductorEngine;
   private readonly projectId: ProjectId;
   private readonly openMail: (projectId: ProjectId) => MailStore;
+  private readonly openWorktrees: (projectId: ProjectId) => WorktreeStore;
   private readonly router: DaemonBackedAgentRouter | undefined;
 
   constructor(deps: EngineLiveStateProviderDeps) {
     this.engine = deps.engine;
     this.projectId = deps.projectId;
     this.openMail = deps.openMail ?? openMailStore;
+    this.openWorktrees = deps.openWorktrees ?? openWorktreeStore;
     this.router = deps.router;
   }
 
   liveStates(agentIds: readonly string[]): readonly LiveAgentState[] {
     const mail = this.openMail(this.projectId);
+    const worktrees = this.openWorktrees(this.projectId);
     try {
-      return agentIds.map((agentId) => ({
-        agentId,
-        hosted: this.engine.isHosted(this.projectId, agentId),
-        outstandingMail: mail.outstandingCount(agentId),
-        paused: this.router?.isPaused(agentId) ?? false,
-        stuck: this.router?.isStuck(agentId) ?? false,
-        stopped: this.router?.isStopped(agentId) ?? false,
-      }));
+      return agentIds.map((agentId) => {
+        const branch = resolveAgentBranch(worktrees, agentId);
+        return {
+          agentId,
+          hosted: this.engine.isHosted(this.projectId, agentId),
+          outstandingMail: mail.outstandingCount(agentId),
+          paused: this.router?.isPaused(agentId) ?? false,
+          stuck: this.router?.isStuck(agentId) ?? false,
+          stopped: this.router?.isStopped(agentId) ?? false,
+          finished: branch != null && worktrees.getFinish(branch) != null,
+        };
+      });
     } finally {
       mail.close();
+      worktrees.close();
     }
   }
 }

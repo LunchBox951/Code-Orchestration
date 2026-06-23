@@ -732,6 +732,7 @@ describe('queryObservability', () => {
           paused: false,
           stuck: false,
           stopped: false,
+          finished: false,
         })),
     });
 

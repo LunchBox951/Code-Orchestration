@@ -261,13 +261,25 @@ function childCapWaitingDisposition(
   if (!children.some((c) => c.role !== 'reviewer')) return undefined;
   const cap = resolveMaxActiveChildren(ctx.projectId);
   const target = reviews != null ? readWorktreeInfo(ctx.cwd).branch : undefined;
+  // The set of agent-ids that have FINALIZED a research result (#158): a read-only researcher that
+  // recorded `research.finalized` has reached a lifecycle-terminal state and no longer occupies a
+  // slot, even though it is neither merged (it has no branch) nor stopped.
+  const finalizedResearchers = new Set(
+    (ctx.research?.listResearch() ?? []).map((r) => r.researcher),
+  );
   const disposition = childCapDisposition(
     children,
     (child) => branchMerged(reviews, target, child.branch),
     cap,
-    // A durably STOPPED child (operator Stop, #131) no longer occupies a slot. With no control
-    // store injected, no child is treated as inactive — the count stays conservative (unchanged).
-    (child) => agentControl?.isStopped(child.childId) === true,
+    // A child no longer occupies a slot once it reaches a lifecycle-terminal state: durably STOPPED
+    // by the operator (#131), a researcher that FINALIZED its result (#158), or a worker that
+    // recorded `co_finish` (#166). OR-composed into the SAME predicate — each disjunct can only
+    // REMOVE a child from the active count, never overrun the cap. With no control store injected,
+    // the stop disjunct is simply never true (the count stays conservative).
+    (child) =>
+      agentControl?.isStopped(child.childId) === true ||
+      (child.role === 'researcher' && finalizedResearchers.has(child.childId)) ||
+      (child.branch != null && worktrees.getFinish(child.branch) != null),
   );
   if (!disposition.queued) return undefined;
   return {
@@ -275,9 +287,11 @@ function childCapWaitingDisposition(
     waiting: {
       message:
         `dispatch queued: parent '${ctx.agent}' already has ${disposition.activeCount} active ` +
-        `child(ren) at the cap of ${cap}. Wait for a child branch to merge before slinging another.`,
+        `child(ren) at the cap of ${cap}. A slot frees when a child reaches a terminal state: a ` +
+        `branch merges, a researcher finalizes, a worker records co_finish, or the operator stops it.`,
       next_step:
-        'Integrate or land an active child branch to free a slot, then re-issue this co_sling.',
+        'Free a slot — land/merge an active child branch, or wait for a child to finalize, ' +
+        'finish, or be operator-reclaimed — then re-issue this co_sling.',
       reason: `max active children reached (${disposition.activeCount}/${cap})`,
       maxed_providers: [],
       unavailable_providers: [],
