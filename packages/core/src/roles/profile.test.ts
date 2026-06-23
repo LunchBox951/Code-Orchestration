@@ -9,6 +9,7 @@ import {
   roleBasePrompt,
   type RoleProfile,
 } from './profile.js';
+import { SUB_ROLES } from './sub-roles.js';
 
 // AC-L6a-1 + AC-L6a-8 — authoritative role profiles: five distinct permission profiles; roleToolsets
 // is derived from them; checkRoleProfileCompleteness is green for real profiles and red for crafted
@@ -107,6 +108,23 @@ const EXPECTED_LIFECYCLE_VERBS: Readonly<Record<Role, readonly string[]>> = {
   researcher: ['co_issue_diagnose', 'co_research_finalize'],
 };
 
+const NON_LIFECYCLE_PROFILE_TOOLS = new Set<string>([
+  'co_orient',
+  'co_status',
+  'co_mail_inbox',
+  'co_mail_get',
+  'co_mail_thread',
+  'co_mail_send',
+  'co_mail_ack',
+  'co_spec_get',
+  'co_issue_capture',
+  'co_issue_list',
+  'co_research_get',
+  'co_mail_retract',
+  'co_worktree_info',
+  'co_phase_status',
+]);
+
 function lifecycleNudgeVerbs(text: string): string[] {
   const match = text.match(/Your lifecycle verbs \(([^)]*)\) may be deferred[^\n]*/);
   expect(match, 'expected a lifecycle tool_search nudge').not.toBeNull();
@@ -124,6 +142,14 @@ describe('lifecycleVerbsFor — role-specific workflow verbs surfaced up front',
     for (const role of BASE_ROLES) {
       const toolset = new Set(ROLE_PROFILES[role].toolset);
       for (const verb of lifecycleVerbsFor(role)) expect(toolset.has(verb)).toBe(true);
+    }
+  });
+
+  it('drift-guard: every role-profile tool is either lifecycle or an explicit non-lifecycle helper', () => {
+    for (const role of BASE_ROLES) {
+      expect(lifecycleVerbsFor(role)).toEqual(
+        ROLE_PROFILES[role].toolset.filter((tool) => !NON_LIFECYCLE_PROFILE_TOOLS.has(tool)),
+      );
     }
   });
 
@@ -154,6 +180,18 @@ describe('#128 — roleBasePrompt surfaces this role’s deferred lifecycle verb
       expect(lifecycleNudgeVerbs(prompt)).toEqual(lifecycleVerbsFor(role));
       // The nudge: these verbs may be deferred behind tool_search — load/search them up front.
       const nudge = prompt.split('\n').find((line) => line.startsWith('Your lifecycle verbs '))!;
+      expect(nudge).toMatch(/tool_search/);
+      expect(nudge).toMatch(/deferred/i);
+      expect(nudge).toMatch(/load.*(before acting|up front)|(before acting|up front).*load/is);
+    }
+
+    for (const subRole of SUB_ROLES) {
+      const prompt = roleBasePrompt(subRole.baseRole, {
+        subRole: subRole.name,
+        subRoleApproach: subRole.approach,
+      });
+      const nudge = prompt.split('\n').find((line) => line.startsWith('Your lifecycle verbs '))!;
+      expect(lifecycleNudgeVerbs(prompt)).toEqual(lifecycleVerbsFor(subRole.baseRole));
       expect(nudge).toMatch(/tool_search/);
       expect(nudge).toMatch(/deferred/i);
       expect(nudge).toMatch(/load.*(before acting|up front)|(before acting|up front).*load/is);

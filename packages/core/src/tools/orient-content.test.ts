@@ -26,14 +26,44 @@ import { SUB_ROLES } from '../roles/sub-roles.js';
 function distinctiveFieldIdentifiers(): string[] {
   const out = new Set<string>();
   for (const spec of buildCoreRegistry().list()) {
-    const schema = spec.inputSchema;
-    if (schema instanceof z.ZodObject) {
-      for (const field of Object.keys(schema.shape)) {
-        if (field.includes('_')) out.add(field);
-      }
-    }
+    collectDistinctiveFieldIdentifiers(spec.inputSchema, out);
   }
   return [...out];
+}
+
+function collectDistinctiveFieldIdentifiers(schema: unknown, out: Set<string>): void {
+  const seen = new Set<unknown>();
+
+  function visit(current: unknown): void {
+    if (current == null || typeof current !== 'object' || seen.has(current)) return;
+    seen.add(current);
+
+    if (current instanceof z.ZodObject) {
+      for (const [field, fieldSchema] of Object.entries(current.shape)) {
+        if (field.includes('_')) out.add(field);
+        visit(fieldSchema);
+      }
+      return;
+    }
+
+    if (current instanceof z.ZodArray) {
+      visit(current.element);
+      return;
+    }
+
+    const wrapped = current as {
+      readonly def?: {
+        readonly innerType?: unknown;
+        readonly schema?: unknown;
+        readonly type?: unknown;
+      };
+    };
+    visit(wrapped.def?.innerType);
+    visit(wrapped.def?.schema);
+    visit(wrapped.def?.type);
+  }
+
+  visit(schema);
 }
 
 /** The distinctive field identifiers restated in `text` — a field-list restatement. [] ⇒ clean. */
@@ -70,6 +100,8 @@ describe('AC-L2-4 — P5 anti-drift: orient restates no tool field-list (schemas
     expect(distinctive.length).toBeGreaterThan(0);
     expect(distinctive.every((field) => field.includes('_'))).toBe(true);
     expect(new Set(distinctive).size).toBe(distinctive.length);
+    expect(distinctive).toEqual(expect.arrayContaining(['baseline_sha']));
+    expect(distinctive).toEqual(expect.arrayContaining(['commands_run', 'baseline_compared']));
   });
 
   it('GREEN: every shipped orient variant restates none of them', () => {
@@ -207,6 +239,17 @@ describe('AC-L2-4 — orient is role-scoped and workflow-only', () => {
       const out = orientContent(role);
       const nudge = lifecycleNudgeText(out);
       expect(lifecycleNudgeVerbs(out)).toEqual(lifecycleVerbsFor(role));
+      expect(nudge).toMatch(/tool_search/);
+      expect(nudge).toMatch(/deferred/i);
+      expect(nudge).toMatch(
+        /load.*(before acting|up front|now)|(before acting|up front|now).*load/is,
+      );
+    }
+
+    for (const subRole of SUB_ROLES) {
+      const out = orientContent(`${subRole.baseRole}:${subRole.name}`);
+      const nudge = lifecycleNudgeText(out);
+      expect(lifecycleNudgeVerbs(out)).toEqual(lifecycleVerbsFor(subRole.baseRole));
       expect(nudge).toMatch(/tool_search/);
       expect(nudge).toMatch(/deferred/i);
       expect(nudge).toMatch(
