@@ -77,6 +77,13 @@ export interface ProjectController {
   showNoProject(error?: string): void;
   /** Re-arm the current daemon — the operator "Retry" path. No-op (visible error) when no project is open. */
   retryDaemon(): Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Re-open the CURRENT project through the serialized open tail (#95/#71) so a freshly-connected GitHub
+   * token (re)provisions the daemon's spawn env. Tears down + rebuilds the supervisor + shell exactly
+   * like a project switch, so the restart cannot race a concurrent project open/switch. A no-op when no
+   * project is open (nothing to re-provision).
+   */
+  reopenCurrentProject(): Promise<void>;
   /** Stop the daemon then close the shell (the inverse of the open order) — the app-quit path. */
   shutdown(): Promise<void>;
   /** Best-effort synchronous daemon stop for `before-quit` (fire-and-forget; `shutdown()` does the awaited teardown). */
@@ -272,6 +279,18 @@ export function createProjectController(deps: ProjectControllerDeps): ProjectCon
     }
   }
 
+  // Re-open the current project through the SAME serialized tail as openProject, so a Connect-GitHub
+  // restart is fully ordered against any concurrent project switch (it cannot start a shell that was
+  // just closed, nor stop a daemon that was just replaced). Resolves to a no-op when no project is open.
+  function reopenCurrentProject(): Promise<void> {
+    const projectId = currentProjectId;
+    const path = currentPath;
+    if (projectId == null) return Promise.resolve();
+    const run = openTail.then(() => doOpenProject(projectId, path));
+    openTail = run.catch(() => undefined);
+    return run;
+  }
+
   async function shutdown(): Promise<void> {
     // Tear down through the same tail so a quit during an in-flight open waits for that open to settle first.
     const run = openTail.then(() => teardownActive());
@@ -297,6 +316,7 @@ export function createProjectController(deps: ProjectControllerDeps): ProjectCon
     pickAndOpenProject,
     showNoProject,
     retryDaemon,
+    reopenCurrentProject,
     shutdown,
     requestDaemonStop,
   };

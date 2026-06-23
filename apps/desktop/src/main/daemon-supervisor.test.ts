@@ -7,6 +7,7 @@ import {
   createDaemonSupervisor,
   defaultCoMcpBinPath,
   probeOperatorSocketHealthy,
+  resolveSpawnGithubEnv,
   type DaemonSpawnHandle,
   type DaemonStatus,
   type SpawnDescriptor,
@@ -150,6 +151,153 @@ describe('daemon-supervisor — production default path', () => {
     await expect(
       probeOperatorSocketHealthy('/nonexistent/co-daemon-supervisor-probe.sock'),
     ).resolves.toBe(false);
+  });
+});
+
+// ── GitHub provisioning env (#95/#71) ────────────────────────────────────────────────────────────────
+
+describe('daemon-supervisor — buildDaemonSpawnDescriptor extraEnv (#95/#71)', () => {
+  it('merges injected extraEnv CO_GH_TOKEN while preserving ELECTRON_RUN_AS_NODE', () => {
+    const descriptor = buildDaemonSpawnDescriptor(
+      PROJECT_ID,
+      '/x/bin.js',
+      { PATH: '/usr/bin', CUSTOM: 'kept' },
+      { CO_GH_TOKEN: 'tok-123', PATH: '/opt/homebrew/bin:/usr/bin' },
+    );
+    expect(descriptor.env['CO_GH_TOKEN']).toBe('tok-123');
+    expect(descriptor.env['PATH']).toBe('/opt/homebrew/bin:/usr/bin'); // extraEnv overrides base
+    expect(descriptor.env['CUSTOM']).toBe('kept');
+    expect(descriptor.env['ELECTRON_RUN_AS_NODE']).toBe('1'); // never clobbered by extraEnv
+  });
+
+  it('with NO extraEnv the CO_GH_TOKEN key is ABSENT (never an empty value)', () => {
+    const descriptor = buildDaemonSpawnDescriptor(PROJECT_ID, '/x/bin.js', { PATH: '/usr/bin' });
+    expect('CO_GH_TOKEN' in descriptor.env).toBe(false);
+  });
+
+  it('a malicious extraEnv cannot override ELECTRON_RUN_AS_NODE', () => {
+    const descriptor = buildDaemonSpawnDescriptor(
+      PROJECT_ID,
+      '/x/bin.js',
+      {},
+      { ELECTRON_RUN_AS_NODE: '0' },
+    );
+    expect(descriptor.env['ELECTRON_RUN_AS_NODE']).toBe('1');
+  });
+});
+
+describe('resolveSpawnGithubEnv — token precedence (#95/#71)', () => {
+  it('a stored (connected) token wins → CO_GH_TOKEN, no auto-prime', () => {
+    const runGhAuthToken = vi.fn();
+    const env = resolveSpawnGithubEnv({
+      storedToken: '  stored-tok  ',
+      baseEnv: { GH_TOKEN: 'env-tok' },
+      runGhAuthToken,
+    });
+    expect(env).toEqual({ CO_GH_TOKEN: 'stored-tok' });
+    expect(runGhAuthToken).not.toHaveBeenCalled();
+  });
+
+  it('no stored token but an explicit env token present → adds NOTHING (daemon resolver picks it up)', () => {
+    const runGhAuthToken = vi.fn();
+    const env = resolveSpawnGithubEnv({
+      storedToken: null,
+      baseEnv: { GITHUB_TOKEN: 'env-tok' },
+      runGhAuthToken,
+    });
+    expect(env).toEqual({});
+    expect(runGhAuthToken).not.toHaveBeenCalled();
+  });
+
+  it('no stored token AND no env token → AUTO-PRIMES from `gh auth token` and widens PATH', () => {
+    const runGhAuthToken = vi.fn().mockReturnValue({
+      token: 'gh-cli-tok',
+      command: '/opt/homebrew/bin/gh',
+    });
+    const env = resolveSpawnGithubEnv({
+      storedToken: null,
+      baseEnv: { PATH: '/usr/bin' },
+      runGhAuthToken,
+    });
+    expect(env['CO_GH_TOKEN']).toBe('gh-cli-tok');
+    expect(env['PATH']).toBe('/opt/homebrew/bin:/usr/bin'); // gh dir prepended for the daemon fallback
+    expect(runGhAuthToken).toHaveBeenCalledOnce();
+  });
+
+  it('no token anywhere → empty additions (CO_GH_TOKEN absent, never blank)', () => {
+    const env = resolveSpawnGithubEnv({
+      storedToken: null,
+      baseEnv: {},
+      runGhAuthToken: vi.fn().mockReturnValue(undefined),
+    });
+    expect(env).toEqual({});
+    expect('CO_GH_TOKEN' in env).toBe(false);
+  });
+
+  it('a blank stored token is ignored (treated as absent)', () => {
+    const env = resolveSpawnGithubEnv({
+      storedToken: '   ',
+      baseEnv: {},
+      runGhAuthToken: vi.fn().mockReturnValue(undefined),
+    });
+    expect('CO_GH_TOKEN' in env).toBe(false);
+  });
+});
+
+describe('daemon-supervisor — resolveExtraEnv seam threads into the spawn (#95/#71)', () => {
+  it('injects the resolved extra env (CO_GH_TOKEN) into every spawn descriptor', async () => {
+    const spawn = recordingSpawn();
+    const resolveExtraEnv = vi.fn().mockReturnValue({ CO_GH_TOKEN: 'live-tok' });
+    const supervisor = createDaemonSupervisor({
+      spawn: spawn.seam,
+      probeHealth: vi.fn().mockResolvedValue(true),
+      delay: immediateDelay,
+      resolveExtraEnv,
+    });
+
+    await supervisor.start(PROJECT_ID);
+
+    expect(resolveExtraEnv).toHaveBeenCalled();
+    expect(spawn.descriptors[0]!.env['CO_GH_TOKEN']).toBe('live-tok');
+    expect(spawn.descriptors[0]!.env['ELECTRON_RUN_AS_NODE']).toBe('1');
+  });
+
+  it('re-resolves extra env on each (re)start so a just-connected token takes effect', async () => {
+    const spawn = recordingSpawn();
+    const tokens = ['first-tok', 'second-tok'];
+    let i = 0;
+    const resolveExtraEnv = vi.fn(() => ({ CO_GH_TOKEN: tokens[i++] ?? 'x' }));
+    const supervisor = createDaemonSupervisor({
+      spawn: spawn.seam,
+      probeHealth: vi.fn().mockResolvedValue(true),
+      delay: immediateDelay,
+      resolveExtraEnv,
+    });
+
+    const OTHER = 'ffffffff-1111-2222-3333-444444444444' as ProjectId;
+    await supervisor.start(PROJECT_ID);
+    await supervisor.restart(OTHER);
+
+    expect(spawn.descriptors[0]!.env['CO_GH_TOKEN']).toBe('first-tok');
+    expect(spawn.descriptors[1]!.env['CO_GH_TOKEN']).toBe('second-tok');
+  });
+
+  it('a throwing resolveExtraEnv degrades to no additions — the daemon still spawns', async () => {
+    const spawn = recordingSpawn();
+    const supervisor = createDaemonSupervisor({
+      spawn: spawn.seam,
+      probeHealth: vi.fn().mockResolvedValue(true),
+      delay: immediateDelay,
+      resolveExtraEnv: () => {
+        throw new Error('keyring exploded');
+      },
+    });
+
+    const result = await supervisor.start(PROJECT_ID);
+
+    expect(result).toBe('healthy');
+    expect('CO_GH_TOKEN' in spawn.descriptors[0]!.env).toBe(false);
+    expect(spawn.descriptors[0]!.env['ELECTRON_RUN_AS_NODE']).toBe('1');
   });
 });
 

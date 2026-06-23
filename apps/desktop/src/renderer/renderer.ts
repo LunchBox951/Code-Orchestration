@@ -99,6 +99,9 @@ let latestAgentsState: AgentsConsoleState | null = null;
 let latestReviewState: ReviewState | null = null;
 let latestLimitsState: LimitsCostState | null = null;
 let latestSettingsState: SettingsState | null = null;
+// The GitHub connect state (#95/#71) — presence + source only, NEVER the token. Drives the Settings
+// → GitHub section's connected/not-connected line + connect/disconnect actions.
+let latestGithubStatus: GithubStatus | null = null;
 let projectInfo: { id: string; name: string; branch?: string } | null = null;
 let sourceTab: 'branches' | 'prs' | 'commits' = 'branches';
 // The app-supervised Conductor daemon's lifecycle status (P-ON1), pushed over `daemon:status`. Drives
@@ -356,6 +359,8 @@ function activateView(view: LocalNavView): void {
   if (view === 'agents' && latestAgentsState != null) renderAgentsTranscript(latestAgentsState);
   if (view === 'review' && latestReviewState != null) renderReview(latestReviewState);
   if (view === 'settings' && latestSettingsState != null) renderSettings(latestSettingsState);
+  // Re-read the GitHub connect state whenever Settings opens (it can change out-of-band: env, gh login).
+  if (view === 'settings') refreshGithubStatus();
 }
 
 function setNavEnabled(enabled: boolean): void {
@@ -2064,7 +2069,82 @@ function renderSettings(state: SettingsState): void {
       </section>`,
     )
     .join('');
-  container.innerHTML = `${toggle}${body}`;
+  container.innerHTML = `${toggle}${githubSectionHtml()}${body}`;
+}
+
+/**
+ * The Settings → GitHub section (#95/#71). A thin DOM mirror of `buildGithubSectionView` (settings-vm):
+ * shows connected / not-connected status with a connect (token field) + disconnect actions. The token
+ * field is `type="password"` and its value is NEVER read into any log — it is sent over the single
+ * `githubConnect` IPC and cleared from the DOM immediately after.
+ */
+function githubSectionHtml(): string {
+  const status = latestGithubStatus;
+  // Derive the view inline (the renderer is a standalone bundle and cannot import the shared module).
+  const source = status?.source ?? null;
+  const connected = status?.connected ?? false;
+  let statusLabel: string;
+  let hint: string;
+  let showConnect: boolean;
+  let showDisconnect: boolean;
+  if (source === 'connected') {
+    statusLabel = 'Connected';
+    hint = 'A GitHub token is stored (encrypted) and provisioned to every coordinator pane.';
+    showConnect = false;
+    showDisconnect = true;
+  } else if (source === 'env') {
+    statusLabel = 'Connected via environment token';
+    hint =
+      'Authenticating from CO_GH_TOKEN/GH_TOKEN/GITHUB_TOKEN. Paste a token to store one in-app instead.';
+    showConnect = true;
+    showDisconnect = false;
+  } else if (source === 'gh') {
+    statusLabel = 'Connected via gh auth login';
+    hint =
+      'Authenticating from your existing `gh auth login`. Paste a token to store one in-app instead.';
+    showConnect = true;
+    showDisconnect = false;
+  } else {
+    statusLabel = status == null ? 'Checking…' : 'Not connected';
+    hint =
+      'Paste a GitHub token to enable issue filing and remote pushes. It is stored encrypted, never in plaintext.';
+    showConnect = status != null;
+    showDisconnect = false;
+  }
+  const dot = connected ? 'ok' : 'off';
+  const connectRow = showConnect
+    ? `
+      <div class="gh-connect-row">
+        <input type="password" id="gh-token-input" class="gh-token-input" autocomplete="off"
+               spellcheck="false" placeholder="GitHub token (ghp_… / gho_…)" aria-label="GitHub token" />
+        <button class="gh-btn" id="gh-connect-btn" type="button">Connect</button>
+      </div>`
+    : '';
+  const disconnectRow = showDisconnect
+    ? `<button class="gh-btn gh-btn-secondary" id="gh-disconnect-btn" type="button">Disconnect</button>`
+    : '';
+  return `
+    <section class="set-section" id="github-section">
+      <h2>GitHub</h2>
+      <div class="gh-status-line">
+        <span class="gh-dot gh-dot-${dot}" aria-hidden="true"></span>
+        <span class="gh-status-label">${esc(statusLabel)}</span>
+      </div>
+      <p class="gh-hint">${esc(hint)}</p>
+      ${connectRow}
+      ${disconnectRow}
+    </section>`;
+}
+
+/** Fetch + cache the GitHub status, then re-render the Settings view if it is the active surface. */
+function refreshGithubStatus(): void {
+  void window.coShell
+    .githubStatus?.()
+    .then((status) => {
+      latestGithubStatus = status;
+      if (latestSettingsState != null) renderSettings(latestSettingsState);
+    })
+    .catch((err: unknown) => console.error('co: github:status failed', err));
 }
 
 function revertSettings(): void {
@@ -2170,6 +2250,40 @@ function bindSettingsView(): void {
     const resetBtn = (e.target as HTMLElement).closest<HTMLElement>('[data-setting-reset]');
     if (resetBtn?.dataset['settingReset'] != null)
       applySettingClear(resetBtn.dataset['settingReset']);
+
+    // ── GitHub Connect (#95/#71) ──────────────────────────────────────────────
+    if ((e.target as HTMLElement).closest('#gh-connect-btn') != null) {
+      const input = document.getElementById('gh-token-input') as HTMLInputElement | null;
+      const token = input?.value ?? '';
+      if (token.trim().length === 0) {
+        flashToast('Paste a GitHub token first.');
+        return;
+      }
+      // Clear the field immediately so the secret does not linger in the DOM after submit.
+      if (input != null) input.value = '';
+      void window.coShell
+        .githubConnect(token)
+        .then((res) => {
+          if (!res.ok) flashToast(res.error ?? 'Could not connect GitHub.');
+          else if (res.warning != null) flashToast(res.warning);
+          else flashToast('GitHub connected.');
+          refreshGithubStatus();
+        })
+        .catch((err: unknown) => flashToast(String(err)));
+      return;
+    }
+    if ((e.target as HTMLElement).closest('#gh-disconnect-btn') != null) {
+      void window.coShell
+        .githubDisconnect()
+        .then((res) => {
+          if (!res.ok) flashToast(res.error ?? 'Could not disconnect GitHub.');
+          else if (res.warning != null) flashToast(res.warning);
+          else flashToast('GitHub disconnected.');
+          refreshGithubStatus();
+        })
+        .catch((err: unknown) => flashToast(String(err)));
+      return;
+    }
   });
 
   root.addEventListener('change', (e) => {
@@ -2764,6 +2878,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
   bindSettingsView();
+
+  // ── GitHub Connect (#95/#71) ────────────────────────────────────────────────
+  // Seed the connect state and subscribe to out-of-band pushes (connect/disconnect re-provision).
+  refreshGithubStatus();
+  bridge.onGithubStatus?.((status) => {
+    latestGithubStatus = status;
+    if (latestSettingsState != null) renderSettings(latestSettingsState);
+  });
 
   const handleReviewSelect = (reviewId: string): void => {
     applyReviewResult(bridge.reviewSelect(reviewId));

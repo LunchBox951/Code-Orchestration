@@ -1,10 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import type { ArchiveEntry, ProjectId } from '@co/core';
 import { openArchiveStore, openRegistry } from '@co/core';
 import { createAppShell } from './app-shell.js';
-import { createDaemonSupervisor } from './daemon-supervisor.js';
+import { createDaemonSupervisor, resolveSpawnGithubEnv } from './daemon-supervisor.js';
+import { createGithubCredentialStore } from './github-credentials.js';
 import { createProjectController } from './open-project.js';
 import { resolveSourceState } from './source-ipc.js';
 import { readBundledDemoSpec, startFromDemoSpec } from './demo-spec.js';
@@ -19,6 +20,7 @@ import {
   requireComposerField,
   requireFiniteSeq,
   requireAgentId,
+  requireGithubToken,
   requireInputData,
   requireMailTab,
   requireMailType,
@@ -37,6 +39,37 @@ let mainWindow: BrowserWindow | null = null;
 
 function sendToRenderer(channel: string, data: unknown): void {
   mainWindow?.webContents?.send(channel, data);
+}
+
+/**
+ * #95 / #71 — the operator-facing GitHub credential store, encrypted at rest via Electron `safeStorage`
+ * under `app.getPath('userData')`. Lazily constructed (Electron's `app` paths/safeStorage are only valid
+ * after `app` is ready) and memoized. The plaintext token never leaves this module except into the
+ * spawn env the daemon supervisor builds — never to a log, the renderer, or the repo.
+ */
+let githubCredentialStore: ReturnType<typeof createGithubCredentialStore> | null = null;
+function credentialStore(): ReturnType<typeof createGithubCredentialStore> {
+  githubCredentialStore ??= createGithubCredentialStore({
+    safeStorage,
+    userDataPath: app.getPath('userData'),
+  });
+  return githubCredentialStore;
+}
+
+/**
+ * Resolve the GitHub provisioning env for each `co-mcp serve` spawn (#95/#71): a connected token (or, with
+ * none, a `gh auth token` auto-prime) becomes `CO_GH_TOKEN` so the daemon authenticates every pane app-wide.
+ * Reading the store can throw if the keyring vanished mid-session; degrade VISIBLY to no additions rather
+ * than stranding the daemon unspawned (the supervisor also guards this seam).
+ */
+function resolveDaemonGithubEnv(): Readonly<Record<string, string>> {
+  let storedToken: string | null = null;
+  try {
+    storedToken = credentialStore().readToken();
+  } catch (e) {
+    console.error('Failed to read the stored GitHub credential (continuing without it):', e);
+  }
+  return resolveSpawnGithubEnv({ storedToken, baseEnv: process.env });
 }
 
 /**
@@ -65,7 +98,8 @@ async function showDirectoryDialog(): Promise<string | null> {
  * registry, the real supervisor + shell factories); the controller itself is electron-free + headless-tested.
  */
 const controller = createProjectController({
-  createSupervisor: (opts) => createDaemonSupervisor(opts),
+  createSupervisor: (opts) =>
+    createDaemonSupervisor({ ...opts, resolveExtraEnv: resolveDaemonGithubEnv }),
   createShell: (projectId) =>
     createAppShell({
       projectId,
@@ -519,6 +553,96 @@ ipcMain.handle('project:open', async () => {
 });
 
 ipcMain.handle('daemon:retry', () => controller.retryDaemon());
+
+// ── GitHub Connect IPC channels (#95/#71) ─────────────────────────────────────
+//
+// Connect-GitHub for the GUI launch path: store an operator-pasted token encrypted, then re-provision
+// the daemon so the new CO_GH_TOKEN takes effect across every pane app-wide. The token NEVER appears in
+// any IPC payload, log, or error message — `github:status` reports only presence + source.
+
+/** The current GitHub-auth state for the renderer badge — presence + source ONLY, never the token. */
+function githubStatus(): { connected: boolean; source: 'connected' | 'env' | 'gh' | null } {
+  let stored = false;
+  try {
+    stored = credentialStore().hasToken();
+  } catch (e) {
+    console.error('Failed to read the GitHub credential status:', e);
+  }
+  if (stored) return { connected: true, source: 'connected' };
+  // No stored token — report whether the daemon would still authenticate via env or `gh auth login`,
+  // so the operator sees "connected (via gh)" rather than a misleading "not connected".
+  const env = resolveSpawnGithubEnv({ storedToken: null, baseEnv: process.env });
+  if (env['CO_GH_TOKEN'] != null) {
+    return {
+      connected: true,
+      source:
+        process.env['CO_GH_TOKEN'] != null ||
+        process.env['GH_TOKEN'] != null ||
+        process.env['GITHUB_TOKEN'] != null
+          ? 'env'
+          : 'gh',
+    };
+  }
+  return { connected: false, source: null };
+}
+
+ipcMain.handle('github:status', () => githubStatus());
+
+ipcMain.handle('github:connect', async (_event, token: unknown) => {
+  let validated: string;
+  try {
+    validated = requireGithubToken(token);
+  } catch (e) {
+    // The guard message never echoes the token value.
+    return { ok: false, error: e instanceof Error ? e.message : 'Invalid GitHub token.' };
+  }
+  try {
+    credentialStore().storeToken(validated);
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : 'Could not store the GitHub token.',
+    };
+  }
+  // Re-provision the daemon through the serialized open tail so the new CO_GH_TOKEN takes effect and the
+  // restart cannot race a concurrent project switch. A failure here leaves the token stored (the next
+  // start picks it up) but is surfaced so the operator can retry.
+  try {
+    await controller.reopenCurrentProject();
+  } catch (e) {
+    return {
+      ok: true,
+      warning: `GitHub connected, but the Conductor could not restart automatically: ${
+        e instanceof Error ? e.message : String(e)
+      }. Use Retry from the header.`,
+    };
+  }
+  sendToRenderer('github:status', githubStatus());
+  return { ok: true };
+});
+
+ipcMain.handle('github:disconnect', async () => {
+  try {
+    credentialStore().clearToken();
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : 'Could not clear the GitHub token.',
+    };
+  }
+  try {
+    await controller.reopenCurrentProject();
+  } catch (e) {
+    return {
+      ok: true,
+      warning: `GitHub disconnected, but the Conductor could not restart automatically: ${
+        e instanceof Error ? e.message : String(e)
+      }. Use Retry from the header.`,
+    };
+  }
+  sendToRenderer('github:status', githubStatus());
+  return { ok: true };
+});
 
 // ── Review IPC channels ─────────────────────────────────────────────────────
 

@@ -274,6 +274,10 @@ interface DaemonStatusPayload {
 
 type CurrentProjectState = { projectId: string; path: string | null } | null;
 
+// ── GitHub Connect (#95/#71 — presence + source only, never the token value) ──────────────────
+type GithubStatus = { connected: boolean; source: 'connected' | 'env' | 'gh' | null };
+type GithubActionResult = { ok: boolean; error?: string; warning?: string };
+
 // ── Settings (inline mirror of @co/core SettingDescriptor + shared SettingsVM types) ──────────
 type SettingsLayer = 'global' | 'project';
 type SettingSource = 'override' | 'inherited' | 'default';
@@ -381,6 +385,11 @@ interface CoShellBridge {
   settingsSet(layer: SettingsLayer, key: string, value: unknown): Promise<SettingWriteResult>;
   settingsClear(layer: SettingsLayer, key: string): Promise<SettingWriteResult>;
   settingsSetLayer(layer: SettingsLayer): Promise<SettingsState | null>;
+  // ── GitHub Connect ────────────────────────────────────────────────────────────
+  githubStatus(): Promise<GithubStatus>;
+  githubConnect(token: string): Promise<GithubActionResult>;
+  githubDisconnect(): Promise<GithubActionResult>;
+  onGithubStatus(listener: (status: GithubStatus) => void): () => void;
   // ── Session ───────────────────────────────────────────────────────────────
   sessionStart(
     prompt: string | null,

@@ -87,6 +87,64 @@ export function buildSettingsRows(args: {
   });
 }
 
+/** The GitHub connect state surfaced from main — presence + source ONLY (never the token value). */
+export interface GithubStatus {
+  readonly connected: boolean;
+  readonly source: 'connected' | 'env' | 'gh' | null;
+}
+
+/** A render-ready view of the Settings → GitHub section. Pure over {@link GithubStatus}, so it is
+ *  unit-testable without a browser: the renderer is a thin DOM layer over these fields. */
+export interface GithubSectionView {
+  readonly connected: boolean;
+  /** The status line, e.g. "Connected" / "Connected via gh auth login" / "Not connected". */
+  readonly statusLabel: string;
+  /** True when the operator can paste + connect a token (i.e. not already connected via a stored token). */
+  readonly showConnect: boolean;
+  /** True when a disconnect action applies (only a stored token can be disconnected). */
+  readonly showDisconnect: boolean;
+  /** A short hint shown under the status line. */
+  readonly hint: string;
+}
+
+/** Build the GitHub-section view from the main-process status. Pure — no I/O, deterministic. */
+export function buildGithubSectionView(status: GithubStatus): GithubSectionView {
+  if (status.source === 'connected') {
+    return {
+      connected: true,
+      statusLabel: 'Connected',
+      showConnect: false,
+      showDisconnect: true,
+      hint: 'A GitHub token is stored (encrypted) and provisioned to every coordinator pane.',
+    };
+  }
+  if (status.source === 'env') {
+    return {
+      connected: true,
+      statusLabel: 'Connected via environment token',
+      showConnect: true,
+      showDisconnect: false,
+      hint: 'Authenticating from CO_GH_TOKEN/GH_TOKEN/GITHUB_TOKEN. Paste a token to store one in-app instead.',
+    };
+  }
+  if (status.source === 'gh') {
+    return {
+      connected: true,
+      statusLabel: 'Connected via gh auth login',
+      showConnect: true,
+      showDisconnect: false,
+      hint: 'Authenticating from your existing `gh auth login`. Paste a token to store one in-app instead.',
+    };
+  }
+  return {
+    connected: false,
+    statusLabel: 'Not connected',
+    showConnect: true,
+    showDisconnect: false,
+    hint: 'Paste a GitHub token to enable issue filing and remote pushes. It is stored encrypted, never in plaintext.',
+  };
+}
+
 export class SettingsVM {
   private _state: SettingsState = {
     activeLayer: 'project',

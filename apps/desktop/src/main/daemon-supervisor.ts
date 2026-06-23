@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import type { ProjectId } from '@co/core';
-import { OperatorIpcConnection } from '@co/mcp';
+import { ghCommandPathEnv, resolveGhTokenFromEnv } from '@co/core';
+import { OperatorIpcConnection, defaultGhAuthTokenRunner, type GhAuthTokenRunner } from '@co/mcp';
 import { defaultOperatorSocketPath } from './app-shell.js';
 
 /**
@@ -54,17 +55,61 @@ export function defaultCoMcpBinPath(): string {
  * the script as plain Node instead of launching a SECOND Electron app — the same pattern the
  * native-abi proof uses. Pure + side-effect-free so a test asserts the production default without
  * spawning a real daemon.
+ *
+ * `extraEnv` (#95/#71) merges the Connect-GitHub provisioning ({@link CO_GH_TOKEN} + a widened PATH so
+ * the GUI-launched daemon can find `gh`) into the spawn env. It is applied AFTER `baseEnv` but BEFORE
+ * `ELECTRON_RUN_AS_NODE` so the flag can never be clobbered. With NO token `extraEnv` omits
+ * `CO_GH_TOKEN` entirely — the key is ABSENT, never an empty/blank value (which the daemon's
+ * trim-and-drop resolver would reject anyway, but we never even emit it).
  */
 export function buildDaemonSpawnDescriptor(
   projectId: ProjectId,
   coMcpBinPath: string,
   baseEnv: NodeJS.ProcessEnv = process.env,
+  extraEnv: Readonly<Record<string, string>> = {},
 ): SpawnDescriptor {
   return {
     command: process.execPath,
     args: [coMcpBinPath, 'serve', projectId],
-    env: { ...baseEnv, ELECTRON_RUN_AS_NODE: '1' },
+    env: { ...baseEnv, ...extraEnv, ELECTRON_RUN_AS_NODE: '1' },
   };
+}
+
+/**
+ * Compute the GitHub provisioning env merged into each `co-mcp serve` spawn (#95/#71). Pure over its
+ * inputs so it is unit-testable without spawning.
+ *
+ * Precedence (mirrors the daemon's own {@link resolveGhTokenFromEnv} policy so the GUI and CLI launch
+ * paths agree on which token wins):
+ *   1. A token the operator CONNECTED in Settings (`storedToken`) → injected as `CO_GH_TOKEN`.
+ *   2. Else an EXPLICIT env token already present in `baseEnv` (`CO_GH_TOKEN`/`GH_TOKEN`/`GITHUB_TOKEN`)
+ *      → left as-is (we add nothing; the daemon's resolver picks it up).
+ *   3. Else AUTO-PRIME (zero-config for `gh`-logged-in operators): run the bounded `gh auth token`
+ *      resolver and, if it yields a token, inject it as `CO_GH_TOKEN` AND widen PATH to include the
+ *      resolved `gh` directory so the daemon's own fallback can also find `gh`.
+ *
+ * Returns ONLY the additions; never an empty/blank `CO_GH_TOKEN`. The plaintext token is never logged.
+ */
+export function resolveSpawnGithubEnv(args: {
+  readonly storedToken: string | null;
+  readonly baseEnv: NodeJS.ProcessEnv;
+  readonly runGhAuthToken?: GhAuthTokenRunner;
+}): Record<string, string> {
+  const stored = args.storedToken?.trim();
+  if (stored != null && stored.length > 0) {
+    return { CO_GH_TOKEN: stored };
+  }
+  // An explicit env token already present — the daemon's resolver will pick it up; add nothing.
+  if (resolveGhTokenFromEnv(args.baseEnv) != null) return {};
+
+  // Auto-prime: source the operator's existing `gh auth login` (GUI-PATH-safe absolute probes) and
+  // inject it as CO_GH_TOKEN, widening PATH so the daemon's own gh fallback finds the same binary.
+  const runner = args.runGhAuthToken ?? defaultGhAuthTokenRunner;
+  const resolution = runner(args.baseEnv);
+  if (resolution == null) return {};
+  const token = resolution.token.trim();
+  if (token.length === 0) return {};
+  return { CO_GH_TOKEN: token, ...ghCommandPathEnv(resolution.command, args.baseEnv) };
 }
 
 /**
@@ -117,6 +162,13 @@ export interface DaemonSupervisorOptions {
   readonly spawn?: (descriptor: SpawnDescriptor) => DaemonSpawnHandle;
   /** Bin-resolution seam. Default: {@link defaultCoMcpBinPath}. */
   readonly resolveBinPath?: () => string;
+  /**
+   * Per-spawn extra-env seam (#95/#71). Resolved IMMEDIATELY BEFORE each `co-mcp serve` spawn so a
+   * just-connected GitHub token (or a `gh auth token` auto-prime) takes effect on the next start /
+   * restart without re-instantiating the supervisor. Defaults to `{}` (no additions). Production wires
+   * {@link resolveSpawnGithubEnv} over the credential store. Must NOT emit a blank `CO_GH_TOKEN`.
+   */
+  readonly resolveExtraEnv?: () => Readonly<Record<string, string>>;
   /** Socket-path seam. Default: {@link defaultOperatorSocketPath} (the server's own formula). */
   readonly socketPathFor?: (projectId: ProjectId) => string;
   /** Health-probe seam. Default: {@link probeOperatorSocketHealthy}. */
@@ -154,6 +206,7 @@ export class DaemonSupervisor {
   private readonly emitStatus: ((status: DaemonStatus) => void) | undefined;
   private readonly spawnFn: (descriptor: SpawnDescriptor) => DaemonSpawnHandle;
   private readonly resolveBinPath: () => string;
+  private readonly resolveExtraEnv: () => Readonly<Record<string, string>>;
   private readonly socketPathFor: (projectId: ProjectId) => string;
   private readonly probeHealth: (socketPath: string) => Promise<boolean>;
   private readonly delay: (ms: number) => Promise<void>;
@@ -181,6 +234,7 @@ export class DaemonSupervisor {
     this.emitStatus = options.onStatus;
     this.spawnFn = options.spawn ?? defaultSpawn;
     this.resolveBinPath = options.resolveBinPath ?? defaultCoMcpBinPath;
+    this.resolveExtraEnv = options.resolveExtraEnv ?? (() => ({}));
     this.socketPathFor = options.socketPathFor ?? defaultOperatorSocketPath;
     this.probeHealth = options.probeHealth ?? probeOperatorSocketHealthy;
     this.delay = options.delay ?? realDelay;
@@ -293,7 +347,22 @@ export class DaemonSupervisor {
         'DaemonSupervisor.spawnChild: no projectId — start(projectId) must run first.',
       );
     }
-    const descriptor = buildDaemonSpawnDescriptor(this.projectId, this.resolveBinPath());
+    // Resolve the GitHub provisioning env at spawn time so a just-connected token (or a `gh auth token`
+    // auto-prime) takes effect on the next start/restart. A throwing seam must never strand the daemon
+    // unspawned (Principle 9 — degrade visibly, not silently) — fall back to no additions.
+    let extraEnv: Readonly<Record<string, string>>;
+    try {
+      extraEnv = this.resolveExtraEnv();
+    } catch (err) {
+      process.stderr.write(`[daemon-supervisor] resolveExtraEnv threw: ${String(err)}\n`);
+      extraEnv = {};
+    }
+    const descriptor = buildDaemonSpawnDescriptor(
+      this.projectId,
+      this.resolveBinPath(),
+      process.env,
+      extraEnv,
+    );
     const child = this.spawnFn(descriptor);
     this.child = child;
     let settled = false;

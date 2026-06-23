@@ -2702,6 +2702,75 @@
         color: var(--text-hi);
         border-color: var(--accent);
       }
+      /* GitHub Connect section (#95/#71) */
+      .gh-status-line {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--text-hi);
+        padding: 4px 2px;
+      }
+      .gh-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .gh-dot-ok {
+        background: var(--ok, oklch(0.78 0.16 150));
+      }
+      .gh-dot-off {
+        background: var(--text-faint);
+      }
+      .gh-hint {
+        font-size: 12px;
+        color: var(--text-dim);
+        margin: 2px 2px 10px;
+        line-height: 1.45;
+        max-width: 640px;
+      }
+      .gh-connect-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      .gh-token-input {
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        color: var(--text-body);
+        font: inherit;
+        font-size: 12px;
+        padding: 6px 9px;
+        border-radius: 6px;
+        width: 320px;
+        max-width: 100%;
+      }
+      .gh-btn {
+        appearance: none;
+        background: color-mix(in oklch, var(--accent) 22%, transparent);
+        border: 1px solid color-mix(in oklch, var(--accent) 55%, transparent);
+        color: var(--text-hi);
+        border-radius: 6px;
+        cursor: pointer;
+        padding: 6px 14px;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .gh-btn:hover {
+        background: color-mix(in oklch, var(--accent) 34%, transparent);
+      }
+      .gh-btn-secondary {
+        background: transparent;
+        border-color: var(--border);
+        color: var(--text-dim);
+      }
+      .gh-btn-secondary:hover {
+        color: var(--text-hi);
+        border-color: var(--accent);
+      }
     </style>
     <link rel="stylesheet" href="./vendor/xterm.css" />
   </head>

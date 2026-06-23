@@ -42,6 +42,9 @@ interface ArchiveEntry {
 type DaemonStatus = 'starting' | 'healthy' | 'restarting' | 'failed' | 'stopped';
 type DaemonStatusPayload = { status: DaemonStatus; detail: string | null };
 type CurrentProjectState = { projectId: string; path: string | null } | null;
+/** GitHub connect state — presence + source ONLY (never the token value). */
+type GithubStatus = { connected: boolean; source: 'connected' | 'env' | 'gh' | null };
+type GithubActionResult = { ok: boolean; error?: string; warning?: string };
 
 interface CoShellBridge {
   navigate(view: NavView): void;
@@ -104,6 +107,11 @@ interface CoShellBridge {
   settingsSet(layer: SettingsLayer, key: string, value: unknown): Promise<SettingWriteResult>;
   settingsClear(layer: SettingsLayer, key: string): Promise<SettingWriteResult>;
   settingsSetLayer(layer: SettingsLayer): Promise<SettingsState | null>;
+  // ── GitHub Connect ────────────────────────────────────────────────────────────
+  githubStatus(): Promise<GithubStatus>;
+  githubConnect(token: string): Promise<GithubActionResult>;
+  githubDisconnect(): Promise<GithubActionResult>;
+  onGithubStatus(listener: (status: GithubStatus) => void): () => void;
   // ── Session ───────────────────────────────────────────────────────────────
   sessionStart(
     prompt: string | null,
@@ -321,6 +329,23 @@ const bridge: CoShellBridge = {
   },
   async settingsSetLayer(layer: SettingsLayer): Promise<SettingsState | null> {
     return ipcRenderer.invoke<SettingsState | null>('settings:setLayer', layer);
+  },
+  // ── GitHub Connect ────────────────────────────────────────────────────────────
+  async githubStatus(): Promise<GithubStatus> {
+    return ipcRenderer.invoke<GithubStatus>('github:status');
+  },
+  async githubConnect(token: string): Promise<GithubActionResult> {
+    // The token transits this single invoke only; it is never logged or re-broadcast. The main process
+    // stores it encrypted and replies with presence-only status — the value never round-trips back.
+    return ipcRenderer.invoke<GithubActionResult>('github:connect', token);
+  },
+  async githubDisconnect(): Promise<GithubActionResult> {
+    return ipcRenderer.invoke<GithubActionResult>('github:disconnect');
+  },
+  onGithubStatus(listener: (status: GithubStatus) => void) {
+    const handler = (_event: unknown, status: GithubStatus): void => listener(status);
+    ipcRenderer.on('github:status', handler);
+    return () => ipcRenderer.removeListener('github:status', handler);
   },
   // ── Session ───────────────────────────────────────────────────────────────
   async sessionStart(

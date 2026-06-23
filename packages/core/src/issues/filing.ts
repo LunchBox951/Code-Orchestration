@@ -26,6 +26,7 @@ import {
 import { MAIL_APPROVAL, OPERATOR, type DeliveredMail, type MailEnvelope } from '../mail/events.js';
 import type { MailStore } from '../mail/mail-store.js';
 import type { GhExec, RepoMode } from '../worktrees/repo-mode.js';
+import { resolveGhTokenFromEnv } from '../worktrees/github-auth.js';
 import type { IssueDestination, IssueRecord } from './events.js';
 import { scrubIssueText } from './scrub.js';
 
@@ -198,12 +199,46 @@ function findAlreadyPostedIssue(opts: {
 }
 
 /**
+ * Fail-fast GitHub-auth pre-check (#95 secondary ask). When no GitHub token is resolvable, throw a
+ * CLEAR, ACTIONABLE error BEFORE invoking `gh` — so the operator sees "connect GitHub in Settings"
+ * instead of a raw `gh: To get started with GitHub CLI, please run: gh auth login` failure surfaced
+ * from deep inside the {@link GhExec} seam (Principle 9 — fail loud AND legibly). Emits a ready-to-run
+ * `gh issue create` fallback the operator can paste, so a logged-out operator is never fully blocked.
+ *
+ * The token presence is checked via {@link resolveGhTokenFromEnv} over `env` (default `process.env`),
+ * which the daemon has already provisioned from a connected token / env / `gh auth login`. Injectable
+ * for tests. This does NOT validate the token's scopes — that genuinely requires a real `gh` call.
+ */
+export function assertGhTokenForFiling(opts: {
+  readonly destination: IssueDestination;
+  readonly coRepoSlug?: string;
+  readonly title: string;
+  readonly env?: NodeJS.ProcessEnv;
+}): void {
+  const env = opts.env ?? process.env;
+  if (resolveGhTokenFromEnv(env) != null) return;
+  const repoFlag =
+    opts.destination === 'co' && opts.coRepoSlug != null && opts.coRepoSlug.trim().length > 0
+      ? `-R ${opts.coRepoSlug} `
+      : '';
+  throw new Error(
+    'issue filing: no GitHub token available — connect GitHub in Settings, set CO_GH_TOKEN, or run ' +
+      '`gh auth login`, then retry. To file this issue by hand instead, run:\n' +
+      `  gh issue create ${repoFlag}--title ${JSON.stringify(opts.title)} --body "<paste the approved body>"`,
+  );
+}
+
+/**
  * Enact the outward filing through the approval gate: {@link gateOutwardAction} BLOCKS a pending
  * approval, REFUSES a declined one, and runs the posting on approve. To stay idempotent across a
  * crash between the post and the durable `issue.filed` record (#7 §5 #9), it SEARCHES for an
  * already-posted issue (by {@link issueBodyMarker}) before creating, and reuses it if found.
  * Returns the posted issue ref (the URL `gh` prints); the caller records that ref as the durable
  * idempotency marker.
+ *
+ * Before any `gh` invocation on the approved path it runs {@link assertGhTokenForFiling} so a
+ * logged-out operator gets the actionable connect-GitHub message rather than a raw `gh` failure
+ * (#95). Pass `tokenEnv` to check a non-`process.env` environment (tests / a sandboxed daemon env).
  */
 export function fileIssueOutward(opts: {
   readonly outcome: ApprovalOutcome;
@@ -214,9 +249,18 @@ export function fileIssueOutward(opts: {
   readonly issueId: string;
   readonly title: string;
   readonly body: string;
+  readonly tokenEnv?: NodeJS.ProcessEnv;
 }): string {
   const args = ghIssueCreateArgs(opts);
   return gateOutwardAction(opts.outcome, () => {
+    // Only enforced once the operator has APPROVED (inside the gate) — a pending/declined filing must
+    // still BLOCK/REFUSE on its own terms first, regardless of token presence.
+    assertGhTokenForFiling({
+      destination: opts.destination,
+      ...(opts.coRepoSlug != null ? { coRepoSlug: opts.coRepoSlug } : {}),
+      title: opts.title,
+      ...(opts.tokenEnv != null ? { env: opts.tokenEnv } : {}),
+    });
     const existingUrl = findAlreadyPostedIssue(opts);
     if (existingUrl != null) return existingUrl;
     return opts.ghExec(opts.cwd, args).trim();
