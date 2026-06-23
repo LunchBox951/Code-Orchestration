@@ -613,6 +613,17 @@ describe('#78 codex MCP-tool pre-approval', () => {
       kind: 'codex-mcp-pre-grant-missing',
     });
   });
+
+  it('labels invalid Codex hook env names as coCliEnv', () => {
+    expect(() =>
+      buildPaneLaunchConfig('codex', {
+        ...BASE_IDENTITY,
+        coCliEnv: {
+          'BAD KEY': 'x',
+        },
+      }),
+    ).toThrow(/coCliEnv key 'BAD KEY'.*environment variable name/i);
+  });
 });
 
 // ---------------------------------------------------------------------------

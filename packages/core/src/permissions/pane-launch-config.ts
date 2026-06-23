@@ -323,19 +323,20 @@ interface CodexConfigArtifacts {
 
 function sortedEnvEntries(
   env: Readonly<Record<string, string>> | undefined,
+  label: string,
 ): Array<[string, string]> {
   if (env == null) return [];
   const entries = Object.entries(env).sort(([a], [b]) => a.localeCompare(b));
-  for (const [key] of entries) requireEnvVarName(key);
+  for (const [key] of entries) requireEnvVarName(key, label);
   return entries;
 }
 
 const ENV_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
-function requireEnvVarName(key: string): string {
+function requireEnvVarName(key: string, label: string): string {
   if (!ENV_VAR_NAME.test(key)) {
     throw new Error(
-      `buildPaneLaunchConfig: coMcpEnv key '${key}' is not a valid environment ` + 'variable name.',
+      `buildPaneLaunchConfig: ${label} key '${key}' is not a valid environment ` + 'variable name.',
     );
   }
   return key;
@@ -350,13 +351,13 @@ function buildCodexConfigArtifacts(identity: PaneIdentity): CodexConfigArtifacts
   const hookArgs = [...(identity.coCliArgs ?? [])];
   requireTrustedHookExecutableArgs(hookArgs);
   const hookExecutable = [hookCli, ...hookArgs].map(shellDoubleQuote).join(' ');
-  const hookEnvPrefix = sortedEnvEntries(identity.coCliEnv)
+  const hookEnvPrefix = sortedEnvEntries(identity.coCliEnv, 'coCliEnv')
     .map(([key, value]) => `${key}=${shellDoubleQuote(value)}`)
     .join(' ');
   const hookInvocation = `${hookExecutable} hook codex-block-list --rules ${shellDoubleQuote(rulesPath)}`;
   const hookCommand =
     hookEnvPrefix.length > 0 ? `${hookEnvPrefix} ${hookInvocation}` : hookInvocation;
-  const mcpEnvLines = sortedEnvEntries(identity.coMcpEnv).flatMap(([key, value]) => [
+  const mcpEnvLines = sortedEnvEntries(identity.coMcpEnv, 'coMcpEnv').flatMap(([key, value]) => [
     `${key} = "${tomlStringEscape(value)}"`,
   ]);
   const lines: string[] = [
@@ -441,7 +442,7 @@ function buildClaudeMcpConfigJson(identity: PaneIdentity): string {
   const command = requireAbsoluteCommand('coMcpCommand', identity.coMcpCommand);
   const args = [...(identity.coMcpArgs ?? [])];
   requireTrustedMcpExecutableArgs('claude', command, args);
-  const envEntries = sortedEnvEntries(identity.coMcpEnv);
+  const envEntries = sortedEnvEntries(identity.coMcpEnv, 'coMcpEnv');
   return (
     JSON.stringify(
       {

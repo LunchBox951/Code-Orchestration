@@ -143,12 +143,80 @@ function sameDraft(existing: PlanRecord, rec: PlanDrafted): boolean {
   );
 }
 
-function upsertPhases(db: DatabaseSync, taskId: string, phases: readonly PhaseNode[]): void {
+interface PreservedPhaseState {
+  readonly status: PhaseStatus;
+  readonly deps: readonly string[];
+  readonly criteria: readonly Criterion[];
+  readonly verifiedPass?: boolean;
+  readonly baselineSha?: string;
+}
+
+function samePhaseVerificationContract(
+  preserved: PreservedPhaseState | undefined,
+  phase: PhaseNode,
+): preserved is PreservedPhaseState {
+  return (
+    preserved != null &&
+    JSON.stringify(preserved.deps) === JSON.stringify(phase.deps) &&
+    JSON.stringify(preserved.criteria) === JSON.stringify(phase.criteria)
+  );
+}
+
+function changedPhaseContracts(
+  phases: readonly PhaseNode[],
+  preservedPhaseState: ReadonlyMap<string, PreservedPhaseState>,
+): ReadonlySet<string> {
+  const currentPhaseIds = new Set(phases.map((phase) => phase.phaseId));
+  const changed = new Set<string>();
+  for (const phase of phases) {
+    if (!samePhaseVerificationContract(preservedPhaseState.get(phase.phaseId), phase)) {
+      changed.add(phase.phaseId);
+    }
+  }
+  for (const phaseId of preservedPhaseState.keys()) {
+    if (!currentPhaseIds.has(phaseId)) changed.add(phaseId);
+  }
+  return changed;
+}
+
+function affectedPhaseContracts(
+  phases: readonly PhaseNode[],
+  changed: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const affected = new Set(changed);
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const phase of phases) {
+      if (affected.has(phase.phaseId)) continue;
+      if (phase.deps.some((dep) => affected.has(dep))) {
+        affected.add(phase.phaseId);
+        expanded = true;
+      }
+    }
+  }
+  return affected;
+}
+
+function upsertPhases(
+  db: DatabaseSync,
+  taskId: string,
+  phases: readonly PhaseNode[],
+  preservedPhaseState: ReadonlyMap<string, PreservedPhaseState> = new Map(),
+): void {
+  const affectedPhaseState = affectedPhaseContracts(
+    phases,
+    changedPhaseContracts(phases, preservedPhaseState),
+  );
   db.prepare(`DELETE FROM plan_phases WHERE task_id = ?`).run(taskId);
   phases.forEach((phase, ordinal) => {
+    const preserved = preservedPhaseState.get(phase.phaseId);
+    const preserveState =
+      !affectedPhaseState.has(phase.phaseId) && samePhaseVerificationContract(preserved, phase);
     db.prepare(
-      `INSERT INTO plan_phases (task_id, phase_id, ordinal, name, owner, deps, criteria, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'planned')`,
+      `INSERT INTO plan_phases
+       (task_id, phase_id, ordinal, name, owner, deps, criteria, status, verified_pass, baseline_sha)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       taskId,
       phase.phaseId,
@@ -157,6 +225,9 @@ function upsertPhases(db: DatabaseSync, taskId: string, phases: readonly PhaseNo
       phase.owner ?? null,
       JSON.stringify(phase.deps),
       JSON.stringify(phase.criteria),
+      preserveState ? preserved.status : 'planned',
+      preserveState && preserved.verifiedPass != null ? (preserved.verifiedPass ? 1 : 0) : null,
+      preserveState ? (preserved.baselineSha ?? null) : null,
     );
   });
 }
@@ -300,7 +371,19 @@ export class PlansProjector implements Projector {
         db.prepare(`UPDATE plans SET replan_count = replan_count + 1 WHERE task_id = ?`).run(
           taskId,
         );
-        upsertPhases(db, taskId, phases);
+        const preservedPhaseState = new Map(
+          existing.phases.map((phase) => [
+            phase.phaseId,
+            {
+              status: phase.status,
+              deps: phase.deps,
+              criteria: phase.criteria,
+              ...(phase.verifiedPass != null ? { verifiedPass: phase.verifiedPass } : {}),
+              ...(phase.baselineSha != null ? { baselineSha: phase.baselineSha } : {}),
+            },
+          ]),
+        );
+        upsertPhases(db, taskId, phases, preservedPhaseState);
         return;
       }
       case EVENT_TASK_COMPLETED: {
