@@ -471,6 +471,72 @@ describe('recordCost — rolls up per agent AND per task (dollars where present;
     }
   });
 
+  it('readRollups returns legacy-deduped totals without writing observation identities', () => {
+    const pid = 'p-rollup-readonly-legacy-dedupe';
+    const obs = {
+      provider: 'codex' as const,
+      agent: 'a1',
+      task: 't1',
+      turn: 0,
+      used_pct: 0,
+      total_tokens: 10,
+    };
+    const project = openProjectStore(pid);
+    try {
+      project.transaction((tx) => {
+        tx.append([makeCostRecordedEvent(pid, obs), makeCostRecordedEvent(pid, obs)]);
+        const db = tx.raw as DatabaseSync;
+        ensureCostTables(db, { backfillLegacy: false });
+        db.prepare(
+          `INSERT INTO cost_rollup
+             (kind, id, total_cost_usd, input_tokens, output_tokens, total_tokens, used_pct, observations)
+           VALUES
+             ('agent', 'a1', 0, 0, 0, 20, 0, 2),
+             ('task', 't1', 0, 0, 0, 20, 0, 2)`,
+        ).run();
+      });
+    } finally {
+      project.close();
+    }
+
+    const store = openDispatchStore(pid);
+    try {
+      const rollups = store.readRollups();
+      expect(rollups).toEqual([
+        expect.objectContaining({
+          kind: 'agent',
+          id: 'a1',
+          totalTokens: 10,
+          observations: 1,
+          tokenObservations: 1,
+        }),
+        expect.objectContaining({
+          kind: 'task',
+          id: 't1',
+          totalTokens: 10,
+          observations: 1,
+          tokenObservations: 1,
+        }),
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const audit = openProjectStore(pid);
+    try {
+      expect(
+        audit.transaction((tx) => {
+          const db = tx.raw as DatabaseSync;
+          return Number(
+            (db.prepare('SELECT COUNT(*) AS n FROM cost_observations').get() as { n: number }).n,
+          );
+        }),
+      ).toBe(0);
+    } finally {
+      audit.close();
+    }
+  });
+
   it('fails loud on conflicting duplicate cost observations', () => {
     const store = openDispatchStore('p-rollup-conflict');
     const budget = { capCents: 1000 };

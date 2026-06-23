@@ -221,6 +221,162 @@ export function rowToCostRollup(row: Record<string, unknown>): CostRollup {
   };
 }
 
+interface CostRollupAccumulator {
+  totalCostUsd: number;
+  costUsdObservations: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  tokenObservations: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  usedPct: number;
+  usedPctObservations: number;
+  observations: number;
+}
+
+function emptyRollupAccumulator(): CostRollupAccumulator {
+  return {
+    totalCostUsd: 0,
+    costUsdObservations: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    tokenObservations: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    usedPct: 0,
+    usedPctObservations: 0,
+    observations: 0,
+  };
+}
+
+function accumulatorToRollup(
+  kind: CostRollupKind,
+  id: string,
+  acc: CostRollupAccumulator,
+): CostRollup {
+  return {
+    kind,
+    id,
+    totalCostUsd: acc.totalCostUsd,
+    costUsdObservations: acc.costUsdObservations,
+    inputTokens: acc.inputTokens,
+    outputTokens: acc.outputTokens,
+    totalTokens: acc.totalTokens,
+    tokenObservations: acc.tokenObservations,
+    cacheReadTokens: acc.cacheReadTokens,
+    cacheCreationTokens: acc.cacheCreationTokens,
+    usedPct: acc.usedPct,
+    usedPctObservations: acc.usedPctObservations,
+    observations: acc.observations,
+  };
+}
+
+function addObservedCost(acc: CostRollupAccumulator, obs: CostRecorded): void {
+  acc.totalCostUsd += obs.cost_usd ?? 0;
+  if (obs.cost_usd !== undefined) acc.costUsdObservations += 1;
+  acc.inputTokens += obs.input_tokens ?? 0;
+  acc.outputTokens += obs.output_tokens ?? 0;
+  acc.totalTokens += obs.total_tokens ?? 0;
+  if (obs.total_tokens !== undefined) acc.tokenObservations += 1;
+  acc.cacheReadTokens += obs.cache_read_input_tokens ?? 0;
+  acc.cacheCreationTokens += obs.cache_creation_input_tokens ?? 0;
+  acc.usedPct += obs.used_pct ?? 0;
+  if (obs.used_pct !== undefined) acc.usedPctObservations += 1;
+  acc.observations += 1;
+}
+
+function observationIdentity(obs: CostRecorded): string {
+  return obs.source_id != null
+    ? `${obs.provider}\0${obs.agent}\0${obs.task}\0source:${obs.source_id}`
+    : `${obs.provider}\0${obs.agent}\0${obs.task}\0turn:${obs.turn}`;
+}
+
+function readOnlyRollupsFromEvents(db: DatabaseSync): CostRollup[] {
+  if (!tableExists(db, 'events')) return [];
+  const rows = db
+    .prepare('SELECT payload FROM events WHERE type = ? ORDER BY seq')
+    .all(EVENT_COST_RECORDED) as Array<{ readonly payload: unknown }>;
+  const seen = new Set<string>();
+  const byKey = new Map<string, CostRollupAccumulator>();
+  const apply = (kind: CostRollupKind, id: string, obs: CostRecorded) => {
+    const key = `${kind}\0${id}`;
+    let acc = byKey.get(key);
+    if (acc == null) {
+      acc = emptyRollupAccumulator();
+      byKey.set(key, acc);
+    }
+    addObservedCost(acc, obs);
+  };
+
+  for (const row of rows) {
+    const obs = costRecordedSchema.parse(JSON.parse(String(row.payload)));
+    const identity = observationIdentity(obs);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    apply('agent', obs.agent, obs);
+    apply('task', obs.task, obs);
+  }
+
+  return [...byKey.entries()]
+    .map(([key, acc]) => {
+      const [kind, id] = key.split('\0') as [CostRollupKind, string];
+      return accumulatorToRollup(kind, id, acc);
+    })
+    .sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+}
+
+function selectPersistedRollupsWithReadOnlyCounts(db: DatabaseSync): CostRollup[] {
+  const rows = db
+    .prepare(
+      `SELECT
+         ${ROLLUP_COLUMNS},
+         (
+           SELECT COUNT(*)
+             FROM cost_observations AS o
+            WHERE o.cost_usd IS NOT NULL
+              AND (
+                (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
+                OR
+                (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
+              )
+         ) AS read_cost_usd_observations,
+         (
+           SELECT COUNT(*)
+             FROM cost_observations AS o
+            WHERE o.total_tokens IS NOT NULL
+              AND (
+                (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
+                OR
+                (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
+              )
+         ) AS read_token_observations,
+         (
+           SELECT COUNT(*)
+             FROM cost_observations AS o
+            WHERE o.used_pct IS NOT NULL
+              AND (
+                (cost_rollup.kind = 'agent' AND o.agent = cost_rollup.id)
+                OR
+                (cost_rollup.kind = 'task' AND o.task = cost_rollup.id)
+              )
+         ) AS read_used_pct_observations
+       FROM cost_rollup
+       ORDER BY kind, id`,
+    )
+    .all() as Array<Record<string, unknown>>;
+
+  return rows.map((row) =>
+    rowToCostRollup({
+      ...row,
+      cost_usd_observations: row.read_cost_usd_observations,
+      token_observations: row.read_token_observations,
+      used_pct_observations: row.read_used_pct_observations,
+    }),
+  );
+}
+
 /** Map a raw `cost_near_budget` row to a {@link NearBudgetRecord}. */
 export function rowToNearBudgetRecord(row: Record<string, unknown>): NearBudgetRecord {
   return {
@@ -259,6 +415,12 @@ export function selectAllCostRollups(
   opts: { readonly backfillLegacy?: boolean } = {},
 ): CostRollup[] {
   ensureCostTables(db, opts);
+  if (opts.backfillLegacy === false) {
+    const observationCount = countRows(db, 'cost_observations');
+    const rollupCount = countRows(db, 'cost_rollup');
+    if (observationCount === 0 && rollupCount > 0) return readOnlyRollupsFromEvents(db);
+    return selectPersistedRollupsWithReadOnlyCounts(db);
+  }
   const rows = db.prepare(`SELECT ${ROLLUP_COLUMNS} FROM cost_rollup ORDER BY kind, id`).all();
   return rows.map((r) => rowToCostRollup(r as Record<string, unknown>));
 }

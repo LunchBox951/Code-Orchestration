@@ -29,6 +29,7 @@ import {
   validateSettingValue,
 } from '@co/core';
 import { ConductorUnavailableError, OperatorIpcClient } from '@co/mcp';
+import type { OperatorIpcClientDeps } from '@co/mcp';
 import { NavVM } from '../shared/nav-vm.js';
 import { ConnectionVM } from '../shared/connection-vm.js';
 import { DashboardVM } from '../shared/dashboard-vm.js';
@@ -60,6 +61,8 @@ export interface AppShellDeps {
   readonly socketPath?: string;
   /** Injectable for tests — production leaves this undefined (creates a real client). */
   readonly client?: OperatorIpcClient;
+  /** Injectable for tests that need to observe the internally wired OperatorIpcClient callbacks. */
+  readonly clientFactory?: (clientDeps: OperatorIpcClientDeps) => OperatorIpcClient;
   /** Injectable for tests — production opens a real MailStore. */
   readonly actionablesReader?: () => readonly DeliveredMail[];
   /** Injectable for tests — reads a recipient's inbox (default: real MailStore). */
@@ -301,9 +304,12 @@ export function createAppShell(deps: AppShellDeps): AppShell {
       );
   };
 
+  const makeClient =
+    deps.clientFactory ??
+    ((clientDeps: OperatorIpcClientDeps) => new OperatorIpcClient(clientDeps));
   const client =
     deps.client ??
-    new OperatorIpcClient({
+    makeClient({
       projectId: deps.projectId,
       socketPath,
       onState: (s) => {

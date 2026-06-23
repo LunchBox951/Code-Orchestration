@@ -16,6 +16,7 @@ import { selectAllAgents } from '../roles/roster-projector.js';
 import { selectAllPlans } from '../plans/plans-projector.js';
 import { selectAllCostRollups } from '../dispatch/cost-projector.js';
 import { ensureReviewTables } from '../review/review-projector.js';
+import { EVENT_REVIEW_STRIKE, EVENT_REVIEW_VERDICT } from '../review/events.js';
 import type { AgentRecord } from '../roles/events.js';
 import type { PlanRecord } from '../plans/events.js';
 import type { CostRollup } from '../dispatch/events.js';
@@ -51,6 +52,63 @@ function rowToReviewSummary(row: Record<string, unknown>): ReviewSummary {
   };
 }
 
+function tableExists(db: DatabaseSync, name: string): boolean {
+  const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  return row != null;
+}
+
+function reviewKey(target: string, branch: string): string {
+  return `${target}\0${branch}`;
+}
+
+function selectReplayStrikeCounts(db: DatabaseSync): Map<string, number> {
+  const counts = new Map<string, number>();
+  if (!tableExists(db, 'events')) return counts;
+  const rows = db
+    .prepare(
+      `SELECT
+         type,
+         json_extract(payload, '$.target') AS target,
+         json_extract(payload, '$.branch') AS branch,
+         json_extract(payload, '$.reviewId') AS review_id,
+         json_extract(payload, '$.verdict') AS verdict
+       FROM events
+       WHERE type IN (?, ?)
+       ORDER BY seq ASC`,
+    )
+    .all(EVENT_REVIEW_STRIKE, EVENT_REVIEW_VERDICT) as Array<Record<string, unknown>>;
+
+  const states = new Map<
+    string,
+    { readonly consumed: Set<string>; readonly visible: Set<string> }
+  >();
+  for (const row of rows) {
+    const target = typeof row.target === 'string' ? row.target : undefined;
+    const branch = typeof row.branch === 'string' ? row.branch : undefined;
+    if (target == null || branch == null) continue;
+    const key = reviewKey(target, branch);
+    let state = states.get(key);
+    if (state == null) {
+      state = { consumed: new Set<string>(), visible: new Set<string>() };
+      states.set(key, state);
+    }
+    if (row.type === EVENT_REVIEW_STRIKE) {
+      const reviewId = typeof row.review_id === 'string' ? row.review_id : undefined;
+      if (reviewId == null) continue;
+      const fresh = !state.consumed.has(reviewId);
+      state.consumed.add(reviewId);
+      if (fresh) state.visible.add(reviewId);
+      continue;
+    }
+    if (row.type === EVENT_REVIEW_VERDICT && row.verdict === 'PASS') {
+      state.visible.clear();
+    }
+  }
+
+  for (const [key, state] of states) counts.set(key, state.visible.size);
+  return counts;
+}
+
 /** All review rows in the projection table, in a deterministic order (target, branch). */
 function selectAllReviews(db: DatabaseSync): ReviewSummary[] {
   // The operator dashboard polls this on every refresh tick. Skip the heavy legacy backfills
@@ -59,13 +117,22 @@ function selectAllReviews(db: DatabaseSync): ReviewSummary[] {
   // contending with the daemon writer → "database is locked" (#126). A read only needs the idempotent
   // `CREATE TABLE IF NOT EXISTS` + column migrations, mirroring how the projector's reset/apply call it.
   ensureReviewTables(db, { backfillStrikes: false, backfillLegacy: false });
+  const strikeCounts = selectReplayStrikeCounts(db);
   const rows = db
     .prepare(
       'SELECT target, branch, scope, verdict, strikes, serialized, overridden ' +
         'FROM reviews ORDER BY target, branch',
     )
     .all();
-  return rows.map((r) => rowToReviewSummary(r as Record<string, unknown>));
+  return rows.map((r) => {
+    const row = r as Record<string, unknown>;
+    const target = String(row.target);
+    const branch = String(row.branch);
+    return rowToReviewSummary({
+      ...row,
+      strikes: strikeCounts.get(reviewKey(target, branch)) ?? row.strikes,
+    });
+  });
 }
 
 // ─── Snapshot type ────────────────────────────────────────────────────────────

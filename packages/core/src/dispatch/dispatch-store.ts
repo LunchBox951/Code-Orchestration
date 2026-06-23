@@ -461,7 +461,9 @@ export function openDispatchStore(projectId: string): DispatchStore {
     },
 
     readRollups(): readonly CostRollup[] {
-      return store.transaction((tx) => selectAllCostRollups(tx.raw as DatabaseSync));
+      return store.transaction((tx) =>
+        selectAllCostRollups(tx.raw as DatabaseSync, { backfillLegacy: false }),
+      );
     },
 
     readNearBudget(task?: string): readonly NearBudgetRecord[] {

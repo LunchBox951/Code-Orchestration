@@ -21,7 +21,13 @@ import type {
   TranscriptTail,
 } from '@co/core';
 import type { ProjectId } from '@co/core';
-import { MAIL_REVIEW_REQUEST, MAIL_REVIEW_RESPONSE, OPERATOR, projectDataDir } from '@co/core';
+import {
+  MAIL_APPROVAL,
+  MAIL_REVIEW_REQUEST,
+  MAIL_REVIEW_RESPONSE,
+  OPERATOR,
+  projectDataDir,
+} from '@co/core';
 import {
   openConfigStore,
   MAX_ACTIVE_CHILDREN_KEY,
@@ -29,7 +35,7 @@ import {
   type ConfigStore,
 } from '@co/core';
 import { operatorIpcSocketPath } from '@co/mcp';
-import type { OperatorIpcClient } from '@co/mcp';
+import type { OperatorIpcClient, OperatorIpcClientDeps } from '@co/mcp';
 
 const FAKE_PROJECT_ID = 'test-project' as ProjectId;
 const FAKE_SOCKET = '/tmp/co-test.sock';
@@ -533,7 +539,6 @@ describe('createAppShell — review VM bridge wiring', () => {
     idempotencyKey: 'review-request:rev-shell',
     resolved: false,
   } as DeliveredMail;
-
   const REVIEW_CONTEXT = {
     kind: 'resolved',
     reviewId: 'rev-shell',
@@ -1458,6 +1463,17 @@ describe('createAppShell — a failing post-action refresh degrades visibly, nev
     idempotencyKey: 'review-request:rev-lock',
     resolved: false,
   } as DeliveredMail;
+  const APPROVAL_MAIL = {
+    seq: 92,
+    recipient: OPERATOR,
+    sender: 'lead-1',
+    type: MAIL_APPROVAL,
+    subject: 'Approve merge',
+    body: 'Please approve this merge.',
+    ts: 1700000000001,
+    idempotencyKey: 'approval:merge-lock',
+    resolved: false,
+  } as DeliveredMail;
 
   let unhandled: unknown[] = [];
   let onUnhandled: (reason: unknown) => void;
@@ -1531,6 +1547,73 @@ describe('createAppShell — a failing post-action refresh degrades visibly, nev
     expect(onConnectionError.mock.calls.at(-1)?.[0]).toMatch(/operator IPC refresh failed/i);
     expect(onConnectionError.mock.calls.at(-1)?.[0]).toMatch(/database is locked/i);
     // (c) NOTHING leaked to the process as an unhandled rejection.
+    expect(unhandled).toEqual([]);
+
+    await shell.close();
+  });
+
+  it('catches a refresh rejection after approval and reports a visible error', async () => {
+    let inbox: readonly DeliveredMail[] = [APPROVAL_MAIL];
+    const client = {
+      ...makeClient(),
+      observe: vi.fn().mockRejectedValue(new Error('database is locked')),
+      approve: vi.fn().mockImplementation(async () => {
+        inbox = [{ ...APPROVAL_MAIL, resolved: true } as DeliveredMail];
+      }),
+    } as unknown as OperatorIpcClient;
+    const onConnectionError = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      client,
+      actionablesReader: () => [],
+      inboxReader: () => inbox,
+      outboxReader: () => [],
+      onConnectionError,
+    });
+
+    shell.refreshMail();
+    await shell.mail.approve(APPROVAL_MAIL.seq);
+    await flushPromises();
+    await flushPromises();
+
+    expect(client.approve).toHaveBeenCalledOnce();
+    expect(onConnectionError).toHaveBeenCalled();
+    expect(onConnectionError.mock.calls.at(-1)?.[0]).toMatch(/operator IPC refresh failed/i);
+    expect(onConnectionError.mock.calls.at(-1)?.[0]).toMatch(/database is locked/i);
+    expect(unhandled).toEqual([]);
+
+    await shell.close();
+  });
+
+  it('catches a refresh rejection from the internally wired disconnected onState path', async () => {
+    let onState: OperatorIpcClientDeps['onState'];
+    const client = {
+      ...makeClient(),
+      observe: vi.fn().mockRejectedValue(new Error('database is locked')),
+    } as unknown as OperatorIpcClient;
+    const onConnectionError = vi.fn();
+    const shell = createAppShell({
+      projectId: FAKE_PROJECT_ID,
+      socketPath: FAKE_SOCKET,
+      clientFactory: (deps) => {
+        onState = deps.onState;
+        return client;
+      },
+      actionablesReader: () => [],
+      inboxReader: () => [],
+      outboxReader: () => [],
+      onConnectionError,
+    });
+
+    onState?.('disconnected');
+    await flushPromises();
+    await flushPromises();
+
+    expect(client.observe).toHaveBeenCalledOnce();
+    expect(onConnectionError).toHaveBeenCalled();
+    expect(onConnectionError.mock.calls.at(-1)?.[0]).toMatch(/operator IPC refresh failed/i);
+    expect(onConnectionError.mock.calls.at(-1)?.[0]).toMatch(/database is locked/i);
     expect(unhandled).toEqual([]);
 
     await shell.close();
